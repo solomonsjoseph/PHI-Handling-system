@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (NEVER commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+aws-credentials.ini
+
+# Real PHI (NEVER commit)
+real_phi/
+real_data/
+production_data/
+*.real.csv
+*.real.json
+*.real.xlsx
+
+# Large generated outputs (regenerate locally)
+corpus/generated/*.tar.gz
+benchmarks/results/*.detailed.json
+
+# Logs
+*.log
+logs/
+
+# Local build artifacts
+tmp/
+*.tmp
+.phi-local-*
