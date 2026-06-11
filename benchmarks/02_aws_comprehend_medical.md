@@ -4,6 +4,21 @@
 **Authority:** Amazon Web Services managed PHI detection service
 **Official note:** "Under the HIPAA act, PHI that is based on a list of 18 identifiers must be treated with special care. Amazon Comprehend Medical detects entities associated with these identifiers but these entities don't map 1:1 to the list specified by the Safe Harbor method."
 
+## Performance claims
+
+Specific F1 score claims for AWS Comprehend Medical (e.g., "83% F1 on clinical PHI") were not independently verified during adversarial source review conducted 2026-06-11. These figures appear in third-party comparisons and vendor marketing but could not be confirmed from primary sources. Do not cite any specific F1 figure for AWS Comprehend Medical in IRB documentation. Use empirical benchmark results from this repo's comprehend_medical_adapter.py instead.
+
+## Coverage gaps relative to this corpus
+
+- No Indian identifiers: PAN, Aadhaar, ABHA, CTRI, UAN, ESI, CGHS, BPL, state-variant driving licenses, ration cards
+- No DPDPA Rule 14 identifier coverage
+- No ICMR 2017 risk tier tagging
+- No GDPR-specific annotations (genetic data as distinct from health data)
+- No detection regime tagging (rule_applicable vs contextual_ner_required per i2b2 taxonomy)
+- No conflict case coverage (ZIP code HIPAA vs GDPR jurisdictional disagreement)
+- US-only: no multilingual support, English only
+- The ID mega-category collapses 9 HIPAA categories (G, H, I, J, K, L, M, P, R) into one, eliminating per-category diagnostic precision
+
 ## DetectPHI Entity Types (9 total)
 
 | Entity | Description | HIPAA Safe Harbor category |

@@ -62,3 +62,7 @@ tmp/
 *.tmp
 .phi-local-*
 
+# Research archive (deep-research outputs, SWOT analyses, workflow logs)
+# These are exploratory notes, not part of the corpus or IRB submission.
+research/
+

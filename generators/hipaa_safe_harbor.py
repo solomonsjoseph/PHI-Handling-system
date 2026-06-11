@@ -29,6 +29,11 @@ from .common import (
     AUTH_HIPAA_ACTUAL_KNOWLEDGE,
     AUTH_HIPAA_SAFE_HARBOR,
     AUTH_SWEENEY_K_ANON,
+    DETECTION_REGIME_CONFLICT,
+    DETECTION_REGIME_NER,
+    DETECTION_REGIME_RULE,
+    LAYER_CONFLICT,
+    LAYER_HIPAA,
     DeterministicGenerator,
     GoldSpan,
     HIPAA_CATEGORIES,
@@ -260,6 +265,31 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
                 records.append(fn(rng, i))
         return records
 
+    # Detection regime per HIPAA category (i2b2 taxonomy, arXiv 2412.10918):
+    # rule_applicable: E(FAX), F(EMAIL), G(SSN), I(HEALTH_PLAN), J(ACCOUNT), K(LICENSE), L(VEHICLE/VIN), N(URL), O(IP)
+    # contextual_ner_required: A(NAMES), C(DATES), D(PHONE), H(MRN), M(DEVICE), P(BIOMETRIC), Q(PHOTO), R(OTHER)
+    # conflict_case: B(GEOGRAPHY/ZIP) -- ZIP is PHI under HIPAA; not enumerated under GDPR without linkage
+    _CATEGORY_REGIME = {
+        "A": DETECTION_REGIME_NER,
+        "B": DETECTION_REGIME_CONFLICT,  # ZIP conflict case: HIPAA PHI vs GDPR not-enumerated
+        "C": DETECTION_REGIME_NER,
+        "D": DETECTION_REGIME_NER,
+        "E": DETECTION_REGIME_RULE,
+        "F": DETECTION_REGIME_RULE,
+        "G": DETECTION_REGIME_RULE,
+        "H": DETECTION_REGIME_NER,
+        "I": DETECTION_REGIME_RULE,
+        "J": DETECTION_REGIME_RULE,
+        "K": DETECTION_REGIME_RULE,
+        "L": DETECTION_REGIME_RULE,
+        "M": DETECTION_REGIME_NER,
+        "N": DETECTION_REGIME_RULE,
+        "O": DETECTION_REGIME_RULE,
+        "P": DETECTION_REGIME_NER,
+        "Q": DETECTION_REGIME_NER,
+        "R": DETECTION_REGIME_NER,
+    }
+
     def _record(
         self,
         cat: str,
@@ -268,12 +298,15 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
         spans_spec,
         **kwargs,
     ) -> Record:
+        regime = self._CATEGORY_REGIME.get(cat, DETECTION_REGIME_NER)
+        layer = LAYER_CONFLICT if regime == DETECTION_REGIME_CONFLICT else LAYER_HIPAA
         r = Record(
             record_id=f"hipaa_{cat}_{index:04d}",
             text=text,
             gold_spans=self.annotate(text, spans_spec),
-            layer="hipaa_safe_harbor",
+            layer=layer,
             jurisdiction="us",
+            detection_regime=regime,
             de_id_tier="identifiable",
             format="text",
             authority_citations=[AUTH_HIPAA_SAFE_HARBOR],
@@ -282,7 +315,7 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
         )
         return r
 
-    # -- Category A: Names --
+    # -- Category A: Names (contextual_ner_required) --
     def _gen_names(self, rng, i):
         patient = us_name(rng)
         physician = "Dr. " + us_name(rng)
@@ -293,16 +326,15 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
             f"The patient reports no new symptoms."
         )
         spans = [
-            (patient, "NAME_PATIENT", "A", "us", AUTH_HIPAA_SAFE_HARBOR),
-            (physician, "NAME_PROVIDER", "A", "us", AUTH_HIPAA_SAFE_HARBOR),
-            (relative, "NAME_HOUSEHOLD", "A", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (patient, "NAME_PATIENT", "A", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
+            (physician, "NAME_PROVIDER", "A", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
+            (relative, "NAME_HOUSEHOLD", "A", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
         ]
         return self._record("A", i, text, spans)
 
-    # -- Category B: Geography --
+    # -- Category B: Geography (conflict_case: ZIP is PHI under HIPAA, not enumerated under GDPR) --
     def _gen_geography(self, rng, i):
         street, city, state, zip3, zip_full = us_address(rng)
-        # Sometimes use a restricted ZIP3 to test edge case
         if i % 5 == 0 and RESTRICTED_ZIP3:
             restricted_zip = sorted(RESTRICTED_ZIP3)[i % len(RESTRICTED_ZIP3)]
             zip_full = f"{restricted_zip}{rng.randint(10, 99):02d}"
@@ -311,13 +343,13 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
             f"Home visit scheduled. Neighborhood: mid-density residential."
         )
         spans = [
-            (street, "ADDRESS_STREET", "B", "us", AUTH_HIPAA_SAFE_HARBOR),
-            (city, "ADDRESS_CITY", "B", "us", AUTH_HIPAA_SAFE_HARBOR),
-            (zip_full, "ADDRESS_ZIP", "B", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (street, "ADDRESS_STREET", "B", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
+            (city, "ADDRESS_CITY", "B", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
+            (zip_full, "ADDRESS_ZIP", "B", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_CONFLICT),
         ]
         return self._record("B", i, text, spans)
 
-    # -- Category C: Dates and ages over 89 --
+    # -- Category C: Dates and ages over 89 (contextual_ner_required; also conflict_case for GDPR) --
     def _gen_dates_ages(self, rng, i):
         year = rng.randint(1920, 2024)
         month = rng.randint(1, 12)
@@ -332,19 +364,19 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
                 f"Admitted on {admit} for evaluation."
             )
             spans = [
-                (dob, "DATE_DOB", "C", "us", AUTH_HIPAA_SAFE_HARBOR),
-                (f"age {age}", "AGE_OVER_89", "C", "us", AUTH_HIPAA_SAFE_HARBOR),
-                (admit, "DATE_ADMIT", "C", "us", AUTH_HIPAA_SAFE_HARBOR),
+                (dob, "DATE_DOB", "C", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
+                (f"age {age}", "AGE_OVER_89", "C", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
+                (admit, "DATE_ADMIT", "C", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
             ]
         else:
             text = f"Patient DOB {dob}, age {age} years. Admitted on {admit} for evaluation."
             spans = [
-                (dob, "DATE_DOB", "C", "us", AUTH_HIPAA_SAFE_HARBOR),
-                (admit, "DATE_ADMIT", "C", "us", AUTH_HIPAA_SAFE_HARBOR),
+                (dob, "DATE_DOB", "C", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
+                (admit, "DATE_ADMIT", "C", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
             ]
         return self._record("C", i, text, spans)
 
-    # -- Category D: Phone --
+    # -- Category D: Phone (contextual_ner_required) --
     def _gen_phone(self, rng, i):
         phone = us_phone(rng)
         alt_phone = us_phone(rng)
@@ -354,12 +386,12 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
             f"Confirm appointment next week."
         )
         spans = [
-            (phone, "PHONE_HOME", "D", "us", AUTH_HIPAA_SAFE_HARBOR),
-            (alt_phone, "PHONE_WORK", "D", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (phone, "PHONE_HOME", "D", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
+            (alt_phone, "PHONE_WORK", "D", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
         ]
         return self._record("D", i, text, spans)
 
-    # -- Category E: Fax (distinct from phone) --
+    # -- Category E: Fax (rule_applicable: phone-format pattern) --
     def _gen_fax(self, rng, i):
         fax = us_fax(rng)
         text = (
@@ -367,11 +399,11 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
             f"Please confirm receipt of the discharge summary."
         )
         spans = [
-            (fax, "FAX", "E", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (fax, "FAX", "E", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
         ]
         return self._record("E", i, text, spans)
 
-    # -- Category F: Email --
+    # -- Category F: Email (rule_applicable: RFC 822 pattern) --
     def _gen_email(self, rng, i):
         first = rng.choice(US_FIRST_NAMES).lower()
         last = rng.choice(US_LAST_NAMES).lower()
@@ -379,38 +411,38 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
         email = f"{first}.{last}{rng.randint(1, 999)}@{domain}"
         text = f"Patient requested portal messages be sent to {email} for follow-up."
         spans = [
-            (email, "EMAIL", "F", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (email, "EMAIL", "F", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
         ]
         return self._record("F", i, text, spans)
 
-    # -- Category G: SSN --
+    # -- Category G: SSN (rule_applicable: NNN-NN-NNNN pattern) --
     def _gen_ssn(self, rng, i):
         ssn = us_ssn(rng)
         text = f"Insurance verification: patient SSN on file as {ssn}. Confirmed with ID."
         spans = [
-            (ssn, "SSN", "G", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (ssn, "SSN", "G", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
         ]
         return self._record("G", i, text, spans)
 
-    # -- Category H: MRN --
+    # -- Category H: MRN (contextual_ner_required: format varies by institution) --
     def _gen_mrn(self, rng, i):
         mrn = us_mrn(rng)
         text = f"Retrieved encounter notes under MRN {mrn}. Prior visits: 3 in the past year."
         spans = [
-            (mrn, "MRN", "H", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (mrn, "MRN", "H", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
         ]
         return self._record("H", i, text, spans)
 
-    # -- Category I: Health plan beneficiary --
+    # -- Category I: Health plan beneficiary (rule_applicable: MBI has fixed format) --
     def _gen_health_plan(self, rng, i):
         mbi = health_plan_beneficiary(rng)
         text = f"Medicare Beneficiary Identifier: {mbi}. Claim submitted for outpatient visit."
         spans = [
-            (mbi, "HEALTH_PLAN_ID", "I", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (mbi, "HEALTH_PLAN_ID", "I", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
         ]
         return self._record("I", i, text, spans)
 
-    # -- Category J: Account numbers --
+    # -- Category J: Account numbers (rule_applicable: fixed-length numeric) --
     def _gen_account(self, rng, i):
         acct = "".join(str(rng.randint(0, 9)) for _ in range(10))
         bank_acct = "".join(str(rng.randint(0, 9)) for _ in range(9))
@@ -419,12 +451,12 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
             f"ACH setup on bank account {bank_acct} routing 021000021."
         )
         spans = [
-            (acct, "ACCOUNT_NUMBER", "J", "us", AUTH_HIPAA_SAFE_HARBOR),
-            (bank_acct, "BANK_ACCOUNT", "J", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (acct, "ACCOUNT_NUMBER", "J", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
+            (bank_acct, "BANK_ACCOUNT", "J", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
         ]
         return self._record("J", i, text, spans)
 
-    # -- Category K: Certificate/license --
+    # -- Category K: Certificate/license (rule_applicable: state DL + NPI patterns) --
     def _gen_license(self, rng, i):
         dl_number = "D" + "".join(str(rng.randint(0, 9)) for _ in range(8))
         npi = us_npi(rng)
@@ -433,12 +465,12 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
             f"Treating physician NPI: {npi}."
         )
         spans = [
-            (dl_number, "DRIVERS_LICENSE", "K", "us", AUTH_HIPAA_SAFE_HARBOR),
-            (npi, "NPI", "K", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (dl_number, "DRIVERS_LICENSE", "K", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
+            (npi, "NPI", "K", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
         ]
         return self._record("K", i, text, spans)
 
-    # -- Category L: Vehicle identifiers --
+    # -- Category L: Vehicle identifiers (rule_applicable: ISO 3779 VIN + plate patterns) --
     def _gen_vehicle(self, rng, i):
         vin = us_vin(rng)
         plate = us_license_plate(rng)
@@ -447,12 +479,12 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
             f"with plate {plate} left at work site."
         )
         spans = [
-            (vin, "VIN", "L", "us", AUTH_HIPAA_SAFE_HARBOR),
-            (plate, "LICENSE_PLATE", "L", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (vin, "VIN", "L", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
+            (plate, "LICENSE_PLATE", "L", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
         ]
         return self._record("L", i, text, spans)
 
-    # -- Category M: Device identifiers --
+    # -- Category M: Device identifiers (contextual_ner_required: UDI varies; clinical context needed) --
     def _gen_device(self, rng, i):
         udi = us_device_udi(rng)
         serial = us_device_serial(rng)
@@ -461,21 +493,21 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
             f"Manufacturer recall check: not affected."
         )
         spans = [
-            (udi, "DEVICE_UDI", "M", "us", AUTH_HIPAA_SAFE_HARBOR),
-            (serial, "DEVICE_SERIAL", "M", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (udi, "DEVICE_UDI", "M", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
+            (serial, "DEVICE_SERIAL", "M", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
         ]
         return self._record("M", i, text, spans)
 
-    # -- Category N: URL --
+    # -- Category N: URL (rule_applicable: RFC 3986 pattern) --
     def _gen_url(self, rng, i):
         u = url(rng)
-        text = f"Patient portal enrollment at {u} — credentials mailed separately."
+        text = f"Patient portal enrollment at {u}. Credentials mailed separately."
         spans = [
-            (u, "URL", "N", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (u, "URL", "N", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
         ]
         return self._record("N", i, text, spans)
 
-    # -- Category O: IP --
+    # -- Category O: IP (rule_applicable: CIDR patterns) --
     def _gen_ip(self, rng, i):
         ip4 = ipv4(rng)
         ip6 = ipv6(rng)
@@ -484,12 +516,12 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
             f"IPv6 address logged: {ip6}."
         )
         spans = [
-            (ip4, "IP_V4", "O", "us", AUTH_HIPAA_SAFE_HARBOR),
-            (ip6, "IP_V6", "O", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (ip4, "IP_V4", "O", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
+            (ip6, "IP_V6", "O", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_RULE),
         ]
         return self._record("O", i, text, spans)
 
-    # -- Category P: Biometric --
+    # -- Category P: Biometric (contextual_ner_required: GDPR Art. 4(14) biometric data) --
     def _gen_biometric(self, rng, i):
         bio1 = biometric_reference(rng)
         text = (
@@ -497,11 +529,11 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
             f"Used for patient identification at check-in."
         )
         spans = [
-            (bio1, "BIOMETRIC", "P", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (bio1, "BIOMETRIC", "P", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
         ]
         return self._record("P", i, text, spans)
 
-    # -- Category Q: Photo --
+    # -- Category Q: Photo (contextual_ner_required) --
     def _gen_photo(self, rng, i):
         photo = photo_reference(rng)
         text = (
@@ -509,11 +541,11 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
             f"Used for patient chart identification."
         )
         spans = [
-            (photo, "PHOTO_FULL_FACE", "Q", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (photo, "PHOTO_FULL_FACE", "Q", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
         ]
         return self._record("Q", i, text, spans)
 
-    # -- Category R: Any other unique identifying code --
+    # -- Category R: Any other unique identifying code (contextual_ner_required) --
     def _gen_other_unique(self, rng, i):
         clinical_trial = f"NCT{rng.randint(10_000_000, 99_999_999)}"
         unique_code = "X" + "".join(rng.choices(string.ascii_uppercase + string.digits, k=15))
@@ -522,8 +554,8 @@ class HIPAASafeHarborGenerator(DeterministicGenerator):
             f"internal research code {unique_code}."
         )
         spans = [
-            (clinical_trial, "CLINICAL_TRIAL_ID", "R", "us", AUTH_HIPAA_SAFE_HARBOR),
-            (unique_code, "INTERNAL_CODE", "R", "us", AUTH_HIPAA_SAFE_HARBOR),
+            (clinical_trial, "CLINICAL_TRIAL_ID", "R", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
+            (unique_code, "INTERNAL_CODE", "R", "us", AUTH_HIPAA_SAFE_HARBOR, DETECTION_REGIME_NER),
         ]
         return self._record("R", i, text, spans)
 
@@ -582,9 +614,9 @@ class HIPAAQuasiIdentifierGenerator(DeterministicGenerator):
             f"re-identifiable per Sweeney 2002 and violates 164.514(b)(2)(ii)."
         )
         spans = [
-            (profession, "QUASI_PROFESSION", None, "us", AUTH_HIPAA_ACTUAL_KNOWLEDGE),
-            (city, "QUASI_CITY", "B", "us", AUTH_HIPAA_ACTUAL_KNOWLEDGE),
-            (disease, "QUASI_RARE_DISEASE", None, "us", AUTH_SWEENEY_K_ANON),
+            (profession, "QUASI_PROFESSION", None, "us", AUTH_HIPAA_ACTUAL_KNOWLEDGE, DETECTION_REGIME_NER),
+            (city, "QUASI_CITY", "B", "us", AUTH_HIPAA_ACTUAL_KNOWLEDGE, DETECTION_REGIME_NER),
+            (disease, "QUASI_RARE_DISEASE", None, "us", AUTH_SWEENEY_K_ANON, DETECTION_REGIME_NER),
         ]
         r = Record(
             record_id=f"hipaa_qi_{i:04d}",
@@ -592,6 +624,7 @@ class HIPAAQuasiIdentifierGenerator(DeterministicGenerator):
             gold_spans=self.annotate(text, spans),
             layer="hipaa_quasi_identifier",
             jurisdiction="us",
+            detection_regime=DETECTION_REGIME_NER,
             de_id_tier="safe_harbor",  # claims to be de-identified but has QI
             format="text",
             authority_citations=[AUTH_HIPAA_ACTUAL_KNOWLEDGE, AUTH_SWEENEY_K_ANON],

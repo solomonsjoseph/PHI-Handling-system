@@ -1,11 +1,13 @@
 """
 Common utilities for deterministic PHI corpus generation.
 
-Every generator in this package derives from DeterministicGenerator and uses 
-seeded PRNG state. The same seed produces bitwise-identical corpora — a 
+Every generator in this package derives from DeterministicGenerator and uses
+seeded PRNG state. The same seed produces bitwise-identical corpora -- a
 requirement for IRB reproducibility attestation.
 
 Authority: See authorities/AUTHORITY_MATRIX.md for the full citation index.
+Multi-jurisdiction architecture: See authorities/06_regulatory_philosophy_comparison.md
+Detection regime taxonomy: See AUTHORITY_MATRIX.md Table F (arXiv 2412.10918)
 """
 from __future__ import annotations
 
@@ -60,9 +62,60 @@ AUTH_OWASP_LLM_01 = "OWASP LLM Top 10 2025 LLM01 Prompt Injection"
 AUTH_MIA_NATURE_2024 = "Nature Sci Rep 2024 Membership Inference"
 
 AUTH_GDPR_RECITAL_26 = "GDPR Recital 26 (anonymous data)"
+AUTH_GDPR_RECITAL_35 = "GDPR Recital 35 (health data definition)"
 AUTH_GDPR_ARTICLE_4 = "GDPR Article 4(1) (personal data)"
+AUTH_GDPR_ARTICLE_4_13 = "GDPR Article 4(13) (genetic data)"
+AUTH_GDPR_ARTICLE_4_14 = "GDPR Article 4(14) (biometric data)"
+AUTH_GDPR_ARTICLE_4_15 = "GDPR Article 4(15) (data concerning health)"
+AUTH_GDPR_ARTICLE_9 = "GDPR Article 9(1) (special categories)"
+AUTH_GDPR_ARTICLE_89 = "GDPR Article 89 (research safeguards)"
+AUTH_EHDS_2024 = "EU EHDS Regulation 2024/3175 Article 3"
+
+AUTH_PIPEDA_S1 = "PIPEDA Schedule 1 Principles"
+AUTH_PHIPA_ON = "PHIPA Ontario 2004 (personal health information)"
+AUTH_HIA_AB = "HIA Alberta 2000 (health information)"
+AUTH_PIPA_BC = "PIPA BC 2003 (personal information)"
+
+AUTH_UK_GDPR = "UK GDPR Article 4(1) (retained EU law)"
+AUTH_UK_NHS_NUMBER = "NHS Data Security and Protection Toolkit"
+
+AUTH_AU_PRIVACY = "Privacy Act 1988 (Cth) Australian Privacy Principles"
+AUTH_AU_MY_HEALTH = "Healthcare Identifiers Act 2010 (Cth)"
+
+AUTH_PDPA_SG = "PDPA Singapore 2012 (2021 amendments)"
+AUTH_APPI_JP = "APPI Japan 2022 amendments"
+AUTH_LGPD_BR = "LGPD Brazil 2020 Article 5"
+AUTH_PIPL_CN = "PIPL China 2021 (sensitive personal information)"
 
 AUTH_PUTTASWAMY = "Puttaswamy v Union of India (2017) 10 SCC 1"
+
+# -----------------------------------------------------------------------------
+# Detection regime constants (i2b2 taxonomy, arXiv 2412.10918 December 2024)
+# rule_applicable: regex/pattern matching sufficient (10 structured types)
+# contextual_ner_required: transformer NER required (18 contextual types)
+# conflict_case: jurisdictions disagree on PHI status (ZIP, dates, re-ID codes)
+# -----------------------------------------------------------------------------
+
+DETECTION_REGIME_RULE = "rule_applicable"
+DETECTION_REGIME_NER = "contextual_ner_required"
+DETECTION_REGIME_CONFLICT = "conflict_case"
+
+# -----------------------------------------------------------------------------
+# Corpus layer taxonomy (authorities/06_regulatory_philosophy_comparison.md)
+# -----------------------------------------------------------------------------
+
+LAYER_COMMON = "common"
+LAYER_HIPAA = "hipaa_specific"
+LAYER_INDIA = "india_specific"
+LAYER_GDPR = "gdpr_specific"
+LAYER_CONFLICT = "conflict_cases"
+LAYER_CANADA = "canada_specific"
+LAYER_UK = "uk_specific"
+LAYER_AUSTRALIA = "australia_specific"
+LAYER_SINGAPORE = "singapore_specific"
+LAYER_JAPAN = "japan_specific"
+LAYER_BRAZIL = "brazil_specific"
+LAYER_CHINA_PIPL = "china_pipl"  # STRUCTURALLY SEPARATE -- not comparable to other layers
 
 
 # -----------------------------------------------------------------------------
@@ -110,12 +163,13 @@ class GoldSpan:
     """A single PHI span within a record with verified offsets."""
     start: int
     end: int
-    category: str          # HIPAA Safe Harbor A-R, or extended category
+    category: str               # HIPAA Safe Harbor A-R, or extended category
     hipaa_category: Optional[str] = None   # A-R or None for non-HIPAA
-    jurisdiction: str = "universal"  # "us" | "in" | "universal"
+    jurisdiction: str = "universal"        # "us" | "in" | "eu" | "universal" | ...
     authority: str = ""
     value: str = ""
-    entity_type: str = ""  # semantic type (NAME, MRN, AADHAAR, etc.)
+    entity_type: str = ""       # i2b2 semantic type (PATIENT, MRN, AADHAAR, etc.)
+    detection_regime: str = DETECTION_REGIME_NER  # rule_applicable | contextual_ner_required | conflict_case
 
     def verify(self, text: str) -> bool:
         """Verify the span offsets match the expected value."""
@@ -128,12 +182,13 @@ class Record:
     record_id: str
     text: str
     gold_spans: List[GoldSpan] = field(default_factory=list)
-    layer: str = ""
-    jurisdiction: str = "universal"
-    de_id_tier: str = "identifiable"  # "identifiable" | "limited_data_set" | "safe_harbor"
-    risk_tier: str = "minimal"  # ICMR four-tier
+    layer: str = LAYER_COMMON              # corpus layer taxonomy (LAYER_* constants)
+    jurisdiction: str = "universal"        # "us" | "in" | "eu" | "universal" | ...
+    detection_regime: str = DETECTION_REGIME_NER  # record-level regime: rule_applicable | contextual_ner_required | conflict_case
+    de_id_tier: str = "identifiable"       # "identifiable" | "limited_data_set" | "safe_harbor"
+    risk_tier: str = "minimal"             # ICMR four-tier: less_than_minimal | minimal | minor_increase | more_than_minimal
     vulnerability_tags: List[str] = field(default_factory=list)
-    context: str = ""  # "research" | "fundraising" | "treatment" | "payment" | "operations"
+    context: str = ""                      # "research" | "fundraising" | "treatment" | "payment" | "operations"
     format: str = "text"
     authority_citations: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -145,6 +200,7 @@ class Record:
             "gold_spans": [asdict(s) for s in self.gold_spans],
             "layer": self.layer,
             "jurisdiction": self.jurisdiction,
+            "detection_regime": self.detection_regime,
             "de_id_tier": self.de_id_tier,
             "risk_tier": self.risk_tier,
             "vulnerability_tags": self.vulnerability_tags,
@@ -193,15 +249,21 @@ class DeterministicGenerator:
     def annotate(
         self,
         text: str,
-        spans_spec: List[Tuple[str, str, str, str, str]],
+        spans_spec: List[Tuple[str, str, str, str, str, str]],
     ) -> List[GoldSpan]:
-        """Build GoldSpan list from (value, category, hipaa_cat, jurisdiction, authority) tuples.
+        """Build GoldSpan list from (value, category, hipaa_cat, jurisdiction, authority, detection_regime) tuples.
 
         Finds the value in text and records exact offsets.
         Returns verified spans only (raises if any spec value not found).
+        detection_regime defaults to DETECTION_REGIME_NER if the tuple has only 5 elements (backward compat).
         """
         spans = []
-        for value, category, hipaa_cat, jurisdiction, authority in spans_spec:
+        for spec in spans_spec:
+            if len(spec) == 6:
+                value, category, hipaa_cat, jurisdiction, authority, regime = spec
+            else:
+                value, category, hipaa_cat, jurisdiction, authority = spec
+                regime = DETECTION_REGIME_NER
             start = text.find(value)
             if start < 0:
                 raise ValueError(f"Value '{value}' not found in text: {text[:200]}")
@@ -215,6 +277,7 @@ class DeterministicGenerator:
                 authority=authority,
                 value=value,
                 entity_type=category,
+                detection_regime=regime,
             ))
         return spans
 
