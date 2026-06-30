@@ -1,0 +1,829 @@
+# PHI Scrub — study-specific config for scripts/security/phi_scrub.py
+# ---------------------------------------------------------------------------
+# This file configures the PHI scrubber that runs as Step 1.6 of the pipeline
+# (between dataset extraction and dataset cleanup). Removing this file makes
+# the module a no-op for this study.
+#
+# Scope — structural field transforms only (see ``transformation_methods:`` below
+# for the IRB-grade catalog of every technique; rule sections list *which* columns
+# each technique applies to — do not repeat ``method:`` on every field line):
+#   (a) HMAC-SHA256 pseudonymization — id_fields (one-way, deterministic)
+#   (b) Per-subject deterministic date jitter (SANT) — date_fields
+#   (c) DROP — field removed entirely (drop_fields)
+#   (d) CAP — numeric value above threshold collapsed to label (cap_fields)
+#   (e) GENERALIZE — value-level mapping to broad category (generalize_fields)
+#   (f) SUPPRESS_SMALL_CELL — numeric clamped to threshold to resist k-anon attacks
+#   (g) KEEP — explicit allowlist that wins over broader patterns (keep_fields)
+#
+# Free-text PHI (narrative verbatim) is handled via the drop rule on the
+# specific narrative fields listed in drop_fields. Narrative whole-value
+# drop is the honest-safe default.
+#
+# Rule priority (first match wins within the scrubber):
+#   1. keep_fields  — explicit allowlist (short-circuits every other rule)
+#   2. birthdate_field
+#   3. drop_fields
+#   4. cap_fields
+#   5. generalize_fields
+#   6. suppress_small_cell_fields
+#   7. date_fields  — jitter
+#   8. id_fields    — pseudonymize
+#
+# All regex patterns are compiled with re.IGNORECASE. Field-name matching
+# uses re.search (not fullmatch) — anchor with ^…$ for exact-column-name
+# intent; leave unanchored for substring-in-column-name intent.
+#
+# IRB-grade benchmark anchors (see docs/sphinx/irb_auditor/):
+#   HIPAA §164.514(b)(2), ICMR §11, SPDI Rule 3, Aadhaar Act §29,
+#   DPDPA 2023 §2(t), NIST SP 800-188, RePORT India Common Protocol.
+#
+# Provenance: rule catalog ported from scripts/archive/phi_rules.py (1033-line
+# IN-jurisdiction field-rule registry), Indo-VAP-calibrated.
+# ---------------------------------------------------------------------------
+
+# ── Compliance posture ────────────────────────────────────────────────────
+#   "safe_harbor"     — drops birthdate_field entirely (default).
+#                        Age fidelity is lost. No IRB/DUA paperwork needed.
+#   "limited_dataset" — shifts birthdate_field with the same per-subject
+#                        offset as other dates (SANT method), preserving
+#                        age-at-event. REQUIRES authorities/phi_limited_dataset.md
+#                        with IRB approval + Data Use Agreement citations.
+compliance_posture: "safe_harbor"
+
+# ── Subject-ID resolution (keys the per-subject date offset) ──────────────
+# Column names used to key the per-subject deterministic date offset.
+# Must be literal column names (not regex). Candidates are tried in order;
+# the first non-empty value wins. For Indo-VAP, per-subject forms use
+# SUBJID and household-contact forms (e.g. 10_TST) use FID.
+# If a row has NONE of these fields populated, the row is quarantined.
+subject_id_fields:
+  - "SUBJID"
+  - "FID"
+
+# ── Jitter envelope (days). Per-subject offset ∈ [-max, +max] inclusive. ──
+# SANT recommendation: 30 days preserves weekly/monthly clinical interval
+# structure while obscuring exact event dates.
+max_jitter_days: 30
+
+# ── Future-dated value policy ─────────────────────────────────────────────
+# A real clinical observation date is always in the past (year <= current year).
+# A date whose resolved year > plausible_max_year is treated as a placeholder,
+# never as a real visit/collection date that should be jittered + published.
+#
+# plausible_max_year: the upper inclusive bound for a plausible observation year.
+#   Set to the current study year. Code default when absent: 9999 (check is off).
+#   Valid range: [1900, 9999].
+plausible_max_year: 2026
+#
+# future_date_policy: what to do when a date's resolved year > plausible_max_year.
+#   "sentinel"   — treat as a missing-data placeholder (same as date_null_token):
+#                  leave the raw value unchanged, bump date_future_sentinel counter,
+#                  publish the row normally. Use when future-year values are a known
+#                  data-entry convention for "unknown/pending" in this study.
+#   "quarantine" — quarantine the whole row (fail-closed). Code default when absent.
+#                  Use when future dates are unexpected and may indicate bad data.
+future_date_policy: "sentinel"
+
+# unparseable_date_policy (Note 29): what to do with a date value that survives the
+# sentinel / null-token / future-date checks but still cannot be parsed+shifted after
+# every format is exhausted (genuinely malformed — NOT a recognized placeholder).
+#   "blank"      — remove that single field (set ""), publish the rest of the row.
+#                  Strictly safe: the raw, un-jitterable date is never published (no
+#                  leak) and the row's other clean data is preserved. Count-only audit
+#                  (date_unparseable_blanked), mirroring date_null_token. DEFAULT.
+#   "quarantine" — withhold the whole row (the prior fail-closed behavior). Use when a
+#                  malformed date should block the entire record pending data fix.
+unparseable_date_policy: "blank"
+
+# ── Orphan row handling ───────────────────────────────────────────────────
+# A row whose subject_id_field is missing / blank / null gets moved to
+# tmp/{STUDY}/quarantine/{file}.jsonl. If more than this many orphans
+# per file, the pipeline hard-fails.
+orphan_quarantine_threshold: 10
+
+# JSONL filename substrings that legitimately lack a subject-ID column.
+# Any file whose name contains one of these patterns is treated as a
+# non-subject dataset — orphan-quarantine is skipped for those rows.
+# Add study-specific entries here rather than hardcoding names in the
+# scrub engine.
+no_subject_id_forms:
+  - "Air_Quality"
+
+# Partial-publish safety cap: in hold-and-continue mode, if MORE than this
+# fraction of a single file's rows are quarantined (date/band/generalize), the
+# run hard-fails instead of publishing a gutted dataset — a few bad rows are
+# held, a systemic failure halts. Range (0, 1].
+partial_max_quarantine_fraction: 0.10
+
+# ── Age cap (HIPAA §164.514(b)(2)(i)(C) — ages > 89 aggregated) ───────────
+age_cap:
+  threshold: 89
+  label: "90+"
+
+# ── Small-cell suppression threshold (k-anonymity proxy; ICMR §11.7) ──────
+# Contact / household counts ≥ this value are clamped to this value.
+small_cell_threshold: 5
+
+# ──────────────────────────────────────────────────────────────────────────
+# KEEP FIELDS (allowlist — wins over every other rule)
+# ──────────────────────────────────────────────────────────────────────────
+# Explicit keep rules prevent clinical / lab / medication / time-of-day
+# fields from being swept up by broader drop or date patterns. These are
+# evaluated FIRST by _scrub_row. An exact match → field passes through
+# unchanged, no audit event.
+keep_fields:
+  # ── Age-adjacent clinical indicators (not person age) ──
+  - "(?:AGEEST|AGEY|TXESTIMATE)"
+  - "GESTAGE"
+  - "MENSESAGE"
+  - "PTBage"
+  - "PTBmarried"
+  # ── Death indicators (boolean flags, not dates) ──
+  - "^EE_DIED$"
+  - "^EE_DIEDTB$"
+  - "^EE_NUMDIED$"
+  # ── Marital indicator (binary flag, not status string) ──
+  - "(?:EVRMARRIED)"
+  # ── A1 (maintainer 2026-06-22): bare clock TIMES + child YEARS-of-birth KEEP ──
+  # Specimen collection / log-in / log-out / reposit TIMES-of-day carry no date
+  # (the associated DATES are jittered separately) and are not Safe Harbor date
+  # elements, so they are kept as lab-process research vars rather than jittered
+  # (a bare time is unparseable by the SANT date shifter → would quarantine).
+  - "^ST_(?:COLLTIM|LINTIM|LOUTTIM|REPOSINTIM)$"
+  # Child year-of-birth — a YEAR is permitted under HIPAA Safe Harbor
+  # §164.514(b)(2)(i)(C) (only sub-year precision is removed); children, so the
+  # >89-age rule never applies. Kept (jitter is impossible on a bare year).
+  - "^CC_CHILDY\\d+$"
+  # ── False-positive guards for time-of-day vs. date ──
+  - "(?:_TIM\\d*$|_TIME$|_TMON$|BLDTIM|MBTIM|STTIM|RCTIM|ENTIM)"
+  - "(?:TIMA$|TIMB$|TIMb$)"
+  - "RECTIM"
+  - "(?:SPUTIM|WBTIM|cbctim|helmtim|HELMTIM|QUANTIM)"
+  - "TRVTIM"
+  - "HHTBTIME"
+  - "NDREATIM"
+  - "MBRECTIM"
+  # ── False-positive guards for "urine" (not a URL) ──
+  - "URIN(?:E|A|B)"
+  # ── False-positive guards for clinical lab specimen ID indicators ──
+  # These are LOW-cardinality lab codes (CX_LABID 9 distinct, DST_XLABID 2,
+  # ZN_MBLABID 63, CM_MBLABID 7 — each over ~3000 rows, k-anonymous), NOT
+  # unique per-specimen identifiers (contrast the near-unique MBREFID accession
+  # #, ratio ~0.7-0.9, which pseudonymizes via id_fields). Kept as research vars.
+  - "^(?:CX_LABID|ZN_MBLABID\\d*|CM_MBLABID\\d*|DST_XLABID\\d*)$"
+  - "^CBC_HBAND$"
+  # ── Visit labels (categorical) ──
+  - "[-_]VISIT"
+  - "^VISIT$"
+  # ── Sex (essential clinical variable) ──
+  - "(?:^IS_SEX$|^HHC_SEX$|^HC_SEX$|^IC_SEX$|_SEX$)"
+  - "^SexContact$"
+  # ── Ration card CATEGORY (coded, not card number) ──
+  - "^IC_RATION$"
+  # ── TB card + dose-grid + PHC-indicator clinical fields ──
+  - "^TC_ETBSITE$"
+  - "^TC_CARDLOC$"
+  - "^TC_[CI]DOSES\\d*$"
+  - "(?:DOSES|DOSAGE|COMPLIANCE)[-_]?\\d*$"
+  - "^PHC$"
+  - "WEIGHT_?ESTIMATE"
+  - "^Image_Seq$"
+  - "STORAGE\\d*$"
+  - "BIDI"
+  - "PRIORBID"
+  - "STEROID"
+  - "ANTACID"
+  - "^EE_FRIDGE$"
+  # ── MEDF_CCBLOCK — "CC block" is clinical medication block, NOT geography ──
+  - "^(?:MEDF?_)?CCBLOCK$"
+  # ── Collection type (clinical) ──
+  - "COLLTYP"
+  # ── Clinical indicator groups (large lab/medication/AE/EE/TC/TB blocks) ──
+  # Broad clinical-block keeps, but NOT staff initials/signatures (CBC_INIT /
+  # CXR_INIT / CXR_SIGN are direct identifiers → fall through to drop_fields; A1).
+  - "^CBC_(?!INIT|SIGN)"
+  - "^CXR_(?!INIT|SIGN)"
+  - "^cxr_(?!init|sign)"
+  - "^CX_(?:DST|GROWTH|ISOLATE|LALIQUOT|LIQTTD|LRECON|MB(?:ND|SPMETH|SPSETT)|MEDIA|MTB|ND|PROCVOL|REASON|RECREFR|SOL|COLLVOL)"
+  - "^DST_(?:DST|ALI|ISOLATE|MB(?:ND|SPMETH|SPSETT)|XVISIT)"
+  - "^ZN_(?:AFB|LIQ(?:CONTM|MTBNEG|MTBPOS|ND|NMTBPOS|TTDD)|MB(?:ND|SPMETH)|SOL(?:CONTM|MTBNEG|MTBPOS|ND|NMTBPOS|QNCAT|QNND|QUAN)|SPMETH)"
+  - "^CM_(?:AFB|FEVER|MBND|SVOLM)"
+  - "^CC_(?:ALC|ARM|ARRACK|CGR|CHDRN|CIG|CNCT|CURV|DEP|DIET|DM|DRNK|DRRH|FRST|HEIGHT|HELM|HIV|HNDWSH|HOO|KNEE|LMBS|LST|LUMPS|MED|MENSES|MNET|NAUS|NOPREG|NOPRGTEST|OBS|PREG|RBS|RSH|SHOES|SMK|SWL|THRST|TOILET|TRV|URINE|VIST|WEIGHT|WHZNG|WORMS|WSH|WTR|ABDISC)"
+  - "^EE_(?:ACRES|AGLAND|AIRFLOW|BATH|BEDRM|BEDS|BICYCLE|BOAT|BULL|BWTV|CAR|CENTS|CHAIR|CK|CLOCK|COLOR|COOKER|COT|DIN|DOORS|DPW|EFAN|EX(?:DOOR|WALL|WND)|FLOOR|FUEL|KIT|LEFT|LIGHT|LIV|LRG|MATTRESS|MDW|MOPED|MOTOR|MULTI|NEW|NUM|OPEN|OTHER(?:LAND|UNITS)|OTH?RM|OWN|PUMP|RADIO|RES|ROOF|ROOMS|RUP|SCL|SCOOTER|SEW|SMK|SML|TABLE|THRESH|TOIL|TOT|TRACTOR|TYP|WATER|WIND|WND)"
+  - "^MEDF?_(?:ART(?:MED|ONGO|STUNK|CURR|ND)|BDIOLAT|DIA(?:CHG|ND|OTHSP|CURR)|DXYCYCL|FLRQNLN|H2RANT|INH(?:CURR|ENUNK|ONGO|STUNK)|INSULIN|METFORM|OCM(?:CHG|ND|CURR)|PPUMP|PROPH(?:ENUNK|ONGO|OTSP|STUNK)|RIF(?:CURR|ENUNK|ONGO|STUNK)|RPT(?:CURR|ENUNK|ONGO|STUNK)|STATIN|SULFON|TBPRO(?:ND|TOCHG|CURR)|THIOGLIT|VITD|WARFN)"
+  - "^AE_(?:EVENT|RELATION|SEVERITY|SEVERITYO|STATUS|SUMMARY|TMAWARE)"
+  - "^EC_(?:AINCLR|ELIG|ELIGCONF)"
+  - "^COE_(?:APPROVE|COENROLL|PROTCOL)"
+  - "^FA_(?:FUCOMPA(?:DC)?|TBALT|TBALTDIAGSP)$"
+  - "^FB_(?:ENRCOHA(?:SP|SPO)?|FUCOMPB)$"
+  - "^NC_(?:COLLND|NDREA|REASON)(?:SP)?"
+  - "^SC_(?:BLD(?:DRW)|CBC|GENO(?:REC(?:GOOD)?|STOR|TYP)|HHCVST|HLMNTH|ICVST|NODRW|PAX(?:CP|GENE|REC(?:GOOD)?|STOR)|PBMC(?:REC(?:GOOD)?|STOR|TOT|VIAB|VOL)|PLASMA(?:REC(?:GOOD)?|STOR)|PROCSIG|PTCPT|QTF(?:REC(?:GOOD)?|STOR)|RECGOOD|SALIVA|SLV(?:REC(?:GOOD)?|STOR)|STORALIQ|Sputum|URINE|URN(?:REC(?:GOOD)?|STOR))"
+  - "^ST_(?:COMMENT|LALIQUOT|LINPRESV|LOUTPRESV|LRECON|LRECVIAL|PBMC|QUANT|REPOSCOND|shipvial)"
+  - "^TBE_(?:ND|OTHLIV|OTHWHN|SPDAYS|TBTREAT)"
+  # NOCARD(?!SP): keep the coded "why no card" parent (TC_NOCARD) but NOT the
+  # facility write-in TC_NOCARDSP ("specify center:") — that is a free-text facility
+  # 'specify' and drops below with its siblings TC_OTDOTSLOC / TC_CENTERSP (A1 policy).
+  - "^TC_(?:CARD|CHANGE(?:SP)?|CMONTH|DOSEFREQ|DOSNUM|EXTROT|EXTRPULM|MONTH|NOCARD(?!SP)|PHASE|WEIGHT|chestxna)"
+  - "^(?:CGRYN|CHEWING|CIGYN|SMOYN|SNUFF|OSMOYN)$"
+  - "^(?:Cigarettes|Clothes|Mosquito|Oinject|Oralmed|Other|Private|Removstom|Shortbreath|Silicosis|Touch|Unknown|Utensils)$"
+  - "^TBKNOW"
+  - "^EXTR"
+  - "^F1$"
+  - "^Remote_Cmp$"
+  - "^(?:Kidneyfail|COPD|Asthma|Cancer|Cough|Diet)$"
+  - "^Constr_\\d+$"
+  - "^RE_(?:CXR|HHTB|SPUTUM|TBDIAG|TBMED|TBSYMP|SEEKCARE|SEEKCARENA|DOTSNA|DOTSOTH)$"
+  - "^TST_PPDSOURCE$"
+  - "^TST_SPLACE\\d+$"
+  - "^TST_(?:BLIST|COUGH|INDUR|STREN|STRENOTH|SUBST|ND|PPDOTHER|TU)\\d*$"
+  - "^TST_TUOTHER$"
+  # ── Home/residence duration — TB-exposure relevant (T2.1 Q2 KEEP) ──────
+  - "(?:IC_HOMEHOUR|IC_HOMETIME|IC_HOMETIME_MONTHS)"
+  # ── Non-date "Not Done" flag columns whose names contain date sub-tokens ─
+  # These columns store free-text status indicators ("Not Done", "Not Recorded")
+  # or binary flags, NOT actual dates. Their names contain date sub-tokens
+  # (MBDAT, PROCDAT) so they would otherwise be swept by the specific-catalog
+  # date rule via re.search. KEEP at priority-1 short-circuits the date rule.
+  # field_is_date() also respects keep_fields, so these return False there too.
+  - "^CX_PROCDAT_ND$"
+  - "^ZN_MBDATNR$"
+  - "^ZN_MBDATNR2$"
+
+# ──────────────────────────────────────────────────────────────────────────
+# DATE FIELDS (jittered with per-subject constant offset)
+# ──────────────────────────────────────────────────────────────────────────
+date_fields:
+  # ── Specific clinical-date catalog (Indo-VAP CRF-tuned) ──────────────────
+  - "(?:VISDAT|ICFDT|COMPDAT|COMPDTE|TBTXDT|ENRDT|SCRDT|RANDDT|ONSDT|ENDDT|ADMDT|DISDT|RXSTDT|RXENDT|FOLDT|VISTDAT|BLDDAT|RECDAT|HIVDAT|IGRADAT|CXRDAT|PREGOUTDAT|MBDAT|STDAT|ENDAT|DSTDAT|GIVEDAT|ARTDAT|HBAND|HBADAT|HEMDAT|EVENTDAT|AWAREDAT|WOUTDAT|WITHDAT|RLPSDAT|PREGDAT|PROCD|MBRECDAT|PROCDAT|COLLDAT|LINDAT|LOUTDAT|GENOPROCDAT|GENORECDAT|PAXPROCDAT|PAXRECDAT|PBMCPROCDAT|PBMCRECDAT|PLASMAPROCDAT|PLASMARECDAT|QTFGITPROCDAT|QTFGITRECDAT|SLVPROCDAT|SLVRECDAT|URNPROCDAT|URNRECDAT|ARTSTDAT|ARTENDAT|INHSTDAT|INHENDAT|RIFSTDAT|RIFENDAT|PROPHSTDAT|PROPHENDAT|RPTSTDAT|RPTENDAT|COMPDATE|xraydat|PREGOUTDAT_2|COMPDAT_2|MBDAT2|SC_URNPROC80DAT|CAREDAT|TBDIAGDAT|ENROLLDAT|CD4DAT|LNDAT|LNDATND|GENOPROC80DAT|PAXPROC80DAT|PBMCPROC80DAT|PLASMAPROC80DAT|QTFGITPROC80DAT|SLVPROC80DAT|URNPROC80DAT|LIQENDAT|LIQSTDAT|SOLENDAT|SOLSTDAT|RECDAT2|BatchRDate)"
+  # NOTE: MBDATNR and MBDATNR2 were removed from the catalog above — those
+  # columns (ZN_MBDATNR, ZN_MBDATNR2) store free-text "Not Done" / "Not
+  # Recorded" status strings, not actual dates, and must NOT be date-scrubbed.
+  # ── Generic date-suffix catch-alls ────────────────────────────────────────
+  - "(?:_?DAT\\d*$|_DT$|DATE\\d*$|_date$)"
+  - "^TST_DAT\\d+$"
+  - "^TST_ENDAT\\d+$"
+  - "DATND\\d*$"
+
+# ──────────────────────────────────────────────────────────────────────────
+# ID FIELDS (HMAC-SHA256 pseudonymized with domain-separated labels)
+# ──────────────────────────────────────────────────────────────────────────
+# Output format: ``RID_<LABEL>_<alpha12>``. The label is used TWICE:
+#   1. As the HMAC domain separator: ``HMAC-SHA256(key, f"{label}:{value}")``.
+#      Same raw value under different labels → different pseudonyms
+#      (prevents cross-category correlation attacks — RFC 5869 §3.2 /
+#      HKDF info-param rationale).
+#   2. As the visible category inside an opaque ``RID_`` token, so an IRB
+#      reviewer reading the audit can distinguish ``RID_FAM_`` (family) from
+#      ``RID_LAB_`` (lab accession) from ``RID_SUBJ_`` (subject). The tag is
+#      alphabet-only so the pre-publication leak gate does not mistake the
+#      generated pseudonym for a raw subject ID or phone-like number.
+#
+# First-match wins — list specific patterns BEFORE generic ones so
+# ``^SUBJID$`` with label SUBJ binds before a fallback
+# ``(?:patient|subject|participant)[-_]?id`` catch-all.
+#
+# Label convention: 3–5 uppercase chars, ASCII only. Keep stable across
+# studies so agent tools can canonicalize cross-study joins on the prefix.
+id_fields:
+  # ── Subject IDs ───────────────────────────────────────────────────────────
+  - {pattern: "^SUBJID$", label: "SUBJ"}
+  - {pattern: "^NC_SUBJID$", label: "SUBJ"}
+  - {pattern: "(?:patient|subject|participant)[-_]?(?:id|num|no)", label: "SUBJ"}
+  # ── Screening / enrolment numbers (Indo-VAP and similar TB studies) ───────
+  # Index Case (IC_*) and Index Subject (IS_*) screen numbers are linkable
+  # back to enrolment registers; pseudonymise rather than let them flow raw.
+  - {pattern: "^I[CS]_SCRNNUM$", label: "SCRN"}
+  - {pattern: "(?:scrn|screen|enrol(?:l)?)num", label: "SCRN"}
+  # ── Family / household IDs ────────────────────────────────────────────────
+  - {pattern: "^FID$", label: "FAM"}
+  - {pattern: "^FID\\d+$", label: "FAM"}
+  - {pattern: "^(?:[A-Z]{1,4}[-_])?FID\\d*$", label: "FAM"}
+  - {pattern: "(?:family|household)[-_]?(?:id|num|no)", label: "FAM"}
+  # ── Facility / site / clinic IDs ──────────────────────────────────────────
+  - {pattern: "^PHCID$", label: "FAC"}
+  - {pattern: "^ICTC$", label: "FAC"}
+  - {pattern: "(?:facility|center|site|clinic|hospital)[-_]?(?:id|code|num|no)", label: "FAC"}
+  # ── Co-enrollment cross-reference ────────────────────────────────────────
+  - {pattern: "COENRL(?:ID)?\\d*$", label: "CRL"}
+  # ── Case-tracking IDs ────────────────────────────────────────────────────
+  - {pattern: "^CSID$", label: "CASE"}
+  # ── ID-change tracking (link-to-subject-identity fields) ─────────────────
+  - {pattern: "[-_]IDNA$", label: "IDCH"}
+  - {pattern: "[-_]IDCHG(?:NA)?$", label: "IDCH"}
+  # ── TB incidence cross-reference ─────────────────────────────────────────
+  - {pattern: "TBINCID", label: "TBIN"}
+  # ── Medication cross-reference IDs ───────────────────────────────────────
+  - {pattern: "(?:ARTIDN|DIAIDN|OCMIDN|TBPROIDN)", label: "MED"}
+  # ── Lab reference / specimen IDs ─────────────────────────────────────────
+  - {pattern: "(?:LABID|REFID|MBREFID|CX_LABID|XLABID|MBLABID)", label: "LAB"}
+  # ── Study / protocol cross-reference (co-enrollment metadata) ────────────
+  - {pattern: "COE_(?:PROTOCOL|SPONSOR)\\d*$", label: "STDY"}
+  # ── A1 (Note 28): IDs recovered from drop_fields → pseudonymize, never drop ─
+  # Treatment-unit / data-management-center IDs (per-subject linkage).
+  - {pattern: "[-_]?TUID(?:CHG)?$", label: "TU"}
+  - {pattern: "[-_]?DMCID(?:CHG)?$", label: "DMC"}
+  # Specimen collection / processing IDs + the processing-ID signature columns.
+  - {pattern: "(?:COLLTID|COLLTNUM|COLLTMG)$", label: "SPEC"}
+  - {pattern: "PROCID$", label: "SPEC"}
+  - {pattern: "PROCSIG$", label: "SPEC"}
+  - {pattern: "^ST_LOUTTRAC$", label: "SPEC"}
+  # Lab accession numbers (LBACCID / LACCNUM).
+  - {pattern: "LBACCID$", label: "LAB"}
+  - {pattern: "LACCNUM$", label: "LAB"}
+  # Household-contact IDs (HHC1..n — "Household Contact ID #", per the SoT).
+  - {pattern: "^HHC\\d+$", label: "HHC"}
+  # Batch barcode ID (data-entry, but a stable linkable code → pseudonymize).
+  - {pattern: "^Remote[-_]?Bid$", label: "BID"}
+  # ── Specimen / sample / accession IDs ────────────────────────────────────
+  - {pattern: "(?:specimen|sample|accession)[-_]?(?:id|num|no|number)", label: "SPEC"}
+
+# ──────────────────────────────────────────────────────────────────────────
+# BIRTHDATE (posture-dependent)
+# ──────────────────────────────────────────────────────────────────────────
+# safe_harbor     → field dropped entirely from every row.
+# limited_dataset → field treated as a normal date (jittered with same offset).
+birthdate_field: "(?:IS_BIRTHDAT|IC_BIRTHDAT|HHC_BRTHDAT|HC_BRTHDAT|birth|dob|bday|brthdat)"
+
+# ──────────────────────────────────────────────────────────────────────────
+# AGE-DEPENDENT DATE POLICY (birthdate + death date)
+# ──────────────────────────────────────────────────────────────────────────
+# Policy: a birthdate / death date is the ONLY way to recover age-at-event or
+# event timing when a form carries no explicit AGE column. So:
+#   * form HAS an age field  → birthdate/death date DROPPED (Safe Harbor; the age
+#     column already carries the needed info, capped at 89).
+#   * form has NO age field  → birthdate/death date JITTERED with the same
+#     per-subject offset (preserves the period/timeline, not the real date), and
+#     DROPPED as a fallback when the value cannot be jittered (unparseable_date_policy).
+# The jitter is interval-preserving by construction (one deterministic offset per
+# subject across ALL their dates). NOTE: a jittered birthdate keeps the birth YEAR;
+# for a no-age form carrying ages > 89 the year would imply age > 89 (HIPAA cap) —
+# add a year-generalize there if such a form ever appears (none in Indo-VAP: every
+# birthdate-bearing form has an age field, so the birthdate-jitter branch is dormant).
+#
+# age_fields: header NAMES that mean "this form has an age value" (drives the
+# has-age decision). death_date_fields: the death-DATE columns governed above
+# (death SOURCE/CAUSE/PLACE stay in drop_fields).
+age_fields:
+  - "^(?:IS_AGE|IC_AGE|HHC_AGE|HC_AGE|AE_AGE|CC_AGE|NC_AGE)$"
+  - "(?:^|_)AGE(?:Y|YR|YRS|EST|MON|MONTH|MONTHS)?$"
+death_date_fields:
+  - "(?:DTH|DEATH)[-_]?(?:DAT|DATE)"
+  - "^(?:FA_DTHDAT|FB_DTHDAT|AE_DEATHDAT)$"
+
+# ──────────────────────────────────────────────────────────────────────────
+# DROP FIELDS (entire column removed from every row)
+# ──────────────────────────────────────────────────────────────────────────
+# Archive catalog: 93 rules across 14 categories. HIPAA §164.514(b)(2)(i)(A-R)
+# coverage + DPDPA §2(t) identifier categories + India-government-ID catalog.
+# Each rule drops fields where the column NAME matches; values are removed
+# from every row. Former FREE_TEXT_PHI whole-hash rules converted to DROP
+# because whole-value hashing of narrative strings did not remove
+# embedded PHI tokens — it only obscured the containing string.
+drop_fields:
+  # ── Secondary / redundant subject IDs (Excel re-entry artefacts) ─────────
+  # The scrub's secondary-subject-ID RESOLVER (phi_scrub._scrub_row) reads each
+  # SUBJID{n}/SUBJID_{n} value, compares it to the canonical SUBJID for the row,
+  # and either DROPS it (exact duplicate re-entry) or PSEUDONYMIZES it in the
+  # SUBJ keyspace (a distinct linked subject). This drop rule is the fail-closed
+  # FALLBACK when no canonical SUBJID resolves; the resolver supersedes it when
+  # one does. (A1 / Note 28 — "an ID is pseudonymized, never dropped".)
+  - "^SUBJID\\d+(?:_\\d+)?$"
+  - "^SUBJID_\\d+$"
+  # ── Form / CRF tracking IDs (system artefacts) ───────────────────────────
+  - "^Form[-_]?ID"
+  - "^Form_Id$"
+  - "^Form[-_]?Id(?:Mthd)?$"
+  - "^FormIDMthd$"
+  - "^Remote[-_]?Uid(?:_PRESENT)?$"
+  - "^Remote[-_]?Uid$"
+  # ── Batch/scan metadata (no clinical value) ──────────────────────────────
+  - "^Batch"
+  - "^Verify_Wks$"
+  - "^Suspense_File$"
+  - "^Remote_(?:Fax|Phn|User)$"
+  - "^Route_To$"
+  - "^OrigPgSeq$"
+  - "^Orig_File$"
+  # ── Person initials (staff identifiers) ──────────────────────────────────
+  - "[-_]INIT(?:IAL)?S?(?:[-_]?\\d+)?$"
+  - "^(?:[A-Z]{1,4}[-_])?INIT(?:IAL)?S?(?:[-_]?\\d+)?$"
+  - "^TC_INITIAL(?:[-_]?\\d+)?$"
+  # ── Signatures / sign IDs (staff) ────────────────────────────────────────
+  - "[-_]SIGN(?:[-_]?\\d+)?$"
+  - "^(?:[A-Z]{1,4}[-_])?SIGN(?:[-_]?\\d+)?$"
+  - "COLLSIGN(?:[-_]?\\d+)?$"
+  - "(?:COLLSIG|LINSIG|LOUTSIG|REPOSINSIG)(?:[-_]?\\d+)?$"
+  # NOTE: SC_*PROCSIG (specimen processing-ID signatures) are pseudonymized as
+  # processing IDs via id_fields (A1 maintainer resolution: category=id), NOT
+  # dropped here.
+  # ── Staff / personnel identifiers ────────────────────────────────────────
+  - "(?:created|modified|updated|entered|verified)[-_]?by"
+  - "(?:data[-_]?entry|crf)[-_]?(?:clerk|operator|tech|user)"
+  - "(?:monitor|auditor|reviewer)[-_]?(?:name|id|initials?)"
+  - "(?:site[-_]?)?(?:coordinator|investigator|pi)[-_]?(?:name|id|init)"
+  - "(?:interviewer|assessor|examiner)[-_]?(?:name|id|initials?)"
+  - "(?:nurse|physician|clinician|doctor)[-_]?(?:name|id|initials?)"
+  - "staff[-_]?(?:name|id|initials?)"
+  # ── Lab technician NAMES (staff) → drop. (Collector / specimen / accession
+  #    *IDs* are pseudonymized via id_fields, not dropped — A1 / Note 28.) ────
+  - "(?:lab|laboratory)[-_]?(?:tech|technician)[-_]?(?:name|id|initials?)"
+  - "(?:LINTTECH|LOUTTECH|REPOSINTECH)"
+  # ── SSN / MRN (HIPAA #7/#8) ──────────────────────────────────────────────
+  - "(?:ssn|social_?security)"
+  - "(?:mrn|medical_?record)"
+  # ── Person names (all variants) ──────────────────────────────────────────
+  - "(?:patient|subject|participant)[-_]?name"
+  - "(?:first|last|middle|given|family|sur)[-_]?name"
+  - "^First_Name$"
+  - "(?:father|mother|spouse|guardian|next[-_]?of[-_]?kin|caregiver|relative)[-_]?name"
+  - "(?:emergency|contact)[-_]?(?:person|name)"
+  - "^SC_NAME$"
+  - "CLINNAME"
+  - "[-_]NAME$"
+  # ── DOB / death dates ────────────────────────────────────────────────────
+  # Death DATES are NO LONGER dropped here — they are age-dependent (see
+  # death_date_fields + age_fields below): jittered when the form has no age
+  # field (preserve timeline), dropped when it does. Birthdate is in
+  # birthdate_field (also age-dependent). Death SOURCE/CAUSE/PLACE stay dropped.
+  # ── Place of death / death cause source ──────────────────────────────────
+  - "(?:PLACE_?OF_?DEATH|DEATH_?PLACE)"
+  - "(?:DTHSRC|DTHSRCSP|DTHCAUSSP)$"
+  # ── System timestamps (no clinical value) ────────────────────────────────
+  - "^time_?stamp$"
+  - "(?:created|modified|updated|entered|verified)[-_]?(?:at|on|date|time|ts|timestamp)"
+  - "(?:system|server|db|database)[-_]?(?:time|timestamp|date|ts)"
+  - "(?:upload|import|export)[-_]?(?:time|timestamp|date|ts)"
+  - "(?:last[-_]?)?(?:login|access|sync)[-_]?(?:time|timestamp|date|ts)"
+  # ── Internal CRF workflow tracking ───────────────────────────────────────
+  - "(?:audit[-_]?)?trail"
+  - "^(?:row|record)[-_]?(?:id|num|number)$"
+  - "(?:session|transaction)[-_]?id"
+  - "(?:query|discrepancy)[-_]?(?:status|note|comment)"
+  - "(?:lock|freeze|sign[-_]?off)[-_]?(?:status|date|by)"
+  - "(?:sdv|source[-_]?doc)[-_]?(?:status|date|by)"
+  # ── Specimen tracking ──
+  # ST_*TIM (COLLTIM/LINTIM/LOUTTIM/REPOSINTIM) are bare specimen log TIMES-of-day
+  # → KEPT (see keep_fields; not jitterable, not a Safe Harbor date element).
+  # ST_RESPOSINDAT is the specimen RE-POSITION/repository event DATE. Like every
+  # other ST_*DAT column (VISDAT/COLLDAT/LINDAT/LOUTDAT/LNDAT — all jittered) it is a
+  # clinical specimen-timeline date: it JITTERS per-subject (interval-preserving) via
+  # the date rung, NOT dropped. The classifier decides jitter_date and the manifest
+  # declares it DMY. Only the RE-POSITION signature (ST_REPOSINSIG) and technician
+  # (ST_REPOSINTECH) elements drop — those carry identifiers; the date does not.
+  # (Was previously over-dropped — lumped with the *SIG/*TECH block; Note 33.)
+  # ── Socioeconomic coded categoricals → KEEP (A1 / Note 28) ───────────────
+  # Religion / caste / tribe / community / language / schooling / occupation are
+  # NOT among the HIPAA Safe Harbor 18 identifiers and are epidemiologically
+  # load-bearing TB risk factors. phi_review classifies them KEEP; routing them
+  # to drop produced 11 keep+drop ledger contradictions (A1). They are recovered
+  # as coded categoricals here — NO drop rule. The "specify" write-ins for these
+  # coded fields (IC_JOBSP / IC_LANGUAGESP / IC_RELIGIONSP) are likewise KEEP
+  # (option codes, not free narrative). Facility/geography "specify" fields
+  # (IC_CLINICSP / *_HIVLOCSP) are handled separately below (drop / generalize).
+  # ── Facility / clinic NAMES + free-text 'specify' → drop (A1: codes KEEP) ──
+  # Maintainer A1 decision (2026-06-22): coded clinic / center / site numbers
+  # (IC_CLINIC / RE_CLINIC / RE_DOTSCLINIC / TC_CENTER), the coded HIV-test and
+  # TB-diagnosis facility values (IC_HIVLOC / HC_HIVLOC / RE_TBDIAGLOC), the 3-way
+  # municipality code (IS_MUNIC) and the urbanicity category (EE_LOC) are KEPT as
+  # coded research variables — NO drop rule here (the data dictionary shows them
+  # as low-cardinality option codes, not free addresses). Only clinic NAMES and
+  # free-text 'specify' write-ins drop — those boxes can carry a verbatim address
+  # or embedded identifier (free text is dropped wholesale, never preserved).
+  - "(?:RE_CLINICNAME$|RE_DOTSCLINNAME$)"
+  - "(?:IC_CLINICSP$|RE_CLINICOTH$|TC_CENTERSP$)"
+  - "(?:IC_HIVLOCSP$|HC_HIVLOCSP$|CC_HIVLOCSP$)"
+  - "^TC_OTDOTSLOC$"
+  # TC_NOCARDSP "Treatment card held at another DOTS center, specify center:" — a
+  # facility 'specify' write-in (HIPAA geography #2; can carry a verbatim center
+  # name/address). Siblings TC_OTDOTSLOC / TC_CENTERSP already drop; NOCARDSP was
+  # accidentally swept into the ^TC_ keep prefix. Aligned to A1 facility-specify policy.
+  - "^TC_NOCARDSP$"
+  # ── Geography (HIPAA §164.514(b)(2)(i)(B) — raw sub-state identifiers) ─────
+  # Raw village / hamlet / district / block / tehsil / address / pincode / GPS
+  # always dropped (HIPAA §164.514(b)(2)(i)(B) catalog coverage). The Indo-VAP
+  # study carries none of these generic-geography column names — the specific
+  # coded municipality / facility codes it DOES carry are kept above.
+  - "(?:VILLAGE|CITY|TOWN|DISTRICT|TALUK|BLOCK|WARD|LOCALITY|PANCHAYAT|MANDAL|TEHSIL|STATE|PROVINCE|REGION|AREA|ZONE|HAMLET)"
+  - "(?:ADDR|ADDRESS|RESIDENCE)"
+  - "(?:pin_?code|postal|zip)"
+  - "(?:zip_?code|postal)"
+  - "(?:gps|geoloc|latitude|longitude|lat[-_]?long|coordinates)"
+  # ── Phone / email / IP / fax / URL ───────────────────────────────────────
+  - "(?:mobile|phone)[-_]?(?:no|num|number)?$"
+  - "contact[-_](?:no|num|number)"
+  - "(?:phone|fax|telephone)[-_]?(?:no|num|number)?"
+  - "(?:fax)[-_]?(?:no|num|number)?"
+  - "^EE_PHONE$"
+  - "(?:e[-_]?mail|email[-_]?addr)"
+  - "(?:ip[-_]?addr|ip[-_]?address)"
+  - "(?:ip[-_]?address|user[-_]?agent|browser)"
+  - "(?:web[-_]?url|website|homepage|(?<![A-Za-z])uri(?![A-Za-z]))"
+  # ── India government IDs (Aadhaar Act + DPDPA + SPDI) ───────────────────
+  - "(?:aadhaar|aadhar|uid_no)"
+  - "(?:^|[-_])pan(?:[-_]?(?:no|num|number|card))?(?:$|[-_])"
+  - "(?:voter|epic|election)[-_]?(?:id|no|num|card)?"
+  - "(?:passport)[-_]?(?:no|num|number)?"
+  - "(?:ration[-_]?card)[-_]?(?:no|num|number)?"
+  # ── HIPAA catch-alls (#4/#6/#7/#8/#9/#10/#11/#14/#15) ────────────────────
+  - "(?:health[-_]?plan|beneficiary|insurance|policy)[-_]?(?:id|no|num|number)"
+  - "(?:account|bank[-_]?acct)[-_]?(?:no|num|number)"
+  - "(?:certificate|license|licence|registration)[-_]?(?:no|num|number)"
+  - "(?:vehicle|vin|chassis|engine|serial)[-_]?(?:id|no|num|number)"
+  - "(?:vehicle|device|serial)[-_]?(?:id|no|num|number)"
+  - "(?:device|implant|pacemaker)[-_]?(?:id|no|num|serial)"
+  - "(?:biometric|fingerprint|voiceprint|retina|iris[-_]?scan|face[-_]?id)"
+  - "(?:photo|photograph|face[-_]?image|mugshot)[-_]?(?:id|file|path|url)?"
+  - "(?:photo|image|face)[-_]?(?:id|file|path|url)"
+  - "(?:tracking[-_]?id|cookie[-_]?id|browser[-_]?id|ad[-_]?id)"
+  - "(?:username|login[-_]?id|user[-_]?id|screen[-_]?name)"
+  - "(?:cctv|surveillance|camera[-_]?id|footage)"
+  - "(?:medical[-_]?image|xray[-_]?file|ct[-_]?scan[-_]?file|mri[-_]?file|dicom)"
+  # NB: \buid\b (word-bounded) so this Aadhaar/unique-id catch-all does NOT
+  # swallow treatment-unit IDs (…TUID/TUIDCHG), which pseudonymize via id_fields.
+  - "(?:unique[-_]?id|\\buid\\b|identification[-_]?number)"
+  # ── Staff-adjacent asha/anm/anganwadi worker identifiers ─────────────────
+  - "(?:asha|anm|anganwadi)[-_]?(?:name|id|worker)"
+  # ── Children's birth years ──
+  # CC_CHILDY{1..8} are child YEARS-of-birth → KEPT (see keep_fields). A bare year
+  # is permitted under HIPAA Safe Harbor §164.514(b)(2)(i)(C) and is not jitterable.
+  # ── Narrative / free-text / specify / comment fields ─────────────────────
+  # Whole-field DROP rather than whole-value HMAC: hashing a free-text
+  # value that contains an Aadhaar or a phone number does not remove the
+  # PHI, it just obscures the containing string. Dropping the field is
+  # the honest-safe default until a narrative NER sweep lands.
+  - "(?:WITHDRAWEXPLAIN|WITHDRAW_?EXPLAIN)"
+  - "(?:TBTRTSP|TBTRT_?SP)$"   # "TB treatment — specify" free-text (A1: was misfiled in date_fields)
+  - "^FA_FUCOMPADCSP$"
+  - "^CC_NOPREGTESTSP$"
+  - "^CC_CNCTNDSP$"
+  - "(?:^ST_COMMENT$|^sc_COMMENT$)"
+  - "(?:COMMENT|REMARK|NOTE)$"
+
+# ──────────────────────────────────────────────────────────────────────────
+# CAP FIELDS (numeric values above threshold replaced with a label)
+# ──────────────────────────────────────────────────────────────────────────
+# Default: use top-level age_cap for ages. Specific fields override.
+# Per HIPAA §164.514(b)(2)(i)(C) — ages > 89 aggregated to "90+".
+cap_fields:
+  - pattern: "^(?:IS_AGE|IC_AGE|HHC_AGE|HC_AGE|AE_AGE|CC_AGE|NC_AGE)$"
+    # Uses top-level age_cap (threshold=89, label="90+")
+  - pattern: "^(?:[A-Z]{1,4}[-_])?AGE$"
+  - pattern: "^Age$"
+
+# ──────────────────────────────────────────────────────────────────────────
+# GENERALIZE FIELDS (value-level categorical mapping)
+# ──────────────────────────────────────────────────────────────────────────
+# Generalize only columns that phi_review (the dual-jurisdiction regulation
+# classifier) also decided to GENERALIZE. Columns it decided KEEP must not be
+# routed here, or they (a) quarantine when their values don't fit the map and
+# (b) fail the decided-vs-applied verifier (assertion 12: keep ≠ generalize).
+#
+# REMOVED (phi_review decides KEEP — not Safe Harbor / DPDPA identifiers):
+#   * marital status (IC_MARISTAT / HC_MARISTAT) — kept as-is.
+#   * the per-option care-seeking INDICATOR columns Govthosp / Munhosp /
+#     MedColl / Medshop / Nonallo — these are binary 0/1 checkboxes, NOT a
+#     categorical facility-TYPE value, so the facility value-map cannot cover
+#     them (every row quarantined — this 100%-held forms 2A/2B). CareOther is a
+#     free-text "other (specify)" field → handled by drop_fields (suppression),
+#     never generalize.
+# RETAINED: a genuine categorical facility-TYPE column (HOSP_TYPE / FACIL_TYPE…)
+#   would still generalize via the value map below — IF phi_review decides
+#   generalize for it. None exist in the current study, so this is inert.
+generalize_fields:
+  - pattern: "(?:HOSP_?TYPE|HOSPITAL_?TYPE|FACIL_?TYPE|SITE_?TYPE|CENTER_?TYPE|CLINIC_?TYPE)"
+    mapping: "facility"
+
+# Value-to-value mappings invoked by generalize_fields
+generalization_maps:
+  marital:
+    # Indo-VAP exact values (compound labels)
+    "married/living together": "Married"
+    "never married": "Single"
+    "widowed": "Other"
+    "separated/divorced": "Other"
+    "not applicable (child)": "Other"
+    # Standard single-word labels
+    "married": "Married"
+    "single": "Single"
+    "unmarried": "Single"
+    "divorced": "Other"
+    "separated": "Other"
+    "widow": "Other"
+    "widower": "Other"
+    "living together": "Married"
+    "cohabiting": "Married"
+  facility:
+    # Indo-VAP coded values
+    "govthosp": "Government"
+    "phc": "Government"
+    "medcoll": "Government"
+    "munhosp": "Government"
+    "private": "Private"
+    "medshop": "Private"
+    "nonallo": "Other"
+    "careother": "Other"
+    # Standard text labels
+    "government": "Government"
+    "govt": "Government"
+    "public": "Government"
+    "chc": "Government"
+    "district hospital": "Government"
+    "sub centre": "Government"
+    "block phc": "Government"
+    "ngo": "Other"
+    "other": "Other"
+
+# ──────────────────────────────────────────────────────────────────────────
+# BAND FIELDS (fail-closed preserve-generalization of socioeconomic vars)
+# ──────────────────────────────────────────────────────────────────────────
+# Education / occupation / income / wages / work-hours are epidemiologically
+# useful for TB analysis. Under the active dual-jurisdiction rule bundle
+# (HIPAA Safe Harbor + India DPDPA), `phi_review` classifies these columns as
+# **KEEP** — they are NOT among the HIPAA Safe Harbor 18 identifiers, so they
+# are published as-is (with a `keep_decision` audit trace) rather than scrubbed.
+#
+# The band rule below is therefore EMPTY by default: routing a KEEP-decided
+# column to a fail-closed empty band would (a) quarantine 100% of every form
+# that carries it (e.g. 2A/2B baseline → 0 rows published) and (b) contradict
+# `phi_review`'s decision, failing the decided-vs-applied verifier (assertion
+# 12). The band machinery is retained for a FUTURE policy in which an operator
+# *both* (1) makes `phi_review` decide GENERALIZE for a column AND (2) populates
+# the matching band_maps/band_ranges from the AMBER data dictionary. Until then
+# these stay empty and inert (no field routes to band).
+#
+# To re-enable banding for a column: add its pattern here AND fill the matching
+# band_maps/band_ranges entry. An empty band map remains fail-closed
+# (PHIBandUnmappedError) so a half-configured band can never silently leak.
+band_fields: []
+
+# Categorical band maps — exact (lower-cased) raw value → broad label.
+# DEFERRED TEMPLATES: empty ⇒ fail-closed (every value quarantines until filled).
+band_maps:
+  education_band: {}
+  occupation_band: {}
+  income_band: {}
+
+# Numeric band ranges — ascending {max: <upper-inclusive>, label}; final entry may
+# omit 'max' as an open-ended catch-all. DEFERRED TEMPLATES: empty ⇒ fail-closed.
+band_ranges:
+  wage_amount_band: []
+  work_hours_band: []
+
+# ──────────────────────────────────────────────────────────────────────────
+# SUPPRESS_SMALL_CELL FIELDS (numeric clamped to threshold)
+# ──────────────────────────────────────────────────────────────────────────
+# Cap extreme household / contact counts to top-level small_cell_threshold
+# (default 5) to prevent k-anon re-identification via unique household
+# demographics. Values ≥ threshold collapse to threshold.
+suppress_small_cell_fields:
+  # 6[_ ]?YRS: header normalization inserts an underscore (IS_CONTACTS_6YRS ->
+  # is_contacts_6_yrs), so the force-drop-exclusion check (which sees the NORMALIZED
+  # header) must match both forms — else the count is force-dropped instead of
+  # clamped. Mirrors phi_review's own normalization-robust contacts pattern.
+  - "^IS_CONTACTS$"
+  - "^IS_CONTACTS_(?:TOTAL|6[_ ]?YRS)$"
+  - "(?:contacts?_?(?:total|count|6[_ ]?yrs)?$)"
+
+# ──────────────────────────────────────────────────────────────────────────
+# DATE NULL TOKENS
+# ──────────────────────────────────────────────────────────────────────────
+# Recognized missing-data placeholders permitted in DATE fields. A date-field
+# value equal to one of these (case-insensitive, stripped) is treated as
+# "no date" — left as-is, NOT jittered, NOT quarantined. Anything else that
+# fails to parse as a date STILL fail-closes (quarantines the row). Keep this
+# list tight: only genuine not-applicable/unknown sentinels, never anything
+# that could be a real date. Operators may extend it per study.
+date_null_tokens:
+  - UNK
+  - UNKNOWN
+  - NA
+  - "N/A"
+  - "N.A."
+  - NONE
+  - NIL
+  - "NOT DONE"
+  - "NOT APPLICABLE"
+  - "NOT AVAILABLE"
+  - "NOT REPORTED"
+  - ND
+  - NR
+  - "."
+  - "-"
+  - "--"
+  - "?"
+  # ── Sentinel placeholder values seen in date fields (not real dates) ─────
+  - "99999999"   # numeric sentinel for "unknown/missing" in specimen forms
+  - "00000000"   # zero-date sentinel
+  - "0"          # single-zero placeholder
+
+# ── Transformation method catalog (Note 9 — documentation only) ───────────
+# IRB-grade named methods. Runtime ledgers record ``method`` + ``method_parameters``
+# per column via ``phi_scrub._method_for_action``; this block is the authoritative
+# catalog — do NOT duplicate ``method:`` keys under individual rule entries.
+transformation_methods:
+  SANT_date_jitter:
+    applies_to: "date_fields; birthdate_field when compliance_posture is limited_dataset"
+    ledger_method_id: SANT_date_jitter
+    description: >-
+      Per-subject deterministic date offset (SANT) preserving visit intervals.
+    how_it_applies: >-
+      Parse the date, add a constant day offset in [-max_jitter_days, +max_jitter_days]
+      keyed by subject_id_fields, re-emit ISO YYYY-MM-DD. Null tokens and future-year
+      placeholders follow date_null_tokens / future_date_policy.
+    parameters:
+      - max_jitter_days
+      - subject_id_fields
+      - date_null_tokens
+      - "manifest date_locales (per-column locale precedence)"
+    regulatory_notes: "NIST SP 800-188 date shifting; ICMR §11 date de-identification."
+
+  field_removal:
+    applies_to: "drop_fields; birthdate_field when safe_harbor; phi_review force-drop (suppress / direct identifiers)"
+    ledger_method_id: field_removal
+    description: Column omitted from every published row.
+    how_it_applies: >-
+      Matching columns are dropped before any other rule runs on the row. Force-drop
+      from phi_review classification is priority 0 in the scrub engine.
+    parameters: []
+
+  HMAC-SHA256:
+    applies_to: id_fields
+    ledger_method_id: HMAC-SHA256
+    description: One-way deterministic pseudonym for record linkage.
+    how_it_applies: >-
+      Replace raw ID with RID_<label>_<alpha12> via HMAC-SHA256(key, label:raw_id).
+    parameters:
+      - "per-pattern label in id_fields"
+
+  threshold_cap:
+    applies_to: "cap_fields; global age_cap"
+    ledger_method_id: threshold_cap
+    description: Numeric values above a threshold collapse to a categorical label.
+    how_it_applies: >-
+      When value > threshold, replace with label (e.g. ages > 89 → 90+). Per-field
+      cap_fields override the global age_cap when both match.
+    parameters:
+      - threshold
+      - label
+
+  generalization_map:
+    applies_to: "generalize_fields + generalization_maps"
+    ledger_method_id: generalization_map
+    description: Categorical value → broad category via a named map.
+    how_it_applies: >-
+      Look up the raw value in the named generalization map; unmapped non-empty values
+      quarantine the row (fail-closed).
+    parameters:
+      - map name
+      - mapping entries
+
+  band_map:
+    applies_to: "band_fields + band_ranges / band_maps"
+    ledger_method_id: band_map
+    description: Numeric or categorical value → coded epidemiological band.
+    how_it_applies: >-
+      Map via band_ranges (numeric) or band_maps (categorical); unmapped non-empty
+      values quarantine the row (fail-closed).
+    parameters:
+      - band name
+      - kind (numeric or categorical)
+
+  small_cell_clamp:
+    applies_to: suppress_small_cell_fields
+    ledger_method_id: small_cell_clamp
+    description: ICMR-style contact-count capping (top-code above threshold).
+    how_it_applies: >-
+      Numeric values strictly greater than small_cell_threshold are clamped down to
+      the threshold before publish.
+    parameters:
+      - small_cell_threshold
+
+  keep_passthrough:
+    applies_to: keep_fields
+    ledger_method_id: keep_passthrough
+    description: Explicit retention allowlist (documented in ledger keep_decisions).
+    how_it_applies: >-
+      Column published unchanged when it matches keep_fields (priority 1). Recorded
+      as a keep_decision in the PHI ledger envelope, not as a PHI event method.
+    parameters:
+      - "matching regex/name in keep_fields"
+
+# ──────────────────────────────────────────────────────────────────────────
+# FILE EXCLUSIONS — DOCUMENTATION ONLY (not consumed by this scrubber)
+# ──────────────────────────────────────────────────────────────────────────
+# These patterns are NOT read by load_scrub_config and have no runtime
+# effect. Extraction-layer junk filtering is enforced by DEFAULT_JUNK_FILENAMES
+# in scripts/extraction/io/file_discovery.py. This section documents the
+# intended exclusion intent for operator reference only.
+file_exclusions:
+  - "~\\$"                          # Excel lock files
+  - "\\.DS_Store$"                  # macOS junk
+  - "Thumbs\\.db$"                  # Windows junk
+  - "^\\."                          # hidden files
+  - "__MACOSX"                      # macOS archive junk
+  - "\\.bak$"                       # backup files
+  - "\\.tmp$"                       # temp files
+  - "staff|personnel|employee"      # staff data files
+  - "contact.*list|phone.*list"     # contact lists
+  - "password|credential"           # credential files
+  - "consent.*form.*signed"         # signed consent images

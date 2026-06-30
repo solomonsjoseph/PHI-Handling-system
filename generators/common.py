@@ -366,8 +366,9 @@ def verhoeff_make(digits_11: str) -> str:
     ]
     inv = [0, 4, 3, 2, 1, 5, 6, 7, 8, 9]
     c = 0
-    # compute over reversed with "0" prepended (placeholder for check digit)
-    for i, ch in enumerate(reversed("0" + digits_11)):
+    # placeholder "0" for the check digit goes at position 0 of the full 12-digit string,
+    # which is the last element when reversed. Append, then reverse.
+    for i, ch in enumerate(reversed(digits_11 + "0")):
         c = d[c][p[i % 8][int(ch)]]
     return digits_11 + str(inv[c])
 

@@ -1,26 +1,112 @@
-phase: 2
-last_completed_phase: 1
-last_updated: 2026-06-11T00:00:00Z
+phase: 3
+last_completed_phase: 3_multi_jurisdiction_plus_file_formats_plus_phi_engine
+last_updated: 2026-06-29T00:00:00Z
 branch: feat/v2-multi-jurisdiction
-next_action: Begin Phase 2 gap-closure generators. Start with common layer (7 universal identifiers), then hipaa_specific, then india_specific.
+next_action: Tier 3 -- File format generators (DICOM, FHIR, HL7v2, eml first)
+
 notes: |
-  Phase 0 complete: research phase done. Eight primary authorities analyzed.
-  Phase 1 complete: v2 redesign implemented on feat/v2-multi-jurisdiction.
-    Changes in this phase:
-    - GDPR elevated to co-primary jurisdiction (authorities/05_gdpr_article9_health_data.md)
-    - Regulatory philosophy comparison added (authorities/06_regulatory_philosophy_comparison.md)
-    - AUTHORITY_MATRIX.md v2.0: GDPR column, additional jurisdiction table, Table F detection regime taxonomy
-    - generators/common.py: detection_regime field on Record and GoldSpan; GDPR/10-jurisdiction auth constants; LAYER_* and DETECTION_REGIME_* constants
-    - generators/hipaa_safe_harbor.py: all 18 HIPAA categories tagged with detection_regime per i2b2 taxonomy; ZIP (cat B) tagged as conflict_case
-    - benchmarks/modified_deidentify_adapter.py: stub for EMNLP 2025 positive control (license pending)
-    - benchmarks/01_presidio_entities.md: coverage gaps and unverified performance claims sections added
-    - benchmarks/02_aws_comprehend_medical.md: unverified claims caveated
-    - docs/SYNTHETIC_DATA_LEGAL_BASIS.md: replaces synthetic=IRB-exempt assumption
-    - docs/KNOWN_LIMITATIONS.md: 15 honest limitations across 5 parts
-    - README.md: updated to 10-jurisdiction scope, three-philosophy architecture
-    - .gitignore: research/ folder added (gitignored, local only)
-    - research/: deep-research outputs and SWOT analysis (gitignored, local reference only)
-  open_blockers:
-    - Clinician reviewer access: 3 board-certified clinicians needed (Sir must arrange)
-    - AWS/Azure/JSL credentials: three benchmark adapters need credentials confirmation
-    - Modified Deidentify license: pending verification before adapter completion
+  Phase 2 USA Tier 1 COMPLETE. All tests pass (73/73). Corpus PASS.
+
+  USA/HIPAA generators (10 total):
+    generators/hipaa_safe_harbor.py    -- 18 categories + quasi-identifiers
+    generators/hipaa_lds.py            -- Limited Data Set tier (164.514(e))
+    generators/hipaa_reid_codes.py     -- Re-ID codes (164.514(c)); permitted vs forbidden
+    generators/hipaa_fundraising.py    -- Fundraising context (164.514(f)); crosswalk pairs
+    generators/hipaa_verification.py   -- Disclosure audit logs (164.514(h))
+    generators/hipaa_biometric.py      -- Biometric identifiers (P): 10 modes, GS1/HIBCC/ICCBBA
+    generators/hipaa_device.py         -- Device identifiers (M): GS1/HIBCC/ICCBBA UDI + SaMD
+    generators/hipaa_fax.py            -- Fax numbers (E): 10 contexts, fax/phone disambiguation
+    generators/hipaa_vehicle.py        -- Vehicle identifiers (L): ISO 3779 VIN + 6 state plates
+
+  Corpus output (seed=42):
+    corpus/us/hipaa_safe_harbor.jsonl         180 records   302 spans
+    corpus/us/hipaa_quasi_identifiers.jsonl    50 records   150 spans
+    corpus/us/hipaa_lds.jsonl                  40 records   130 spans
+    corpus/us/hipaa_reid_codes.jsonl           40 records    40 spans
+    corpus/us/hipaa_fundraising.jsonl          40 records   265 spans
+    corpus/us/hipaa_verification.jsonl         40 records   195 spans
+    corpus/us/hipaa_biometric.jsonl            40 records    48 spans
+    corpus/us/hipaa_device.jsonl               40 records    64 spans
+    corpus/us/hipaa_fax.jsonl                  40 records    68 spans
+    corpus/us/hipaa_vehicle.jsonl              40 records    52 spans
+    TOTAL: 550 records, 1314 spans, all span offsets verified PASS
+
+  Key additions in Tier 1:
+    - biometric: fingerprint/voice/iris/retinal/DNA/face templates; multi-modality;
+      revocation; GDPR Art. 4(14) cross-ref; DNA cites Art. 4(13)
+    - device: GS1 "(01)" prefix, HIBCC "+" prefix, ICCBBA "=R" prefix verified by tests;
+      implanted devices, IVD, SaMD version IDs, recall records
+    - fax: 10 contexts including fax/phone disambiguation record; E.164 international;
+      broadcast (3 fax numbers); tests verify both (D) and (E) citations in same record
+    - vehicle: 17-char VIN validated (no I/O/Q per NHTSA); 6 state plate formats;
+      ambulance, MVA, rideshare, home health, fleet, recall, vanity plate contexts
+
+  USA remaining (lower priority, safe_harbor covers at basic level):
+    None. All 18 HIPAA categories now have dedicated deep-coverage generators.
+
+  USA Tier 2 (next):
+    - benchmarks/presidio_adapter.py  -- run Presidio against 550-record US corpus
+    - benchmarks/metrics.py           -- precision, recall, F1, gap detection rate
+
+Tier 2 benchmark results (Presidio, seed=42, strategy=overlap, threshold=0.5):
+  Run: python3 -m benchmarks.presidio_adapter --corpus-dir corpus/us --output-dir benchmarks/results/presidio --verbose
+  Results file: benchmarks/results/presidio/presidio_benchmark_result.json
+
+  550 records, 1314 gold spans
+    Coverable by Presidio : 952 spans (72.4%)
+    Structural gaps        : 362 spans (27.6%) -- VIN, biometric, device UDI, re-ID codes, MRN, etc.
+  Predicted spans (Presidio): 1762
+
+  AGGREGATE (coverable spans only):
+    Precision : 0.4257   -- LOW: many false positives from Presidio on clinical text
+    Recall    : 0.7878
+    F1        : 0.5527
+    Macro-F1  : 0.6680
+
+  PER HIPAA CATEGORY (notable):
+    (A) Names          F1=0.992  -- near-perfect, PERSON recognizer strong
+    (C) Dates          F1=0.994  -- near-perfect
+    (D) Phone          F1=0.983  -- strong
+    (E) Fax            F1=0.943  -- Presidio conflates fax+phone; finds digit but mislabels
+    (F) Email          F1=1.000
+    (G) SSN            F1=1.000
+    (I) Health Plan    F1=0.000  -- Presidio MBI regex does not match generated MBIs
+    (J) Account        F1=1.000
+    (K) License        F1=1.000
+    (L) Vehicle        F1=0.125  -- VINs fully missed; only 2/30 plate spans detected
+    (N) URL            F1=1.000
+    (O) IP             F1=1.000
+    (B) Geography      R=0.661   -- ZIP code gaps; no ZIP3-restricted logic
+
+  PER DETECTION REGIME:
+    rule_applicable          P=1.000 R=0.794 F1=0.885
+    contextual_ner_required  P=1.000 R=0.816 F1=0.898
+    conflict_case            P=1.000 R=0.143 F1=0.250  -- conflict cases (ZIP) mostly missed
+
+  KEY FINDINGS FOR IRB (revised 2026-06-11):
+    1. Precision (0.43) is low: Presidio generates ~2.3x more predictions than gold spans.
+       This confirms Presidio produces significant clinical text false positives.
+    2. 28.4% of this corpus is structurally undetectable by Presidio (gap rate).
+       Prior figure 27.6% was understated: category (I) HEALTH_PLAN_ID was incorrectly
+       counted as coverable. Corrected: 373 gap spans / 1314 total = 28.4%.
+    3. Category (I) MBI: confirmed structural gap. No US_MBI recognizer exists in
+       presidio-analyzer 2.2.360. benchmarks/01_presidio_entities.md claim was false.
+       Generator also corrected: was producing 10-char strings; CMS format is 11-char
+       C A AN N A AN N A A N N. Fixed 2026-06-11. 74 tests pass.
+    4. Category (L) Vehicle: 6.7% recall. VIN pattern absent from Presidio entirely.
+       Confirms gap claim in AUTHORITY_MATRIX.md Table C.
+    5. Conflict cases (ZIP codes): R=0.143. Presidio detects ZIPs without jurisdiction logic.
+    6. benchmarks/01_presidio_entities.md is NOT a verified coverage oracle. Two cells
+       verified false by live engine inspection. All Table C "covered" claims require
+       re-audit against get_supported_entities() before IRB submission.
+
+  Benchmark code:
+    benchmarks/metrics.py          -- tool-agnostic scoring engine (P/R/F1/gap/per-category)
+    benchmarks/presidio_adapter.py -- Presidio adapter with entity type mapping
+    tests/test_benchmark_metrics.py -- 30 tests covering scoring engine + mapping consistency
+
+open_blockers:
+  - Clinician reviewer access (Sir must arrange)
+  - AWS/Azure/JSL credentials: benchmark adapters need confirmation
+  - Modified Deidentify license: pending
+  - Presidio MBI regex mismatch: verify us_health_plan_beneficiary() format

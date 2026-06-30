@@ -33,3 +33,7 @@ hypothesis>=6.115.5
 
 # Security
 cryptography>=43.0.3
+
+# phi_engine additional dependencies
+pycanon==1.0.1
+click>=8.0.0

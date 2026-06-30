@@ -1,0 +1,53 @@
+# ============================================================
+# RePORT AI Portal Runtime Configuration (Production-Aligned)
+# ============================================================
+
+app:
+  name: RePORT AI Portal
+  version: "0.18.0"
+  mode: user
+  log_level: INFO
+
+
+# ============================================================
+# SECURITY (NO SECRETS HERE)
+# ============================================================
+
+security:
+  encryption:
+    enabled: false
+    log_encryption: false
+    # NOTE: log encryption is not yet implemented — this block is reserved
+    # for a future feature.  No logs are encrypted at runtime.
+    public_key_path: config/keys/log_public.pem
+
+  rbac:
+    enabled: false
+
+  audit:
+    enabled: true
+
+
+# ============================================================
+# PATHS (STATIC ONLY, NO LOGIC)
+# ============================================================
+
+paths:
+  data_dir: data/
+  output_dir: output/
+  logs_dir: .logs/
+
+
+# ============================================================
+# AI Assistant / AGENT
+# ============================================================
+
+ai_assistant:
+  llm_model: qwen3:8b  # default: Ollama local model (no API key needed). Override via LLM_MODEL env var or wizard.
+  agent:
+    orchestration_mode: auto
+    max_tokens: 16384
+    timeout_seconds: 300
+  telemetry:
+    enabled: true
+    sink: telemetry/events.jsonl

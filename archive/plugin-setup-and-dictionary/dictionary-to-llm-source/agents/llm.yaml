@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dictionary to LLM Source"
+  short_description: "Extract the study data dictionary to staging (no PHI)"
+  default_prompt: "Use $dictionary-to-llm-source to extract the study data dictionary into staging JSONL for promotion into llm_source/dictionary_mapping/ — variable/codelist metadata only, reference URLs masked at publish, never a dataset row value."

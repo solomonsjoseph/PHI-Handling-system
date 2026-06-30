@@ -1,0 +1,5 @@
+benchmark_mode: true
+provider: none
+model: none
+encrypt_output: false
+log_level: WARNING

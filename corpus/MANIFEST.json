@@ -1,0 +1,79 @@
+{
+  "files": {
+    "us/hipaa_biometric": {
+      "path": "corpus/us/hipaa_biometric.jsonl",
+      "records": 40,
+      "sha256": "d02740e281160dba6bcb860ae7c7d9d04cd7b80e1fe6e674c960ce27f1e29816",
+      "spans": 48
+    },
+    "us/hipaa_device": {
+      "path": "corpus/us/hipaa_device.jsonl",
+      "records": 40,
+      "sha256": "15916d0c045896b4149e9af39340dd5b6d492e51db094ceee630cba93b85789f",
+      "spans": 64
+    },
+    "us/hipaa_fax": {
+      "path": "corpus/us/hipaa_fax.jsonl",
+      "records": 40,
+      "sha256": "00866aa9dbc0a61cd36070cc92dcc45209152f8db60c268238785a6a881f6924",
+      "spans": 68
+    },
+    "us/hipaa_fundraising": {
+      "path": "corpus/us/hipaa_fundraising.jsonl",
+      "records": 40,
+      "sha256": "9062ba78411dc34c081e48a277151ac8f939e11325dd1bd18e0b186d590de388",
+      "spans": 265
+    },
+    "us/hipaa_lds": {
+      "path": "corpus/us/hipaa_lds.jsonl",
+      "records": 40,
+      "sha256": "d4e40e441efce536c37a7303ff532b722a646df6d14b4850d7eafa81f9f28e57",
+      "spans": 130
+    },
+    "us/hipaa_quasi_identifiers": {
+      "path": "corpus/us/hipaa_quasi_identifiers.jsonl",
+      "records": 50,
+      "sha256": "ea0fd138abc468fe15a624b9c6614518915160fa9abf70c27a92fe18f965b945",
+      "spans": 150
+    },
+    "us/hipaa_reid_codes": {
+      "path": "corpus/us/hipaa_reid_codes.jsonl",
+      "records": 40,
+      "sha256": "91ef4fe71ca68e2f64538920cbb91c40f907dc763068033d784a30ec8851f9e4",
+      "spans": 40
+    },
+    "us/hipaa_safe_harbor": {
+      "path": "corpus/us/hipaa_safe_harbor.jsonl",
+      "records": 180,
+      "sha256": "7a2bfaf8747d19057cc45d22ba9ed50b70af3a7e56f36a6eb5514c6b24bebed0",
+      "spans": 302
+    },
+    "us/hipaa_vehicle": {
+      "path": "corpus/us/hipaa_vehicle.jsonl",
+      "records": 40,
+      "sha256": "7b516a2817c8f6d26dd3801130cbb2185c90c45cd0116f0a189a18612c264a51",
+      "spans": 52
+    },
+    "us/hipaa_verification": {
+      "path": "corpus/us/hipaa_verification.jsonl",
+      "records": 40,
+      "sha256": "0ba37a80b70779fe012069d5387ec75c5039f1031dee81d14addb7633cf01aa4",
+      "spans": 195
+    }
+  },
+  "jurisdictions": [
+    "us"
+  ],
+  "seed": 42,
+  "span_errors": [],
+  "totals": {
+    "us": {
+      "jurisdiction": "us",
+      "records": 550,
+      "seed": 42,
+      "spans": 1314
+    }
+  },
+  "validation_status": "PASS",
+  "version": "2.0.0-dev"
+}

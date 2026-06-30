@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dataset to LLM Source"
+  short_description: "PHI-safe dataset publish flow"
+  default_prompt: "Use $dataset-to-llm-source to run or verify the PHI-safe raw workbook to llm_source dataset pipeline."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dataset Deduplication"
+  short_description: "Remove junk + provably-safe duplicate dataset files"
+  default_prompt: "Use $dataset-deduplication to clean the staging datasets tree — remove junk files and merge only provably-safe duplicates (scrub-first, fail-closed); divergent pairs go to human review. Counts/names only, never row data."

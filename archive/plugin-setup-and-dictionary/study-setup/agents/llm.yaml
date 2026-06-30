@@ -1,0 +1,4 @@
+interface:
+  display_name: "Study Setup"
+  short_description: "Prepare a study for a publish run (dirs + key + readiness)"
+  default_prompt: "Use $study-setup to pre-create a study's run directories and check readiness of its required inputs (forms manifest, study privacy config, raw datasets, PHI key); optionally bootstrap a fresh PHI key. Setup only — not a publish phase."

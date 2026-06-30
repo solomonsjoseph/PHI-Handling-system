@@ -201,20 +201,32 @@ def photo_reference(rng) -> str:
 
 
 def health_plan_beneficiary(rng) -> str:
-    """US Medicare Beneficiary Identifier (MBI) — 11 alphanumeric, specific format."""
-    # MBI format: C A AN A AN N A A N N (C=1-9 no 0; A=alpha excl S,L,O,I,B,Z; AN=alpha or numeric)
-    c1 = str(rng.randint(1, 9))
-    alpha_pool = "ACDEFGHJKMNPQRTUVWXY"  # exclude SLOIBZ
-    a1 = rng.choice(alpha_pool)
-    an1 = rng.choice(alpha_pool + string.digits)
-    a2 = rng.choice(alpha_pool)
-    an2 = rng.choice(alpha_pool + string.digits)
-    n1 = str(rng.randint(0, 9))
-    a3 = rng.choice(alpha_pool)
-    a4 = rng.choice(alpha_pool)
-    n2 = str(rng.randint(0, 9))
-    n3 = str(rng.randint(0, 9))
-    return c1 + a1 + an1 + a2 + an2 + n1 + a3 + a4 + n2 + n3
+    """US Medicare Beneficiary Identifier (MBI) -- 11-character, CMS format C A AN N A AN N A A N N.
+
+    Position legend (CMS MBI format spec):
+      C  = digit 1-9 (no leading zero)
+      A  = alpha excluding S, L, O, I, B, Z
+      AN = alpha (same exclusions) OR digit 0-9
+      N  = digit 0-9
+
+    Authority: CMS Medicare Beneficiary Identifier (MBI) format specification.
+    Prior bug: positions 4 and 5 were inverted (A AN instead of N A), producing
+    10-char strings. Corrected 2026-06-11.
+    """
+    alpha_pool = "ACDEFGHJKMNPQRTUVWXY"  # exclude SLOIBZ per CMS spec
+    an_pool = alpha_pool + string.digits
+    c1  = str(rng.randint(1, 9))          # pos 1: C
+    a1  = rng.choice(alpha_pool)           # pos 2: A
+    an1 = rng.choice(an_pool)              # pos 3: AN
+    n1  = str(rng.randint(0, 9))           # pos 4: N
+    a2  = rng.choice(alpha_pool)           # pos 5: A
+    an2 = rng.choice(an_pool)              # pos 6: AN
+    n2  = str(rng.randint(0, 9))           # pos 7: N
+    a3  = rng.choice(alpha_pool)           # pos 8: A
+    a4  = rng.choice(alpha_pool)           # pos 9: A
+    n3  = str(rng.randint(0, 9))           # pos 10: N
+    n4  = str(rng.randint(0, 9))           # pos 11: N
+    return c1 + a1 + an1 + n1 + a2 + an2 + n2 + a3 + a4 + n3 + n4
 
 
 def us_npi(rng) -> str:

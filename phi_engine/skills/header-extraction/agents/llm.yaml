@@ -1,0 +1,4 @@
+interface:
+  display_name: "Header Extraction"
+  short_description: "Read first-row dataset headers (metadata only)"
+  default_prompt: "Use $header-extraction to read the column NAMES (first-row headers) from a study's manifest-kept datasets before any row value is opened — metadata only, never row data."

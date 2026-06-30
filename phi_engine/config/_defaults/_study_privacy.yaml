@@ -1,0 +1,15 @@
+# Maintainer template for config/<STUDY>/_study_privacy.yaml (Note 11).
+# Copy and customize per study; the study-setup wizard writes a completed file.
+jurisdictions:
+  - USA
+  - INDIA
+data_as_of: "YYYY-MM-DD"
+rule_refresh: online_preferred
+conflict_policy: strictest_wins
+approval:
+  mode: hybrid
+  max_synthetic_attempts: 5
+parallelism:
+  mode: auto
+# Publish-time kanon_publish_gate (pyCANON k-anonymity) is DEFERRED — not used in
+# the live publish path. Re-identification is classification + scrub + pattern scan.

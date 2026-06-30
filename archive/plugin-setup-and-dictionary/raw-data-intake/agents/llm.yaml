@@ -1,0 +1,4 @@
+interface:
+  display_name: "Raw Data Intake"
+  short_description: "Sort an unorganized study delivery into the canonical data/raw/<study>/ layout (skill 0)"
+  default_prompt: "Use $raw-data-intake to sort an unorganized study delivery (flat dump and/or zips) into data/raw/<study>/{annotated_pdfs,datasets,data_dictionary,_unclassified} and draft the forms manifest. Filename + extension only — never open a workbook. Idempotent: no-op on an already-organized tree unless forced. Setup only, not a publish phase."

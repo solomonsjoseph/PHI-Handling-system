@@ -1,0 +1,4 @@
+interface:
+  display_name: "PHI Classification"
+  short_description: "Header-only jurisdiction PHI classification gate"
+  default_prompt: "Use $phi-classification to classify each form's column NAMES by jurisdiction and cross-verify direct identifiers against the SoT before any row value is opened, writing the authoritative phi_handling_approval.json (approved vs held forms) — header names and counts only, never row data."
