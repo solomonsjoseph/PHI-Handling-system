@@ -1,7 +1,7 @@
 """
 Tests for file_formats generators.
 
-Covers DICOM, FHIR R4, HL7 v2.x, and EML generators.
+Covers DICOM, FHIR R4, HL7 v2.x, EML, and xlsx generators.
 Each test is self-contained and deterministic (seed=42).
 
 Authority coverage verified: DICOM PS3.15 Annex E, HL7 FHIR R4 v4.0.1,
@@ -307,3 +307,108 @@ class TestEMLGenerator:
         """X-Patient-ID custom header must be in the email text."""
         for r in self.records:
             assert "X-Patient-ID:" in r.text, f"X-Patient-ID header missing in {r.record_id}"
+
+
+# ---------------------------------------------------------------------------
+# xlsx tests
+# ---------------------------------------------------------------------------
+
+class TestXlsxGenerator:
+
+    def setup_method(self):
+        from generators.file_formats.xlsx_gen import XlsxGenerator
+        self.gen = XlsxGenerator(seed=42)
+        self.records = self.gen.generate()
+
+    def test_tier_distribution(self):
+        """Must have records in all four tiers."""
+        tiers = {r.metadata["corpus_tier"] for r in self.records}
+        assert tiers == {"A", "B", "C", "D"}, f"Missing tiers: {tiers}"
+
+    def test_tier_a_has_phi_spans(self):
+        """Every Tier A record must have at least one gold span."""
+        tier_a = [r for r in self.records if r.metadata["corpus_tier"] == "A"]
+        assert tier_a, "No Tier A records"
+        for r in tier_a:
+            assert r.gold_spans, f"Tier A record {r.record_id} has no gold spans"
+
+    def test_tier_c_placeholder_has_no_phi_spans(self):
+        """Tier C placeholder records must have zero gold spans (they are not PHI)."""
+        placeholders = [r for r in self.records
+                        if r.metadata["corpus_tier"] == "C"
+                        and "placeholder" in r.record_id]
+        assert placeholders, "No placeholder Tier C records"
+        for r in placeholders:
+            assert r.gold_spans == [], (
+                f"Tier C placeholder {r.record_id} should have no PHI spans but has {r.gold_spans}"
+            )
+
+    def test_tier_c_age_bin_no_phi_spans(self):
+        """Age bin records must have zero gold spans."""
+        age_bins = [r for r in self.records if "agebin" in r.record_id]
+        assert age_bins, "No age bin records"
+        for r in age_bins:
+            assert r.gold_spans == [], f"Age bin {r.record_id} should not have PHI spans"
+
+    def test_tier_d_requires_human_review(self):
+        """All Tier D records must have requires_human_review=True."""
+        tier_d = [r for r in self.records if r.metadata["corpus_tier"] == "D"]
+        assert tier_d, "No Tier D records"
+        for r in tier_d:
+            assert r.metadata["requires_human_review"] is True, (
+                f"Tier D record {r.record_id} missing requires_human_review=True"
+            )
+            assert r.metadata["human_review_reason"], (
+                f"Tier D record {r.record_id} missing human_review_reason"
+            )
+
+    def test_all_spans_verify(self):
+        """All gold span offsets must match their declared values in record text."""
+        for r in self.records:
+            errors = r.verify_spans()
+            assert not errors, f"Span offset errors in {r.record_id}: {errors}"
+
+    def test_tier_b_edge_case_metadata_present(self):
+        """Every Tier B record must document its edge_case and detection_challenge."""
+        tier_b = [r for r in self.records if r.metadata["corpus_tier"] == "B"]
+        assert tier_b, "No Tier B records"
+        for r in tier_b:
+            assert "edge_case" in r.metadata, f"{r.record_id} missing edge_case"
+            assert "detection_challenge" in r.metadata, f"{r.record_id} missing detection_challenge"
+
+    def test_authority_citation_present(self):
+        """Every record must cite at least one authority."""
+        for r in self.records:
+            assert r.authority_citations, f"{r.record_id} missing authority_citations"
+
+    def test_format_field_is_xlsx(self):
+        """All records must declare format='xlsx'."""
+        for r in self.records:
+            assert r.format == "xlsx", f"{r.record_id} has format={r.format}"
+
+    def test_seed_reproducibility(self):
+        """Same seed must produce bitwise-identical records."""
+        from generators.file_formats.xlsx_gen import XlsxGenerator
+        gen2 = XlsxGenerator(seed=42)
+        recs2 = gen2.generate()
+        for r1, r2 in zip(self.records, recs2):
+            assert r1.text == r2.text, f"Seed reproducibility failed at {r1.record_id}"
+            assert r1.record_id == r2.record_id
+
+    def test_tier_b_hidden_sheet_record_exists(self):
+        """Hidden sheet edge case (B9) must be present."""
+        hidden = [r for r in self.records if "hiddensheet" in r.record_id]
+        assert hidden, "No hidden sheet Tier B records"
+        for r in hidden:
+            assert "hidden_sheet" in r.metadata.get("xlsx_phi_locations", [])
+
+    def test_tier_b_metadata_author_phi_location(self):
+        """Metadata author edge case (B4) must declare metadata.author as PHI location."""
+        meta_recs = [r for r in self.records if "metadata" in r.record_id
+                     and r.metadata["corpus_tier"] == "B"]
+        assert meta_recs, "No metadata author Tier B records"
+        for r in meta_recs:
+            locs = r.metadata.get("xlsx_phi_locations", [])
+            assert any("metadata" in loc for loc in locs), (
+                f"{r.record_id}: metadata.author not in xlsx_phi_locations"
+            )
