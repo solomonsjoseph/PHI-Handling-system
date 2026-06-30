@@ -556,6 +556,113 @@ LLM_MODEL = _get_env("LLM_MODEL", yaml_get("ai_assistant", "llm_model", default=
 # LLM_PROVIDER: explicit env var wins; otherwise infer from model name.
 LLM_PROVIDER: str = _get_env("LLM_PROVIDER") or _infer_provider(LLM_MODEL)
 
+# PHI corpus LLM config -- read from llm: block in config.yaml, overridable by env vars.
+PHI_LLM_PROVIDER: str = _get_env("PHI_LLM_PROVIDER", yaml_get("llm", "provider", default=LLM_PROVIDER))
+PHI_LLM_MODEL: str = _get_env("PHI_LLM_MODEL", yaml_get("llm", "model", default=LLM_MODEL))
+PHI_LLM_API_KEY_ENV: str = _get_env("PHI_LLM_API_KEY_ENV", yaml_get("llm", "api_key_env", default=""))
+PHI_LLM_BASE_URL: str = _get_env("PHI_LLM_BASE_URL", yaml_get("llm", "base_url", default="http://localhost:11434"))
+PHI_LLM_TIMEOUT_S: int = _get_env_int("PHI_LLM_TIMEOUT_S", int(yaml_get("llm", "timeout_s", default=60)))
+PHI_LLM_MAX_RETRIES: int = _get_env_int("PHI_LLM_MAX_RETRIES", int(yaml_get("llm", "max_retries", default=3)))
+PHI_CONFIDENCE_THRESHOLD: float = _get_env_float(
+    "PHI_CONFIDENCE_THRESHOLD", float(yaml_get("llm", "confidence_threshold", default=0.75))
+)
+
+
+class LLMClient:
+    """Thin provider-agnostic wrapper with a single .complete(prompt) -> str method.
+
+    Supports anthropic, openai, google-genai, and ollama (local). The provider is
+    selected by PHI_LLM_PROVIDER (env) or llm.provider (config.yaml). API keys are
+    never stored here -- only the name of the env var that holds them.
+    """
+
+    def __init__(
+        self,
+        provider: str = PHI_LLM_PROVIDER,
+        model: str = PHI_LLM_MODEL,
+        api_key_env: str = PHI_LLM_API_KEY_ENV,
+        base_url: str = PHI_LLM_BASE_URL,
+        timeout_s: int = PHI_LLM_TIMEOUT_S,
+        max_retries: int = PHI_LLM_MAX_RETRIES,
+    ) -> None:
+        self.provider = provider
+        self.model = model
+        self._api_key_env = api_key_env
+        self._base_url = base_url.rstrip("/")
+        self._timeout_s = timeout_s
+        self._max_retries = max_retries
+
+    @property
+    def _api_key(self) -> str:
+        if not self._api_key_env:
+            _defaults = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "google-genai": "GOOGLE_API_KEY"}
+            self._api_key_env = _defaults.get(self.provider, "")
+        return os.environ.get(self._api_key_env, "") if self._api_key_env else ""
+
+    def complete(self, prompt: str) -> str:
+        """Send prompt to LLM and return text response. Raises on unrecoverable error."""
+        dispatch = {
+            "anthropic": self._complete_anthropic,
+            "openai": self._complete_openai,
+            "google-genai": self._complete_google,
+        }
+        fn = dispatch.get(self.provider, self._complete_ollama)
+        return fn(prompt)
+
+    def _complete_anthropic(self, prompt: str) -> str:
+        try:
+            import anthropic as _anthropic
+        except ImportError as exc:
+            raise ImportError("pip install anthropic") from exc
+        client = _anthropic.Anthropic(api_key=self._api_key, max_retries=self._max_retries)
+        msg = client.messages.create(
+            model=self.model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=self._timeout_s,
+        )
+        return msg.content[0].text
+
+    def _complete_openai(self, prompt: str) -> str:
+        try:
+            import openai as _openai
+        except ImportError as exc:
+            raise ImportError("pip install openai") from exc
+        client = _openai.OpenAI(api_key=self._api_key, max_retries=self._max_retries, timeout=self._timeout_s)
+        resp = client.chat.completions.create(
+            model=self.model, messages=[{"role": "user", "content": prompt}]
+        )
+        return resp.choices[0].message.content
+
+    def _complete_google(self, prompt: str) -> str:
+        try:
+            import google.generativeai as genai
+        except ImportError as exc:
+            raise ImportError("pip install google-generativeai") from exc
+        genai.configure(api_key=self._api_key)
+        return genai.GenerativeModel(self.model).generate_content(prompt).text
+
+    def _complete_ollama(self, prompt: str) -> str:
+        try:
+            import httpx
+        except ImportError as exc:
+            raise ImportError("pip install httpx") from exc
+        resp = httpx.post(
+            f"{self._base_url}/api/generate",
+            json={"model": self.model, "prompt": prompt, "stream": False},
+            timeout=self._timeout_s,
+        )
+        resp.raise_for_status()
+        return resp.json()["response"]
+
+    def __repr__(self) -> str:
+        return f"LLMClient(provider={self.provider!r}, model={self.model!r})"
+
+
+def get_llm_client() -> "LLMClient":
+    """Return a configured LLMClient using current PHI_LLM_* constants."""
+    return LLMClient()
+
 # Qwen3 downgrade ladder — descending parameter count. When Ollama refuses
 # a rung with "requires more system memory", _init_llm walks this list to
 # find the largest rung that actually loads. Only applies to qwen3:* models;

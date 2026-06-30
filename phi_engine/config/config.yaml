@@ -51,3 +51,18 @@ ai_assistant:
   telemetry:
     enabled: true
     sink: telemetry/events.jsonl
+
+
+# ============================================================
+# LLM CLIENT (PHI corpus generation and detection)
+# Provider options: anthropic | openai | google-genai | ollama
+# Switch provider by setting LLM_PROVIDER env var, or editing here.
+# ============================================================
+llm:
+  provider: ollama
+  model: llama3.2
+  api_key_env: ""           # name of env var holding the API key (never the key itself)
+  base_url: http://localhost:11434
+  timeout_s: 60
+  max_retries: 3
+  confidence_threshold: 0.75  # LLM confidence below this threshold → flag for human review
