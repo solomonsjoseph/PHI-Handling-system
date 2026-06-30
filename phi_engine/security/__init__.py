@@ -35,8 +35,16 @@ from .key_rotation import (
 # Remove import until the module is implemented.
 from .phi_guard_gate import PHIGuardResult, run_phi_guard_gate
 from .phi_keystore import PHIKeyStore, clear_phi_key, get_phi_key, phi_key_fingerprint
-# ponytail: phi_rulebook imports phi_review; phi_scrub -- both absent from plugin export.
-# Omitted until those modules are added. phi_patterns, phi_allowlist still importable directly.
+from .phi_rulebook import RulebookResolution, resolve_rulebook
+from .phi_scrub import (
+    PHIKeyAccessDeniedError,
+    PHIScrubConfig,
+    PHIScrubError,
+    bootstrap_key,
+    load_key,
+    load_scrub_config,
+    run_scrub,
+)
 from .pycanon_gate import PyCanonGateResult, check_publish_anonymity
 from .secure_env import (
     ZoneViolationError,
@@ -57,7 +65,14 @@ __all__ = [  # noqa: RUF022 — grouped by concept for readability, not alphabet
     "assert_output_zone",
     "assert_write_zone",
     "validate_paths",
-    # PHI scrub omitted: phi_scrub.py absent from plugin export (pending implementation).
+    # PHI scrub (8-action catalog)
+    "PHIKeyAccessDeniedError",
+    "PHIScrubConfig",
+    "PHIScrubError",
+    "bootstrap_key",
+    "load_key",
+    "load_scrub_config",
+    "run_scrub",
     # PHI key store + rotation (Wave 3 C1)
     "PHIKeyStore",
     "KeyRotationRequiresConfirmationError",
@@ -80,5 +95,7 @@ __all__ = [  # noqa: RUF022 — grouped by concept for readability, not alphabet
     "PyCanonGateResult",
     "check_publish_anonymity",
     "run_phi_guard_gate",
-    # PHI rulebook omitted: phi_rulebook imports phi_review (absent from plugin export).
+    # PHI rulebook engine (Wave 3 C2)
+    "RulebookResolution",
+    "resolve_rulebook",
 ]

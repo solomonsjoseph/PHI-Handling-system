@@ -319,3 +319,105 @@ def test_span_values_non_empty(records):
             assert span.value, f"Empty span value in {rec.record_id}"
             assert span.end > span.start, f"Zero-length span in {rec.record_id}"
             assert len(span.value) == span.end - span.start
+
+
+# ---------------------------------------------------------------------------
+# Tests for generators/in/in_dpdpa.py (DPDPA Rule 14 specific identifiers)
+# ---------------------------------------------------------------------------
+
+def _load_in_dpdpa():
+    spec = importlib.util.spec_from_file_location(
+        "in_dpdpa",
+        str(Path(__file__).resolve().parents[1] / "generators" / "in" / "in_dpdpa.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+_dpdpa_mod = _load_in_dpdpa()
+IndiaDPDPAGenerator = _dpdpa_mod.IndiaDPDPAGenerator
+
+DPDPA_COUNT = 4
+
+@pytest.fixture(scope="module")
+def dpdpa_records():
+    gen = IndiaDPDPAGenerator(seed=42)
+    return gen.generate_batch(count_per_type=DPDPA_COUNT)
+
+
+def test_dpdpa_record_count(dpdpa_records):
+    assert len(dpdpa_records) == 4 * DPDPA_COUNT  # 4 types
+
+
+def test_dpdpa_jurisdiction(dpdpa_records):
+    for rec in dpdpa_records:
+        assert rec.jurisdiction == "in"
+
+
+def test_dpdpa_authority_citations(dpdpa_records):
+    for rec in dpdpa_records:
+        assert rec.authority_citations, f"No authority_citations on {rec.record_id}"
+        assert any("Rule 14" in c for c in rec.authority_citations), (
+            f"Rule 14 not cited in {rec.record_id}"
+        )
+
+
+def test_dpdpa_spans_verify(dpdpa_records):
+    for rec in dpdpa_records:
+        errors = rec.verify_spans()
+        assert not errors, f"{rec.record_id}: {errors}"
+
+
+def test_dpdpa_customer_id_format(dpdpa_records):
+    cif_recs = [r for r in dpdpa_records if "in_dpdpa_cif" in r.record_id]
+    assert len(cif_recs) == DPDPA_COUNT
+    for rec in cif_recs:
+        spans = [s for s in rec.gold_spans if s.category == "DPDPA_CUSTOMER_ID"]
+        assert spans, f"No DPDPA_CUSTOMER_ID span in {rec.record_id}"
+        val = spans[0].value
+        assert re.match(r"^(CIF|CUST|KYC|ACC)\d+$", val), f"Unexpected CIF format: {val}"
+
+
+def test_dpdpa_acquisition_form_format(dpdpa_records):
+    afn_recs = [r for r in dpdpa_records if "in_dpdpa_afn" in r.record_id]
+    assert len(afn_recs) == DPDPA_COUNT
+    for rec in afn_recs:
+        spans = [s for s in rec.gold_spans if s.category == "DPDPA_ACQUISITION_FORM"]
+        assert spans
+        val = spans[0].value
+        assert re.fullmatch(r"AF-\d{4}-\d{6}", val), f"Unexpected AFN format: {val}"
+
+
+def test_dpdpa_application_reference_format(dpdpa_records):
+    arn_recs = [r for r in dpdpa_records if "in_dpdpa_arn" in r.record_id]
+    assert len(arn_recs) == DPDPA_COUNT
+    for rec in arn_recs:
+        spans = [s for s in rec.gold_spans if s.category == "DPDPA_APP_REF"]
+        assert spans
+        val = spans[0].value
+        assert re.fullmatch(r"ARN/\d{4}/\d{2}/\d{6}", val), f"Unexpected ARN format: {val}"
+
+
+def test_dpdpa_enrolment_id_format(dpdpa_records):
+    eid_recs = [r for r in dpdpa_records if "in_dpdpa_eid" in r.record_id]
+    assert len(eid_recs) == DPDPA_COUNT
+    for rec in eid_recs:
+        spans = [s for s in rec.gold_spans if s.category == "DPDPA_ENROLMENT_ID"]
+        assert spans
+        val = spans[0].value
+        assert re.fullmatch(r"ENR-\d{10}", val), f"Unexpected EID format: {val}"
+
+
+def test_dpdpa_seed_reproducibility():
+    gen1 = IndiaDPDPAGenerator(seed=42)
+    gen2 = IndiaDPDPAGenerator(seed=42)
+    recs1 = gen1.generate_batch()
+    recs2 = gen2.generate_batch()
+    assert [r.text for r in recs1] == [r.text for r in recs2]
+
+
+def test_dpdpa_generate_corpus():
+    recs = _dpdpa_mod.generate_corpus(seed=42)
+    assert len(recs) == 4 * DPDPA_COUNT
+    out = Path(__file__).resolve().parents[1] / "corpus" / "in" / "india_dpdpa.jsonl"
+    assert out.exists(), "generate_corpus did not write india_dpdpa.jsonl"
