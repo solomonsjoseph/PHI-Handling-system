@@ -194,14 +194,14 @@ Rules:
 - ALL values are SYNTHETIC / FICTIONAL. No real people, no real PHI.
 - Each record has a unique record_id starting with "llm_{jurisdiction.lower()}_{batch_num:03d}_"
 - Include at least 2 different entity types per record
-- gold_spans must have correct character offsets into the query string
-- detection_regime: "HEADER_ONLY" for column-level, "TEXT" for free-text narrative
+- gold_spans must have correct character offsets into the text string
+- detection_regime: "rule_applicable" for structured, "contextual_ner_required" for free-text
 
 Respond with a JSON array of records matching exactly this schema:
 [
   {{
     "record_id": "llm_hipaa_000_001",
-    "query": "Patient Jane Doe, DOB 1985-03-12, MRN 4829301, SSN 123-45-6789...",
+    "text": "Patient Jane Doe, DOB 1985-03-12, MRN 4829301, SSN 123-45-6789...",
     "jurisdiction": "{jurisdiction}",
     "gold_spans": [
       {{
@@ -210,7 +210,7 @@ Respond with a JSON array of records matching exactly this schema:
         "entity_type": "NAME",
         "hipaa_category": "A",
         "authority_citation": "45 CFR 164.514(b)(2)(i)(A)",
-        "detection_regime": "TEXT"
+        "detection_regime": "contextual_ner_required"
       }}
     ]
   }}
@@ -251,7 +251,7 @@ JSON array only. No prose."""
             ))
         rec = Record(
             record_id=raw_rec["record_id"],
-            query=raw_rec["query"],
+            text=raw_rec.get("text", raw_rec.get("query", "")),
             gold_spans=spans,
             jurisdiction=raw_rec.get("jurisdiction", jurisdiction),
         )
