@@ -55,14 +55,21 @@ ai_assistant:
 
 # ============================================================
 # LLM CLIENT (PHI corpus generation and detection)
-# Provider options: anthropic | openai | google-genai | ollama
-# Switch provider by setting LLM_PROVIDER env var, or editing here.
+# Provider options:
+#   anthropic    -- Claude; set ANTHROPIC_API_KEY
+#   openai       -- GPT; set OPENAI_API_KEY
+#   openai-oauth -- ChatGPT subscription via local proxy (personal/local use only)
+#                   Setup: npx @openai/codex login
+#                          npx openai-oauth   (proxy at http://127.0.0.1:10531/v1)
+#   google-genai -- Gemini; set GOOGLE_API_KEY
+#   ollama       -- local model; set base_url to Ollama server
+# Switch provider by setting PHI_LLM_PROVIDER env var, or editing here.
 # ============================================================
 llm:
-  provider: ollama
-  model: llama3.2
-  api_key_env: ""           # name of env var holding the API key (never the key itself)
-  base_url: http://localhost:11434
+  provider: openai-oauth
+  model: gpt-4o
+  api_key_env: ""           # not needed for openai-oauth; set OPENAI_API_KEY for openai provider
+  base_url: http://127.0.0.1:10531/v1
   timeout_s: 60
   max_retries: 3
   confidence_threshold: 0.75  # LLM confidence below this threshold → flag for human review

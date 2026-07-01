@@ -594,6 +594,9 @@ class LLMClient:
 
     @property
     def _api_key(self) -> str:
+        if self.provider == "openai-oauth":
+            # Local proxy; any non-empty string is accepted
+            return os.environ.get("OPENAI_API_KEY", "oauth")
         if not self._api_key_env:
             _defaults = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "google-genai": "GOOGLE_API_KEY"}
             self._api_key_env = _defaults.get(self.provider, "")
@@ -604,6 +607,7 @@ class LLMClient:
         dispatch = {
             "anthropic": self._complete_anthropic,
             "openai": self._complete_openai,
+            "openai-oauth": self._complete_openai_oauth,
             "google-genai": self._complete_google,
         }
         fn = dispatch.get(self.provider, self._complete_ollama)
@@ -629,6 +633,32 @@ class LLMClient:
         except ImportError as exc:
             raise ImportError("pip install openai") from exc
         client = _openai.OpenAI(api_key=self._api_key, max_retries=self._max_retries, timeout=self._timeout_s)
+        resp = client.chat.completions.create(
+            model=self.model, messages=[{"role": "user", "content": prompt}]
+        )
+        return resp.choices[0].message.content
+
+    def _complete_openai_oauth(self, prompt: str) -> str:
+        """Call the openai-oauth local proxy (ChatGPT subscription via OAuth).
+
+        Requires the proxy to be running first:
+            npx @openai/codex login      # one-time browser OAuth
+            npx openai-oauth             # starts proxy at http://127.0.0.1:10531/v1
+
+        The proxy exposes a standard /v1/chat/completions endpoint.
+        Personal/local use only per OpenAI ToS.
+        """
+        try:
+            import openai as _openai
+        except ImportError as exc:
+            raise ImportError("pip install openai") from exc
+        proxy_url = self._base_url if "10531" in self._base_url else "http://127.0.0.1:10531/v1"
+        client = _openai.OpenAI(
+            api_key=self._api_key,
+            base_url=proxy_url,
+            max_retries=self._max_retries,
+            timeout=self._timeout_s,
+        )
         resp = client.chat.completions.create(
             model=self.model, messages=[{"role": "user", "content": prompt}]
         )
