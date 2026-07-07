@@ -2,7 +2,7 @@ phase: 3
 last_completed_phase: 3_multi_jurisdiction_plus_file_formats_plus_phi_engine
 last_updated: 2026-06-29T00:00:00Z
 branch: feat/v2-multi-jurisdiction
-next_action: Tier 3 -- File format generators (DICOM, FHIR, HL7v2, eml first)
+next_action: Tier 4 -- evidence registry, validators, strict benchmark protocol, and PHI/LLM boundary verification
 
 notes: |
   Phase 2 USA Tier 1 COMPLETE. All tests pass (73/73). Corpus PASS.

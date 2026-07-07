@@ -1,5 +1,73 @@
 {
+  "capability_registry_sha256": "7efa831c4d682852008e1ffadb3af659da00cd9e94fdcfca8bfebf644c57e21f",
+  "claim_level": "L2-partial",
   "files": {
+    "au/australia_identifiers": {
+      "path": "corpus/au/australia_identifiers.jsonl",
+      "records": 28,
+      "sha256": "4cbe0ba2b0cadb53091f80f29de8656f1e1981d2878c803221f73a4b94b54f11",
+      "spans": 56
+    },
+    "br/brazil_identifiers": {
+      "path": "corpus/br/brazil_identifiers.jsonl",
+      "records": 36,
+      "sha256": "53a98906b45ce9b79cf8f51373cadfbe290b7b618c1dcf677a040d4ac23d7cc4",
+      "spans": 72
+    },
+    "eu/eu_identifiers": {
+      "path": "corpus/eu/eu_identifiers.jsonl",
+      "records": 40,
+      "sha256": "756f9942934b94cd1a054c992b734bca746ea346f8b3b6ebf86c77c0618769db",
+      "spans": 84
+    },
+    "file_formats/dicom_headers": {
+      "path": "corpus/file_formats/dicom_headers.jsonl",
+      "records": 20,
+      "sha256": "e3e7205217ce60646a5605c96b956275ae3a98efddce0b901dc9301ac6c9f185",
+      "spans": 120
+    },
+    "file_formats/eml_messages": {
+      "path": "corpus/file_formats/eml_messages.jsonl",
+      "records": 20,
+      "sha256": "ce9209332c12bddad19e42e947164face0f0772a2fe7fa19224331f6073a6608",
+      "spans": 140
+    },
+    "file_formats/fhir_bundles": {
+      "path": "corpus/file_formats/fhir_bundles.jsonl",
+      "records": 20,
+      "sha256": "8b6bb73020369229fabf6d03d9ceae40f303e81f23da7d171f1fd09a314bf3b5",
+      "spans": 179
+    },
+    "file_formats/hl7v2_messages": {
+      "path": "corpus/file_formats/hl7v2_messages.jsonl",
+      "records": 20,
+      "sha256": "41d71950ab87792002091071e4727b7de3e6e2acdc5efd91ccd02ce6c64cd79e",
+      "spans": 160
+    },
+    "file_formats/xlsx_phi_corpus": {
+      "path": "corpus/file_formats/xlsx_phi_corpus.jsonl",
+      "records": 68,
+      "sha256": "0e565786f067c7b9ee76b330dbfd5b32c2d76cd12e39d4f49f2aa265eea89d90",
+      "spans": 213
+    },
+    "in/india_dpdpa": {
+      "path": "corpus/in/india_dpdpa.jsonl",
+      "records": 16,
+      "sha256": "76a6004729d43f1083a3850cf161e47a9c124c7d5b76c84127023f1b10e6a42c",
+      "spans": 32
+    },
+    "in/india_identifiers": {
+      "path": "corpus/in/india_identifiers.jsonl",
+      "records": 40,
+      "sha256": "eab292e6735be65a4817c045e52165ab148099c07f831e9650ae798a76ca6b0b",
+      "spans": 80
+    },
+    "ug/uganda_identifiers": {
+      "path": "corpus/ug/uganda_identifiers.jsonl",
+      "records": 28,
+      "sha256": "77539642b39e2485aff4b05d0458c692293609ad4642fa4602ec56a6b01f0c36",
+      "spans": 56
+    },
     "us/hipaa_biometric": {
       "path": "corpus/us/hipaa_biometric.jsonl",
       "records": 40,
@@ -61,12 +129,55 @@
       "spans": 195
     }
   },
+  "generated_at_utc": "2026-07-06T20:21:19.024612Z",
   "jurisdictions": [
+    "au",
+    "br",
+    "eu",
+    "file_formats",
+    "in",
+    "ug",
     "us"
   ],
   "seed": 42,
   "span_errors": [],
   "totals": {
+    "au": {
+      "jurisdiction": "au",
+      "records": 28,
+      "seed": 42,
+      "spans": 56
+    },
+    "br": {
+      "jurisdiction": "br",
+      "records": 36,
+      "seed": 42,
+      "spans": 72
+    },
+    "eu": {
+      "jurisdiction": "eu",
+      "records": 40,
+      "seed": 42,
+      "spans": 84
+    },
+    "file_formats": {
+      "jurisdiction": "file_formats",
+      "records": 148,
+      "seed": 42,
+      "spans": 812
+    },
+    "in": {
+      "jurisdiction": "in",
+      "records": 56,
+      "seed": 42,
+      "spans": 112
+    },
+    "ug": {
+      "jurisdiction": "ug",
+      "records": 28,
+      "seed": 42,
+      "spans": 56
+    },
     "us": {
       "jurisdiction": "us",
       "records": 550,

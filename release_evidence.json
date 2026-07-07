@@ -1,0 +1,26 @@
+{
+  "claim_level": "L2-partial",
+  "limitations": [
+    "benchmark_aws_comprehend: requires AWS credentials",
+    "benchmark_azure_health: requires Azure credentials",
+    "benchmark_john_snow_labs: requires John Snow Labs license",
+    "benchmark_modified_deidentify: requires underlying model license confirmation",
+    "canada_pipeda: not implemented in canonical generator path",
+    "china_pipl: not implemented in canonical generator path",
+    "clinician_review: Clinician review is planned and not completed",
+    "counsel_review: Counsel review is planned and not completed",
+    "format_csv: not generated in current canonical corpus",
+    "format_docx: not generated in current canonical corpus",
+    "format_exif: not generated in current canonical corpus",
+    "format_hl7_cda: not generated in current canonical corpus",
+    "format_json: not generated in current canonical corpus",
+    "format_parquet: not generated in current canonical corpus",
+    "format_pdf: not generated in current canonical corpus",
+    "japan_appi: not implemented in canonical generator path",
+    "singapore_pdpa: not implemented in canonical generator path",
+    "uk_gdpr: not implemented in canonical generator path"
+  ],
+  "manifest_sha256": "0785aa439edefe0cf8f9d5cd8d895f321712fea77f6d9e69455a45118ee6a5a8",
+  "mia_report_sha256": "1033f0a8fc742636b8be9163b35ed8a6366815bddaa18d0d578225b3cdb6d923",
+  "validation_report_sha256": "769089c19633953a91249f8dac37da1e67ceff29d0f69155d0440f58ccc29fff"
+}

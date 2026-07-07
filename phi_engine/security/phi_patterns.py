@@ -248,14 +248,45 @@ BLOCKING_PATTERNS: list[tuple[str, Any]] = [
     ),
     # ── US identifier shapes (cross-site collaboration hedge) ────────────
     ("SSN", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
+    # Unhyphenated SSN only fires next to an explicit SSN label -- a bare
+    # 9-digit run is too common (account/order numbers) to block on its own.
+    ("SSN_UNHYPHENATED", re.compile(r"(?i:\bssn|social\s*security(?:\s*number)?)\s*[:#]?\s*(\d{9})\b")),
     ("MRN", re.compile(r"\bMRN[-:]?\s*\d{6,10}\b", re.I)),
+    ("MRN_LABELED", re.compile(r"(?i:medical\s*record\s*(?:number|no\.?|#))\s*[:#]?\s*\d{4,10}\b")),
     ("IP", re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")),
+    # US phone: (xxx) xxx-xxxx, xxx-xxx-xxxx, or xxx.xxx.xxxx -- distinct from
+    # a bare 10-digit run so it doesn't collide with account/order numbers.
+    (
+        "US_PHONE",
+        re.compile(r"\(\d{3}\)\s?\d{3}[-.\s]\d{4}\b|\b\d{3}[-.]\d{3}[-.]\d{4}\b"),
+    ),
+    # HIPAA §164.514(b)(2)(i)(C): ages over 89 must be treated as identifying.
+    (
+        "AGE_OVER_89",
+        re.compile(r"\b(?:9\d|1\d{2})\s*(?:years?[\s-]old|y\.?o\.?)\b|(?i:\baged?\s*:?\s*)(9\d|1\d{2})\b"),
+    ),
+    # Street-address line: number + name + common suffix.
+    (
+        "ADDRESS",
+        re.compile(
+            r"\b\d{1,5}\s+[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)?\s+"
+            r"(?:St|Ave|Rd|Ln|Dr|Blvd|Way|Ct|Ter|Pl|"
+            r"Street|Avenue|Road|Lane|Drive|Boulevard|Court|Terrace|Place)\b\.?"
+        ),
+    ),
     # ── Dates (HIPAA §164.514(b)(2)(i)(C)) ───────────────────────────────
     (
         "DATE_ISO",
         re.compile(
             r"\b(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
             r"(?:[ T]\d{2}:\d{2}(?::\d{2})?)?\b"
+        ),
+    ),
+    (
+        "DATE_TEXT",
+        re.compile(
+            r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+"
+            r"\d{1,2},?\s+(?:19|20)\d{2}\b"
         ),
     ),
     (

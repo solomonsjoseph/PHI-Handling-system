@@ -5,7 +5,7 @@ build-backend = "setuptools.backends.legacy:build"
 [project]
 name = "phi-handling"
 version = "2.0.0.dev0"
-description = "LLM-orchestrated PHI de-identification pipeline and benchmark framework"
+description = "Evidence-first PHI corpus, benchmark, and runtime safety harness"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 

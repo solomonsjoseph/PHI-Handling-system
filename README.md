@@ -1,253 +1,205 @@
-# PHI Handling -- IRB-Approval-Ready Corpus and Benchmark
+# PHI Handling - Evidence-First Corpus, Benchmark, and Runtime Safety Harness
 
-**Repository status:** v2.0.0-dev (2026-06-11)
-**License:** MIT (see LICENSE)
-**Maintainer:** See CONTRIBUTING.md for contact information
+**Repository status:** v2.0.0-dev evidence-alignment in progress  
+**Claim level:** Current public claim level: L1 strong, L2 partial, L3 partial, L4/L5 not yet supported  
+**License:** MIT (see `LICENSE`)  
+**Maintainer:** Private maintainer contact must be configured by the project owner before public security or PHI-leak reports are accepted.
 
-This repository contains a multi-jurisdiction PHI detection test corpus, validation harness, and benchmark framework designed to produce results suitable for IRB review. It covers 10 jurisdictions: USA (HIPAA), EU/EEA (GDPR), India (DPDPA 2023 / Rules 2025), Canada (PIPEDA + provincial), UK (UK GDPR), Australia (Privacy Act 2024), Singapore (PDPA 2021), Japan (APPI 2022), Brazil (LGPD), and China (PIPL -- structurally separate layer, not directly comparable to other jurisdictions).
+This repository contains a synthetic PHI corpus, benchmark, and runtime safety harness whose public claims are bounded by machine-checkable evidence in `harness/capability_registry.json`, `corpus/MANIFEST.json`, validation reports, tests, benchmark artifacts, MIA smoke reports, and release evidence. If a capability is not listed in the capability registry at the required status, it is not claimed here as release coverage.
 
-## For IRB reviewers -- read this first
+This repository is IRB-oriented: it provides IRB-review support artifacts for corpus provenance, validation, benchmark protocol, security controls, and review checklists. It is not a standalone review submission by itself.
 
-1. Start with `authorities/AUTHORITY_MATRIX.md` -- every identifier category, every generator, every edge case traces to a primary legal or research source.
-2. Continue to `docs/VALIDATION_PROTOCOL.md` -- the clinician review protocol, counsel review checklist, and reproducibility attestation.
-3. The corpus itself is in `corpus/` with structural validation in `validators/`.
-4. Benchmark comparisons against Presidio, Amazon Comprehend Medical, Modified Deidentify (EMNLP 2025), and other published tools are in `benchmarks/`.
+This repository does not certify HIPAA, GDPR, DPDPA, or other compliance.
 
-This document is structured so that a reviewer can verify corpus completeness by checking the matrix against the authorities cited, without needing to trust the maintainers' claims.
+## For reviewers -- current evidence status
 
-## Scope and what this repository provides
+1. Start with `harness/capability_registry.json` to see which jurisdictions, formats, benchmarks, controls, and review steps are manifested, tested, implemented, or planned.
+2. Use `corpus/MANIFEST.json` for the current canonical corpus release evidence.
+3. Use `validation_report.json`, `mia_report.json`, `release_evidence.json`, and `benchmarks/results/*` when those artifacts are generated for a release candidate.
+4. Treat planned registry entries as roadmap items, not implemented coverage.
+
+A reviewer should be able to distinguish manifested evidence from tested generators, implemented controls, and planned work without relying on maintainer assertions.
+
+## Claim level
+
+| Level | Current status | Evidence boundary |
+|---|---|---|
+| L1 | Strong | Registry-backed project scope, no-real-PHI statement, canonical US/HIPAA JSONL corpus entries, validation commands, and security disclosure policy. |
+| L2 | Partial | Tested non-US and file-format generators exist, and validator evidence exists, but only registry entries at `manifested` status are described as release coverage. |
+| L3 | Partial | Benchmark code, deterministic MIA smoke testing, PHI/LLM boundary guards, and threat-model documentation are implemented, but benchmark result artifacts and external reviews are not claimed as complete release evidence here. |
+| L4 | Not yet supported | Clinician review, counsel review, commercial benchmark validation, and strict benchmark artifact review are not complete. |
+| L5 | Not yet supported | No external certification, regulatory approval, or independent audit is claimed. |
+
+Supporting implemented controls that are not manifested coverage claims:
+
+| ID | Kind | Status | Claim | Limitations |
+|---|---|---|---|---|
+| `benchmark_presidio_stock` | benchmark | implemented | Stock Presidio benchmark path exists but requires clean stock/tuned adapter split before manifested comparison | requires clean stock/tuned adapter split before manifested comparison |
+| `benchmark_presidio_tuned` | benchmark | implemented | Tuned Presidio benchmark path exists and must be labelled separately from stock Presidio | custom MBI/VIN recognizers must be labelled tuned |
+| `mia_framework` | privacy_attack | implemented | Deterministic MIA smoke test for release evidence is implemented |  |
+| `no_phi_to_llm_boundary` | security_control | implemented | PHI-to-LLM boundary guards exist but are not yet universally wrapped | existing guards present but not universally wrapped |
+| `threat_model` | security_control | implemented | Threat model documentation and release-gate mapping are implemented |  |
+
+## Manifested coverage
+
+Only these registry entries are claimed as manifested release coverage.
+
+| ID | Kind | Status | Jurisdiction | Claim | Output | Limitations |
+|---|---|---|---|---|---|---|
+| `format_jsonl` | file_format | manifested |  | JSONL is the canonical manifested corpus file format | `corpus/**/*.jsonl` |  |
+| `us_hipaa` | jurisdiction | manifested | us | US/HIPAA synthetic corpus with span-level gold annotations | `corpus/us/*.jsonl` |  |
+
+## Tested but not yet release-manifested coverage
+
+These entries have tests or validator support, but they are not claimed as manifested release coverage in this README unless and until the registry and release manifest promote them.
+
+| ID | Kind | Status | Jurisdiction | Claim | Output | Limitations |
+|---|---|---|---|---|---|---|
+| `format_dicom_header` | file_format | tested |  | DICOM header generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/dicom_headers.jsonl` |  |
+| `format_eml` | file_format | tested |  | EML generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/eml_messages.jsonl` |  |
+| `format_fhir_r4` | file_format | tested |  | FHIR R4 generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/fhir_bundles.jsonl` |  |
+| `format_hl7v2` | file_format | tested |  | HL7v2 generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/hl7v2_messages.jsonl` |  |
+| `format_xlsx` | file_format | tested |  | XLSX generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/xlsx_phi_corpus.jsonl` |  |
+| `australia_privacy` | jurisdiction | tested | au | Australia Privacy Act synthetic identifier generator exists with tests but is not yet in the canonical manifest | `corpus/au/australia_identifiers.jsonl` |  |
+| `brazil_lgpd` | jurisdiction | tested | br | Brazil/LGPD synthetic identifier generator exists with tests but is not yet in the canonical manifest | `corpus/br/brazil_identifiers.jsonl` |  |
+| `eu_gdpr` | jurisdiction | tested | eu | EU/GDPR synthetic identifier generator exists with tests but is not yet in the canonical manifest | `corpus/eu/eu_identifiers.jsonl` |  |
+| `india_dpdpa` | jurisdiction | tested | in | India DPDPA synthetic generator exists with tests but is not yet in the canonical manifest | `corpus/in/india_dpdpa.jsonl` |  |
+| `india_identifiers` | jurisdiction | tested | in | India identifier synthetic generator exists with tests but is not yet in the canonical manifest | `corpus/in/india_identifiers.jsonl` |  |
+| `uganda_dppa` | jurisdiction | tested | ug | Uganda DPPA synthetic identifier generator exists with tests but is not yet in the canonical manifest | `corpus/ug/uganda_identifiers.jsonl` |  |
+| `validator_suite` | validator | tested |  | Standalone validation suite is implemented and covered by corpus validator tests |  |  |
+
+## Planned coverage not claimed as implemented
+
+These entries remain planned. They must not be described as implemented, tested, manifested, externally reviewed, or certified until the registry and release evidence support that status.
+
+| ID | Kind | Status | Jurisdiction | Claim | Output | Limitations |
+|---|---|---|---|---|---|---|
+| `benchmark_aws_comprehend` | benchmark | planned |  | AWS Comprehend Medical benchmark is planned and credential-gated |  | requires AWS credentials |
+| `benchmark_azure_health` | benchmark | planned |  | Azure Health benchmark is planned and credential-gated |  | requires Azure credentials |
+| `benchmark_john_snow_labs` | benchmark | planned |  | John Snow Labs Healthcare NLP benchmark is planned and license-gated |  | requires John Snow Labs license |
+| `benchmark_modified_deidentify` | benchmark | planned |  | Modified Deidentify benchmark is planned and license-gated |  | requires underlying model license confirmation |
+| `format_csv` | file_format | planned |  | CSV corpus export is planned and not generated in the current canonical corpus |  | not generated in current canonical corpus |
+| `format_docx` | file_format | planned |  | DOCX corpus export is planned and not generated in the current canonical corpus |  | not generated in current canonical corpus |
+| `format_exif` | file_format | planned |  | EXIF corpus export is planned and not generated in the current canonical corpus |  | not generated in current canonical corpus |
+| `format_hl7_cda` | file_format | planned |  | HL7 CDA corpus export is planned and not generated in the current canonical corpus |  | not generated in current canonical corpus |
+| `format_json` | file_format | planned |  | JSON corpus export is planned and not generated in the current canonical corpus |  | not generated in current canonical corpus |
+| `format_parquet` | file_format | planned |  | Parquet corpus export is planned and not generated in the current canonical corpus |  | not generated in current canonical corpus |
+| `format_pdf` | file_format | planned |  | PDF corpus export is planned and not generated in the current canonical corpus |  | not generated in current canonical corpus |
+| `canada_pipeda` | jurisdiction | planned | ca | Canada/PIPEDA corpus coverage is planned and not implemented in the canonical generator path |  | not implemented in canonical generator path |
+| `china_pipl` | jurisdiction | planned | cn | China PIPL corpus coverage is planned and not implemented in the canonical generator path |  | not implemented in canonical generator path |
+| `japan_appi` | jurisdiction | planned | jp | Japan APPI corpus coverage is planned and not implemented in the canonical generator path |  | not implemented in canonical generator path |
+| `singapore_pdpa` | jurisdiction | planned | sg | Singapore PDPA corpus coverage is planned and not implemented in the canonical generator path |  | not implemented in canonical generator path |
+| `uk_gdpr` | jurisdiction | planned | uk | UK GDPR corpus coverage is planned and not implemented in the canonical generator path |  | not implemented in canonical generator path |
+| `clinician_review` | review_control | planned |  | Clinician review is planned and not completed |  |  |
+| `counsel_review` | review_control | planned |  | Counsel review is planned and not completed |  |  |
+
+## Evidence commands
+
+```bash
+python -m harness.generate_corpus --seed 42 --jurisdiction all --out-dir corpus
+python -m harness.run_all_validations --corpus-dir corpus --manifest corpus/MANIFEST.json --output validation_report.json
+python -m benchmarks.presidio_adapter --corpus-dir corpus/us --output-dir benchmarks/results/presidio-stock --profile stock --scoring-profile strict_all_span --verbose
+python -m harness.mia_framework --corpus-dir corpus --output mia_report.json
+python -m harness.release_evidence --corpus-dir corpus --manifest corpus/MANIFEST.json --validation-report validation_report.json --mia-report mia_report.json --output release_evidence.json
+```
+
+## Scope and non-claims
 
 ### What it does
 
-- Generates synthetic PHI test records against a common layer of 7 universal identifiers present across all 10 jurisdictions, plus jurisdiction-specific layers for each jurisdiction's unique identifiers. Jurisdiction-specific layers are never mixed: a US record never contains India-specific identifiers and vice versa, except in explicitly-tagged cross-border conflict cases.
-- Provides conflict cases layer for identifiers where HIPAA and GDPR produce different legal outcomes: ZIP codes, dates, and re-identification codes. Conflict cases are tagged with the jurisdiction pair whose rules diverge.
-- Assigns a `detection_regime` field on every record with values `rule_applicable` (identifier is enumerated in the relevant statute) or `contextual_ner_required` (identifier is contextually sensitive, not enumerated), following the i2b2 taxonomy.
-- Covers three de-identification tiers: Safe Harbor de-identified, HIPAA Limited Data Set (LDS), and identifiable PHI.
-- Covers 13+ file formats: JSONL, JSON, CSV, XLSX, DOCX, PDF, EML, DICOM headers, HL7 FHIR R4, HL7 CDA, Parquet, EXIF-tagged images.
-- Runs baseline benchmarks against Microsoft Presidio, Amazon Comprehend Medical (optional, requires AWS credentials), Modified Deidentify (EMNLP 2025, pending license confirmation), and other tools.
-- Provides membership inference attack (MIA) shadow-model framework for privacy testing.
+- Provides a registry-backed synthetic PHI corpus and safety harness.
+- Provides current manifested release coverage for US/HIPAA JSONL corpus artifacts only.
+- Provides tested, non-manifested generators for India, EU/GDPR, Brazil, Australia, Uganda, DICOM headers, FHIR R4, HL7v2, EML, and XLSX.
+- Provides runtime safety controls intended to prevent PHI from crossing LLM tool boundaries without explicit gates.
+- Provides IRB-review support artifacts and review checklists for future human review.
 
-### What it does NOT do
+### What it does not do
 
 - It does not contain any real PHI.
-- It does not contain any actual patient images (synthetic only).
-- It is NOT itself a de-identification tool -- it is a test corpus and evaluation harness for such tools.
-- It does NOT certify HIPAA, GDPR, or DPDPA compliance for any specific system. Passing this benchmark is necessary but not sufficient for regulatory compliance.
-- It does NOT claim to enumerate every possible PHI instance. Safe Harbor (b)(2)(ii) "no actual knowledge" remains a human judgment.
-- It does NOT substitute for counsel review. Sections marked `[COUNSEL REVIEW REQUIRED]` require legal sign-off before production use. See `docs/COUNSEL_REVIEW_CHECKLIST.md`.
-- It does NOT substitute for clinician review. Three independent board-certified clinicians are required for clinical plausibility review. Status: PENDING. See `docs/CLINICIAN_REVIEW_PROTOCOL.md`.
-- It does NOT claim synthetic data is IRB-exempt by definition. Legal basis for synthetic data use in research must be evaluated per-jurisdiction. See `docs/SYNTHETIC_DATA_LEGAL_BASIS.md`.
-- China PIPL layer results are NOT directly comparable to HIPAA/GDPR results. The PIPL layer uses a structurally separate taxonomy reflecting China's data processor-centric model. Comparisons across this boundary require explicit acknowledgment in any publication.
+- It does not contain any actual patient images; synthetic-only image-related coverage is tracked separately.
+- It is not itself a de-identification tool; it is a corpus, benchmark, and runtime safety harness for evaluating such tools.
+- This repository does not certify HIPAA, GDPR, DPDPA, or other compliance.
+- It does not claim to enumerate every possible PHI instance. Safe Harbor (b)(2)(ii) "no actual knowledge" remains a human judgment.
+- It does not substitute for counsel review. Counsel review is tracked as planned in the capability registry.
+- It does not substitute for clinician review. Three independent clinician reviewers are required for clinical plausibility review. Status: PENDING.
+- It does not claim synthetic data is IRB-exempt by definition. Legal basis for synthetic data use in research must be evaluated per jurisdiction.
+- It does not claim Canada, UK, Singapore, Japan, China, JSON, CSV, DOCX, PDF, HL7 CDA, Parquet, EXIF, commercial benchmarks, clinician review, counsel review, or external review as implemented coverage.
 
-## Jurisdictional scope
+## Repository structure
 
-This corpus covers 10 jurisdictions organized under three regulatory philosophies.
+Key paths for the current evidence-alignment work:
 
-### Rule-based jurisdictions (enumerated identifier lists)
-
-These jurisdictions specify identifiers by explicit statutory list. A record is de-identified when it no longer contains items from the enumerated list.
-
-| Jurisdiction | Primary Law | Identifier Scope |
-|---|---|---|
-| USA | HIPAA Privacy Rule, 45 CFR 164.514 | 18 Safe Harbor categories; LDS tier at 164.514(e) |
-| India | DPDPA 2023, DPDP Rules 2025, SPDI Rules 2011 | Rule 14 identifiers; SPDI 8-category sensitive data |
-
-### Principle-based jurisdictions (contextual determination)
-
-These jurisdictions define personal data by function ("any information relating to an identified or identifiable natural person") rather than by enumerated list. De-identification sufficiency is determined contextually.
-
-| Jurisdiction | Primary Law | Notes |
-|---|---|---|
-| EU/EEA | GDPR Art. 4(1), Art. 9 (special categories) | Recital 26 re-identification standard |
-| UK | UK GDPR, Data Protection Act 2018 | Post-Brexit UK GDPR is functionally similar to EU GDPR; ICO guidance applies |
-| Canada | PIPEDA, provincial health privacy acts (PHIPA, HIA) | Quebec Law 25 adds additional obligations from 2023 |
-| Australia | Privacy Act 1988 (as amended 2024) | 2024 amendments strengthen de-identification obligations |
-| Singapore | PDPA 2021 | Includes new mandatory data breach notification obligations |
-| Japan | APPI 2022 (revised) | Anonymously processed information (API) and pseudonymously processed information (PPI) are distinct categories |
-| Brazil | LGPD (Lei 13.709/2018) | Sensitive data at Art. 11; anonymization standard at Art. 12 |
-
-### Structurally separate layer
-
-This jurisdiction uses a regulatory model that is not directly comparable to HIPAA/GDPR. Results from this layer must not be aggregated with other jurisdictions without explicit methodology disclosure.
-
-| Jurisdiction | Primary Law | Notes |
-|---|---|---|
-| China | PIPL (Personal Information Protection Law, 2021) | Data processor-centric model; national security carve-outs; separate taxonomy |
-
-### Architecture rule
-
-The common layer covers the 7 universal identifiers that appear in all 10 jurisdictions: full name, date of birth, email address, telephone number, postal address, government-issued national identifier (or functional equivalent), and medical record number (or clinical encounter identifier). These are placed in `corpus/universal/`. No jurisdiction-specific identifier ever appears in the universal layer.
-
-## Structure
-
-```
-PHI-Handling-IRB-approval-ready/
-|-- LICENSE                          # MIT license
-|-- CODE_OF_CONDUCT.md               # Contributor Covenant 2.1
-|-- CONTRIBUTING.md                  # How to contribute
-|-- SECURITY.md                      # Security disclosure policy
-|-- README.md                        # This file
-|-- CHANGELOG.md                     # Versioned changes
-|-- MANIFEST.json                    # Corpus hash and provenance
+```text
+PHI-Handling-system/
+|-- README.md
+|-- pyproject.toml
+|-- .phi-build-status
 |
-|-- authorities/                     # Primary legal/research sources
-|   |-- AUTHORITY_MATRIX.md          # The single source of truth for IRB reviewers
-|   |-- 01_hipaa_164_514_full.md     # HIPAA 45 CFR 164.514 analysis
-|   |-- 02_dpdp_rules_2025.md        # DPDP Rules 2025 analysis
-|   |-- 03_icmr_2017.md              # ICMR 2017 analysis
-|   |-- 04_spdi_rules_2011.md        # SPDI Rules 2011 analysis
-|   |-- 05_gdpr_article9_health_data.md  # GDPR Art. 9 special category analysis
-|   |-- 06_regulatory_philosophy_comparison.md  # Cross-jurisdiction philosophy taxonomy
-|   `-- citations.bib                # BibTeX of all research citations
+|-- harness/
+|   |-- capability_registry.py       # Registry loader, status checks, Markdown CLI
+|   |-- capability_registry.json     # Machine-checkable claim/status source of truth
+|   |-- generate_corpus.py           # Seeded corpus generation
+|   |-- run_all_validations.py       # Validation runner
+|   |-- mia_framework.py             # Deterministic MIA smoke test
+|   `-- release_evidence.py          # Release evidence hashing and claim-level summary
 |
-|-- corpus/                          # Generated test corpus
-|   |-- universal/                   # Common layer: 7 identifiers, all 10 jurisdictions
-|   |-- us/                          # US HIPAA-specific tests
-|   |-- eu/                          # EU GDPR-specific tests
-|   |-- in/                          # India DPDPA-specific tests
-|   |-- ca/                          # Canada PIPEDA/provincial tests
-|   |-- uk/                          # UK GDPR-specific tests
-|   |-- au/                          # Australia Privacy Act tests
-|   |-- sg/                          # Singapore PDPA tests
-|   |-- jp/                          # Japan APPI tests
-|   |-- br/                          # Brazil LGPD tests
-|   |-- cn/                          # China PIPL tests (separate, not comparable)
-|   |-- conflict_cases/              # Identifiers with divergent HIPAA/GDPR outcomes
-|   |-- file_formats/                # File-format fixtures
-|   |-- limited_data_set/            # HIPAA LDS tier
-|   |-- fundraising/                 # 164.514(f) context tests
-|   |-- reidentification_codes/      # 164.514(c) tests
-|   |-- quasi_identifiers/           # k-anonymity tests
-|   |-- injection/                   # OWASP LLM01 prompt injection
-|   |-- membership_inference/        # Nature Sci Rep 2024 MIA
-|   `-- statistical/                 # Statistical utility fixtures
+|-- corpus/
+|   |-- MANIFEST.json                # Current canonical manifest when generated
+|   `-- us/                          # Manifested US/HIPAA JSONL corpus outputs
 |
-|-- generators/                      # Python code to generate corpus
-|   |-- README.md                    # How generators work
-|   |-- common.py                    # Shared utilities
-|   |-- common_layer/                # Planned: universal 7-identifier generators
-|   |-- hipaa_specific/              # Planned: HIPAA 18-category generators
-|   |-- india_specific/              # Planned: DPDPA/SPDI/ICMR generators
-|   |-- gdpr_specific/               # Planned: GDPR Art. 9 and national law generators
-|   |-- conflict_cases/              # Planned: cross-jurisdiction divergence cases
-|   |-- hipaa_safe_harbor.py         # 18-category generators
-|   |-- hipaa_lds.py                 # Limited Data Set generator
-|   |-- dpdpa_second_schedule.py     # DPDPA research exemption
-|   |-- spdi_sensitive.py            # 8-category SPDI generator
-|   |-- indian_identifiers.py        # Aadhaar, PAN, ABHA, CTRI, etc.
-|   |-- file_formats/                # Per-format generators
-|   |   |-- xlsx_gen.py
-|   |   |-- csv_gen.py
-|   |   |-- pdf_gen.py
-|   |   |-- docx_gen.py
-|   |   |-- dicom_header_gen.py
-|   |   |-- fhir_gen.py
-|   |   |-- eml_gen.py
-|   |   `-- exif_gen.py
-|   `-- injection.py                 # Prompt injection fixtures
+|-- generators/                      # Implemented and tested generator code
+|   |-- hipaa_*.py                   # US/HIPAA generator modules
+|   |-- in/ eu/ br/ au/ ug/          # Tested non-US generator modules
+|   `-- file_formats/                # Tested DICOM/FHIR/HL7v2/EML/XLSX modules
 |
-|-- validators/                      # Corpus structural validation
-|   |-- offset_validator.py          # Verify every gold span
-|   |-- hash_validator.py            # Corpus integrity
-|   `-- taxonomy_validator.py        # Taxonomy closure check
-|
-|-- benchmarks/                      # Comparison with baseline tools
-|   |-- README.md                    # How to run benchmarks
-|   |-- presidio_adapter.py          # Presidio wrapper
-|   |-- comprehend_medical_adapter.py  # AWS Comprehend Medical wrapper
-|   |-- azure_health_adapter.py      # Azure Health De-ID wrapper
-|   |-- modified_deidentify_adapter.py  # Modified Deidentify (EMNLP 2025) wrapper
-|   |-- metrics.py                   # Precision/recall/F1
-|   `-- results/                     # Benchmark output
-|
-|-- harness/                         # Integration test harness
-|   |-- run_all_validations.py       # Single-command validation
-|   |-- generate_corpus.py           # Rebuild corpus from generators
-|   `-- mia_framework.py             # Membership inference attacks
-|
-|-- tests/                           # Unit tests for generators/validators
-|   `-- ...
-|
-|-- docs/                            # Process documentation
-|   |-- VALIDATION_PROTOCOL.md       # Clinician + counsel review process
-|   |-- ATTESTATION_TEMPLATE.md      # Reproducibility template
-|   |-- COUNSEL_REVIEW_CHECKLIST.md  # Per-item legal sign-off
-|   |-- CLINICIAN_REVIEW_PROTOCOL.md # Medical plausibility review
-|   |-- THREAT_MODEL.md              # OWASP LLM Top 10 + MITRE ATLAS
-|   |-- REPRODUCIBILITY.md           # How to rebuild the corpus
-|   |-- KNOWN_LIMITATIONS.md         # Everything this corpus does not cover
-|   `-- SYNTHETIC_DATA_LEGAL_BASIS.md  # Legal basis for synthetic data per jurisdiction
-|
-|-- scripts/                         # Utility scripts
-|   `-- ...
-|
-`-- .github/
-    |-- workflows/
-    |   `-- ci.yml                   # GitHub Actions CI
-    `-- ISSUE_TEMPLATE/
-        |-- bug_report.md
-        |-- authority_citation.md
-        `-- new_identifier.md
+|-- validators/                      # Structural corpus validators
+|-- benchmarks/                      # Benchmark code and result artifacts
+|-- authorities/                     # Primary legal/research source mapping
+|-- docs/                            # Validation, reproducibility, threat model, and review documents
+|-- phi_engine/                      # Runtime PHI and LLM safety controls
+`-- tests/
 ```
 
 ## Quick start
 
 ```bash
-git clone https://github.com/brucebanner010198-commits/PHI-Handling-IRB-approval-ready.git
-cd PHI-Handling-IRB-approval-ready
 python -m pip install -r requirements.txt
-
-# Regenerate the corpus from source (deterministic, seeded)
-python harness/generate_corpus.py --seed 20260420
-
-# Validate corpus integrity
-python harness/run_all_validations.py
-
-# Run Presidio benchmark
-python benchmarks/presidio_adapter.py --corpus corpus/ --output benchmarks/results/presidio_v2.0.json
-
-# Run Comprehend Medical benchmark (requires AWS credentials)
-python benchmarks/comprehend_medical_adapter.py --corpus corpus/ --aws-region us-east-1
+python -m pytest tests/test_capability_registry.py -q
+python -m harness.capability_registry
 ```
 
-## What makes this IRB-approval-ready
+For release-candidate evidence generation, use the commands in [Evidence commands](#evidence-commands).
 
-Five properties, each with a defensible mechanism:
+## What makes this evidence-first
 
-1. **Completeness** -- Every HIPAA Safe Harbor identifier, every DPDPA Rule 14 identifier, every SPDI Rules 2011 category, and all identifiers enumerated in the common layer has at least one dedicated generator with test cases. Measured in Table A of `authorities/AUTHORITY_MATRIX.md`. Gap categories are explicitly documented in `docs/KNOWN_LIMITATIONS.md`. The 10-jurisdiction scope is covered at two levels: the common layer (7 identifiers, all jurisdictions) and jurisdiction-specific layers (unique identifiers per jurisdiction, never mixed).
+Five properties, each tied to registry-backed evidence:
 
-2. **Provenance** -- Every test case has an `authority_citation` field. Every claim in every document in this repository cites the primary source. No claim comes from summaries of summaries.
-
-3. **Reproducibility** -- The corpus is generated from seeded generators. Given the same seed, the output is bitwise identical. `MANIFEST.json` records the hash. `docs/REPRODUCIBILITY.md` documents the exact process.
-
-4. **Benchmark-comparability** -- Baseline results for Presidio (open source, no credentials needed), Amazon Comprehend Medical (optional, needs AWS), and Modified Deidentify (EMNLP 2025, pending license confirmation) are reported. This means an IRB reviewer can compare detector performance to published baselines without trusting the maintainers' numbers. Note: F1 scores for commercial tools have not been independently verified; see Known Limitations.
-
-5. **Reviewer-friendly structure** -- The README points reviewers at the authority matrix first, not at the code. The goal is that a reviewer can say "I believe this corpus is comprehensive" on the basis of evidence, not trust.
+1. **Registry-backed claim boundaries** -- `harness/capability_registry.json` records whether each jurisdiction, format, benchmark, validator, security control, review control, and privacy attack capability is planned, implemented, tested, manifested, or externally reviewed.
+2. **Provenance** -- Generated records carry authority citation fields, and public claims should map back to primary sources or registry entries rather than summaries of summaries.
+3. **Reproducibility** -- The canonical corpus is generated from seeded generators. `corpus/MANIFEST.json` records release hash and span-count evidence when the corpus is generated.
+4. **Benchmark-readiness** -- Baseline benchmark code exists for Presidio, while commercial-tool artifacts remain registry-tracked work before they can support release claims.
+5. **Reviewer-friendly structure** -- The README points reviewers at machine-checkable registry and manifest evidence first. The goal is that a reviewer can distinguish implemented evidence from planned work without relying on trust.
 
 ## Known limitations
 
-Full detail is in `docs/KNOWN_LIMITATIONS.md`. The five most significant limitations are:
+Full detail is in `docs/KNOWN_LIMITATIONS.md`. The most important limitations are:
 
-1. **Clinical plausibility review pending.** Three independent board-certified clinicians are required to sign off on clinical plausibility per the ASQ-PHI protocol. This review has not yet been completed. No record in the corpus should be treated as medically authoritative until this review is done.
-
-2. **DPDPA Rules 3-16 not yet in force.** The substantive provisions of the DPDP Rules 2025 (Rules 3 through 16 and Rules 22-23) do not commence until 2027-05-13 per the Official Gazette G.S.R. 846(E). Corpus coverage of these provisions is structurally complete but cannot be validated against live regulatory guidance until commencement.
-
-3. **No independently verified F1 scores for commercial tools.** Benchmark results for Amazon Comprehend Medical, Azure Health Data Services, and John Snow Labs Healthcare NLP are generated using those tools' default configurations. The maintainers have not independently replicated published F1 scores for these tools. Treat benchmark comparisons as indicative, not authoritative.
-
-4. **Modified Deidentify adapter pending license confirmation.** The Modified Deidentify system (EMNLP 2025) benchmark adapter is included in the repository structure, but the adapter cannot be run until license terms for the underlying model weights are confirmed. This item is marked `[COUNSEL REVIEW REQUIRED]`.
-
-5. **China PIPL layer is structurally separate.** The PIPL layer uses a data processor-centric taxonomy that does not map cleanly onto the HIPAA/GDPR identifier model. Aggregate F1 scores that combine PIPL results with other jurisdictions are methodologically invalid. Any publication using this corpus must report PIPL results separately.
+1. **Clinical plausibility review pending.** Three independent clinician reviewers are required before clinical plausibility can be treated as reviewed evidence.
+2. **Counsel review pending.** Jurisdiction-specific legal basis, synthetic-data posture, and external LLM egress approval require counsel review before higher claim levels.
+3. **Commercial benchmarks pending.** AWS Comprehend Medical, Azure Health, John Snow Labs, and Modified Deidentify remain planned or credential/license-gated.
+4. **Release-manifest boundaries matter.** Tested generators are not described as manifested coverage until registry status and manifest evidence support that claim.
+5. **No compliance certification.** This repository provides evidence artifacts, not regulatory certification.
 
 Additional limitations covering language coverage, image PHI, state-specific formats, private DICOM tags, longitudinal linkability, and baseline benchmark configurations are documented in `docs/KNOWN_LIMITATIONS.md`.
 
 ## Citation
 
-If you use this corpus in research, please cite:
+If you use this corpus in research, please cite the repository and release evidence artifact used for your run:
 
-```
-[Author]. (2026). PHI-Handling-IRB-approval-ready: A multi-jurisdiction synthetic
-PHI test corpus for HIPAA, GDPR, DPDPA, and allied compliance validation [Software].
-https://github.com/brucebanner010198-commits/PHI-Handling-IRB-approval-ready
+```text
+[Author]. (2026). PHI Handling: Evidence-first synthetic PHI corpus,
+benchmark, and runtime safety harness [Software].
+Release evidence: release_evidence.json for the cited run.
 ```
 
 ## Relationship to RePORTaLiN
@@ -256,10 +208,10 @@ This repository is **separate from and not dependent on** the RePORTaLiN-RAG pro
 
 ## Security disclosure
 
-See `SECURITY.md`. Do not file security issues as public GitHub issues.
+Do not file suspected PHI or security leakage as a public GitHub issue. Use a private maintainer contact configured by the project owner; if none is configured, stop distribution and notify the repository owner out of band.
 
 ## License
 
 MIT License. See `LICENSE` for full text.
 
-Notable exceptions: The authority matrix references statutory text which is in the public domain. Research citations in `authorities/citations.bib` are by reference only; their contents remain subject to their respective licenses (typically CC-BY for open access journals).
+Notable exceptions: The authority matrix references statutory text which is in the public domain. Research citations in `authorities/citations.bib` are by reference only; their contents remain subject to their respective licenses.

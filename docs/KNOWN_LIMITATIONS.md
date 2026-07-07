@@ -1,8 +1,8 @@
 # KNOWN_LIMITATIONS.md
 
 **Version:** 2.0.0
-**Last updated:** 2026-06-11
-**Applies to:** PHI-Handling-IRB-approval-ready corpus and benchmark framework
+**Last updated:** 2026-07-06
+**Applies to:** Evidence-first PHI corpus, benchmark, and runtime safety harness
 
 This document records limitations, gaps, and unresolved questions in the corpus and benchmark framework as of the version above. IRB reviewers should read this document before drawing conclusions from any benchmark results produced using this corpus. The authors have stress-tested this work adversarially; what follows is an honest account of what remains incomplete, unverified, or out of scope.
 
@@ -173,6 +173,80 @@ Two empirical claims in the authority matrix rely on sources that had not comple
 Both are cited as directional evidence consistent with the broader de-identification literature. They are not cited as definitive proof. IRB reviewers who require peer-reviewed journal citations for these specific quantitative claims should note this gap and either wait for publication or substitute published alternatives.
 
 No other empirical claims in the authority matrix rely solely on preprint sources. All regulatory citations are to primary sources (Federal Register, Official Gazette, official ICMR publications).
+
+---
+
+## Part 6 -- Evidence and Claim-Level Limitations
+
+### 16. Claim ladder governs public interpretation
+
+The current public claim ladder is:
+
+| Level | Allowed claim | Current status |
+|---|---|---|
+| L0 | Prototype PHI corpus and benchmark harness | Supported |
+| L1 | Reproducible US/HIPAA synthetic benchmark with span-level gold annotations | Strong |
+| L2 | Multi-jurisdiction synthetic PHI benchmark | Partial |
+| L3 | File-format and adversarial PHI benchmark | Partial |
+| L4 | IRB-audit-ready benchmark with clinician/counsel review | Not yet supported |
+| L5 | Market-leading PHI detector or safest AI-powered PHI system | Not yet supported |
+
+The repository must not be interpreted as L4/L5 unless the capability registry, validation reports, strict benchmark artifacts, clinician/counsel status, threat model, and release evidence support that claim. Clinician review, counsel review, and external validation remain PENDING unless a separate durable artifact records completion.
+
+### 17. Evidence commands are required before release claims
+
+Current evidence artifacts should be generated with:
+
+```bash
+python -m harness.generate_corpus --seed 42 --jurisdiction all --out-dir corpus
+python -m harness.run_all_validations --corpus-dir corpus --manifest corpus/MANIFEST.json --output validation_report.json
+python -m benchmarks.presidio_adapter --corpus-dir corpus/us --output-dir benchmarks/results/presidio-stock --profile stock --scoring-profile strict_all_span --verbose
+python -m harness.mia_framework --corpus-dir corpus --output mia_report.json
+python -m harness.release_evidence --corpus-dir corpus --manifest corpus/MANIFEST.json --validation-report validation_report.json --mia-report mia_report.json --output release_evidence.json
+```
+
+These commands provide reproducible structural evidence and release hashes. They do not certify regulatory compliance, complete clinician review, complete counsel review, or prove performance on real clinical distributions.
+
+---
+
+## Part 7 -- CLAUDE.md Build-Plan Gaps (unbuilt scope, not deferred silently)
+
+The original build plan in `CLAUDE.md` Phase 2/3 specified a larger generator and file-format set than currently exists. This section lists exactly what from that plan is NOT built, so the gap is documented rather than silently absent. None of this is scheduled; it is listed here so a reviewer comparing this repo against `CLAUDE.md` does not have to reverse-engineer the delta themselves.
+
+### 18. DPDPA provision-specific generators not built (CLAUDE.md Phase 2)
+
+Only `generators/in/in_dpdpa.py` exists, covering the four DPDP Rules 2025 Rule 14 identifier categories (customer ID file number, acquisition form number, application reference number, enrolment ID). The following generators named in `CLAUDE.md` Phase 2 do not exist:
+- `dpdpa_second_schedule.py` (8-condition research-exemption fixtures)
+- `dpdpa_pediatric_exemption.py` (Fourth Schedule Part A)
+- `dpdpa_algorithmic_dd.py` (Rule 13(3) algorithmic due diligence)
+- `dpdpa_breach_timing.py` (72-hour breach notification)
+- `dpdpa_consent_manager.py` (token-forwarding scenarios)
+
+### 19. ICMR-specific generators not built (CLAUDE.md Phase 2)
+
+No `icmr_*` generator files exist. The four ICMR generators named in the plan are not built:
+- `icmr_risk_categorization.py` (four-tier risk tags)
+- `icmr_vulnerability.py` (legal/clinical/situational vulnerability categories)
+- `icmr_emergency_disclosure.py` (suicidal ideation / HIV / court-order override cases)
+- `icmr_hmsc_international.py` (HMSC international-collaboration metadata)
+
+### 20. Indian identifier generators partially built
+
+`generators/in/in_identifiers.py` covers Aadhaar, PAN, ABHA Number, ABHA Address, Voter ID, CTRI ID, UAN, driving license (single format), and mobile numbers. Not built: `in_ration_card.py` (29 state-variant formats), state-variant driving license beyond one format, and dedicated ESI/CGHS/BPL identifier generators.
+
+### 21. Quasi-identifier layer is US-only
+
+`generators/hipaa_safe_harbor.py` includes `HIPAAQuasiIdentifierGenerator` (profession, city, rare-disease combinations under Sweeney k-anonymity), but the standalone cross-jurisdiction `quasi_identifier_combinations.py` module the plan specified does not exist, so India-side quasi-identifier coverage is absent.
+
+### 22. File-format generators: 5 of 12 built
+
+Built: `xlsx_gen.py`, `dicom_header_gen.py`, `fhir_gen.py`, `eml_gen.py`, `hl7v2_gen.py` (all in `generators/file_formats/`).
+
+Not built: `csv_gen.py`, `pdf_gen.py`, `docx_gen.py`, `cda_gen.py` (HL7 CDA), `exif_gen.py`, `parquet_gen.py`, `sqlite_gen.py`. Any benchmark claim about PDF-, DOCX-, CSV-, CDA-, EXIF-, Parquet-, or SQLite-embedded PHI detection is out of scope until these exist.
+
+### 23. Legacy v1.0.1 corpus import (CLAUDE.md Phase 1) not done
+
+`corpus/legacy_v1.0.1/` does not exist in this repository. The prior 5,942-record / 1,990-gold-span corpus referenced in `CLAUDE.md` has not been imported or reconciled against the current taxonomy.
 
 ---
 

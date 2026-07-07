@@ -1,0 +1,293 @@
+[
+  {
+    "id": "us_hipaa",
+    "kind": "jurisdiction",
+    "status": "manifested",
+    "public_claim": "US/HIPAA synthetic corpus with span-level gold annotations",
+    "authority": ["45 CFR 164.514"],
+    "jurisdiction": "us",
+    "generator": "harness.generate_corpus:build_us_corpus",
+    "output": "corpus/us/*.jsonl"
+  },
+  {
+    "id": "india_dpdpa",
+    "kind": "jurisdiction",
+    "status": "tested",
+    "public_claim": "India DPDPA synthetic generator exists with tests but is not yet in the canonical manifest",
+    "authority": ["DPDPA 2023", "DPDP Rules 2025"],
+    "jurisdiction": "in",
+    "generator": "generators.in.in_dpdpa:IndiaDPDPAGenerator.generate_batch",
+    "output": "corpus/in/india_dpdpa.jsonl"
+  },
+  {
+    "id": "india_identifiers",
+    "kind": "jurisdiction",
+    "status": "tested",
+    "public_claim": "India identifier synthetic generator exists with tests but is not yet in the canonical manifest",
+    "authority": ["DPDPA 2023", "SPDI Rules 2011"],
+    "jurisdiction": "in",
+    "generator": "generators.in.in_identifiers:IndiaIdentifierGenerator.generate_batch",
+    "output": "corpus/in/india_identifiers.jsonl"
+  },
+  {
+    "id": "eu_gdpr",
+    "kind": "jurisdiction",
+    "status": "tested",
+    "public_claim": "EU/GDPR synthetic identifier generator exists with tests but is not yet in the canonical manifest",
+    "authority": ["GDPR Article 4", "GDPR Article 9"],
+    "jurisdiction": "eu",
+    "generator": "generators.eu.eu_gdpr:EUGDPRGenerator.generate_batch",
+    "output": "corpus/eu/eu_identifiers.jsonl"
+  },
+  {
+    "id": "brazil_lgpd",
+    "kind": "jurisdiction",
+    "status": "tested",
+    "public_claim": "Brazil/LGPD synthetic identifier generator exists with tests but is not yet in the canonical manifest",
+    "authority": ["LGPD"],
+    "jurisdiction": "br",
+    "generator": "generators.br.br_lgpd:BrazilLGPDGenerator.generate_batch",
+    "output": "corpus/br/brazil_identifiers.jsonl"
+  },
+  {
+    "id": "australia_privacy",
+    "kind": "jurisdiction",
+    "status": "tested",
+    "public_claim": "Australia Privacy Act synthetic identifier generator exists with tests but is not yet in the canonical manifest",
+    "authority": ["Australia Privacy Act"],
+    "jurisdiction": "au",
+    "generator": "generators.au.au_privacy:AustraliaPrivacyGenerator.generate_batch",
+    "output": "corpus/au/australia_identifiers.jsonl"
+  },
+  {
+    "id": "uganda_dppa",
+    "kind": "jurisdiction",
+    "status": "tested",
+    "public_claim": "Uganda DPPA synthetic identifier generator exists with tests but is not yet in the canonical manifest",
+    "authority": ["Uganda DPPA"],
+    "jurisdiction": "ug",
+    "generator": "generators.ug.ug_dppa:UgandaDPPAGenerator.generate_batch",
+    "output": "corpus/ug/uganda_identifiers.jsonl"
+  },
+  {
+    "id": "canada_pipeda",
+    "kind": "jurisdiction",
+    "status": "planned",
+    "public_claim": "Canada/PIPEDA corpus coverage is planned and not implemented in the canonical generator path",
+    "authority": ["PIPEDA"],
+    "jurisdiction": "ca",
+    "limitations": ["not implemented in canonical generator path"]
+  },
+  {
+    "id": "uk_gdpr",
+    "kind": "jurisdiction",
+    "status": "planned",
+    "public_claim": "UK GDPR corpus coverage is planned and not implemented in the canonical generator path",
+    "authority": ["UK GDPR"],
+    "jurisdiction": "uk",
+    "limitations": ["not implemented in canonical generator path"]
+  },
+  {
+    "id": "singapore_pdpa",
+    "kind": "jurisdiction",
+    "status": "planned",
+    "public_claim": "Singapore PDPA corpus coverage is planned and not implemented in the canonical generator path",
+    "authority": ["Singapore PDPA"],
+    "jurisdiction": "sg",
+    "limitations": ["not implemented in canonical generator path"]
+  },
+  {
+    "id": "japan_appi",
+    "kind": "jurisdiction",
+    "status": "planned",
+    "public_claim": "Japan APPI corpus coverage is planned and not implemented in the canonical generator path",
+    "authority": ["APPI"],
+    "jurisdiction": "jp",
+    "limitations": ["not implemented in canonical generator path"]
+  },
+  {
+    "id": "china_pipl",
+    "kind": "jurisdiction",
+    "status": "planned",
+    "public_claim": "China PIPL corpus coverage is planned and not implemented in the canonical generator path",
+    "authority": ["PIPL"],
+    "jurisdiction": "cn",
+    "limitations": ["not implemented in canonical generator path"]
+  },
+  {
+    "id": "format_dicom_header",
+    "kind": "file_format",
+    "status": "tested",
+    "public_claim": "DICOM header generator is tested but not yet included in the canonical release manifest",
+    "generator": "generators.file_formats.dicom_header_gen:DICOMHeaderGenerator.generate_batch",
+    "output": "corpus/file_formats/dicom_headers.jsonl"
+  },
+  {
+    "id": "format_fhir_r4",
+    "kind": "file_format",
+    "status": "tested",
+    "public_claim": "FHIR R4 generator is tested but not yet included in the canonical release manifest",
+    "generator": "generators.file_formats.fhir_gen:FHIRGenerator.generate_batch",
+    "output": "corpus/file_formats/fhir_bundles.jsonl"
+  },
+  {
+    "id": "format_hl7v2",
+    "kind": "file_format",
+    "status": "tested",
+    "public_claim": "HL7v2 generator is tested but not yet included in the canonical release manifest",
+    "generator": "generators.file_formats.hl7v2_gen:HL7v2Generator.generate_batch",
+    "output": "corpus/file_formats/hl7v2_messages.jsonl"
+  },
+  {
+    "id": "format_eml",
+    "kind": "file_format",
+    "status": "tested",
+    "public_claim": "EML generator is tested but not yet included in the canonical release manifest",
+    "generator": "generators.file_formats.eml_gen:EMLGenerator.generate_batch",
+    "output": "corpus/file_formats/eml_messages.jsonl"
+  },
+  {
+    "id": "format_xlsx",
+    "kind": "file_format",
+    "status": "tested",
+    "public_claim": "XLSX generator is tested but not yet included in the canonical release manifest",
+    "generator": "generators.file_formats.xlsx_gen:XlsxGenerator.generate",
+    "output": "corpus/file_formats/xlsx_phi_corpus.jsonl"
+  },
+  {
+    "id": "format_jsonl",
+    "kind": "file_format",
+    "status": "manifested",
+    "public_claim": "JSONL is the canonical manifested corpus file format",
+    "output": "corpus/**/*.jsonl"
+  },
+  {
+    "id": "format_json",
+    "kind": "file_format",
+    "status": "planned",
+    "public_claim": "JSON corpus export is planned and not generated in the current canonical corpus",
+    "limitations": ["not generated in current canonical corpus"]
+  },
+  {
+    "id": "format_csv",
+    "kind": "file_format",
+    "status": "planned",
+    "public_claim": "CSV corpus export is planned and not generated in the current canonical corpus",
+    "limitations": ["not generated in current canonical corpus"]
+  },
+  {
+    "id": "format_docx",
+    "kind": "file_format",
+    "status": "planned",
+    "public_claim": "DOCX corpus export is planned and not generated in the current canonical corpus",
+    "limitations": ["not generated in current canonical corpus"]
+  },
+  {
+    "id": "format_pdf",
+    "kind": "file_format",
+    "status": "planned",
+    "public_claim": "PDF corpus export is planned and not generated in the current canonical corpus",
+    "limitations": ["not generated in current canonical corpus"]
+  },
+  {
+    "id": "format_hl7_cda",
+    "kind": "file_format",
+    "status": "planned",
+    "public_claim": "HL7 CDA corpus export is planned and not generated in the current canonical corpus",
+    "limitations": ["not generated in current canonical corpus"]
+  },
+  {
+    "id": "format_parquet",
+    "kind": "file_format",
+    "status": "planned",
+    "public_claim": "Parquet corpus export is planned and not generated in the current canonical corpus",
+    "limitations": ["not generated in current canonical corpus"]
+  },
+  {
+    "id": "format_exif",
+    "kind": "file_format",
+    "status": "planned",
+    "public_claim": "EXIF corpus export is planned and not generated in the current canonical corpus",
+    "limitations": ["not generated in current canonical corpus"]
+  },
+  {
+    "id": "benchmark_presidio_stock",
+    "kind": "benchmark",
+    "status": "implemented",
+    "public_claim": "Stock Presidio benchmark path exists but requires clean stock/tuned adapter split before manifested comparison",
+    "limitations": ["requires clean stock/tuned adapter split before manifested comparison"]
+  },
+  {
+    "id": "benchmark_presidio_tuned",
+    "kind": "benchmark",
+    "status": "implemented",
+    "public_claim": "Tuned Presidio benchmark path exists and must be labelled separately from stock Presidio",
+    "limitations": ["custom MBI/VIN recognizers must be labelled tuned"]
+  },
+  {
+    "id": "benchmark_aws_comprehend",
+    "kind": "benchmark",
+    "status": "planned",
+    "public_claim": "AWS Comprehend Medical benchmark is planned and credential-gated",
+    "limitations": ["requires AWS credentials"]
+  },
+  {
+    "id": "benchmark_azure_health",
+    "kind": "benchmark",
+    "status": "planned",
+    "public_claim": "Azure Health benchmark is planned and credential-gated",
+    "limitations": ["requires Azure credentials"]
+  },
+  {
+    "id": "benchmark_john_snow_labs",
+    "kind": "benchmark",
+    "status": "planned",
+    "public_claim": "John Snow Labs Healthcare NLP benchmark is planned and license-gated",
+    "limitations": ["requires John Snow Labs license"]
+  },
+  {
+    "id": "benchmark_modified_deidentify",
+    "kind": "benchmark",
+    "status": "planned",
+    "public_claim": "Modified Deidentify benchmark is planned and license-gated",
+    "limitations": ["requires underlying model license confirmation"]
+  },
+  {
+    "id": "validator_suite",
+    "kind": "validator",
+    "status": "tested",
+    "public_claim": "Standalone validation suite is implemented and covered by corpus validator tests"
+  },
+  {
+    "id": "threat_model",
+    "kind": "security_control",
+    "status": "implemented",
+    "public_claim": "Threat model documentation and release-gate mapping are implemented",
+    "tests": ["tests/test_phi_llm_safety.py", "tests/test_corpus_validators.py"]
+  },
+  {
+    "id": "no_phi_to_llm_boundary",
+    "kind": "security_control",
+    "status": "implemented",
+    "public_claim": "PHI-to-LLM boundary guards exist but are not yet universally wrapped",
+    "limitations": ["existing guards present but not universally wrapped"]
+  },
+  {
+    "id": "mia_framework",
+    "kind": "privacy_attack",
+    "status": "implemented",
+    "public_claim": "Deterministic MIA smoke test for release evidence is implemented"
+  },
+  {
+    "id": "clinician_review",
+    "kind": "review_control",
+    "status": "planned",
+    "public_claim": "Clinician review is planned and not completed"
+  },
+  {
+    "id": "counsel_review",
+    "kind": "review_control",
+    "status": "planned",
+    "public_claim": "Counsel review is planned and not completed"
+  }
+]

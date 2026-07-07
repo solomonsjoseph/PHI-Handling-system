@@ -66,10 +66,10 @@ ai_assistant:
 # Switch provider by setting PHI_LLM_PROVIDER env var, or editing here.
 # ============================================================
 llm:
-  provider: openai-oauth
-  model: gpt-4o
-  api_key_env: ""           # not needed for openai-oauth; set OPENAI_API_KEY for openai provider
-  base_url: http://127.0.0.1:10531/v1
+  provider: none
+  model: none
+  api_key_env: ""
+  base_url: http://localhost:11434
   timeout_s: 60
   max_retries: 3
   confidence_threshold: 0.75  # LLM confidence below this threshold → flag for human review

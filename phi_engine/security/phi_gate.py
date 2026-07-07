@@ -11,11 +11,13 @@ showed precision around 22.7 % on mixed data where the rule catalog +
 clinical allowlist reach materially higher precision on the calibrated
 Indo-VAP field shapes.
 
-The gate is the **defence-in-depth** layer at the trio-bundle → agent
-boundary: every ``@tool`` function in :mod:`scripts.ai_assistant.agent_tools`
-runs its return text through :func:`phi_gate_check` before the string
-reaches the LLM, so even if the offline scrub missed a token the live
-query cannot surface it.
+The gate is the **defence-in-depth** layer at the LLM tool boundary:
+:func:`phi_engine.security.llm_tool_guard.guard_llm_output` calls
+:func:`phi_gate_check` on every payload before it reaches an LLM, so even
+if an upstream scrub missed a token the live call cannot surface it.
+``scripts.ai_assistant.agent_tools`` does not exist in this repository --
+that boundary description belonged to a different (RePORTaLiN-RAG) codebase
+and was left over from an earlier draft of this file.
 
 IRB-grade benchmark anchors:
     * Pillar 2.4 — every tool return passes through a PHI gate

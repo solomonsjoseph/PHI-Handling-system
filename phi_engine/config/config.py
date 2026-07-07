@@ -105,7 +105,7 @@ def strict_study_detection_enabled() -> bool:
 # YAML CONFIG (config/config.yaml — optional overlay)
 # ----------------------------------------------------------------------------
 
-CONFIG_YAML_PATH = Path(__file__).resolve().parent / "config" / "config.yaml"
+CONFIG_YAML_PATH = Path(__file__).resolve().parent / "config.yaml"
 
 
 def _load_yaml_config() -> dict[str, Any]:
@@ -567,6 +567,10 @@ PHI_CONFIDENCE_THRESHOLD: float = _get_env_float(
     "PHI_CONFIDENCE_THRESHOLD", float(yaml_get("llm", "confidence_threshold", default=0.75))
 )
 
+def phi_llm_external_allowed() -> bool:
+    return _get_env_bool("PHI_ALLOW_EXTERNAL_LLM", False)
+
+
 
 class LLMClient:
     """Thin provider-agnostic wrapper with a single .complete(prompt) -> str method.
@@ -604,6 +608,8 @@ class LLMClient:
 
     def complete(self, prompt: str) -> str:
         """Send prompt to LLM and return text response. Raises on unrecoverable error."""
+        if self.provider == "none" or self.model == "none":
+            raise RuntimeError("PHI LLM provider is disabled (provider/model is 'none')")
         dispatch = {
             "anthropic": self._complete_anthropic,
             "openai": self._complete_openai,
@@ -691,6 +697,15 @@ class LLMClient:
 
 def get_llm_client() -> "LLMClient":
     """Return a configured LLMClient using current PHI_LLM_* constants."""
+    external_providers = {
+        "anthropic",
+        "openai",
+        "openai-oauth",
+        "google-genai",
+        "nvidia-ai-endpoints",
+    }
+    if PHI_LLM_PROVIDER in external_providers and not phi_llm_external_allowed():
+        raise RuntimeError("External PHI LLM provider requires PHI_ALLOW_EXTERNAL_LLM=true")
     return LLMClient()
 
 # Qwen3 downgrade ladder — descending parameter count. When Ollama refuses
@@ -938,3 +953,11 @@ def validate_config() -> None:
         "Config loaded | study=%s",
         STUDY_NAME,
     )
+
+    if production_mode_enabled():
+        if yaml_get("security", "encryption", "enabled", default=False) is not True:
+            raise RuntimeError("Production mode requires security.encryption.enabled=true")
+        if yaml_get("security", "rbac", "enabled", default=False) is not True:
+            raise RuntimeError("Production mode requires security.rbac.enabled=true")
+        if PHI_LLM_PROVIDER not in {"none", "ollama", "fake-local"} and not phi_llm_external_allowed():
+            raise RuntimeError("Production mode forbids external PHI LLM providers without PHI_ALLOW_EXTERNAL_LLM=true")

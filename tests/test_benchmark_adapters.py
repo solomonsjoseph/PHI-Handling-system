@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.metrics import BenchmarkResult
+from benchmarks.metrics import BenchmarkResult, PredictedSpan
 
 
 # ---------------------------------------------------------------------------
@@ -218,3 +218,95 @@ class TestPhysioNetDeIDAdapter:
         result = self.adapter.run_all(corpus_dir)
         self.adapter.write_results(result, tmp_path)
         assert (tmp_path / "physionet_benchmark_result.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Presidio adapter profile and artifacts
+# ---------------------------------------------------------------------------
+
+class TestPresidioAdapter:
+
+    def test_stock_and_tuned_instantiate(self):
+        from benchmarks.presidio_adapter import PresidioAdapter
+
+        stock = PresidioAdapter(profile="stock")
+        tuned = PresidioAdapter(profile="tuned")
+
+        assert stock.profile == "stock"
+        assert tuned.profile == "tuned"
+        assert hasattr(stock, "_available")
+        assert hasattr(tuned, "_available")
+
+    def test_bad_profile_raises_value_error(self):
+        from benchmarks.presidio_adapter import PresidioAdapter
+
+        with pytest.raises(ValueError, match="profile must be 'stock' or 'tuned'"):
+            PresidioAdapter(profile="experimental")
+
+    def test_run_all_tool_name_includes_stock_profile(self, corpus_dir, monkeypatch):
+        from benchmarks.presidio_adapter import PresidioAdapter
+
+        adapter = PresidioAdapter(profile="stock")
+        adapter._available = True
+        monkeypatch.setattr(
+            adapter,
+            "analyze_text",
+            lambda text: [PredictedSpan(41, 52, "US_SSN", mapped_type="SSN", mapped_types=frozenset({"SSN"}), score=0.9)],
+        )
+
+        result = adapter.run_all(corpus_dir, scoring_profile="strict_all_span")
+
+        assert result.tool_name.startswith("presidio-stock-")
+        assert result.scoring_profile == "strict_all_span"
+        assert result.strict_all_span.tp == 1
+
+    def test_run_all_tool_name_includes_tuned_profile(self, corpus_dir, monkeypatch):
+        from benchmarks.presidio_adapter import PresidioAdapter
+
+        adapter = PresidioAdapter(profile="tuned")
+        adapter._available = True
+        monkeypatch.setattr(adapter, "analyze_text", lambda text: [])
+
+        result = adapter.run_all(corpus_dir)
+
+        assert result.tool_name.startswith("presidio-tuned-")
+
+    def test_write_results_creates_summary_and_raw_prediction_files(self, corpus_dir, tmp_path, monkeypatch):
+        from benchmarks.presidio_adapter import PresidioAdapter
+
+        adapter = PresidioAdapter(profile="stock")
+        adapter._available = True
+        monkeypatch.setattr(
+            adapter,
+            "analyze_text",
+            lambda text: [PredictedSpan(41, 52, "US_SSN", mapped_type="SSN", mapped_types=frozenset({"SSN"}), score=0.9)],
+        )
+        result = adapter.run_all(corpus_dir, scoring_profile="strict_all_span")
+
+        adapter.write_results(result, tmp_path)
+
+        summary_path = tmp_path / "presidio_stock_benchmark_result.json"
+        raw_path = tmp_path / "presidio_stock_raw_predictions.jsonl"
+        assert summary_path.exists()
+        assert raw_path.exists()
+
+        summary = json.loads(summary_path.read_text())
+        assert summary["scoring_profile"] == "strict_all_span"
+        assert "strict_all_span_f1" in summary
+        assert summary["raw_prediction_artifact"] == raw_path.name
+
+        raw_line = json.loads(raw_path.read_text().splitlines()[0])
+        assert raw_line["record_id"] == "test_001"
+        assert raw_line["gold_count"] == 3
+        assert raw_line["text_sha256"]
+        assert "text" not in raw_line
+        assert raw_line["predictions"] == [
+            {
+                "start": 41,
+                "end": 52,
+                "entity_type": "US_SSN",
+                "mapped_type": "SSN",
+                "mapped_types": ["SSN"],
+                "score": 0.9,
+            }
+        ]

@@ -17,89 +17,276 @@ import hashlib
 import json
 import random
 import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 # Resolve project root (two levels up from this file)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from generators import (
-    HIPAASafeHarborGenerator,
-    HIPAAQuasiIdentifierGenerator,
-    HIPAALDSGenerator,
-    HIPAAReIDCodesGenerator,
-    HIPAAFundraisingGenerator,
-    HIPAAVerificationGenerator,
+    AustraliaPrivacyGenerator,
+    BrazilLGPDGenerator,
+    DICOMHeaderGenerator,
+    EMLGenerator,
+    EUGDPRGenerator,
+    FHIRGenerator,
     HIPAABiometricGenerator,
     HIPAADeviceGenerator,
     HIPAAFaxGenerator,
+    HIPAAFundraisingGenerator,
+    HIPAALDSGenerator,
+    HIPAAQuasiIdentifierGenerator,
+    HIPAAReIDCodesGenerator,
+    HIPAASafeHarborGenerator,
     HIPAAVehicleGenerator,
+    HIPAAVerificationGenerator,
+    HL7v2Generator,
+    IndiaDPDPAGenerator,
+    IndiaIdentifierGenerator,
+    UgandaDPPAGenerator,
+    XlsxGenerator,
 )
 from generators.common import Record, write_jsonl
+from harness.capability_registry import REGISTRY_PATH, STATUS_ORDER, load_capabilities
+
+
+@dataclass(frozen=True)
+class GeneratorSpec:
+    id: str
+    jurisdiction: str
+    output_relpath: str
+    make_records: Callable[[int], list[Record]]
+
+
+def seeded_generator_specs() -> list[GeneratorSpec]:
+    """Return deterministic corpus generator specs in manifest order."""
+    return [
+        GeneratorSpec(
+            "us/hipaa_safe_harbor",
+            "us",
+            "us/hipaa_safe_harbor",
+            lambda seed: HIPAASafeHarborGenerator(seed).generate_batch(10),
+        ),
+        GeneratorSpec(
+            "us/hipaa_quasi_identifiers",
+            "us",
+            "us/hipaa_quasi_identifiers",
+            lambda seed: HIPAAQuasiIdentifierGenerator(seed).generate_batch(50),
+        ),
+        GeneratorSpec(
+            "us/hipaa_lds",
+            "us",
+            "us/hipaa_lds",
+            lambda seed: HIPAALDSGenerator(seed).generate_batch(20),
+        ),
+        GeneratorSpec(
+            "us/hipaa_reid_codes",
+            "us",
+            "us/hipaa_reid_codes",
+            lambda seed: HIPAAReIDCodesGenerator(seed).generate_batch(20),
+        ),
+        GeneratorSpec(
+            "us/hipaa_fundraising",
+            "us",
+            "us/hipaa_fundraising",
+            lambda seed: HIPAAFundraisingGenerator(seed).generate_batch(20),
+        ),
+        GeneratorSpec(
+            "us/hipaa_verification",
+            "us",
+            "us/hipaa_verification",
+            lambda seed: HIPAAVerificationGenerator(seed).generate_batch(20),
+        ),
+        GeneratorSpec(
+            "us/hipaa_biometric",
+            "us",
+            "us/hipaa_biometric",
+            lambda seed: HIPAABiometricGenerator(seed).generate_batch(count_per_mode=4),
+        ),
+        GeneratorSpec(
+            "us/hipaa_device",
+            "us",
+            "us/hipaa_device",
+            lambda seed: HIPAADeviceGenerator(seed).generate_batch(count_per_mode=4),
+        ),
+        GeneratorSpec(
+            "us/hipaa_fax",
+            "us",
+            "us/hipaa_fax",
+            lambda seed: HIPAAFaxGenerator(seed).generate_batch(count_per_mode=4),
+        ),
+        GeneratorSpec(
+            "us/hipaa_vehicle",
+            "us",
+            "us/hipaa_vehicle",
+            lambda seed: HIPAAVehicleGenerator(seed).generate_batch(count_per_mode=4),
+        ),
+        GeneratorSpec(
+            "in/india_dpdpa",
+            "in",
+            "in/india_dpdpa",
+            lambda seed: IndiaDPDPAGenerator(seed).generate_batch(count_per_type=4),
+        ),
+        GeneratorSpec(
+            "in/india_identifiers",
+            "in",
+            "in/india_identifiers",
+            lambda seed: IndiaIdentifierGenerator(seed).generate_batch(count_per_identifier=4),
+        ),
+        GeneratorSpec(
+            "eu/eu_identifiers",
+            "eu",
+            "eu/eu_identifiers",
+            lambda seed: EUGDPRGenerator(seed).generate_batch(count_per_type=4),
+        ),
+        GeneratorSpec(
+            "br/brazil_identifiers",
+            "br",
+            "br/brazil_identifiers",
+            lambda seed: BrazilLGPDGenerator(seed).generate_batch(count_per_type=4),
+        ),
+        GeneratorSpec(
+            "au/australia_identifiers",
+            "au",
+            "au/australia_identifiers",
+            lambda seed: AustraliaPrivacyGenerator(seed).generate_batch(count_per_type=4),
+        ),
+        GeneratorSpec(
+            "ug/uganda_identifiers",
+            "ug",
+            "ug/uganda_identifiers",
+            lambda seed: UgandaDPPAGenerator(seed).generate_batch(count_per_type=4),
+        ),
+        GeneratorSpec(
+            "file_formats/dicom_headers",
+            "file_formats",
+            "file_formats/dicom_headers",
+            lambda seed: DICOMHeaderGenerator(seed).generate_batch(count=20),
+        ),
+        GeneratorSpec(
+            "file_formats/fhir_bundles",
+            "file_formats",
+            "file_formats/fhir_bundles",
+            lambda seed: FHIRGenerator(seed).generate_batch(count=20),
+        ),
+        GeneratorSpec(
+            "file_formats/hl7v2_messages",
+            "file_formats",
+            "file_formats/hl7v2_messages",
+            lambda seed: HL7v2Generator(seed).generate_batch(count=20),
+        ),
+        GeneratorSpec(
+            "file_formats/eml_messages",
+            "file_formats",
+            "file_formats/eml_messages",
+            lambda seed: EMLGenerator(seed).generate_batch(count=20),
+        ),
+        GeneratorSpec(
+            "file_formats/xlsx_phi_corpus",
+            "file_formats",
+            "file_formats/xlsx_phi_corpus",
+            lambda seed: XlsxGenerator(seed).generate(n_per_tier_a=20),
+        ),
+    ]
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _registry_enabled_output_relpaths() -> set[str]:
+    """Return generated output relpaths backed by tested/manifested registry entries."""
+    enabled: set[str] = set()
+    for capability in load_capabilities():
+        if capability.kind not in {"jurisdiction", "file_format"}:
+            continue
+        if STATUS_ORDER[capability.status] < STATUS_ORDER["tested"]:
+            continue
+        if not capability.generator:
+            continue
+        if capability.id == "us_hipaa":
+            enabled.update(
+                spec.output_relpath for spec in seeded_generator_specs() if spec.jurisdiction == "us"
+            )
+            continue
+        output = capability.output
+        if output.startswith("corpus/") and output.endswith(".jsonl"):
+            enabled.add(output[len("corpus/") : -len(".jsonl")])
+    return enabled
+
+
+def run_generator_spec(spec: GeneratorSpec, seed: int, out_dir: Path) -> dict:
+    """Run one deterministic generator spec and write its JSONL output."""
+    records = spec.make_records(seed)
+    path = out_dir / f"{spec.output_relpath}.jsonl"
+    count = write_jsonl(records, path)
+    span_count = sum(len(record.gold_spans) for record in records)
+    file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    errors = []
+    for record in records:
+        record_errors = record.verify_spans()
+        if record_errors:
+            errors.extend(f"{record.record_id}: {error}" for error in record_errors)
+
+    return {
+        "path": _display_path(path),
+        "records": count,
+        "spans": span_count,
+        "sha256": file_hash,
+        "span_errors": errors,
+    }
+
+
+def build_seeded_corpus(seed: int, out_dir: Path, jurisdiction: str) -> dict[str, dict]:
+    """Build deterministic corpus files for one jurisdiction or all registry-backed specs."""
+    supported = {"all", "us", "in", "eu", "br", "au", "ug", "file_formats"}
+    if jurisdiction not in supported:
+        raise SystemExit(f"Unsupported jurisdiction: {jurisdiction}")
+
+    specs = seeded_generator_specs()
+    if jurisdiction == "all":
+        enabled_outputs = _registry_enabled_output_relpaths()
+        selected_specs = [spec for spec in specs if spec.output_relpath in enabled_outputs]
+    else:
+        selected_specs = [spec for spec in specs if spec.jurisdiction == jurisdiction]
+
+    summaries: dict[str, dict] = {}
+    totals: dict[str, dict[str, int | str]] = {}
+    for spec in selected_specs:
+        print_prefix = spec.id
+        summary = run_generator_spec(spec, seed, out_dir)
+        local_name = spec.output_relpath.split("/", 1)[1]
+        jurisdiction_summary = summaries.setdefault(spec.jurisdiction, {})
+        jurisdiction_summary[local_name] = summary
+
+        total = totals.setdefault(
+            spec.jurisdiction,
+            {"records": 0, "spans": 0, "jurisdiction": spec.jurisdiction, "seed": seed},
+        )
+        total["records"] += summary["records"]
+        total["spans"] += summary["spans"]
+
+        status = "OK" if not summary["span_errors"] else f"ERRORS({len(summary['span_errors'])})"
+        print(
+            f"  {print_prefix:35s} {summary['records']:4d} records  "
+            f"{summary['spans']:5d} spans  {status}"
+        )
+
+    for spec_jurisdiction, total in totals.items():
+        summaries[spec_jurisdiction]["__total__"] = total
+    return summaries
 
 
 def build_us_corpus(seed: int, out_dir: Path) -> dict:
-    """Build the full USA/HIPAA corpus layer.
-
-    Returns a summary dict with record counts and per-file hashes.
-    """
-    us_dir = out_dir / "us"
-    us_dir.mkdir(parents=True, exist_ok=True)
-
-    summary = {}
-
-    generators = [
-        ("hipaa_safe_harbor", HIPAASafeHarborGenerator(seed), lambda g: g.generate_batch(10)),
-        ("hipaa_quasi_identifiers", HIPAAQuasiIdentifierGenerator(seed), lambda g: g.generate_batch(50)),
-        ("hipaa_lds", HIPAALDSGenerator(seed), lambda g: g.generate_batch(20)),
-        ("hipaa_reid_codes", HIPAAReIDCodesGenerator(seed), lambda g: g.generate_batch(20)),
-        ("hipaa_fundraising", HIPAAFundraisingGenerator(seed), lambda g: g.generate_batch(20)),
-        ("hipaa_verification", HIPAAVerificationGenerator(seed), lambda g: g.generate_batch(20)),
-        ("hipaa_biometric", HIPAABiometricGenerator(seed), lambda g: g.generate_batch(count_per_mode=4)),
-        ("hipaa_device", HIPAADeviceGenerator(seed), lambda g: g.generate_batch(count_per_mode=4)),
-        ("hipaa_fax", HIPAAFaxGenerator(seed), lambda g: g.generate_batch(count_per_mode=4)),
-        ("hipaa_vehicle", HIPAAVehicleGenerator(seed), lambda g: g.generate_batch(count_per_mode=4)),
-    ]
-
-    total_records = 0
-    total_spans = 0
-
-    for name, gen, fn in generators:
-        records = fn(gen)
-        path = us_dir / f"{name}.jsonl"
-        count = write_jsonl(records, path)
-
-        # Span count and file hash
-        span_count = sum(len(r.gold_spans) for r in records)
-        file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-
-        # Verify all spans
-        errors = []
-        for r in records:
-            errs = r.verify_spans()
-            if errs:
-                errors.extend(f"{r.record_id}: {e}" for e in errs)
-
-        summary[name] = {
-            "path": str(path.relative_to(PROJECT_ROOT)),
-            "records": count,
-            "spans": span_count,
-            "sha256": file_hash,
-            "span_errors": errors,
-        }
-        total_records += count
-        total_spans += span_count
-
-        status = "OK" if not errors else f"ERRORS({len(errors)})"
-        print(f"  {name:35s} {count:4d} records  {span_count:5d} spans  {status}")
-
-    summary["__total__"] = {
-        "records": total_records,
-        "spans": total_spans,
-        "jurisdiction": "us",
-        "seed": seed,
-    }
-    return summary
+    """Build the full USA/HIPAA corpus layer."""
+    return build_seeded_corpus(seed, out_dir, "us")["us"]
 
 
 def build_llm_corpus(
@@ -118,6 +305,12 @@ def build_llm_corpus(
 
     Authority: AUTHORITY_MATRIX.md (all five tables); individual record citations
     trace to specific rows in the matrix.
+
+    Deliberately NOT wrapped with phi_engine.security.llm_tool_guard.guard_llm_output:
+    that guard's phi_gate_check blocks on the exact SSN/MRN/phone/etc. patterns this
+    function is asked to produce, so wiring it here would block the corpus itself.
+    The real-PHI safety net for this path is harness/run_all_validations.py's
+    no_real_phi_static_validator, run over the written corpus after generation.
     """
     from phi_engine.config.config import get_llm_client
 
@@ -295,7 +488,8 @@ def build_manifest(seed: int, summaries: dict, out_dir: Path) -> list:
     all_files = {}
     all_totals = {}
 
-    for jurisdiction, juris_summary in summaries.items():
+    for jurisdiction in sorted(summaries):
+        juris_summary = summaries[jurisdiction]
         for name, info in juris_summary.items():
             if name == "__total__":
                 all_totals[jurisdiction] = info
@@ -311,26 +505,30 @@ def build_manifest(seed: int, summaries: dict, out_dir: Path) -> list:
     manifest = {
         "version": "2.0.0-dev",
         "seed": seed,
-        "jurisdictions": list(summaries.keys()),
+        "jurisdictions": sorted(summaries),
         "files": all_files,
         "totals": all_totals,
         "span_errors": all_errors,
         "validation_status": "PASS" if not all_errors else "FAIL",
+        "claim_level": "L2-partial",
+        "capability_registry_sha256": hashlib.sha256(REGISTRY_PATH.read_bytes()).hexdigest(),
+        "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
 
     manifest_path = out_dir / "MANIFEST.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
     print(f"\nMANIFEST.json written to {manifest_path}")
     return all_errors
 
 
-def main():
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate PHI test corpus")
     parser.add_argument("--seed", type=int, default=42, help="PRNG seed (default: 42)")
     parser.add_argument(
         "--jurisdiction",
         default="us",
-        help="Jurisdiction layer: 'us', 'all', or jurisdiction name for --mode llm (default: us)",
+        help="Jurisdiction layer: 'us', 'all', 'in', 'eu', 'br', 'au', 'ug', or 'file_formats' (default: us)",
     )
     parser.add_argument(
         "--out-dir",
@@ -350,27 +548,25 @@ def main():
         default=50,
         help="Number of records for --mode llm (default: 50)",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     print(f"Generating corpus: seed={args.seed}, jurisdiction={args.jurisdiction}, mode={args.mode}")
     print(f"Output directory: {args.out_dir}")
     print()
 
-    all_summaries = {}
-
     if args.mode == "llm":
         jurisdiction = args.jurisdiction.upper() if args.jurisdiction not in ("us", "all") else "HIPAA"
         print(f"LLM corpus generation: jurisdiction={jurisdiction}, n_records={args.n_records}")
-        all_summaries[jurisdiction.lower()] = build_llm_corpus(
-            args.seed, args.out_dir, jurisdiction=jurisdiction, n_records=args.n_records
-        )
-    elif args.jurisdiction in ("us", "all"):
-        print("USA / HIPAA layer:")
-        all_summaries["us"] = build_us_corpus(args.seed, args.out_dir)
+        all_summaries = {
+            jurisdiction.lower(): build_llm_corpus(
+                args.seed, args.out_dir, jurisdiction=jurisdiction, n_records=args.n_records
+            )
+        }
+    else:
+        all_summaries = build_seeded_corpus(args.seed, args.out_dir, args.jurisdiction)
 
     errors = build_manifest(args.seed, all_summaries, args.out_dir)
 
-    # Totals
     total_records = sum(
         s["__total__"]["records"]
         for s in all_summaries.values()
@@ -386,12 +582,13 @@ def main():
 
     if errors:
         print(f"\nSPAN ERRORS ({len(errors)}):")
-        for e in errors:
-            print(f"  {e}")
-        sys.exit(1)
-    else:
-        print("All span offsets verified. Corpus PASS.")
+        for error in errors:
+            print(f"  {error}")
+        return 1
+
+    print("All span offsets verified. Corpus PASS.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

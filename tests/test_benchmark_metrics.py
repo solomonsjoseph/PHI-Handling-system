@@ -24,6 +24,7 @@ from benchmarks.metrics import (
     SpanScore,
     aggregate_record_scores,
     score_record,
+    score_record_strict_all_span,
 )
 from benchmarks.presidio_adapter import (
     PRESIDIO_COVERABLE,
@@ -205,6 +206,32 @@ class TestScoreRecordOverlap:
         assert rs["fp"] == 1
 
 
+
+
+# ---------------------------------------------------------------------------
+# score_record_strict_all_span
+# ---------------------------------------------------------------------------
+
+class TestScoreRecordStrictAllSpan:
+
+    def test_strict_all_span_counts_gap_as_fn(self):
+        gold = [GoldSpan(0, 17, "VIN", hipaa_category="K", detection_regime="conflict_case")]
+        rs = score_record_strict_all_span(predicted=[], gold=gold)
+        assert rs["tp"] == 0
+        assert rs["fp"] == 0
+        assert rs["fn"] == 1
+        assert rs["per_entity_type"]["VIN"].fn == 1
+
+    def test_strict_all_span_requires_entity_type(self):
+        gold = [GoldSpan(0, 11, "SSN", hipaa_category="G", detection_regime="rule_applicable")]
+        predicted = [PredictedSpan(0, 11, "US_SSN", mapped_type="ACCOUNT_NUMBER")]
+        rs = score_record_strict_all_span(predicted=predicted, gold=gold)
+        assert rs["tp"] == 0
+        assert rs["fn"] == 1
+        assert rs["fp"] == 1
+        assert rs["per_entity_type"]["SSN"].fn == 1
+        assert rs["per_entity_type"]["ACCOUNT_NUMBER"].fp == 1
+
 # ---------------------------------------------------------------------------
 # aggregate_record_scores
 # ---------------------------------------------------------------------------
@@ -243,15 +270,46 @@ class TestAggregateRecordScores:
         result = aggregate_record_scores(scores, tool_name="test")
         d = result.summary_dict()
         required_keys = {
-            "tool", "total_records", "total_gold_spans", "total_predicted_spans",
-            "aggregate_precision", "aggregate_recall", "aggregate_f1", "macro_f1",
-            "gap_span_count", "gap_detection_rate", "coverable_span_count",
-            "per_entity_type", "per_hipaa_category", "per_detection_regime",
-            "gap_entity_types",
+            "tool", "scoring_profile", "total_records", "total_gold_spans",
+            "total_predicted_spans", "aggregate_precision", "aggregate_recall",
+            "aggregate_f1", "macro_f1", "strict_all_span_precision",
+            "strict_all_span_recall", "strict_all_span_f1",
+            "raw_prediction_artifact", "gap_span_count", "gap_detection_rate",
+            "coverable_span_count", "per_entity_type", "per_hipaa_category",
+            "per_detection_regime", "gap_entity_types",
         }
         assert required_keys.issubset(d.keys()), (
             f"Missing keys: {required_keys - d.keys()}"
         )
+
+    def test_summary_dict_includes_strict_fields(self):
+        scores = [
+            {"tp": 0, "fp": 0, "fn": 0,
+             "per_entity_type": {},
+             "per_hipaa_category": {},
+             "per_detection_regime": {},
+             "gap_spans": []},
+        ]
+        strict_scores = [
+            {"tp": 1, "fp": 1, "fn": 2,
+             "per_entity_type": {"SSN": SpanScore(tp=1, fp=1, fn=2)},
+             "per_hipaa_category": {"G": SpanScore(tp=1, fn=2)},
+             "per_detection_regime": {"rule_applicable": SpanScore(tp=1, fn=2)},
+             "gap_spans": []},
+        ]
+        result = aggregate_record_scores(
+            scores,
+            tool_name="test",
+            strict_record_scores=strict_scores,
+            scoring_profile="legacy_overlap_coverable",
+        )
+        result.raw_prediction_artifact = "raw.jsonl"
+        d = result.summary_dict()
+        assert d["scoring_profile"] == "legacy_overlap_coverable"
+        assert d["strict_all_span_precision"] == 0.5
+        assert d["strict_all_span_recall"] == round(1 / 3, 4)
+        assert d["strict_all_span_f1"] == 0.4
+        assert d["raw_prediction_artifact"] == "raw.jsonl"
 
     def test_gap_detection_rate(self):
         scores = [

@@ -100,8 +100,12 @@ Regulation text:
 
 Extracted PHI provisions:"""
 
+    from phi_engine.security.llm_tool_guard import guard_llm_output
+
     client = get_llm_client()
-    return client.complete(prompt)
+    response = client.complete(prompt)
+    guard_llm_output(response)
+    return response
 
 
 def _llm_self_verify(raw_text: str, extracted: str, jurisdiction: str) -> tuple[str, list[str]]:
@@ -133,8 +137,11 @@ Your previous extraction:
 {extracted}
 ---"""
 
+    from phi_engine.security.llm_tool_guard import guard_llm_output
+
     client = get_llm_client()
     response = client.complete(prompt)
+    guard_llm_output(response)
 
     # Parse warnings out of response
     warnings = re.findall(r"(?:MISMATCH|MISSED|INACCURATE)[^\n]*", response)

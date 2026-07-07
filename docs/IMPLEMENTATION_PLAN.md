@@ -1,5 +1,7 @@
 # Comprehensive PHI Corpus and Plugin Integration Plan
 
+> **Historical status (2026-07-06):** This plan is historical and superseded for current execution by the registry/evidence plan tracked through `harness/capability_registry.json`, generated manifests, validation reports, benchmark artifacts, MIA smoke reports, and release evidence. Preserve the content below as historical context; do not treat it as current claim status.
+
 **Phase scope:** 6 representative jurisdictions (one per populated continent) + plugin merge
 **Priority:** PHI leakage prevention > regulatory compliance > accuracy/precision > organization
 **Truth Protocol:** Cited claims have URLs. [UNVERIFIED] = confirm before IRB submission.

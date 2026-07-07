@@ -31,8 +31,8 @@ from .key_rotation import (
     emit_rotation_audit_entry,
     preflight_rotation_gate,
 )
-# ponytail: phi_gate.py referenced in plugin __init__ but absent from plugin source.
-# Remove import until the module is implemented.
+from .llm_source_gate import LeakScanFinding, LeakScanResult, scan_tree_for_phi
+from .phi_gate import PHIGateConfigError, PHIGateResult, phi_gate_check
 from .phi_guard_gate import PHIGuardResult, run_phi_guard_gate
 from .phi_keystore import PHIKeyStore, clear_phi_key, get_phi_key, phi_key_fingerprint
 from .phi_rulebook import RulebookResolution, resolve_rulebook
@@ -89,8 +89,13 @@ __all__ = [  # noqa: RUF022 — grouped by concept for readability, not alphabet
     "kanon_check",
     "mask_small_cell",
     "suppress_small_cells",
-    # PHIGateConfigError/PHIGateResult/phi_gate_check omitted: phi_gate.py not implemented.
+    "PHIGateConfigError",
+    "PHIGateResult",
+    "phi_gate_check",
     # PHI guard gate (Wave 3 C3 — OR-combined Presidio + legacy) + pyCANON
+    "LeakScanFinding",
+    "LeakScanResult",
+    "scan_tree_for_phi",
     "PHIGuardResult",
     "PyCanonGateResult",
     "check_publish_anonymity",

@@ -11,7 +11,7 @@ Every record has:
 - Authority citation on every span
 
 Categories covered (closing prior-corpus gaps):
-- (E) Fax — now distinct from PHONE
+- (E) Fax - now distinct from PHONE
 - (L) Vehicle identifiers including VIN (17-char) and US plate patterns
 - (M) Device identifiers including UDI-DI and serial numbers
 - (N) Web URLs
@@ -132,7 +132,7 @@ def us_fax(rng) -> str:
 
 
 def us_mrn(rng) -> str:
-    """Medical record number — format varies by institution, we simulate several."""
+    """Medical record number - format varies by institution, we simulate several."""
     fmt = rng.choice(["MRN", "PT", "HAR", ""])
     digits = rng.randint(10_000_000, 99_999_999)
     if fmt:
@@ -148,7 +148,7 @@ def us_credit_card(rng) -> str:
 
 
 def us_license_plate(rng) -> str:
-    """US state license plate — simple 3 letters + 4 digits pattern."""
+    """US state license plate - simple 3 letters + 4 digits pattern."""
     letters = "".join(rng.choices(string.ascii_uppercase, k=3))
     digits = "".join(str(rng.randint(0, 9)) for _ in range(4))
     return f"{letters}-{digits}"
@@ -161,7 +161,7 @@ def us_vin(rng) -> str:
 
 
 def us_device_udi(rng) -> str:
-    """UDI-DI format: GS1 / HIBCC / ICCBBA — we use GS1 (01) + 14-digit GTIN."""
+    """UDI-DI format: GS1 / HIBCC / ICCBBA - we use GS1 (01) + 14-digit GTIN."""
     gtin = "".join(str(rng.randint(0, 9)) for _ in range(14))
     return f"(01){gtin}"
 
@@ -187,7 +187,7 @@ def ipv6(rng) -> str:
 
 
 def biometric_reference(rng) -> str:
-    """Biometric identifier reference — format-only (actual biometric data is not text)."""
+    """Biometric identifier reference - format-only (actual biometric data is not text)."""
     kind = rng.choice(["fingerprint", "voice", "retinal", "iris", "DNA"])
     ident = "".join(rng.choices(string.digits, k=16))
     return f"{kind}_template_{ident}"
@@ -230,7 +230,7 @@ def health_plan_beneficiary(rng) -> str:
 
 
 def us_npi(rng) -> str:
-    """National Provider Identifier — 10-digit with Luhn check. Prefix 80840 for ISO."""
+    """National Provider Identifier - 10-digit with Luhn check. Prefix 80840 for ISO."""
     # Actual NPI algorithm prepends 80840 before Luhn
     body = "".join(str(rng.randint(0, 9)) for _ in range(9))
     # For simplicity, we produce Luhn-valid 10-digit numbers

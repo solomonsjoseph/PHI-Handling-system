@@ -153,9 +153,12 @@ def classify_headers(
     # Attempt LLM classification
     results: list[LLMDetectionResult] = []
     try:
+        from phi_engine.security.llm_tool_guard import guard_llm_output
+
         client = get_llm_client()
         prompt = _build_prompt(headers, jurisdiction)
         raw = client.complete(prompt)
+        guard_llm_output(raw)
         parsed = _parse_llm_response(raw, headers)
         for item in parsed:
             results.append(LLMDetectionResult(
