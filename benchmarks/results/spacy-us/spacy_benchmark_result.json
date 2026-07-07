@@ -1,0 +1,734 @@
+{
+  "aggregate_f1": 0.3884,
+  "aggregate_precision": 0.2945,
+  "aggregate_recall": 0.5705,
+  "coverable_span_count": 1120,
+  "gap_detection_rate": 0.1476,
+  "gap_entity_types": [
+    "ABHA_ADDRESS",
+    "ABHA_NUMBER",
+    "BIOMETRIC_DNA_SPECIMEN",
+    "BIOMETRIC_FINGERPRINT_TEMPLATE",
+    "BIOMETRIC_IRIS_TEMPLATE",
+    "BIOMETRIC_VOICE_TEMPLATE",
+    "DEVICE_UDI_GS1",
+    "EMAIL",
+    "FAX",
+    "IN_AADHAAR",
+    "IN_DRIVING_LICENSE_STATE",
+    "IN_ESI",
+    "IN_PAN",
+    "IN_UAN",
+    "IP_V4",
+    "IP_V6",
+    "LICENSE_PLATE",
+    "SSN",
+    "URL",
+    "VIN"
+  ],
+  "gap_span_count": 194,
+  "macro_f1": 0.4938,
+  "per_detection_regime": {
+    "conflict_case": {
+      "f1": 0.6538,
+      "fn": 18,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.4857,
+      "tp": 17
+    },
+    "contextual_ner_required": {
+      "f1": 0.7339,
+      "fn": 417,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5796,
+      "tp": 575
+    },
+    "rule_applicable": {
+      "f1": 0.6714,
+      "fn": 46,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5054,
+      "tp": 47
+    }
+  },
+  "per_entity_type": {
+    "ACCOUNT_NUMBER": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 10
+    },
+    "ADDRESS_CITY": {
+      "f1": 0.8592,
+      "fn": 14,
+      "fp": 6,
+      "precision": 0.9104,
+      "recall": 0.8133,
+      "tp": 61
+    },
+    "ADDRESS_STATE": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 46,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "ADDRESS_STREET": {
+      "f1": 0.8889,
+      "fn": 9,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.8,
+      "tp": 36
+    },
+    "ADDRESS_ZIP": {
+      "f1": 0.6486,
+      "fn": 39,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.48,
+      "tp": 36
+    },
+    "AGE": {
+      "f1": 0.9744,
+      "fn": 1,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.95,
+      "tp": 19
+    },
+    "AGE_OVER_89": {
+      "f1": 0.6667,
+      "fn": 1,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5,
+      "tp": 1
+    },
+    "BADGE_NUMBER": {
+      "f1": 0.75,
+      "fn": 2,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.6,
+      "tp": 3
+    },
+    "BANK_ACCOUNT": {
+      "f1": 0.9474,
+      "fn": 1,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.9,
+      "tp": 9
+    },
+    "BIOMETRIC": {
+      "f1": 0.1818,
+      "fn": 9,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.1,
+      "tp": 1
+    },
+    "BIOMETRIC_ENROLLMENT_ID": {
+      "f1": 0.8571,
+      "fn": 1,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.75,
+      "tp": 3
+    },
+    "BIOMETRIC_FACE_TEMPLATE": {
+      "f1": 0.0,
+      "fn": 4,
+      "fp": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "BIOMETRIC_RETINAL_TEMPLATE": {
+      "f1": 0.4,
+      "fn": 3,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.25,
+      "tp": 1
+    },
+    "CASE_NUMBER": {
+      "f1": 0.75,
+      "fn": 2,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.6,
+      "tp": 3
+    },
+    "CLINICAL_TRIAL_ID": {
+      "f1": 0.4615,
+      "fn": 7,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.3,
+      "tp": 3
+    },
+    "DATE_ADMIT": {
+      "f1": 0.1304,
+      "fn": 25,
+      "fp": 175,
+      "precision": 0.0789,
+      "recall": 0.375,
+      "tp": 15
+    },
+    "DATE_DOB": {
+      "f1": 0.5227,
+      "fn": 42,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.3538,
+      "tp": 23
+    },
+    "DATE_DOB_YEAR_ONLY": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 5
+    },
+    "DATE_SERVICE": {
+      "f1": 0.9831,
+      "fn": 1,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.9667,
+      "tp": 29
+    },
+    "DEPARTMENT": {
+      "f1": 0.8,
+      "fn": 10,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.6667,
+      "tp": 20
+    },
+    "DEVICE_LOT_NUMBER": {
+      "f1": 0.4,
+      "fn": 3,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.25,
+      "tp": 1
+    },
+    "DEVICE_SAMD_VERSION": {
+      "f1": 0.6667,
+      "fn": 2,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5,
+      "tp": 2
+    },
+    "DEVICE_SERIAL": {
+      "f1": 0.2727,
+      "fn": 32,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.1579,
+      "tp": 6
+    },
+    "DEVICE_UDI": {
+      "f1": 0.6667,
+      "fn": 5,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5,
+      "tp": 5
+    },
+    "DEVICE_UDI_HIBCC": {
+      "f1": 0.0,
+      "fn": 8,
+      "fp": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "DEVICE_UDI_ICCBBA": {
+      "f1": 0.0,
+      "fn": 4,
+      "fp": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "DRIVERS_LICENSE": {
+      "f1": 0.0,
+      "fn": 10,
+      "fp": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "FAX_BROADCAST_1": {
+      "f1": 0.6667,
+      "fn": 2,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5,
+      "tp": 2
+    },
+    "FAX_BROADCAST_2": {
+      "f1": 0.4,
+      "fn": 3,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.25,
+      "tp": 1
+    },
+    "FAX_BROADCAST_3": {
+      "f1": 0.6667,
+      "fn": 2,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5,
+      "tp": 2
+    },
+    "FAX_EFAX_NUMBER": {
+      "f1": 0.4,
+      "fn": 3,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.25,
+      "tp": 1
+    },
+    "FAX_HOSPITAL": {
+      "f1": 0.8571,
+      "fn": 1,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.75,
+      "tp": 3
+    },
+    "FAX_INTERNATIONAL": {
+      "f1": 0.4,
+      "fn": 3,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.25,
+      "tp": 1
+    },
+    "FAX_LAB": {
+      "f1": 0.8571,
+      "fn": 1,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.75,
+      "tp": 3
+    },
+    "FAX_PAYER": {
+      "f1": 0.0,
+      "fn": 4,
+      "fp": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "FAX_PCP": {
+      "f1": 0.6667,
+      "fn": 2,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5,
+      "tp": 2
+    },
+    "FAX_PHARMACY": {
+      "f1": 0.6667,
+      "fn": 2,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5,
+      "tp": 2
+    },
+    "FAX_PROVIDER": {
+      "f1": 0.6667,
+      "fn": 4,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5,
+      "tp": 4
+    },
+    "FAX_RADIOLOGY": {
+      "f1": 0.8571,
+      "fn": 1,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.75,
+      "tp": 3
+    },
+    "FAX_RECEIVER": {
+      "f1": 0.0,
+      "fn": 4,
+      "fp": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "FAX_SENDER": {
+      "f1": 0.4,
+      "fn": 3,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.25,
+      "tp": 1
+    },
+    "HEALTH_PLAN_ID": {
+      "f1": 0.7059,
+      "fn": 5,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5455,
+      "tp": 6
+    },
+    "HOSPITAL_NAME": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 599,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "INTERNAL_CODE": {
+      "f1": 0.5714,
+      "fn": 6,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.4,
+      "tp": 4
+    },
+    "LAW": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 1,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "LICENSE_PLATE_VANITY": {
+      "f1": 0.6667,
+      "fn": 2,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5,
+      "tp": 2
+    },
+    "MRN": {
+      "f1": 0.4667,
+      "fn": 32,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.3043,
+      "tp": 14
+    },
+    "NAME_HOUSEHOLD": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 10
+    },
+    "NAME_PATIENT": {
+      "f1": 0.5732,
+      "fn": 0,
+      "fp": 137,
+      "precision": 0.4017,
+      "recall": 1.0,
+      "tp": 92
+    },
+    "NAME_PROVIDER": {
+      "f1": 0.9831,
+      "fn": 2,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.9667,
+      "tp": 58
+    },
+    "NAME_REQUESTOR": {
+      "f1": 0.9831,
+      "fn": 1,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.9667,
+      "tp": 29
+    },
+    "NATIONALITY_RELIGIOUS_POLITICAL": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 17,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "NPI": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 10
+    },
+    "ORDINAL": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 3,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "PERCENT": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 4,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "PHONE": {
+      "f1": 0.5,
+      "fn": 4,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.3333,
+      "tp": 2
+    },
+    "PHONE_HOME": {
+      "f1": 0.6,
+      "fn": 8,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.4286,
+      "tp": 6
+    },
+    "PHONE_REQUESTOR": {
+      "f1": 0.2857,
+      "fn": 25,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.1667,
+      "tp": 5
+    },
+    "PHONE_WORK": {
+      "f1": 0.6667,
+      "fn": 5,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5,
+      "tp": 5
+    },
+    "PHOTO_FULL_FACE": {
+      "f1": 0.4615,
+      "fn": 7,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.3,
+      "tp": 3
+    },
+    "PRODUCT": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 12,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "QUANTITY": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 3,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "QUASI_CITY": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 50
+    },
+    "QUASI_PROFESSION": {
+      "f1": 0.4127,
+      "fn": 37,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.26,
+      "tp": 13
+    },
+    "QUASI_RARE_DISEASE": {
+      "f1": 0.1132,
+      "fn": 47,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.06,
+      "tp": 3
+    },
+    "REID_CODE_FORBIDDEN": {
+      "f1": 0.5714,
+      "fn": 12,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.4,
+      "tp": 8
+    },
+    "REID_CODE_PERMITTED": {
+      "f1": 0.1818,
+      "fn": 18,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.1,
+      "tp": 2
+    },
+    "SSN": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 519,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "WORK_OF_ART": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 9,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    }
+  },
+  "per_hipaa_category": {
+    "A": {
+      "f1": 0.9921,
+      "fn": 3,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.9844,
+      "tp": 189
+    },
+    "B": {
+      "f1": 0.8551,
+      "fn": 62,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.7469,
+      "tp": 183
+    },
+    "C": {
+      "f1": 0.7244,
+      "fn": 70,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5679,
+      "tp": 92
+    },
+    "D": {
+      "f1": 0.4615,
+      "fn": 42,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.3,
+      "tp": 18
+    },
+    "E": {
+      "f1": 0.5882,
+      "fn": 35,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.4167,
+      "tp": 25
+    },
+    "H": {
+      "f1": 0.4667,
+      "fn": 32,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.3043,
+      "tp": 14
+    },
+    "I": {
+      "f1": 0.7059,
+      "fn": 5,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5455,
+      "tp": 6
+    },
+    "J": {
+      "f1": 0.9744,
+      "fn": 1,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.95,
+      "tp": 19
+    },
+    "K": {
+      "f1": 0.6667,
+      "fn": 10,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5,
+      "tp": 10
+    },
+    "L": {
+      "f1": 0.6667,
+      "fn": 2,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.5,
+      "tp": 2
+    },
+    "M": {
+      "f1": 0.3415,
+      "fn": 54,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.2059,
+      "tp": 14
+    },
+    "P": {
+      "f1": 0.3704,
+      "fn": 17,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.2273,
+      "tp": 5
+    },
+    "Q": {
+      "f1": 0.4615,
+      "fn": 7,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.3,
+      "tp": 3
+    },
+    "R": {
+      "f1": 0.6014,
+      "fn": 57,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.43,
+      "tp": 43
+    }
+  },
+  "raw_prediction_artifact": "",
+  "scoring_profile": "legacy_overlap_coverable",
+  "strict_all_span_f1": 0.0,
+  "strict_all_span_precision": 0.0,
+  "strict_all_span_recall": 0.0,
+  "tool": "spacy-en_core_web_sm-3.8.13",
+  "total_gold_spans": 1314,
+  "total_predicted_spans": 2170,
+  "total_records": 550
+}

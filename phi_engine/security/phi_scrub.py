@@ -126,8 +126,8 @@ import re
 import secrets
 import sys
 from collections.abc import Iterable
-from datetime import datetime, timezone
-UTC = timezone.utc  # py3.9 compat, timedelta
+from datetime import datetime, timedelta, timezone
+UTC = timezone.utc  # py3.9 compat
 from pathlib import Path
 from typing import Any
 

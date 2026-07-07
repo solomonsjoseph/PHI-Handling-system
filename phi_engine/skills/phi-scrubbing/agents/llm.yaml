@@ -1,4 +1,0 @@
-interface:
-  display_name: "PHI Scrubbing"
-  short_description: "Fail-closed per-form PHI scrub of staged datasets"
-  default_prompt: "Use $phi-scrubbing to run the fail-closed PHI scrub over the staged dataset JSONL — date jitter, ID pseudonymize, drop/generalize/band, small-cell suppression, quarantine of un-scrubbable rows — rewriting in place and emitting count-only audit ledgers. Defaults to partial-publish-on-review; pass --strict for strict-abort."

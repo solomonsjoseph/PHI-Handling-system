@@ -881,7 +881,7 @@ def _fetch_source_hash(url: str, *, timeout: float = 2.0) -> str | None:
 
 def load_study_privacy_config(study_dir: str | Path) -> StudyPrivacyConfig:
     """Load and validate ``_study_privacy.yaml`` from a raw study directory."""
-    import config
+    import phi_engine.config.config as config
 
     study_path = Path(study_dir)
     # _study_privacy.yaml now lives under config/<study>/ (Note 11), derived from
@@ -1198,14 +1198,32 @@ def _adversarial_header_validation(
     privacy_config: StudyPrivacyConfig,
     rule_bundle: RuleBundle,
 ) -> tuple[str, ...]:
-    """Run header-only adversarial probes without emitting fake row values."""
-    probes = {
+    """Run header-only adversarial probes without emitting fake row values.
+
+    Probe set is jurisdiction-aware (bugfix, standalone refactor 2026-07-07):
+    ``synthetic_aadhaar_header`` names an India-specific government ID
+    (Aadhaar) that only appears in the INDIA rule pack. A single-jurisdiction
+    ``("USA",)`` study is CORRECTLY silent on it -- that is not a rule-bundle
+    defect, so probing for it unconditionally made every USA-only form hold
+    permanently (verified: ``_build_pinned_rules(("USA",))`` classifies
+    ``synthetic_aadhaar_header`` as KEEP, never DROP, by design). The other
+    four probes (participant id / visit date / email / culture result) are
+    genuinely jurisdiction-agnostic -- verified to pass under ``("USA",)``,
+    ``("INDIA",)``, and ``("USA", "INDIA")`` alike -- and stay universal.
+    """
+    universal_probes = {
         "synthetic_participant_id_header": Action.PSEUDONYMIZE,
         "synthetic_visit_date_header": Action.JITTER_DATE,
         "synthetic_email_header": Action.DROP,
-        "synthetic_aadhaar_header": Action.DROP,
         "synthetic_culture_result_header": Action.KEEP,
     }
+    jurisdiction_specific_probes: dict[str, dict[str, Action]] = {
+        "INDIA": {"synthetic_aadhaar_header": Action.DROP},
+    }
+    probes = dict(universal_probes)
+    for jurisdiction in privacy_config.jurisdictions:
+        probes.update(jurisdiction_specific_probes.get(jurisdiction, {}))
+
     classified = classify_headers(tuple(probes), privacy_config, rule_bundle)
     failures = [
         f"adversarial header probe failed: {header}"

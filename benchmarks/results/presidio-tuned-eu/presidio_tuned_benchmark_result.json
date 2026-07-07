@@ -1,0 +1,256 @@
+{
+  "aggregate_f1": 0.5339,
+  "aggregate_precision": 0.4012,
+  "aggregate_recall": 0.7976,
+  "coverable_span_count": 84,
+  "gap_detection_rate": 0.0,
+  "gap_entity_types": [
+    "ABHA_ADDRESS",
+    "ABHA_NUMBER",
+    "AGE_OVER_89",
+    "AUDIT_REQUESTER",
+    "BIOMETRIC_DNA_SPECIMEN",
+    "BIOMETRIC_ENROLLMENT_ID",
+    "BIOMETRIC_FACE_TEMPLATE",
+    "BIOMETRIC_FINGERPRINT_TEMPLATE",
+    "BIOMETRIC_IRIS_TEMPLATE",
+    "BIOMETRIC_RETINAL_TEMPLATE",
+    "BIOMETRIC_VOICE_TEMPLATE",
+    "CTRI_ID",
+    "DEVICE_LOT_NUMBER",
+    "DEVICE_SAMD_VERSION",
+    "DEVICE_SERIAL",
+    "DEVICE_UDI_GS1",
+    "DEVICE_UDI_HIBCC",
+    "DEVICE_UDI_ICCBBA",
+    "DPDPA_ACQUISITION_FORM",
+    "DPDPA_APP_REF",
+    "DPDPA_CUSTOMER_ID",
+    "DPDPA_ENROLMENT_ID",
+    "IN_BPL",
+    "IN_CGHS",
+    "IN_DRIVING_LICENSE_STATE",
+    "IN_ESI",
+    "IN_RATION_CARD",
+    "IN_UAN",
+    "LDS_DISCLOSURE_CODE",
+    "LICENSE_PLATE_VANITY",
+    "MRN",
+    "PHOTO_FULL_FACE",
+    "PHOTO_REFERENCE",
+    "QUASI_PROFESSION",
+    "QUASI_RARE_DISEASE",
+    "REID_CODE_FORBIDDEN",
+    "REID_CODE_PERMITTED",
+    "SUBPOENA_REFERENCE"
+  ],
+  "gap_span_count": 0,
+  "macro_f1": 0.493,
+  "per_detection_regime": {
+    "conflict_case": {
+      "f1": 0.8,
+      "fn": 4,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.6667,
+      "tp": 8
+    },
+    "contextual_ner_required": {
+      "f1": 0.8732,
+      "fn": 9,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.775,
+      "tp": 31
+    },
+    "rule_applicable": {
+      "f1": 0.9333,
+      "fn": 4,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.875,
+      "tp": 28
+    }
+  },
+  "per_entity_type": {
+    "ADDRESS_CITY": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 27,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "BANK_ACCOUNT": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 5,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "BSN_NL": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 4
+    },
+    "CODICE_FISCALE_IT": {
+      "f1": 0.0,
+      "fn": 4,
+      "fp": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "CPR_DK": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 4
+    },
+    "DATE_DEATH_OF_RELATIVE": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 3,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "DATE_OF_BIRTH": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 8
+    },
+    "DNI_ES": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 4
+    },
+    "DRIVERS_LICENSE": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 20,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "FAX": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 6,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "NAME_HOUSEHOLD": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 35,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "NIR_FR": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 4
+    },
+    "PERSONNUMMER_SE": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 4
+    },
+    "PERSON_NAME": {
+      "f1": 0.8732,
+      "fn": 9,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.775,
+      "tp": 31
+    },
+    "PESEL_PL": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 4
+    },
+    "POSTAL_CODE_EU": {
+      "f1": 0.0,
+      "fn": 4,
+      "fp": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "SSN": {
+      "f1": 0.0,
+      "fn": 0,
+      "fp": 4,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "STEUER_ID_DE": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 4
+    }
+  },
+  "per_hipaa_category": {
+    "A": {
+      "f1": 0.8732,
+      "fn": 9,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 0.775,
+      "tp": 31
+    },
+    "B": {
+      "f1": 0.0,
+      "fn": 4,
+      "fp": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "tp": 0
+    },
+    "C": {
+      "f1": 1.0,
+      "fn": 0,
+      "fp": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "tp": 8
+    }
+  },
+  "raw_prediction_artifact": "presidio_tuned_raw_predictions.jsonl",
+  "scoring_profile": "legacy_overlap_coverable",
+  "strict_all_span_f1": 0.0,
+  "strict_all_span_precision": 0.0,
+  "strict_all_span_recall": 0.0,
+  "tool": "presidio-tuned-2.2.363",
+  "total_gold_spans": 84,
+  "total_predicted_spans": 167,
+  "total_records": 40
+}

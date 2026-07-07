@@ -31,9 +31,22 @@ __all__ = [
 
 
 def _resolve_markers() -> tuple[str, str, str, str, str]:
-    """Resolve zone marker paths from config, with fallback for isolated testing."""
+    """Resolve zone marker paths from config, with fallback for isolated testing.
+
+    Standalone refactor (2026-07-07): imports the REAL config module
+    (``phi_engine.config.config``), not a bare ``import config`` -- no such
+    top-level module exists in this package, so that import always raised
+    ``ImportError`` and this resolver silently fell through to the
+    hardcoded-repo-root fallback below. That fallback happened to equal
+    ``config.BASE_DIR`` only because BASE_DIR had no override at the time.
+    Now that ``PHI_WORKSPACE`` can relocate BASE_DIR (see config.py), zone
+    markers MUST track the real, current config module so
+    ``assert_write_zone``/``assert_output_zone`` (called live from
+    ``phi_scrub.run_scrub``) validate against the actual workspace, not a
+    stale path baked in at this module's own directory.
+    """
     try:
-        import config as _cfg
+        import phi_engine.config.config as _cfg
 
         return (
             os.path.realpath(_cfg.RAW_DATA_DIR),

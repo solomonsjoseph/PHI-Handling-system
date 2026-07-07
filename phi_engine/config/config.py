@@ -158,10 +158,34 @@ AGENT_MODEL_ID: str = os.environ.get("REPORTAL_AGENT_MODEL", "claude-opus-4-7")
 # BASE PATHS
 # ----------------------------------------------------------------------------
 
-BASE_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
-# Repo root alias — config.py lives at the repository root, so BASE_DIR *is* the
-# repo root. Several UI/agent artifact-path resolvers reference ``config.REPO_ROOT``;
-# expose it explicitly so those callers resolve against the repo root rather than
+# config.py was ported from the repository root into ``phi_engine/config/``
+# (two directories deeper). ``parents[2]`` walks config.py -> phi_engine/config/
+# -> phi_engine/ -> repo root, restoring the repo-root-relative path contract
+# every other module in this codebase assumes (``secure_env.py``'s zone-marker
+# fallback, ``phi_rulebook.py``'s pinned-seed lookup, ``CONFIG_DEFAULTS_DIR``,
+# STUDY_*_DIR, OUTPUT_DIR, DATA_DIR, TMP_DIR, LOGS_DIR all cascade from this).
+# Discovered 2026-07-07: pre-fix, ``load_scrub_config()`` could never find the
+# packaged defaults (looked one directory too deep) and ``phi_scrub.run_scrub``
+# hard-failed with ``ZoneViolationError`` (its tmp/ staging dir landed under
+# phi_engine/config/tmp/, outside secure_env's real-repo-root tmp/ zone).
+# PHI_WORKSPACE (Standalone refactor, 2026-07-07): when set, relocates the
+# entire runtime tree (data/, output/, tmp/, intake/, organized/, and the
+# per-study config/<study>/ leg -- see _STUDY_CONFIG_ROOT below) to an
+# arbitrary external directory, so this package can be dropped into ANY
+# project and pointed at that project's own workspace with zero code
+# changes. Unset (the default) preserves the original repo-root-relative
+# behavior exactly. CLI subcommands (phi_engine/cli/main.py) set this env
+# var BEFORE importing this module -- the same import-time-resolution
+# pattern harness/run_phi_system.py already used for STUDY_NAME.
+_WORKSPACE_ENV = _get_env("PHI_WORKSPACE")
+BASE_DIR = (
+    Path(_WORKSPACE_ENV).resolve()
+    if _WORKSPACE_ENV
+    else (Path(__file__).resolve().parents[2] if "__file__" in globals() else Path.cwd())
+)
+# Repo root alias — BASE_DIR is resolved to the repo root above. Several
+# UI/agent artifact-path resolvers reference ``config.REPO_ROOT``; expose it
+# explicitly so those callers resolve against the repo root rather than
 # silently falling back to the process CWD via ``getattr(config, "REPO_ROOT", ".")``.
 REPO_ROOT = BASE_DIR
 DATA_DIR = BASE_DIR / "data"
@@ -170,6 +194,10 @@ RAW_DATA_DIR = DATA_DIR / "raw"
 OUTPUT_DIR = BASE_DIR / "output"
 LOGS_DIR = BASE_DIR / ".logs"
 TMP_DIR = BASE_DIR / "tmp"
+# Symlink intake tree (never copies/modifies source bytes) and the
+# organizer's derived-dataset tree -- see phi_engine/pipeline/{intake,organize}.py.
+INTAKE_DIR = BASE_DIR / "intake"
+ORGANIZED_DIR = BASE_DIR / "organized"
 
 
 # ----------------------------------------------------------------------------
@@ -234,16 +262,41 @@ DATASETS_DIR = STUDY_DATA_DIR / "datasets"
 ANNOTATED_PDFS_DIR = STUDY_DATA_DIR / "annotated_pdfs"
 DATA_DICTIONARY_DIR = STUDY_DATA_DIR / "data_dictionary"
 
-# Study config lives in config/<study>/ (underscore-prefixed YAML), separate
-# from raw data (Excel/CSV in data/raw/<study>/datasets/). Note 11.
-CONFIG_DIR = BASE_DIR / "config"
+# Study config lives in phi_engine/config/<study>/ (underscore-prefixed YAML)
+# by default -- separate from raw data (Excel/CSV in data/raw/<study>/datasets/,
+# Note 11). CONFIG_DIR is config.py's OWN directory (not BASE_DIR/"config" —
+# the port merged the original repo-root-level ``config/`` data directory's
+# contents — ``_defaults/``, ``config.yaml`` — directly into
+# ``phi_engine/config/`` alongside config.py itself). ``CONFIG_DEFAULTS_DIR``
+# always stays package-relative (``phi_engine/config/_defaults/``, verified
+# 2026-07-07) — the packaged rule/scrub defaults ship WITH the code and are
+# never workspace-relocated.
+#
+# Per-study config WRITES escape the package when PHI_WORKSPACE is set: a
+# dropped-in deployment must never write generated per-study YAML back into
+# the installed package tree. ``_STUDY_CONFIG_ROOT`` is the single chokepoint
+# both ``STUDY_CONFIG_DIR`` and ``study_config_path()`` resolve against.
+CONFIG_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
 CONFIG_DEFAULTS_DIR = CONFIG_DIR / "_defaults"
-STUDY_CONFIG_DIR = CONFIG_DIR / STUDY_NAME
+_STUDY_CONFIG_ROOT = (Path(_WORKSPACE_ENV) / "config") if _WORKSPACE_ENV else CONFIG_DIR
+STUDY_CONFIG_DIR = _STUDY_CONFIG_ROOT / STUDY_NAME
 
 
 def study_config_path(filename: str, *, study: str | None = None) -> Path:
     """Resolve a per-study config file under config/<study>/ (single chokepoint)."""
-    return CONFIG_DIR / (study or STUDY_NAME) / filename
+    return _STUDY_CONFIG_ROOT / (study or STUDY_NAME) / filename
+
+
+def study_config_dir(study: str | None = None) -> Path:
+    """Resolve the per-study config DIRECTORY (not a file within it).
+
+    Callers that only need the directory (e.g. to bootstrap it) must use
+    this rather than ``study_config_path("", study=...)`` -- ``Path(...) /
+    ""`` is a no-op in pathlib (does not append a segment), so that idiom
+    silently resolves to the STUDY ROOT's PARENT instead of the study's own
+    config directory.
+    """
+    return _STUDY_CONFIG_ROOT / (study or STUDY_NAME)
 
 
 FORMS_MANIFEST_PATH = STUDY_CONFIG_DIR / "_forms_manifest.yaml"
@@ -453,7 +506,7 @@ def phi_scrub_config_path(study: str | None = None) -> Path:
     two (when both exist) happens in ``phi_scrub.load_scrub_config()``; this
     helper only picks the most-specific existing file.
     """
-    per_study = CONFIG_DIR / (study or STUDY_NAME) / PHI_SCRUB_CONFIG_FILENAME
+    per_study = _STUDY_CONFIG_ROOT / (study or STUDY_NAME) / PHI_SCRUB_CONFIG_FILENAME
     if per_study.is_file():
         return per_study
     return CONFIG_DEFAULTS_DIR / PHI_SCRUB_CONFIG_FILENAME
@@ -610,6 +663,21 @@ class LLMClient:
         """Send prompt to LLM and return text response. Raises on unrecoverable error."""
         if self.provider == "none" or self.model == "none":
             raise RuntimeError("PHI LLM provider is disabled (provider/model is 'none')")
+        # Egress gate (closes prior-audit C2 for the pipeline path): scan the
+        # OUTBOUND prompt before it ever reaches a provider. Imported locally
+        # -- phi_engine.security.phi_gate imports this module (config), so a
+        # module-level import here would be circular. Defense-in-depth only:
+        # the primary control is that llm_detector.py/phi_alignment.py build
+        # headers-only prompts in the first place; this backstop exists for
+        # every OTHER caller of LLMClient.complete, present or future.
+        from phi_engine.security.phi_gate import PHIEgressBlockedError, phi_gate_check
+
+        gate = phi_gate_check([prompt])
+        if gate.blocked:
+            raise PHIEgressBlockedError(
+                f"outbound LLM prompt blocked by phi_gate_check; matched pattern "
+                f"categories: {sorted(gate.findings)}"
+            )
         dispatch = {
             "anthropic": self._complete_anthropic,
             "openai": self._complete_openai,
@@ -880,7 +948,7 @@ def ensure_run_directories(study: str | None = None, run_id: str | None = None) 
     import contextlib
 
     active_study = study or STUDY_NAME
-    study_config_dir = CONFIG_DIR / active_study
+    study_config_dir = _STUDY_CONFIG_ROOT / active_study
     staging_root = TMP_DIR / active_study
     staging_datasets = staging_root / "datasets"
     output_dir = OUTPUT_DIR / active_study
@@ -888,7 +956,7 @@ def ensure_run_directories(study: str | None = None, run_id: str | None = None) 
     llm_source = output_dir / "llm_source"
 
     # Non-sensitive parents created first.
-    for path in (OUTPUT_DIR, TMP_DIR, CONFIG_DIR, study_config_dir, staging_root):
+    for path in (OUTPUT_DIR, TMP_DIR, CONFIG_DIR, _STUDY_CONFIG_ROOT, study_config_dir, staging_root):
         path.mkdir(parents=True, exist_ok=True)
 
     sensitive_paths = [

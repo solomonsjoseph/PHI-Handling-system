@@ -38,6 +38,7 @@ from phi_engine.utils.logging_system import get_logger
 logger = get_logger(__name__)
 
 __all__ = [
+    "PHIEgressBlockedError",
     "PHIGateConfigError",
     "PHIGateResult",
     "phi_gate_check",
@@ -46,6 +47,23 @@ __all__ = [
 
 class PHIGateConfigError(ValueError):
     """Raised when the PHI gate is invoked with malformed input."""
+
+
+class PHIEgressBlockedError(PermissionError):
+    """Raised when an outbound LLM prompt trips the PHI gate before dispatch.
+
+    Defense-in-depth on top of the structural headers-only prompt
+    construction (the primary control -- llm_detector.py / phi_alignment.py
+    never place a row value in a prompt to begin with). This is the
+    egress-direction backstop prior-audit finding C2 identified as missing:
+    ``guard_llm_output`` only ever scanned the RETURN value, never the
+    OUTBOUND prompt. The message carries the matched PATTERN CATEGORY only
+    (``PHIGateResult.findings``, e.g. ``AADHAAR``/``EMAIL``) -- never the
+    matched text itself and never a position offset (the underlying
+    ``phi_gate_check`` API does not expose one; do not fabricate one).
+    Known limitation carried from C3: the blocking regex tier has documented
+    false negatives, so this gate is a backstop, not a proof of absence.
+    """
 
 
 @dataclass(frozen=True)

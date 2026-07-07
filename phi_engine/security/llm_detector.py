@@ -140,7 +140,7 @@ def classify_headers(
         headers: Column header names (no data values).
         jurisdiction: Governing regulation (e.g. "HIPAA", "DPDPA", "GDPR").
         review_queue_path: Path to append uncertain cases for human review.
-            Defaults to audit/human_review/llm_uncertain.jsonl relative to cwd.
+            Defaults to ``config.STUDY_AUDIT_DIR/human_review/llm_uncertain.jsonl``.
 
     Returns:
         One LLMDetectionResult per header, in the same order.
@@ -148,7 +148,16 @@ def classify_headers(
     from phi_engine.config.config import PHI_CONFIDENCE_THRESHOLD, get_llm_client
 
     if review_queue_path is None:
-        review_queue_path = Path("audit") / "human_review" / "llm_uncertain.jsonl"
+        # M3 fix (prior audit + standalone refactor 2026-07-07): the old
+        # default (``Path("audit")/"human_review"/"llm_uncertain.jsonl"``)
+        # was relative to the CALLER'S CWD, bypassing zone-guard resolution
+        # entirely -- a review queue could land anywhere depending on how
+        # the process was launched. Resolve through the same zone-guarded
+        # chokepoint every other human-review producer uses.
+        from phi_engine.audit.review_paths import human_review_root
+        from phi_engine.config.config import STUDY_AUDIT_DIR
+
+        review_queue_path = human_review_root(STUDY_AUDIT_DIR) / "llm_uncertain.jsonl"
 
     # Attempt LLM classification
     results: list[LLMDetectionResult] = []

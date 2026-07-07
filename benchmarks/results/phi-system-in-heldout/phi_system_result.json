@@ -1,0 +1,152 @@
+{
+  "ai_layer": {
+    "classifier_path": "phi_review:pinned:INDIA",
+    "header_classification_agreement": 0.7857142857142857,
+    "header_classification_agreement_definition": "binary PHI-vs-non-PHI agreement between phi_review's classified action != 'keep' and the gold column legend's expected_action != 'keep' -- NOT transform-type agreement.",
+    "headers_review_queue": 0,
+    "headers_total": 14,
+    "human_review_rate": 0.0
+  },
+  "dates": {
+    "cells_checked": 174,
+    "interval_preservation_checked": 56,
+    "interval_preservation_preserved": 56,
+    "max_jitter_days": 30,
+    "per_subject_offset_all_constant": true,
+    "per_subject_offset_constant": 60,
+    "per_subject_offset_total": 60,
+    "planted_unparseable_blanked_observed": 2,
+    "shifted": 168,
+    "within_jitter_bound": 174
+  },
+  "fail_closed": {
+    "age_cap_90plus_observed": 1,
+    "age_cap_matches_planted": true,
+    "audit_report_present": true,
+    "blank_matches_planted": true,
+    "blanked_dates_observed": 2,
+    "planted_age_cap_subjects": 1,
+    "planted_orphan_rows": 2,
+    "planted_unparseable_dates": 2,
+    "quarantine_matches_planted": true,
+    "quarantined_rows_observed": 2
+  },
+  "generated_at_utc": "2026-07-07T22:23:23Z",
+  "intake": {
+    "duplicates": 0,
+    "errors": 0,
+    "linked": 3
+  },
+  "jurisdiction": "INDIA",
+  "n_subjects": 60,
+  "pipeline": {
+    "exit_code": 0,
+    "forms_held": [],
+    "forms_processed": [
+      "1A_Screening.jsonl",
+      "2_Demographics.jsonl",
+      "3_Labs.jsonl"
+    ],
+    "guard_failed": false,
+    "guard_ok": true,
+    "jurisdiction": "in",
+    "message": "clean run",
+    "organizer_review_count": 0,
+    "profile_auto_clears": 0,
+    "profile_escalations": 0,
+    "published_count": 3,
+    "review_queue_size": 0,
+    "rulebook_sha256": "2ebcc7a2fa17e53a6f6851d0f92496f48ed9d06e9fd469a00450e331fb7c85ca",
+    "run_id": "20260707T222323Z",
+    "scrub_config_hash": "2cd2ff0d4a5f325c622bf68b5cc201f00d68d849de62d9ec71c12ed360bc26b0",
+    "scrub_raised": null,
+    "sot_generation_error": null,
+    "study": "PaperDemoINHeldout"
+  },
+  "pseudonyms": {
+    "cells_checked": 238,
+    "cross_form_linkage_ok": 60,
+    "cross_form_linkage_subjects_checked": 60,
+    "regex_pass_count": 238,
+    "regex_pass_rate": 1.0
+  },
+  "redaction": {
+    "by_expected_action": {
+      "blank": {
+        "redacted": 2,
+        "total": 2
+      },
+      "cap": {
+        "redacted": 1,
+        "total": 1
+      },
+      "drop": {
+        "redacted": 300,
+        "total": 300
+      },
+      "jitter_date": {
+        "redacted": 168,
+        "total": 174
+      },
+      "pseudonymize": {
+        "redacted": 238,
+        "total": 238
+      },
+      "quarantine_row": {
+        "redacted": 4,
+        "total": 4
+      }
+    },
+    "leaks": [
+      {
+        "column": "VISITDAT",
+        "count": 2,
+        "form": "1A_Screening.jsonl"
+      },
+      {
+        "column": "COLLDAT",
+        "count": 2,
+        "form": "3_Labs.jsonl"
+      },
+      {
+        "column": "TBTXDT",
+        "count": 2,
+        "form": "3_Labs.jsonl"
+      }
+    ],
+    "method": "row-scoped: each ledgered cell's ORIGINAL value is compared only against its own row's post-scrub value at the same column (exact match AND digit-normalized match), not searched across the whole output file -- a whole-file search over-counts false-positive 'leaks' when a short/low-entropy value (a 2-digit age, a jittered date) coincidentally collides with an unrelated subject's value.",
+    "redacted": 713,
+    "redaction_recall": 0.9916550764951322,
+    "total_gold_phi_cells": 719
+  },
+  "residual": {
+    "guard_failed": false,
+    "ok": true
+  },
+  "rulebook_provenance": {
+    "exists": true,
+    "path": "/projectsp/f_wj183_1/work/Solomon/AI-Assisted-projects/PHI-Handling-system/phi_engine/config/_defaults/phi_rulebook/rulebook_v1_INDIA.json",
+    "sha256": "2b236506fbdf2da24dd5757362d9cebba2f6d6eb632ebe759c40b51b7653091a"
+  },
+  "run_id": "20260707T222323Z",
+  "scrub_config_hash": "2cd2ff0d4a5f325c622bf68b5cc201f00d68d849de62d9ec71c12ed360bc26b0",
+  "scrub_outcome": {
+    "partial": true,
+    "partial_forms": {
+      "3_Labs.jsonl": {
+        "columns": [],
+        "elevated": false,
+        "kept": 58,
+        "quarantined": 2,
+        "reasons": [
+          "orphan_no_subject_id:2"
+        ]
+      }
+    },
+    "run_id": "20260707T222323Z",
+    "study": "PaperDemoINHeldout"
+  },
+  "scrub_raised": null,
+  "seed": 1337,
+  "study": "PaperDemoINHeldout"
+}

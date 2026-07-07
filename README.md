@@ -48,6 +48,8 @@ Only these registry entries are claimed as manifested release coverage.
 |---|---|---|---|---|---|---|
 | `format_jsonl` | file_format | manifested |  | JSONL is the canonical manifested corpus file format | `corpus/**/*.jsonl` |  |
 | `us_hipaa` | jurisdiction | manifested | us | US/HIPAA synthetic corpus with span-level gold annotations | `corpus/us/*.jsonl` |  |
+| `india_dpdpa` | jurisdiction | manifested | in | India DPDPA synthetic corpus with span-level gold annotations, present in canonical manifest with PASS validation and end-to-end scrub + benchmark evidence | `corpus/in/india_dpdpa.jsonl` |  |
+| `india_identifiers` | jurisdiction | manifested | in | India identifier synthetic corpus with span-level gold annotations, present in canonical manifest with PASS validation and end-to-end scrub + benchmark evidence | `corpus/in/india_identifiers.jsonl` |  |
 
 ## Tested but not yet release-manifested coverage
 
@@ -60,12 +62,12 @@ These entries have tests or validator support, but they are not claimed as manif
 | `format_fhir_r4` | file_format | tested |  | FHIR R4 generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/fhir_bundles.jsonl` |  |
 | `format_hl7v2` | file_format | tested |  | HL7v2 generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/hl7v2_messages.jsonl` |  |
 | `format_xlsx` | file_format | tested |  | XLSX generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/xlsx_phi_corpus.jsonl` |  |
+| `format_study_tabular` | file_format | tested | in / us | Clinical-study CRF tabular corpus generator (India/USA) is tested but not part of the span-annotated canonical manifest by design (staged per-run, not corpus-generator output; kept OUTSIDE corpus/ to avoid the manifest-agnostic validator sweep) | `benchmarks/results/study_tabular_corpus/` |  |
 | `australia_privacy` | jurisdiction | tested | au | Australia Privacy Act synthetic identifier generator exists with tests but is not yet in the canonical manifest | `corpus/au/australia_identifiers.jsonl` |  |
 | `brazil_lgpd` | jurisdiction | tested | br | Brazil/LGPD synthetic identifier generator exists with tests but is not yet in the canonical manifest | `corpus/br/brazil_identifiers.jsonl` |  |
 | `eu_gdpr` | jurisdiction | tested | eu | EU/GDPR synthetic identifier generator exists with tests but is not yet in the canonical manifest | `corpus/eu/eu_identifiers.jsonl` |  |
-| `india_dpdpa` | jurisdiction | tested | in | India DPDPA synthetic generator exists with tests but is not yet in the canonical manifest | `corpus/in/india_dpdpa.jsonl` |  |
-| `india_identifiers` | jurisdiction | tested | in | India identifier synthetic generator exists with tests but is not yet in the canonical manifest | `corpus/in/india_identifiers.jsonl` |  |
 | `uganda_dppa` | jurisdiction | tested | ug | Uganda DPPA synthetic identifier generator exists with tests but is not yet in the canonical manifest | `corpus/ug/uganda_identifiers.jsonl` |  |
+| `benchmark_phi_engine` | benchmark | tested |  | phi_engine's own detection surface has a tested benchmarks/ adapter, run across all 6 corpus jurisdictions | `benchmarks/results/phi-engine-*/` |  |
 | `validator_suite` | validator | tested |  | Standalone validation suite is implemented and covered by corpus validator tests |  |  |
 
 ## Planned coverage not claimed as implemented
@@ -101,15 +103,72 @@ python -m harness.run_all_validations --corpus-dir corpus --manifest corpus/MANI
 python -m benchmarks.presidio_adapter --corpus-dir corpus/us --output-dir benchmarks/results/presidio-stock --profile stock --scoring-profile strict_all_span --verbose
 python -m harness.mia_framework --corpus-dir corpus --output mia_report.json
 python -m harness.release_evidence --corpus-dir corpus --manifest corpus/MANIFEST.json --validation-report validation_report.json --mia-report mia_report.json --output release_evidence.json
+
+# End-to-end fail-closed scrub system run (India, then USA) -- docs/JURISDICTION_EVIDENCE_REPORT_IN.md / _US.md.
+# Demoted to a benchmark wrapper (standalone refactor): generates the synthetic
+# study, then drives phi_engine exclusively through its public intake_add +
+# run_pipeline entry points -- the same path `python -m phi_engine` below uses.
+python -m harness.run_phi_system --study PaperDemoIN --jurisdiction in --seed 42 --n-subjects 60 --out-dir benchmarks/results/phi-system-in
+python -m harness.run_phi_system --study PaperDemoUS --jurisdiction us --seed 42 --n-subjects 60 --out-dir benchmarks/results/phi-system-us
+
+# Detection benchmark matrix, phi_engine's own surface vs. open-source baselines, all 6 jurisdictions
+python -m benchmarks.phi_engine_adapter --corpus-dir corpus/us --output-dir benchmarks/results/phi-engine-us --verbose
+python -m benchmarks.spacy_adapter --corpus-dir corpus/us --output-dir benchmarks/results/spacy-us --verbose
+python -m benchmarks.collect_results --results-dir benchmarks/results --output benchmarks/results/comparison_table.md
+
+# Camera-ready tables generated ONLY from the artifact JSONs above
+python -m harness.make_paper_assets --results-dir benchmarks/results --out-dir docs/paper_assets
 ```
+
+Note: run under a Python 3.10+ environment (`pyproject.toml` `requires-python = ">=3.10"`); see `docs/paper/PAPER_EVIDENCE_PACK.md` for the exact `.venv` setup this repo's own evidence commands were run under.
+
+## Standalone PHI pipeline (`phi_engine`)
+
+`phi_engine` is a portable package: point it at ANY project's own data with
+`PHI_WORKSPACE` and zero code changes. It never imports `generators` (the
+corpus/benchmark tooling above); the only coupling is the reverse direction
+(the benchmark harness optionally uses `phi_engine` to measure itself).
+
+```bash
+# Symlink-ingest a source tree (never copies/modifies/deletes source bytes).
+python -m phi_engine intake --study MyStudy --source /path/to/raw/data --workspace /path/to/workspace
+
+# Route intake into normalized dataset JSONL (xlsx/xls/csv/json/jsonl/pdf-tables);
+# unrecognized/unparseable files land in a value-free review bucket. Runs
+# automatically on `run` if skipped, but can be run standalone for inspection.
+python -m phi_engine organize --study MyStudy --workspace /path/to/workspace
+
+# Full pipeline: organize (if stale) -> classify (pinned jurisdiction rules,
+# headers-only) -> synthesize the scrub config from the classification ->
+# scrub -> residual PHI guard -> publish. Exit codes: 0 clean, 8 partial
+# (held forms or a non-empty review queue), 5 guard failure, 1 scrub raised,
+# 2 config/input error.
+python -m phi_engine run --study MyStudy --jurisdiction in|us --workspace /path/to/workspace
+
+# List everything awaiting human review (organizer bucket, held forms, LLM
+# uncertain queue) and record a decision. Decisions apply on the NEXT run.
+python -m phi_engine review --study MyStudy --workspace /path/to/workspace list
+python -m phi_engine review --study MyStudy --workspace /path/to/workspace decide --header NOTES --decision keep|drop|override [--action cap|drop|jitter_date|pseudonymize|keep|suppress|generalize]
+
+# Latest run status for a study.
+python -m phi_engine status --study MyStudy --workspace /path/to/workspace
+```
+
+Jurisdiction is `in|us` only -- pinned regulation rules exist solely for
+INDIA/USA (`phi_engine/security/phi_review.py`); other jurisdictions remain
+corpus-side-only (`generators/`). See `docs/STANDALONE_SPEC.md` for the full
+portability/security checklist and `docs/AUDIT_REPORT_2026-07-07_STANDALONE.md`
+for what changed from the prior corpus-coupled driver.
 
 ## Scope and non-claims
 
 ### What it does
 
 - Provides a registry-backed synthetic PHI corpus and safety harness.
-- Provides current manifested release coverage for US/HIPAA JSONL corpus artifacts only.
-- Provides tested, non-manifested generators for India, EU/GDPR, Brazil, Australia, Uganda, DICOM headers, FHIR R4, HL7v2, EML, and XLSX.
+- Provides current manifested release coverage for US/HIPAA and India/DPDPA JSONL corpus artifacts.
+- Provides tested, non-manifested generators for EU/GDPR, Brazil, Australia, Uganda, DICOM headers, FHIR R4, HL7v2, EML, XLSX, and a clinical-study CRF tabular format.
+- Provides an end-to-end fail-closed scrub system run against the tabular format, measured against a gold ledger, for India and USA (`docs/JURISDICTION_EVIDENCE_REPORT_IN.md`, `_US.md`).
+- Provides a detection-benchmark adapter for phi_engine's own pattern-detection surface, run against open-source baselines (Presidio stock/tuned, spaCy) on identical corpora under one scoring protocol (`docs/SOTA_COMPARISON.md`).
 - Provides runtime safety controls intended to prevent PHI from crossing LLM tool boundaries without explicit gates.
 - Provides IRB-review support artifacts and review checklists for future human review.
 
@@ -141,22 +200,25 @@ PHI-Handling-system/
 |   |-- generate_corpus.py           # Seeded corpus generation
 |   |-- run_all_validations.py       # Validation runner
 |   |-- mia_framework.py             # Deterministic MIA smoke test
-|   `-- release_evidence.py          # Release evidence hashing and claim-level summary
+|   |-- release_evidence.py          # Release evidence hashing and claim-level summary
+|   |-- run_phi_system.py            # End-to-end fail-closed scrub system driver
+|   `-- make_paper_assets.py         # Camera-ready tables generated from artifact JSONs only
 |
 |-- corpus/
 |   |-- MANIFEST.json                # Current canonical manifest when generated
-|   `-- us/                          # Manifested US/HIPAA JSONL corpus outputs
+|   `-- us/ in/                      # Manifested US/HIPAA + India/DPDPA JSONL corpus outputs
 |
 |-- generators/                      # Implemented and tested generator code
 |   |-- hipaa_*.py                   # US/HIPAA generator modules
-|   |-- in/ eu/ br/ au/ ug/          # Tested non-US generator modules
-|   `-- file_formats/                # Tested DICOM/FHIR/HL7v2/EML/XLSX modules
+|   |-- in/ eu/ br/ au/ ug/          # Non-US generator modules
+|   |-- file_formats/                # Tested DICOM/FHIR/HL7v2/EML/XLSX modules
+|   `-- study_tabular.py             # Clinical-study CRF tabular generator (India/USA)
 |
 |-- validators/                      # Structural corpus validators
-|-- benchmarks/                      # Benchmark code and result artifacts
+|-- benchmarks/                      # Benchmark adapters (Presidio, spaCy, phi_engine, ...), collect_results.py, and result artifacts
 |-- authorities/                     # Primary legal/research source mapping
-|-- docs/                            # Validation, reproducibility, threat model, and review documents
-|-- phi_engine/                      # Runtime PHI and LLM safety controls
+|-- docs/                            # Validation, reproducibility, threat model, jurisdiction evidence, SOTA comparison, and paper documents
+|-- phi_engine/                      # Runtime PHI and LLM safety controls (scrub, guard gates, header classifier)
 `-- tests/
 ```
 

@@ -1,0 +1,656 @@
+{
+  "au": [
+    {
+      "reason": "requires AWS credentials; pending credentials per registry (planned).",
+      "status": "not_run",
+      "tool": "aws_comprehend_medical"
+    },
+    {
+      "reason": "requires Azure credentials; pending credentials per registry (planned).",
+      "status": "not_run",
+      "tool": "azure_health"
+    },
+    {
+      "reason": "requires CLINIDEID_JAR env var (license-gated Java tool); not set in this environment.",
+      "status": "not_run",
+      "tool": "clinideid"
+    },
+    {
+      "reason": "requires a local model checkpoint path (license-gated); none supplied.",
+      "status": "not_run",
+      "tool": "modified_deidentify"
+    },
+    {
+      "gap_detection_rate": 0.5,
+      "gap_span_count": 28,
+      "legacy_f1": 0.448,
+      "legacy_precision": 0.2887,
+      "legacy_recall": 1.0,
+      "macro_f1": 0.3333,
+      "note": null,
+      "result_file": "benchmarks/results/phi-engine-au/phi_engine_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.366,
+      "strict_precision": 0.2887,
+      "strict_recall": 0.5,
+      "tool": "phi_engine-adapter-v1",
+      "total_gold_spans": 56,
+      "total_records": 28
+    },
+    {
+      "reason": "philter-ucsf 1.0.3 installs from PyPI but is a CLI-only tool (python3 main.py -i ... -o ... -f <config>.json), not a Python library with an importable detect_phi()-style API; its internal module also requires undeclared transitive dependencies (nltk corpora, chardet) beyond a pip install. Confirmed via source inspection (github.com/BCHSI/philter-ucsf) and PyPI docs 2026-07-07; deeper CLI/subprocess integration is out of scope for this evidence pass.",
+      "status": "not_run",
+      "tool": "philter"
+    },
+    {
+      "reason": "requires PHYSIONET_DEID_DIR env var; not set in this environment.",
+      "status": "not_run",
+      "tool": "physionet_deid"
+    },
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.5376,
+      "legacy_precision": 0.3846,
+      "legacy_recall": 0.8929,
+      "macro_f1": 0.3922,
+      "note": null,
+      "result_file": "benchmarks/results/presidio-stock-au/presidio_stock_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "presidio-stock-2.2.363",
+      "total_gold_spans": 56,
+      "total_records": 28
+    },
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.5376,
+      "legacy_precision": 0.3846,
+      "legacy_recall": 0.8929,
+      "macro_f1": 0.3922,
+      "note": null,
+      "result_file": "benchmarks/results/presidio-tuned-au/presidio_tuned_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "presidio-tuned-2.2.363",
+      "total_gold_spans": 56,
+      "total_records": 28
+    },
+    {
+      "reason": "The PyPI package literally named 'pydeid' (0.0.1) is an empty placeholder with no importable submodules -- not the real academic tool. The real pyDeid (GEMINI-Medicine/pyDeid on GitHub, a refactor of the PhysioNet Perl de-identifier) has no PyPI release and its git-installable build did not produce an importable 'pydeid' module in this environment (confirmed by direct install attempt 2026-07-07). Excluded rather than reporting a misleading 0%-recall row for a tool that was never actually exercised.",
+      "status": "not_run",
+      "tool": "pydeid"
+    },
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.4433,
+      "legacy_precision": 0.3116,
+      "legacy_recall": 0.7679,
+      "macro_f1": 0.341,
+      "note": "strict_all_span fields are structurally 0.0 -- this adapter (benchmarks/spacy_adapter.py) does not compute the strict scoring profile, not a measured zero-recall result",
+      "result_file": "benchmarks/results/spacy-au/spacy_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "spacy-en_core_web_sm-3.8.13",
+      "total_gold_spans": 56,
+      "total_records": 28
+    }
+  ],
+  "br": [
+    {
+      "reason": "requires AWS credentials; pending credentials per registry (planned).",
+      "status": "not_run",
+      "tool": "aws_comprehend_medical"
+    },
+    {
+      "reason": "requires Azure credentials; pending credentials per registry (planned).",
+      "status": "not_run",
+      "tool": "azure_health"
+    },
+    {
+      "reason": "requires CLINIDEID_JAR env var (license-gated Java tool); not set in this environment.",
+      "status": "not_run",
+      "tool": "clinideid"
+    },
+    {
+      "reason": "requires a local model checkpoint path (license-gated); none supplied.",
+      "status": "not_run",
+      "tool": "modified_deidentify"
+    },
+    {
+      "gap_detection_rate": 0.5,
+      "gap_span_count": 36,
+      "legacy_f1": 0.8182,
+      "legacy_precision": 0.6923,
+      "legacy_recall": 1.0,
+      "macro_f1": 0.3333,
+      "note": null,
+      "result_file": "benchmarks/results/phi-engine-br/phi_engine_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.5806,
+      "strict_precision": 0.6923,
+      "strict_recall": 0.5,
+      "tool": "phi_engine-adapter-v1",
+      "total_gold_spans": 72,
+      "total_records": 36
+    },
+    {
+      "reason": "philter-ucsf 1.0.3 installs from PyPI but is a CLI-only tool (python3 main.py -i ... -o ... -f <config>.json), not a Python library with an importable detect_phi()-style API; its internal module also requires undeclared transitive dependencies (nltk corpora, chardet) beyond a pip install. Confirmed via source inspection (github.com/BCHSI/philter-ucsf) and PyPI docs 2026-07-07; deeper CLI/subprocess integration is out of scope for this evidence pass.",
+      "status": "not_run",
+      "tool": "philter"
+    },
+    {
+      "reason": "requires PHYSIONET_DEID_DIR env var; not set in this environment.",
+      "status": "not_run",
+      "tool": "physionet_deid"
+    },
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.6439,
+      "legacy_precision": 0.4962,
+      "legacy_recall": 0.9167,
+      "macro_f1": 0.6286,
+      "note": null,
+      "result_file": "benchmarks/results/presidio-stock-br/presidio_stock_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "presidio-stock-2.2.363",
+      "total_gold_spans": 72,
+      "total_records": 36
+    },
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.6439,
+      "legacy_precision": 0.4962,
+      "legacy_recall": 0.9167,
+      "macro_f1": 0.6286,
+      "note": null,
+      "result_file": "benchmarks/results/presidio-tuned-br/presidio_tuned_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "presidio-tuned-2.2.363",
+      "total_gold_spans": 72,
+      "total_records": 36
+    },
+    {
+      "reason": "The PyPI package literally named 'pydeid' (0.0.1) is an empty placeholder with no importable submodules -- not the real academic tool. The real pyDeid (GEMINI-Medicine/pyDeid on GitHub, a refactor of the PhysioNet Perl de-identifier) has no PyPI release and its git-installable build did not produce an importable 'pydeid' module in this environment (confirmed by direct install attempt 2026-07-07). Excluded rather than reporting a misleading 0%-recall row for a tool that was never actually exercised.",
+      "status": "not_run",
+      "tool": "pydeid"
+    },
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.5164,
+      "legacy_precision": 0.3663,
+      "legacy_recall": 0.875,
+      "macro_f1": 0.4911,
+      "note": "strict_all_span fields are structurally 0.0 -- this adapter (benchmarks/spacy_adapter.py) does not compute the strict scoring profile, not a measured zero-recall result",
+      "result_file": "benchmarks/results/spacy-br/spacy_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "spacy-en_core_web_sm-3.8.13",
+      "total_gold_spans": 72,
+      "total_records": 36
+    }
+  ],
+  "eu": [
+    {
+      "reason": "requires AWS credentials; pending credentials per registry (planned).",
+      "status": "not_run",
+      "tool": "aws_comprehend_medical"
+    },
+    {
+      "reason": "requires Azure credentials; pending credentials per registry (planned).",
+      "status": "not_run",
+      "tool": "azure_health"
+    },
+    {
+      "reason": "requires CLINIDEID_JAR env var (license-gated Java tool); not set in this environment.",
+      "status": "not_run",
+      "tool": "clinideid"
+    },
+    {
+      "reason": "requires a local model checkpoint path (license-gated); none supplied.",
+      "status": "not_run",
+      "tool": "modified_deidentify"
+    },
+    {
+      "gap_detection_rate": 0.4286,
+      "gap_span_count": 36,
+      "legacy_f1": 0.4242,
+      "legacy_precision": 0.3333,
+      "legacy_recall": 0.5833,
+      "macro_f1": 0.3542,
+      "note": null,
+      "result_file": "benchmarks/results/phi-engine-eu/phi_engine_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.3333,
+      "strict_precision": 0.3333,
+      "strict_recall": 0.3333,
+      "tool": "phi_engine-adapter-v1",
+      "total_gold_spans": 84,
+      "total_records": 40
+    },
+    {
+      "reason": "philter-ucsf 1.0.3 installs from PyPI but is a CLI-only tool (python3 main.py -i ... -o ... -f <config>.json), not a Python library with an importable detect_phi()-style API; its internal module also requires undeclared transitive dependencies (nltk corpora, chardet) beyond a pip install. Confirmed via source inspection (github.com/BCHSI/philter-ucsf) and PyPI docs 2026-07-07; deeper CLI/subprocess integration is out of scope for this evidence pass.",
+      "status": "not_run",
+      "tool": "philter"
+    },
+    {
+      "reason": "requires PHYSIONET_DEID_DIR env var; not set in this environment.",
+      "status": "not_run",
+      "tool": "physionet_deid"
+    },
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.5339,
+      "legacy_precision": 0.4012,
+      "legacy_recall": 0.7976,
+      "macro_f1": 0.467,
+      "note": null,
+      "result_file": "benchmarks/results/presidio-stock-eu/presidio_stock_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "presidio-stock-2.2.363",
+      "total_gold_spans": 84,
+      "total_records": 40
+    },
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.5339,
+      "legacy_precision": 0.4012,
+      "legacy_recall": 0.7976,
+      "macro_f1": 0.493,
+      "note": null,
+      "result_file": "benchmarks/results/presidio-tuned-eu/presidio_tuned_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "presidio-tuned-2.2.363",
+      "total_gold_spans": 84,
+      "total_records": 40
+    },
+    {
+      "reason": "The PyPI package literally named 'pydeid' (0.0.1) is an empty placeholder with no importable submodules -- not the real academic tool. The real pyDeid (GEMINI-Medicine/pyDeid on GitHub, a refactor of the PhysioNet Perl de-identifier) has no PyPI release and its git-installable build did not produce an importable 'pydeid' module in this environment (confirmed by direct install attempt 2026-07-07). Excluded rather than reporting a misleading 0%-recall row for a tool that was never actually exercised.",
+      "status": "not_run",
+      "tool": "pydeid"
+    },
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.5,
+      "legacy_precision": 0.3693,
+      "legacy_recall": 0.7738,
+      "macro_f1": 0.4981,
+      "note": "strict_all_span fields are structurally 0.0 -- this adapter (benchmarks/spacy_adapter.py) does not compute the strict scoring profile, not a measured zero-recall result",
+      "result_file": "benchmarks/results/spacy-eu/spacy_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "spacy-en_core_web_sm-3.8.13",
+      "total_gold_spans": 84,
+      "total_records": 40
+    }
+  ],
+  "in": [
+    {
+      "reason": "requires AWS credentials; pending credentials per registry (planned).",
+      "status": "not_run",
+      "tool": "aws_comprehend_medical"
+    },
+    {
+      "reason": "requires Azure credentials; pending credentials per registry (planned).",
+      "status": "not_run",
+      "tool": "azure_health"
+    },
+    {
+      "reason": "requires CLINIDEID_JAR env var (license-gated Java tool); not set in this environment.",
+      "status": "not_run",
+      "tool": "clinideid"
+    },
+    {
+      "reason": "requires a local model checkpoint path (license-gated); none supplied.",
+      "status": "not_run",
+      "tool": "modified_deidentify"
+    },
+    {
+      "gap_detection_rate": 0.2857,
+      "gap_span_count": 32,
+      "legacy_f1": 0.5837,
+      "legacy_precision": 0.4444,
+      "legacy_recall": 0.85,
+      "macro_f1": 0.7011,
+      "note": null,
+      "result_file": "benchmarks/results/phi-engine-in/phi_engine_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.5132,
+      "strict_precision": 0.4444,
+      "strict_recall": 0.6071,
+      "tool": "phi_engine-adapter-v1",
+      "total_gold_spans": 112,
+      "total_records": 56
+    },
+    {
+      "reason": "philter-ucsf 1.0.3 installs from PyPI but is a CLI-only tool (python3 main.py -i ... -o ... -f <config>.json), not a Python library with an importable detect_phi()-style API; its internal module also requires undeclared transitive dependencies (nltk corpora, chardet) beyond a pip install. Confirmed via source inspection (github.com/BCHSI/philter-ucsf) and PyPI docs 2026-07-07; deeper CLI/subprocess integration is out of scope for this evidence pass.",
+      "status": "not_run",
+      "tool": "philter"
+    },
+    {
+      "reason": "requires PHYSIONET_DEID_DIR env var; not set in this environment.",
+      "status": "not_run",
+      "tool": "physionet_deid"
+    },
+    {
+      "gap_detection_rate": 0.25,
+      "gap_span_count": 28,
+      "legacy_f1": 0.5645,
+      "legacy_precision": 0.4268,
+      "legacy_recall": 0.8333,
+      "macro_f1": 0.3867,
+      "note": null,
+      "result_file": "benchmarks/results/presidio-stock-in/presidio_stock_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.1014,
+      "strict_precision": 0.0854,
+      "strict_recall": 0.125,
+      "tool": "presidio-stock-2.2.363",
+      "total_gold_spans": 112,
+      "total_records": 56
+    },
+    {
+      "gap_detection_rate": 0.25,
+      "gap_span_count": 28,
+      "legacy_f1": 0.5645,
+      "legacy_precision": 0.4268,
+      "legacy_recall": 0.8333,
+      "macro_f1": 0.3867,
+      "note": null,
+      "result_file": "benchmarks/results/presidio-tuned-in/presidio_tuned_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.1014,
+      "strict_precision": 0.0854,
+      "strict_recall": 0.125,
+      "tool": "presidio-tuned-2.2.363",
+      "total_gold_spans": 112,
+      "total_records": 56
+    },
+    {
+      "reason": "The PyPI package literally named 'pydeid' (0.0.1) is an empty placeholder with no importable submodules -- not the real academic tool. The real pyDeid (GEMINI-Medicine/pyDeid on GitHub, a refactor of the PhysioNet Perl de-identifier) has no PyPI release and its git-installable build did not produce an importable 'pydeid' module in this environment (confirmed by direct install attempt 2026-07-07). Excluded rather than reporting a misleading 0%-recall row for a tool that was never actually exercised.",
+      "status": "not_run",
+      "tool": "pydeid"
+    },
+    {
+      "gap_detection_rate": 0.0714,
+      "gap_span_count": 8,
+      "legacy_f1": 0.4203,
+      "legacy_precision": 0.3246,
+      "legacy_recall": 0.5962,
+      "macro_f1": 0.279,
+      "note": "strict_all_span fields are structurally 0.0 -- this adapter (benchmarks/spacy_adapter.py) does not compute the strict scoring profile, not a measured zero-recall result",
+      "result_file": "benchmarks/results/spacy-in/spacy_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "spacy-en_core_web_sm-3.8.13",
+      "total_gold_spans": 112,
+      "total_records": 56
+    }
+  ],
+  "ug": [
+    {
+      "reason": "requires AWS credentials; pending credentials per registry (planned).",
+      "status": "not_run",
+      "tool": "aws_comprehend_medical"
+    },
+    {
+      "reason": "requires Azure credentials; pending credentials per registry (planned).",
+      "status": "not_run",
+      "tool": "azure_health"
+    },
+    {
+      "reason": "requires CLINIDEID_JAR env var (license-gated Java tool); not set in this environment.",
+      "status": "not_run",
+      "tool": "clinideid"
+    },
+    {
+      "reason": "requires a local model checkpoint path (license-gated); none supplied.",
+      "status": "not_run",
+      "tool": "modified_deidentify"
+    },
+    {
+      "gap_detection_rate": 0.5,
+      "gap_span_count": 28,
+      "legacy_f1": 0.4444,
+      "legacy_precision": 0.2857,
+      "legacy_recall": 1.0,
+      "macro_f1": 0.2,
+      "note": null,
+      "result_file": "benchmarks/results/phi-engine-ug/phi_engine_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.3636,
+      "strict_precision": 0.2857,
+      "strict_recall": 0.5,
+      "tool": "phi_engine-adapter-v1",
+      "total_gold_spans": 56,
+      "total_records": 28
+    },
+    {
+      "reason": "philter-ucsf 1.0.3 installs from PyPI but is a CLI-only tool (python3 main.py -i ... -o ... -f <config>.json), not a Python library with an importable detect_phi()-style API; its internal module also requires undeclared transitive dependencies (nltk corpora, chardet) beyond a pip install. Confirmed via source inspection (github.com/BCHSI/philter-ucsf) and PyPI docs 2026-07-07; deeper CLI/subprocess integration is out of scope for this evidence pass.",
+      "status": "not_run",
+      "tool": "philter"
+    },
+    {
+      "reason": "requires PHYSIONET_DEID_DIR env var; not set in this environment.",
+      "status": "not_run",
+      "tool": "physionet_deid"
+    },
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.5198,
+      "legacy_precision": 0.3802,
+      "legacy_recall": 0.8214,
+      "macro_f1": 0.3727,
+      "note": null,
+      "result_file": "benchmarks/results/presidio-stock-ug/presidio_stock_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "presidio-stock-2.2.363",
+      "total_gold_spans": 56,
+      "total_records": 28
+    },
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.5198,
+      "legacy_precision": 0.3802,
+      "legacy_recall": 0.8214,
+      "macro_f1": 0.3727,
+      "note": null,
+      "result_file": "benchmarks/results/presidio-tuned-ug/presidio_tuned_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "presidio-tuned-2.2.363",
+      "total_gold_spans": 56,
+      "total_records": 28
+    },
+    {
+      "reason": "The PyPI package literally named 'pydeid' (0.0.1) is an empty placeholder with no importable submodules -- not the real academic tool. The real pyDeid (GEMINI-Medicine/pyDeid on GitHub, a refactor of the PhysioNet Perl de-identifier) has no PyPI release and its git-installable build did not produce an importable 'pydeid' module in this environment (confirmed by direct install attempt 2026-07-07). Excluded rather than reporting a misleading 0%-recall row for a tool that was never actually exercised.",
+      "status": "not_run",
+      "tool": "pydeid"
+    },
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.4419,
+      "legacy_precision": 0.3276,
+      "legacy_recall": 0.6786,
+      "macro_f1": 0.3048,
+      "note": "strict_all_span fields are structurally 0.0 -- this adapter (benchmarks/spacy_adapter.py) does not compute the strict scoring profile, not a measured zero-recall result",
+      "result_file": "benchmarks/results/spacy-ug/spacy_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "spacy-en_core_web_sm-3.8.13",
+      "total_gold_spans": 56,
+      "total_records": 28
+    }
+  ],
+  "us": [
+    {
+      "reason": "requires AWS credentials; pending credentials per registry (planned).",
+      "status": "not_run",
+      "tool": "aws_comprehend_medical"
+    },
+    {
+      "reason": "requires Azure credentials; pending credentials per registry (planned).",
+      "status": "not_run",
+      "tool": "azure_health"
+    },
+    {
+      "reason": "requires CLINIDEID_JAR env var (license-gated Java tool); not set in this environment.",
+      "status": "not_run",
+      "tool": "clinideid"
+    },
+    {
+      "reason": "requires a local model checkpoint path (license-gated); none supplied.",
+      "status": "not_run",
+      "tool": "modified_deidentify"
+    },
+    {
+      "gap_detection_rate": 0.5928,
+      "gap_span_count": 779,
+      "legacy_f1": 0.6029,
+      "legacy_precision": 0.4733,
+      "legacy_recall": 0.8299,
+      "macro_f1": 0.659,
+      "note": null,
+      "result_file": "benchmarks/results/phi-engine-us/phi_engine_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.373,
+      "strict_precision": 0.4478,
+      "strict_recall": 0.3196,
+      "tool": "phi_engine-adapter-v1",
+      "total_gold_spans": 1314,
+      "total_records": 550
+    },
+    {
+      "reason": "philter-ucsf 1.0.3 installs from PyPI but is a CLI-only tool (python3 main.py -i ... -o ... -f <config>.json), not a Python library with an importable detect_phi()-style API; its internal module also requires undeclared transitive dependencies (nltk corpora, chardet) beyond a pip install. Confirmed via source inspection (github.com/BCHSI/philter-ucsf) and PyPI docs 2026-07-07; deeper CLI/subprocess integration is out of scope for this evidence pass.",
+      "status": "not_run",
+      "tool": "philter"
+    },
+    {
+      "reason": "requires PHYSIONET_DEID_DIR env var; not set in this environment.",
+      "status": "not_run",
+      "tool": "physionet_deid"
+    },
+    {
+      "gap_detection_rate": 0.2466,
+      "gap_span_count": 324,
+      "legacy_f1": 0.5456,
+      "legacy_precision": 0.426,
+      "legacy_recall": 0.7586,
+      "macro_f1": 0.6447,
+      "note": null,
+      "result_file": "benchmarks/results/presidio-stock-us/presidio_stock_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.3178,
+      "strict_precision": 0.2774,
+      "strict_recall": 0.3721,
+      "tool": "presidio-stock-2.2.363",
+      "total_gold_spans": 1314,
+      "total_records": 550
+    },
+    {
+      "gap_detection_rate": 0.2466,
+      "gap_span_count": 324,
+      "legacy_f1": 0.5703,
+      "legacy_precision": 0.4409,
+      "legacy_recall": 0.8071,
+      "macro_f1": 0.6856,
+      "note": null,
+      "result_file": "benchmarks/results/presidio-tuned-us/presidio_tuned_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.3442,
+      "strict_precision": 0.2969,
+      "strict_recall": 0.4094,
+      "tool": "presidio-tuned-2.2.363",
+      "total_gold_spans": 1314,
+      "total_records": 550
+    },
+    {
+      "reason": "The PyPI package literally named 'pydeid' (0.0.1) is an empty placeholder with no importable submodules -- not the real academic tool. The real pyDeid (GEMINI-Medicine/pyDeid on GitHub, a refactor of the PhysioNet Perl de-identifier) has no PyPI release and its git-installable build did not produce an importable 'pydeid' module in this environment (confirmed by direct install attempt 2026-07-07). Excluded rather than reporting a misleading 0%-recall row for a tool that was never actually exercised.",
+      "status": "not_run",
+      "tool": "pydeid"
+    },
+    {
+      "gap_detection_rate": 0.1476,
+      "gap_span_count": 194,
+      "legacy_f1": 0.3884,
+      "legacy_precision": 0.2945,
+      "legacy_recall": 0.5705,
+      "macro_f1": 0.4938,
+      "note": "strict_all_span fields are structurally 0.0 -- this adapter (benchmarks/spacy_adapter.py) does not compute the strict scoring profile, not a measured zero-recall result",
+      "result_file": "benchmarks/results/spacy-us/spacy_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "spacy-en_core_web_sm-3.8.13",
+      "total_gold_spans": 1314,
+      "total_records": 550
+    }
+  ]
+}

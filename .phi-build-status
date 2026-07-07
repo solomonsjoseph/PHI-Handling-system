@@ -1,8 +1,8 @@
-phase: 3
-last_completed_phase: 3_multi_jurisdiction_plus_file_formats_plus_phi_engine
-last_updated: 2026-06-29T00:00:00Z
+phase: 4
+last_completed_phase: 4_multi_jurisdiction_tabular_scrub_system_run_plus_detection_benchmark
+last_updated: 2026-07-07T15:40:00Z
 branch: feat/v2-multi-jurisdiction
-next_action: Tier 4 -- evidence registry, validators, strict benchmark protocol, and PHI/LLM boundary verification
+next_action: Phase 5 -- clinician review, counsel review, commercial benchmark credentials, i2b2 DUA (all tracked below as open blockers, none started)
 
 notes: |
   Phase 2 USA Tier 1 COMPLETE. All tests pass (73/73). Corpus PASS.
@@ -105,8 +105,91 @@ Tier 2 benchmark results (Presidio, seed=42, strategy=overlap, threshold=0.5):
     benchmarks/presidio_adapter.py -- Presidio adapter with entity type mapping
     tests/test_benchmark_metrics.py -- 30 tests covering scoring engine + mapping consistency
 
+Phase 4 (2026-07-07, this session) -- multi-jurisdiction tabular scrub system run + detection benchmark:
+
+  Corpus refresh (seed 42, --jurisdiction all): 886 records, 2506 spans, validation_status PASS,
+  MIA attack_auc 0.4162. Unchanged totals confirm no generator drift since 2026-06-29.
+
+  NEW: generators/study_tabular.py -- IndiaStudyTabularGenerator + USStudyTabularGenerator,
+  CRF tabular corpus (3 forms/subject, 60 subjects), registry format_study_tabular status=tested.
+  17 tests (tests/test_study_tabular.py).
+
+  NEW: harness/run_phi_system.py -- end-to-end fail-closed scrub driver, no existing equivalent.
+  Runs: PaperDemoIN (seed 42), PaperDemoUS (seed 42), PaperDemoINHeldout (seed 1337, anti-tuning
+  replication -- byte-identical measured outcome to seed 42). Results:
+    redaction_recall: India 99.17% (713/719), USA 99.58% (716/719) -- all unredacted cells
+      explained (zero-jitter-offset dates, a disclosed 1/61 property, not a detection miss).
+    pseudonym regex compliance: 238/238 (100%) both jurisdictions; cross-form linkage 60/60 subjects.
+    fail-closed edge cases: quarantine 2/2, blank 2/2, age-cap 1/1 -- matched in every run.
+    residual PHI findings: 0 (presidio + legacy value-free scanners, OR-combined) in every run.
+    human_review_rate: 0.0%; classifier_path: fallback (llm.provider: none, GR-1 held, no cloud LLM).
+  Full detail: docs/JURISDICTION_EVIDENCE_REPORT_IN.md, docs/JURISDICTION_EVIDENCE_REPORT_US.md.
+  2 tests (tests/test_run_phi_system.py, n_subjects=8 smoke, both jurisdictions).
+
+  Three porting-gap bugs found and fixed while making run_phi_system call phi_scrub.run_scrub
+  directly (full detail: JURISDICTION_EVIDENCE_REPORT_IN.md Section 4):
+    1. phi_engine/config/config.py BASE_DIR resolved one directory too deep post-port
+       (CONFIG_DEFAULTS_DIR unreachable; assert_write_zone hard-failed on every scrub call).
+    2. phi_engine/security/phi_scrub.py missing `timedelta` import (NameError on every date jitter).
+    3. scripts/extraction/forms_manifest.py -- new minimal shim; run_scrub's unconditional import
+       of the un-ported extraction pipeline's forms-manifest gate had no home in this repo.
+  Zero test regressions from any of the three fixes (308 -> 331 passed across this session,
+  all new tests, no prior test broken).
+
+  A measurement-methodology bug (in this session's OWN new code, not phi_engine) was also found
+  and fixed: the first redaction-recall pass used a whole-file substring search (false positives
+  on low-entropy values) and mis-scoped AGE as always-must-change (HIPAA only requires capping
+  >89). Fixed to a row-scoped comparison + per-row AGE-cap ledger override; recall moved from
+  0.8445 (flawed) to 0.9917 (correct) on the identical run.
+
+  NEW: benchmarks/phi_engine_adapter.py -- phi_engine's own detection surface (presidio_gate
+  BLOCKING_PATTERNS + direct WARN_PATTERNS scan) exposed as a benchmarks/ adapter for the first
+  time (Ground truth at session start: "No adapter exists for phi_engine's own detection surface").
+  4 tests (tests/test_phi_engine_adapter.py).
+
+  NEW: benchmarks/collect_results.py -- comparison_table.md/.json across all tools x jurisdictions,
+  not_run rows carry a precise reason (never a faked result).
+
+  NEW: harness/make_paper_assets.py -- table_corpus/table_system/table_benchmark, .md + booktabs
+  .tex, read ONLY from artifact JSONs.
+
+  Detection benchmark matrix (6 jurisdictions x {presidio-stock, presidio-tuned, spacy, phi_engine}):
+  all 24 runs succeeded. phi_engine's own surface has the highest strict-protocol F1 of every
+  fully-run tool on all 6 jurisdictions (0.51 vs Presidio's 0.10 on India; 0.37 vs 0.32/0.34 on
+  USA), at the cost of a higher structural-gap rate on US (59.3% vs 24.7%) -- fewer HIPAA
+  categories covered overall, higher precision on the categories it does cover.
+  Full detail + all 6 comparison tables: benchmarks/results/comparison_table.md, docs/SOTA_COMPARISON.md.
+
+  philter-ucsf and pydeid investigated in depth (installed, tested, web-researched): both
+  confirmed non-functional for this adapter contract in this environment (philter-ucsf is a
+  CLI-only tool with no importable detect_phi()-style API and undeclared nltk/chardet deps;
+  the PyPI "pydeid" package is an empty 0.0.1 placeholder unrelated to the real GEMINI-Medicine
+  academic tool, which has no PyPI release). Recorded not_run with the precise reason each time,
+  never a faked zero-recall row. clinideid/physionet_deid/modified_deidentify remain env/license-
+  gated (unchanged from Tier 2); AWS/Azure remain credential-gated (unchanged).
+
+  Registry promotions: india_dpdpa, india_identifiers -> manifested (present in canonical
+  manifest, validation PASS, end-to-end scrub + benchmark evidence now exists).
+  format_study_tabular, benchmark_phi_engine -> tested. README.md updated to match (Manifested
+  coverage table, Evidence commands, What it does).
+
+  Full test suite: .venv/bin/python -m pytest -q -> 331 passed (308 baseline + 17 + 2 + 4 new),
+  zero regressions across every full-suite run this session. NOTE: system python/python3 is 3.9.21,
+  incompatible with this codebase (requires-python >=3.10, PEP 604 isinstance syntax); all commands
+  this session ran under a uv-managed Python 3.12.13 .venv -- see docs/paper/PAPER_EVIDENCE_PACK.md.
+
+  Publication pack: docs/paper/manuscript.md (full draft), docs/paper/PAPER_EVIDENCE_PACK.md
+  (claim -> artifact -> command map), docs/SOTA_COMPARISON.md (14 systems, every number verified
+  against its primary source via web search 2026-07-07; one correction made to the original
+  evidence-plan draft's DeIDClinic/RoBERTa citation -- see SOTA_COMPARISON.md Section 1).
+
 open_blockers:
-  - Clinician reviewer access (Sir must arrange)
-  - AWS/Azure/JSL credentials: benchmark adapters need confirmation
-  - Modified Deidentify license: pending
-  - Presidio MBI regex mismatch: verify us_health_plan_beneficiary() format
+  - Clinician reviewer access (unchanged, unassigned).
+  - Counsel review (unchanged, unassigned).
+  - AWS/Azure/John Snow Labs credentials: benchmark adapters need confirmation (unchanged).
+  - Modified Deidentify license: pending (unchanged).
+  - i2b2 2014 DUA: gated future step for third-party real-corpus validation; not started.
+  - philter-ucsf / pydeid: real Python-API integration (beyond this session's not_run finding)
+    would need either CLI/subprocess wrapping (philter-ucsf) or a from-source academic-tool
+    integration (pyDeid, GEMINI-Medicine/pyDeid on GitHub) -- both out of scope this session.
+  - US held-out-seed replication (only India was seed-replicated this session, per plan scope).

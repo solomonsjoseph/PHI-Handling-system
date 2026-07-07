@@ -12,8 +12,8 @@
   {
     "id": "india_dpdpa",
     "kind": "jurisdiction",
-    "status": "tested",
-    "public_claim": "India DPDPA synthetic generator exists with tests but is not yet in the canonical manifest",
+    "status": "manifested",
+    "public_claim": "India DPDPA synthetic corpus with span-level gold annotations, present in the canonical manifest with PASS validation and end-to-end scrub + benchmark evidence (docs/JURISDICTION_EVIDENCE_REPORT_IN.md)",
     "authority": ["DPDPA 2023", "DPDP Rules 2025"],
     "jurisdiction": "in",
     "generator": "generators.in.in_dpdpa:IndiaDPDPAGenerator.generate_batch",
@@ -22,8 +22,8 @@
   {
     "id": "india_identifiers",
     "kind": "jurisdiction",
-    "status": "tested",
-    "public_claim": "India identifier synthetic generator exists with tests but is not yet in the canonical manifest",
+    "status": "manifested",
+    "public_claim": "India identifier synthetic corpus with span-level gold annotations, present in the canonical manifest with PASS validation and end-to-end scrub + benchmark evidence (docs/JURISDICTION_EVIDENCE_REPORT_IN.md)",
     "authority": ["DPDPA 2023", "SPDI Rules 2011"],
     "jurisdiction": "in",
     "generator": "generators.in.in_identifiers:IndiaIdentifierGenerator.generate_batch",
@@ -289,5 +289,61 @@
     "kind": "review_control",
     "status": "planned",
     "public_claim": "Counsel review is planned and not completed"
+  },
+  {
+    "id": "format_study_tabular",
+    "kind": "file_format",
+    "status": "tested",
+    "public_claim": "Clinical-study CRF tabular corpus generator (India/USA) is tested (tests/test_study_tabular.py) but not part of the span-annotated canonical manifest",
+    "authority": ["DPDPA 2023", "DPDP Rules 2025 Rule 14", "SPDI Rules 2011 Rule 3", "ICMR 2017 Section 2.3.5", "45 CFR 164.514(b)(2)"],
+    "generator": "generators.study_tabular:IndiaStudyTabularGenerator.generate_study",
+    "output": "benchmarks/results/study_tabular_corpus/",
+    "tests": ["tests/test_study_tabular.py"],
+    "limitations": ["not wired into seeded_generator_specs() -- staged per-run by harness.run_phi_system, not part of the span-annotated canonical corpus"]
+  },
+  {
+    "id": "benchmark_phi_engine",
+    "kind": "benchmark",
+    "status": "tested",
+    "public_claim": "phi_engine's own detection surface (presidio_gate + phi_gate pattern matching) has a benchmarks/ adapter, tested (tests/test_phi_engine_adapter.py) and run across all 6 corpus jurisdictions (benchmarks/results/comparison_table.md)",
+    "tests": ["tests/test_phi_engine_adapter.py"],
+    "limitations": ["unmapped BLOCKING_PATTERNS/WARN_PATTERNS names count as UNKNOWN (FP under strict scoring)"]
+  },
+  {
+    "id": "intake_symlink",
+    "kind": "security_control",
+    "status": "implemented",
+    "public_claim": "Symlink-only ingestion (phi_engine.pipeline.intake.intake_add) links any source tree into <workspace>/intake/<study>/ without ever copying, moving, or modifying source bytes; content-duplicate detection and broken-symlink handling are fail-soft, never fatal",
+    "validators": ["harness/spec_check.py:intake_symlink_invariant"],
+    "limitations": ["dedicated pytest coverage lands with the Phase 6 stress suite (tests/test_stress_standalone.py); verified so far by manual portability smoke tests only"]
+  },
+  {
+    "id": "organizer",
+    "kind": "security_control",
+    "status": "implemented",
+    "public_claim": "phi_engine.pipeline.organize.organize routes messy intake input (.jsonl/.json/.csv/.xlsx/.xls/.pdf, unrecognized formats, broken links) into normalized dataset JSONL or a value-free review bucket, reading only through intake symlinks and never touching the source tree",
+    "limitations": ["dedicated pytest coverage lands with the Phase 6 stress suite (tests/test_stress_standalone.py); verified so far by manual smoke tests exercising every format branch"]
+  },
+  {
+    "id": "review_feedback_loop",
+    "kind": "review_control",
+    "status": "tested",
+    "public_claim": "Operator review decisions (keep/drop/override) recorded via phi_engine.pipeline.review.decide persist to review_decisions.yaml and are applied on the NEXT phi_engine run: keep un-holds a risky-named header, drop force-removes a column regardless of its default classification, override changes the applied scrub method",
+    "tests": ["tests/test_review_feedback_loop.py"]
+  },
+  {
+    "id": "prompt_egress_gate",
+    "kind": "security_control",
+    "status": "tested",
+    "public_claim": "LLMClient.complete runs phi_gate_check on every outbound prompt before provider dispatch and raises PHIEgressBlockedError (pattern category only, never matched text) on a match -- closes prior-audit C2 for the pipeline path. Defense-in-depth on top of the structural headers-only prompt construction; the blocking regex tier's documented false negatives (prior-audit C3) still apply",
+    "tests": ["tests/test_llm_egress_gate.py"],
+    "limitations": ["blocking regex tier has documented false negatives (C3); this is a backstop, not a proof of absence"]
+  },
+  {
+    "id": "value_profiler",
+    "kind": "review_control",
+    "status": "tested",
+    "public_claim": "phi_engine.pipeline.profile deterministically profiles column VALUES locally (never leaves the process, never sent to an LLM) and drives two rules in run_pipeline: ESCALATION force-drops a keep-classified header whose values are majority PHI-shaped (catches PHI planted in an unexpectedly-named column); AUTO-CLEAR un-holds a force-dropped header whose value shape structurally proves it cannot be an identifier/date series (closed categorical set, zero blocking/warn/date signal) -- never overrides an explicit human drop decision",
+    "tests": ["tests/test_value_profiler.py"]
   }
 ]

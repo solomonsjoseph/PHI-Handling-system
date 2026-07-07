@@ -1,4 +1,0 @@
-interface:
-  display_name: "Audit Verification"
-  short_description: "Run the 17-assertion publish verifier"
-  default_prompt: "Use $audit-verification to run the post-publish 17-assertion verifier for a completed run (ledger hashes, no-LLM sentinel, quarantine-empty, PHI absence, decided-vs-applied, coverage). Exit codes only, never row data."

@@ -1,5 +1,7 @@
 {
   "claim_level": "L2-partial",
+  "generated_at": "2026-07-07T14:09:17.940909+00:00",
+  "git_sha": "b454b9a2dae7b217dada39e99bddc48cf618a693",
   "limitations": [
     "benchmark_aws_comprehend: requires AWS credentials",
     "benchmark_azure_health: requires Azure credentials",
@@ -20,7 +22,7 @@
     "singapore_pdpa: not implemented in canonical generator path",
     "uk_gdpr: not implemented in canonical generator path"
   ],
-  "manifest_sha256": "0785aa439edefe0cf8f9d5cd8d895f321712fea77f6d9e69455a45118ee6a5a8",
+  "manifest_sha256": "5b413b9df27985c961a9b4b688efd9706e194607f2d1bdfeb97eb7054c34e2be",
   "mia_report_sha256": "1033f0a8fc742636b8be9163b35ed8a6366815bddaa18d0d578225b3cdb6d923",
   "validation_report_sha256": "769089c19633953a91249f8dac37da1e67ceff29d0f69155d0440f58ccc29fff"
 }

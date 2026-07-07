@@ -68,18 +68,18 @@ Guarantees (AI proposes, determinism disposes):
 ```bash
 # Resolve the active rulebook for a study (offline / pinned by default).
 uv run --all-groups python -m \
-  plugins.report-ai-study-pipeline.skills.phi-rulebook.scripts.rulebook_cli \
+  phi_engine.skills.phi-rulebook.scripts.rulebook_cli \
   resolve --study Indo-VAP
 
 # Inspect a committed seed rulebook for a jurisdiction set.
 uv run --all-groups python -m \
-  plugins.report-ai-study-pipeline.skills.phi-rulebook.scripts.rulebook_cli \
+  phi_engine.skills.phi-rulebook.scripts.rulebook_cli \
   show --jurisdictions INDIA,USA
 
 # Fetch latest official regs + AI-extract rules (opt-in; needs --allow-network
 # and REPORTAL_RULEBOOK_AI_EXTRACT=1).
 uv run --all-groups python -m \
-  plugins.report-ai-study-pipeline.skills.phi-rulebook.scripts.rulebook_cli \
+  phi_engine.skills.phi-rulebook.scripts.rulebook_cli \
   refresh --study Indo-VAP --allow-network
 ```
 
@@ -116,6 +116,6 @@ the short-form adapter metadata.
 ## What This Skill Does NOT Do
 
 - **Never reads study data** — operates on rule metadata only (ids, actions, reasons, official-source URLs, SHA-256 hashes); never a dataset value, row, or header content (GR-1).
-- **Is not an orchestrator DAG node** — it is consumed as a shared module in phase 0 and by `$phi-classification`; it does not emit a SkillResult marker and is not a publish phase.
+- **Is not an orchestrator DAG node** — the underlying primitive it wraps (`phi_review.refresh_jurisdiction_rules`) is what `phi_engine.pipeline.run.run_pipeline`'s classification step calls directly (pinned-only, no network); this skill's own caching/drift-detection layer (`resolve_rulebook`) is an operator CLI for out-of-band rulebook inspection, not something the pipeline invokes. It does not emit a SkillResult marker and is not a publish phase.
 - **Does not fetch the network by default** — live extraction is opt-in (`REPORTAL_RULEBOOK_AI_EXTRACT=1` + `--allow-network` + `rule_refresh: online_preferred`); the default path is the deterministic pinned/offline rulebook.
 - **Cannot lower protection** — AI-extracted live rules only add or strengthen decisions (additive merge, strictest-wins); a weakening is flagged (exit `4`), never applied silently.

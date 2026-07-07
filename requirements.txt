@@ -37,11 +37,20 @@ scikit-learn>=1.5.2
 # Testing
 pytest>=8.3.3
 pytest-cov>=6.0.0
+pytest-timeout>=2.3.1
 hypothesis>=6.115.5
 
 # Security
 cryptography>=43.0.3
 
 # phi_engine additional dependencies
-pycanon==1.0.1
+pycanon>=1.0.1
 click>=8.0.0
+
+# Standalone organizer (Phase 2 refactor) -- messy-input ingestion
+pdfplumber>=0.11
+xlrd>=2.0.1
+# xlwt is BIFF-only (legacy .xls writer); used solely by the stress-fixture
+# builder (harness/make_stress_fixtures.py) to author a genuine .xls sample.
+xlwt>=1.3.0
+defusedxml>=0.7.1  # SoT producer (Phase 3) xlsx header extraction -- guards zipfile/XML parsing

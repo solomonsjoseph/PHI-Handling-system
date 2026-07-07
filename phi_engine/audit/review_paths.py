@@ -18,8 +18,8 @@ __all__ = [
     "HUMAN_REVIEW_ROOT",
     "LEGACY_SOT_REVIEW_DIR",
     "classification_review_path",
-    "dataset_jsonl_union_review_path",
     "excel_duplicate_review_path",
+    "organizer_review_path",
     "form_review_dir",
     "human_review_root",
     "intake_review_path",
@@ -124,3 +124,14 @@ def verifier_review_path(audit_dir: Path, form: str) -> Path:
     """Audit-verifier failure note (Note 22): failed assertion id + the form/column
     it concerns + the ledger/config to fix. Counts/ids only."""
     return form_review_dir(audit_dir, form) / "verifier_review.md"
+
+
+def organizer_review_path(audit_dir: Path) -> Path:
+    """Organizer review-bucket JSONL (Standalone refactor, Note 22): messy
+    intake files the organizer could not route (unrecognized format, parse
+    failure, broken intake symlink). One JSON record per entry --
+    ``{file, link_name, reason, ...}`` — never a row value. Cross-file, not
+    form-scoped, so it lives directly under ``human_review/`` rather than a
+    per-form subdirectory (mirrors how dedup/publish-gate producers use a
+    cross-form key, per this module's docstring)."""
+    return human_review_root(audit_dir) / "organizer_review.jsonl"
