@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 import phi_engine.config.config as config
 import phi_engine.pipeline.run as pipeline_run
@@ -63,8 +64,8 @@ def _organized_two_dataset_fixture(
     organized = tmp_path / "organized" / study
     datasets_dir = organized / "datasets"
     verified_dir = organized / ".verified_sources"
-    datasets_dir.mkdir(parents=True)
-    verified_dir.mkdir(parents=True)
+    datasets_dir.mkdir(parents=True, exist_ok=True)
+    verified_dir.mkdir(parents=True, exist_ok=True)
 
     hashes: dict[str, str] = {}
     public_datasets: list[dict[str, object]] = []
@@ -243,15 +244,19 @@ def _relation(
     *,
     level: DependencyLevel,
     support_state: DependencyRelationState,
+    declared_support_missing: bool = False,
 ) -> DependencyRelation:
+    declared_support_id = None if declared_support_missing else _SUPPORT_ONE
     dependency = DatasetDependency(
         dataset_path="datasets/alpha.csv",
         dataset_artifact_id=_DATASET_ONE,
         dataset_source_sha256=hashes[_DATASET_ONE],
         support="data_dictionary/one.csv",
-        support_artifact_id=_SUPPORT_ONE,
+        support_artifact_id=declared_support_id,
         support_source_sha256=(
-            hashes.get(_SUPPORT_ONE, _OLD_SHA)
+            None
+            if declared_support_missing
+            else hashes.get(_SUPPORT_ONE, _OLD_SHA)
             if support_state is DependencyRelationState.CURRENT
             else _OLD_SHA
         ),
@@ -315,7 +320,7 @@ def _run_two_dataset_scenario(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    recommendations: tuple[DependencyRecommendation, ...],
+    recommendations: tuple[DependencyRecommendation, ...] | None,
     decisions: tuple[DependencyDecision, ...],
     relations: tuple[DependencyRelation, ...],
     organize_manifest: dict[str, object],
@@ -326,7 +331,7 @@ def _run_two_dataset_scenario(
     output = tmp_path / "output" / study
     staging = tmp_path / "staging" / study
     lock_dir = tmp_path / "tmp"
-    lock_dir.mkdir(mode=0o700)
+    lock_dir.mkdir(mode=0o700, exist_ok=True)
 
     for name, value in {
         "TMP_DIR": lock_dir,
@@ -342,7 +347,7 @@ def _run_two_dataset_scenario(
     }.items():
         monkeypatch.setattr(config, name, value)
     source_root = tmp_path / "source"
-    source_root.mkdir()
+    source_root.mkdir(exist_ok=True)
 
     monkeypatch.setattr(pipeline_run, "bootstrap_study_privacy", lambda *_: None)
     monkeypatch.setattr(
@@ -368,7 +373,12 @@ def _run_two_dataset_scenario(
     monkeypatch.setattr(pipeline_run, "load_study_dependency_decisions", lambda *_: decisions)
     monkeypatch.setattr(pipeline_run, "load_sot_variable_signals", lambda *_: {})
     monkeypatch.setattr(pipeline_run, "synthesize_study_config", lambda *_: None)
-    monkeypatch.setattr(pipeline_run, "recommend_dependencies", lambda **_: recommendations)
+    if recommendations is not None:
+        monkeypatch.setattr(
+            pipeline_run,
+            "recommend_dependencies",
+            lambda **_: recommendations,
+        )
     monkeypatch.setattr(pipeline_run.phi_scrub, "load_scrub_config", lambda **_: _EffectiveConfig())
     monkeypatch.setattr(
         pipeline_run.phi_scrub,
@@ -431,9 +441,269 @@ def _run_two_dataset_scenario(
 
     result = pipeline_run.run_pipeline(study, "us")
     run_dirs = sorted((output / "runs").iterdir())
-    assert len(run_dirs) == 1
+    assert run_dirs
     staged = staged_at_scrub[0] if staged_at_scrub else ()
-    return result, run_dirs[0], staged
+    return result, run_dirs[-1], staged
+
+
+@pytest.mark.parametrize(
+    "level",
+    [DependencyLevel.REQUIRED, DependencyLevel.HELPFUL],
+)
+def test_manifest_missing_support_reconciles_to_exact_hydrated_path(
+    tmp_path: Path,
+    level: DependencyLevel,
+) -> None:
+    organized, manifest, hashes = _organized_two_dataset_fixture(
+        tmp_path,
+        include_support=True,
+    )
+    hydrated = pipeline_run._hydrate_dependency_inputs(organized, manifest)
+    relation = _relation(
+        hashes,
+        level=level,
+        support_state=DependencyRelationState.STALE,
+        declared_support_missing=True,
+    )
+
+    recommendations = pipeline_run._build_unavailable_manifest_recommendations(
+        hydrated,
+        {"datasets/alpha.csv": (relation,)},
+        rulebook_sha256=_RULEBOOK_SHA,
+        scrub_config_sha256=_SCRUB_SHA,
+    )
+
+    assert len(recommendations) == 1
+    recommendation = recommendations[0]
+    assert recommendation.support_artifact_id == _SUPPORT_ONE
+    assert recommendation.support_sha256 == hashes[_SUPPORT_ONE]
+    assert (
+        recommendation.normalized_support_sha256
+        == hashes["normalized_support"]
+    )
+    assert recommendation.suggested_level is level
+    assert recommendation.default_sensitivity is Sensitivity.CONFIDENTIAL
+
+
+@pytest.mark.parametrize(
+    "level,expected_held,expected_staged",
+    [
+        (DependencyLevel.REQUIRED, [_DATASET_ONE], ("beta.jsonl",)),
+        (
+            DependencyLevel.HELPFUL,
+            [],
+            ("alpha.jsonl", "beta.jsonl"),
+        ),
+    ],
+)
+def test_real_run_and_decision_flow_refreshes_declared_missing_support(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    level: DependencyLevel,
+    expected_held: list[str],
+    expected_staged: tuple[str, ...],
+) -> None:
+    import phi_engine.pipeline.dependencies as dependency_contracts
+    import phi_engine.pipeline.review as dependency_review
+
+    _organized, missing_manifest, hashes = _organized_two_dataset_fixture(
+        tmp_path,
+        include_support=False,
+    )
+    missing_relation = _relation(
+        hashes,
+        level=level,
+        support_state=DependencyRelationState.MISSING,
+        declared_support_missing=True,
+    )
+    first_result, first_run_dir, first_staged = _run_two_dataset_scenario(
+        tmp_path,
+        monkeypatch,
+        recommendations=None,
+        decisions=(),
+        relations=(missing_relation,),
+        organize_manifest=missing_manifest,
+    )
+    missing_recommendations = load_dependency_recommendations(
+        first_run_dir / "dependency_recommendations.jsonl"
+    )
+    assert len(missing_recommendations) == 1
+    missing_recommendation = missing_recommendations[0]
+    assert missing_recommendation.support_artifact_id is None
+    assert first_result.dependency_held_dataset_ids == expected_held
+    assert first_staged == expected_staged
+
+    config_dir = tmp_path / "config" / "Study"
+    config_dir.mkdir(parents=True)
+    manifest_path = config_dir / "_forms_manifest.yaml"
+    manifest_path.write_text(
+        yaml.safe_dump(
+            {
+                "required": ["dataset.csv"],
+                "optional": [],
+                "reject": [],
+                "date_locales": {},
+                "dataset_dependencies_schema": "dataset-dependencies/v1",
+                "dataset_dependencies_code_table_version": 1,
+                "dataset_dependencies": {
+                    missing_relation.dependency.dataset_path: [
+                        {
+                            "dataset_artifact_id": _DATASET_ONE,
+                            "dataset_source_sha256": hashes[_DATASET_ONE],
+                            "support": missing_relation.dependency.support,
+                            "support_artifact_id": None,
+                            "support_source_sha256": None,
+                            "kind": DependencyKind.DICTIONARY.value,
+                            "level": level.value,
+                            "sensitivity": Sensitivity.CONFIDENTIAL.value,
+                            "reason_code": (
+                                DependencyReasonCode.MANIFEST_DECLARED.value
+                            ),
+                            "recommendation_id": (
+                                missing_recommendation.recommendation_id
+                            ),
+                            "basis": missing_recommendation.basis.to_json(),
+                            "confirmed_by": "prior-reviewer",
+                            "confirmed_at": "2026-07-14T10:00:00Z",
+                        }
+                    ]
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    manifest_path.chmod(0o600)
+    monkeypatch.setattr(
+        config,
+        "study_config_dir",
+        lambda selected=None: config_dir,
+    )
+    monkeypatch.setattr(
+        dependency_review,
+        "_current_rulebook_sha256",
+        lambda _study: _RULEBOOK_SHA,
+    )
+    monkeypatch.setattr(
+        dependency_contracts,
+        "_effective_scrub_config_sha256",
+        lambda: _SCRUB_SHA,
+    )
+
+    missing_decision = dependency_review.decide_dependency(
+        "Study",
+        dataset=_DATASET_ONE,
+        recommendation=missing_recommendation.recommendation_id,
+        support=None,
+        level=level,
+        sensitivity=Sensitivity.CONFIDENTIAL,
+        reason_code=DependencyReasonCode.MANIFEST_DECLARED,
+        detail_file=None,
+        decided_by="reviewer",
+    )
+
+    _organized, refreshed_manifest, refreshed_hashes = (
+        _organized_two_dataset_fixture(
+            tmp_path,
+            include_support=True,
+        )
+    )
+    refreshed_relation = _relation(
+        refreshed_hashes,
+        level=level,
+        support_state=DependencyRelationState.STALE,
+        declared_support_missing=True,
+    )
+    refreshed_result, refreshed_run_dir, refreshed_staged = (
+        _run_two_dataset_scenario(
+            tmp_path,
+            monkeypatch,
+            recommendations=None,
+            decisions=(missing_decision,),
+            relations=(refreshed_relation,),
+            organize_manifest=refreshed_manifest,
+        )
+    )
+    refreshed_recommendations = load_dependency_recommendations(
+        refreshed_run_dir / "dependency_recommendations.jsonl"
+    )
+    assert len(refreshed_recommendations) == 1
+    refreshed = refreshed_recommendations[0]
+    assert refreshed.support_artifact_id == _SUPPORT_ONE
+    assert refreshed.support_sha256 == refreshed_hashes[_SUPPORT_ONE]
+    assert (
+        refreshed.normalized_support_sha256
+        == refreshed_hashes["normalized_support"]
+    )
+    assert refreshed_result.dependency_held_dataset_ids == expected_held
+    assert refreshed_staged == expected_staged
+
+    with pytest.raises(ValueError, match="support identity mismatch"):
+        dependency_review.decide_dependency(
+            "Study",
+            dataset=_DATASET_ONE,
+            recommendation=refreshed.recommendation_id,
+            support=None,
+            level=level,
+            sensitivity=Sensitivity.CONFIDENTIAL,
+            reason_code=DependencyReasonCode.MANIFEST_DECLARED,
+            detail_file=None,
+            decided_by="reviewer",
+        )
+
+    present_decision = dependency_review.decide_dependency(
+        "Study",
+        dataset=_DATASET_ONE,
+        recommendation=refreshed.recommendation_id,
+        support=_SUPPORT_ONE,
+        level=level,
+        sensitivity=Sensitivity.CONFIDENTIAL,
+        reason_code=DependencyReasonCode.MANIFEST_DECLARED,
+        detail_file=None,
+        decided_by="reviewer",
+    )
+    assert present_decision.support_artifact_id == _SUPPORT_ONE
+    stored_manifest = yaml.safe_load(
+        manifest_path.read_text(encoding="utf-8")
+    )
+    stored_dependencies = stored_manifest["dataset_dependencies"][
+        missing_relation.dependency.dataset_path
+    ]
+    assert len(stored_dependencies) == 1
+    assert stored_dependencies[0]["recommendation_id"] == refreshed.recommendation_id
+    assert stored_dependencies[0]["support_artifact_id"] == _SUPPORT_ONE
+    assert (
+        dependency_review.load_study_dependency_decisions("Study")
+        == (missing_decision, present_decision)
+    )
+
+    current_relation = _relation(
+        refreshed_hashes,
+        level=level,
+        support_state=DependencyRelationState.CURRENT,
+    )
+    converged_result, converged_run_dir, converged_staged = (
+        _run_two_dataset_scenario(
+            tmp_path,
+            monkeypatch,
+            recommendations=None,
+            decisions=(missing_decision, present_decision),
+            relations=(current_relation,),
+            organize_manifest=refreshed_manifest,
+        )
+    )
+    converged_recommendations = load_dependency_recommendations(
+        converged_run_dir / "dependency_recommendations.jsonl"
+    )
+    assert len(converged_recommendations) == 1
+    assert (
+        converged_recommendations[0].recommendation_id
+        == refreshed.recommendation_id
+    )
+    assert converged_result.exit_code == 0
+    assert converged_result.dependency_review_count == 0
+    assert converged_result.dependency_held_dataset_ids == []
+    assert converged_staged == ("alpha.jsonl", "beta.jsonl")
 
 
 @pytest.mark.parametrize(

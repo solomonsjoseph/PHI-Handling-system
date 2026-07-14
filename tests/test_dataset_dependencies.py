@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from phi_engine.pipeline.dependencies import (
+    append_dependency_decision,
     DependencyDecision,
     DependencyDecisionBasis,
     DependencyKind,
@@ -491,6 +492,67 @@ def test_recommender_same_stem_pdf_and_confirmed_links_and_ignored_suppression(t
     assert any(rec.reason_code is DependencyReasonCode.MANIFEST_DECLARED and rec.suggested_level is DependencyLevel.REQUIRED for rec in recs)
 
 
+def test_recommender_converges_persisted_inferred_decision_to_one_manifest_role(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import phi_engine.pipeline.dependencies as depmod
+
+    monkeypatch.setattr(depmod, "_effective_scrub_config_sha256", lambda: SHA4)
+    dataset = _dataset(tmp_path)
+    pdf = _support(tmp_path, kind=DependencyKind.PDF)
+    object.__setattr__(pdf, "normalized_rows_path", tmp_path / "labs__pdf.jsonl")
+    _write_support_rows(pdf.normalized_rows_path, "Other")
+
+    inferred = recommend_dependencies(
+        datasets=(dataset,),
+        support_artifacts=(pdf,),
+        published_raw_headers_by_dataset={A: frozenset()},
+        transform_requirements_by_dataset={},
+        confirmed_links=(),
+        rule_bundle=_rule_bundle(),
+    )
+    assert len(inferred) == 1
+    assert inferred[0].reason_code is DependencyReasonCode.SAME_STEM_COMPANION
+
+    inferred_rec = inferred[0]
+    inferred_decision = DependencyDecision(
+        schema_version="dependency-decision/v1",
+        decision_id=DD,
+        recommendation_id=inferred_rec.recommendation_id,
+        dataset_artifact_id=inferred_rec.dataset_artifact_id,
+        dataset_sha256=inferred_rec.dataset_sha256,
+        support_artifact_id=inferred_rec.support_artifact_id,
+        support_sha256=inferred_rec.support_sha256,
+        normalized_support_sha256=inferred_rec.normalized_support_sha256,
+        kind=inferred_rec.kind,
+        level=DependencyLevel.HELPFUL,
+        sensitivity=Sensitivity.NON_CONFIDENTIAL,
+        reason_code=inferred_rec.reason_code,
+        basis=inferred_rec.basis,
+        decided_by="reviewer",
+        decided_at="2026-07-14T10:00:00Z",
+    )
+    decisions_path = tmp_path / "dependency_decisions.jsonl"
+    append_dependency_decision(decisions_path, inferred_decision)
+    persisted = load_dependency_decisions(decisions_path)
+
+    converged = recommend_dependencies(
+        datasets=(dataset,),
+        support_artifacts=(pdf,),
+        published_raw_headers_by_dataset={A: frozenset()},
+        transform_requirements_by_dataset={},
+        confirmed_links=persisted,
+        rule_bundle=_rule_bundle(),
+    )
+
+    assert len(converged) == 1
+    assert converged[0].recommendation_id != inferred_rec.recommendation_id
+    assert converged[0].reason_code is DependencyReasonCode.MANIFEST_DECLARED
+    assert converged[0].default_sensitivity is Sensitivity.CONFIDENTIAL
+
+
+
 def test_recommender_exact_manifest_non_confidential_suppresses_inferred_duplicate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -551,7 +613,6 @@ def test_recommender_exact_manifest_non_confidential_suppresses_inferred_duplica
     assert len(recs) == 1
     assert recs[0].reason_code is DependencyReasonCode.MANIFEST_DECLARED
     assert recs[0].default_sensitivity is Sensitivity.NON_CONFIDENTIAL
-
 
 def test_recommender_conservatively_merges_duplicate_manifest_roles(
     tmp_path: Path,

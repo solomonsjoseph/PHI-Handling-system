@@ -280,7 +280,13 @@ def _decide_dependency_locked(
         item
         for item in existing
         if not isinstance(item, dict)
-        or item.get("recommendation_id") != current.recommendation_id
+        or (
+            item.get("recommendation_id") != current.recommendation_id
+            and not (
+                item.get("support") == private.support_path
+                and item.get("kind") == current.kind.value
+            )
+        )
     ]
     updated.append(_manifest_dependency_record(current, private, decision))
     dependencies[private.dataset_path] = updated

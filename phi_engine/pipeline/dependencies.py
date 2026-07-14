@@ -767,6 +767,12 @@ def recommend_dependencies(
                     or decision.reason_code is not DependencyReasonCode.MANIFEST_DECLARED
                 ):
                     continue
+            else:
+                # A persisted decision establishes this dataset/support/kind
+                # as a manifest role even when its original recommendation
+                # identity came from inference.  The canonical manifest item
+                # below replaces that inferred item for review.
+                suppressed_manifest_roles.add(role)
             if decision_is_current:
                 suppressed_manifest_roles.add(role)
             else:

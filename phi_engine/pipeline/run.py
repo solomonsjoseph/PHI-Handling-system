@@ -59,6 +59,7 @@ from phi_engine.pipeline.dependencies import (
     TransformRequirement,
     TransformRequirementOrigin,
     canonical_sha256,
+    recommendation_identity,
     recommend_dependencies,
     support_role_sha256,
     write_dependency_recommendations,
@@ -732,9 +733,19 @@ def _build_unavailable_manifest_recommendations(
         hydrated.dataset_paths_by_id[dataset.artifact_id]: dataset
         for dataset in hydrated.datasets
     }
-    support_ids = {
-        support.artifact_id for support in hydrated.support_artifacts
+    support_by_id = {
+        support.artifact_id: support
+        for support in hydrated.support_artifacts
     }
+    support_by_path: dict[str, ParsedSupportArtifact] = {}
+    for artifact_id, support_path in hydrated.support_paths_by_id.items():
+        support = support_by_id.get(artifact_id)
+        if support is None:
+            raise ValueError("protected support path lacks hydrated artifact")
+        prior = support_by_path.setdefault(support_path, support)
+        if prior.artifact_id != artifact_id:
+            raise ValueError("protected support path identity conflict")
+    support_ids = set(support_by_id)
     recommendations: dict[str, DependencyRecommendation] = {}
     for relations in dependency_relations.values():
         for relation in relations:
@@ -754,14 +765,29 @@ def _build_unavailable_manifest_recommendations(
             dataset = datasets_by_path.get(dependency.dataset_path)
             if dataset is None:
                 continue
-            recommendation_id = dependency.recommendation_id
+            support = support_by_path.get(dependency.support)
+            recommendation_id = (
+                dependency.recommendation_id
+                if support is None
+                else recommendation_identity(
+                    dataset_artifact_id=dataset.artifact_id,
+                    support_artifact_id=support.artifact_id,
+                    kind=dependency.kind,
+                    reason_code=DependencyReasonCode.MANIFEST_DECLARED,
+                    header_ids=(),
+                    transform_requirement_ids=(),
+                )
+            )
+            support_artifact_id = (
+                support.artifact_id if support is not None else None
+            )
             basis = DependencyDecisionBasis(
                 rulebook_sha256=rulebook_sha256,
                 scrub_config_sha256=scrub_config_sha256,
                 support_role_sha256=support_role_sha256(
                     recommendation_id=recommendation_id,
                     dataset_artifact_id=dataset.artifact_id,
-                    support_artifact_id=None,
+                    support_artifact_id=support_artifact_id,
                     kind=dependency.kind,
                     role_source=RoleSource.MANIFEST,
                     organizer_role_version=1,
@@ -772,9 +798,15 @@ def _build_unavailable_manifest_recommendations(
                 recommendation_id=recommendation_id,
                 dataset_artifact_id=dataset.artifact_id,
                 dataset_sha256=dataset.source_sha256,
-                support_artifact_id=None,
-                support_sha256=None,
-                normalized_support_sha256=None,
+                support_artifact_id=support_artifact_id,
+                support_sha256=(
+                    support.source_sha256 if support is not None else None
+                ),
+                normalized_support_sha256=(
+                    support.normalized_rows_sha256
+                    if support is not None
+                    else None
+                ),
                 kind=dependency.kind,
                 suggested_level=(
                     DependencyLevel.REQUIRED
@@ -1257,6 +1289,23 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
         rulebook_sha256=bundle.rules_sha256,
         scrub_config_sha256=scrub_config_hash,
     ):
+        obsolete_inferred_ids = [
+            recommendation_id
+            for recommendation_id, generated in recommendations_by_id.items()
+            if recommendation_id != recommendation.recommendation_id
+            and generated.dataset_artifact_id
+            == recommendation.dataset_artifact_id
+            and generated.support_artifact_id
+            == recommendation.support_artifact_id
+            and generated.kind is recommendation.kind
+            and generated.reason_code
+            in {
+                DependencyReasonCode.SAME_STEM_COMPANION,
+                DependencyReasonCode.EXACT_HEADER_MATCH,
+            }
+        ]
+        for recommendation_id in obsolete_inferred_ids:
+            del recommendations_by_id[recommendation_id]
         prior = recommendations_by_id.setdefault(
             recommendation.recommendation_id,
             recommendation,
