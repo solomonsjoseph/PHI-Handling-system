@@ -40,7 +40,7 @@ from phi_engine.sot.generate_pdf_aware_candidate import build_candidate
 from phi_engine.sot.study_intake import (
     _find_dataset,
     _find_pdf,
-    _form_code,
+    leading_form_code,
     _write_sot_review_report,
 )
 
@@ -313,11 +313,11 @@ def discover_pdf_backed_forms_with_reviews(
         )
         return [], review_paths
 
-    pdf_codes = {_form_code(path.stem) for path in pdf_dir.glob("*.pdf")}
+    pdf_codes = {leading_form_code(path.stem) for path in pdf_dir.glob("*.pdf")}
     datasets_by_code: dict[str, list[Path]] = defaultdict(list)
     for suffix in SUPPORTED_DATASET_SUFFIXES:
         for dataset in dataset_dir.glob(f"*{suffix}"):
-            datasets_by_code[_form_code(dataset.stem)].append(dataset)
+            datasets_by_code[leading_form_code(dataset.stem)].append(dataset)
 
     overrides = PDF_FORM_DATASET_OVERRIDES.get(study, {})
     forms: list[str] = []

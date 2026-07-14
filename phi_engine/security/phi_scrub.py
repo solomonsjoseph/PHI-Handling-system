@@ -144,6 +144,7 @@ from phi_engine.audit.ledger import (
 )
 from phi_engine.utils._extraction_io import atomic_write_json, atomic_write_jsonl, parse_date
 from phi_engine.security.phi_patterns import mask_date_shape as _mask_date_shape
+from phi_engine.security.phi_review import normalize_header
 from phi_engine.security.secure_env import assert_output_zone, assert_write_zone
 from phi_engine.utils.integrity import hash_bytes, hash_file
 from phi_engine.utils.logging_system import get_logger
@@ -1479,7 +1480,7 @@ def _coerce_numeric(value: Any) -> float | None:
         return None
     if isinstance(value, bool):
         return None  # guard: bool is an int subclass in Python
-    if isinstance(value, int | float):
+    if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
         stripped = value.strip()
@@ -1597,7 +1598,7 @@ def suppress_small_cell(value: Any, *, threshold: int) -> tuple[Any, bool]:
         return value, False
     if num > threshold:
         # Preserve original type where possible: int stays int, float stays float.
-        if isinstance(value, int | float) and not isinstance(value, bool):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
             return type(value)(threshold), True
         return threshold, True
     return value, False
@@ -1647,7 +1648,7 @@ def _apply_field_only_rules(
         # both keep_fields and the absence of a drop_fields rule, mirroring
         # _scrub_row's priority-0 gate so quarantine/orphan writes are as clean
         # as the main published rows.
-        norm = _normalize_header_for_lookup(field)
+        norm = normalize_header(field)
         if norm in suppress_headers:
             del row[field]
             _bump("drop", field)
@@ -1846,7 +1847,7 @@ def _scrub_row(
         # under-protects. (The subject ID is NOT here — it is pseudonymized by the
         # id rule, since it is required for record linkage.) ``suppress_headers``
         # carries the combined force-drop set (suppress plus SoT direct identifiers).
-        if suppress_headers and _normalize_header_for_lookup(field) in suppress_headers:
+        if suppress_headers and normalize_header(field) in suppress_headers:
             del row[field]
             _bump("drop", field)
             continue
@@ -2333,11 +2334,7 @@ def _compute_input_dataset_hash(datasets_dir: Path) -> str:
 # -- Classification threading helpers ----------------------------------------
 
 
-def _normalize_header_for_lookup(header: str) -> str:
-    """Normalize a column header for approval-lookup (mirrors phi_review._normalize_header)."""
-    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", header.strip())
-    s = re.sub(r"[^A-Za-z0-9]+", "_", s)
-    return s.strip("_").lower()
+_normalize_header_for_lookup = normalize_header
 
 
 def _load_approval_classifications(
@@ -2369,7 +2366,7 @@ def _load_approval_classifications(
         stem = Path(str(form.get("form_name", ""))).stem
         per_header: dict[str, dict] = {}
         for cls in form.get("classifications", []):
-            per_header[_normalize_header_for_lookup(str(cls.get("header", "")))] = {
+            per_header[normalize_header(str(cls.get("header", "")))] = {
                 "action": cls.get("action"),
                 "matched_rules": list(cls.get("matched_rules", []) or []),
                 "jurisdictions": list(cls.get("jurisdictions", []) or []),
@@ -2378,7 +2375,7 @@ def _load_approval_classifications(
         if stem:
             lookup[stem] = per_header
             force_drop_by_stem[stem] = frozenset(
-                _normalize_header_for_lookup(str(h))
+                normalize_header(str(h))
                 for h in form.get("force_drop_headers", []) or []
             )
     return lookup, force_drop_by_stem, bundle_sha
@@ -2481,7 +2478,7 @@ def _emit_as_written_ledger(
             cls = (
                 (approval_lookup or {})
                 .get(stem, {})
-                .get(_normalize_header_for_lookup(event["field"]))
+                .get(normalize_header(event["field"]))
             )
             if cls is not None:
                 matched_rules = cls["matched_rules"]

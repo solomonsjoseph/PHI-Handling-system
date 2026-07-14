@@ -54,7 +54,7 @@ import json
 import fnmatch
 import re
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from phi_engine.audit.review_paths import sot_review_report_path
@@ -66,8 +66,8 @@ import yaml
 # ---------------------------------------------------------------------------
 
 
-def _form_code(name: str) -> str:
-    """Extract the leading form-code prefix from a filename stem.
+def leading_form_code(name: str) -> str:
+    """Return the canonical leading form-code prefix for a filename stem.
 
     Examples::
 
@@ -75,8 +75,8 @@ def _form_code(name: str) -> str:
         "12A Follow-up A v1.0" → "12A"
         "6_HIV" → "6"
     """
-    m = re.match(r"^([0-9]+[A-Za-z]?)", name.replace("_", " "))
-    return m.group(1) if m else name
+    match = re.match(r"^([0-9]+[A-Za-z]?)", name.replace("_", " "))
+    return match.group(1).upper() if match else name
 
 
 def _find_pdf(study_dir: Path, form: str) -> Path | None:
@@ -96,9 +96,9 @@ def _find_pdf(study_dir: Path, form: str) -> Path | None:
         return exact
 
     # Glob: find by form-code prefix
-    target_code = _form_code(form)
+    target_code = leading_form_code(form)
     for candidate in sorted(pdf_dir.glob("*.pdf")):
-        if _form_code(candidate.stem) == target_code:
+        if leading_form_code(candidate.stem) == target_code:
             return candidate
     return None
 
@@ -150,13 +150,13 @@ def _find_dataset(study_dir: Path, form: str) -> Path | None:
         if exact.exists() and exact.name not in rejected:
             return exact
 
-    target_code = _form_code(form)
+    target_code = leading_form_code(form)
     matches: list[Path] = []
     for ext in (".xlsx", ".xlsm", ".csv"):
         matches.extend(
             candidate
             for candidate in sorted(ds_dir.glob(f"*{ext}"))
-            if _form_code(candidate.stem) == target_code and candidate.name not in rejected
+            if leading_form_code(candidate.stem) == target_code and candidate.name not in rejected
         )
     if len(matches) == 1:
         return matches[0]
@@ -215,7 +215,7 @@ def _write_sot_review_report(
         "",
         f"- study: `{study}`",
         f"- form: `{form}`",
-        f"- generated_utc: `{datetime.now(UTC).replace(microsecond=0).isoformat()}`",
+        f"- generated_utc: `{datetime.now(timezone.utc).replace(microsecond=0).isoformat()}`",
         "",
         "## Source Resolution",
         "",

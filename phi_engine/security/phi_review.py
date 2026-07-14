@@ -42,6 +42,7 @@ __all__ = [
     "is_phi_risky_header",
     "load_sot_variable_signals",
     "load_study_privacy_config",
+    "normalize_header",
     "refresh_jurisdiction_rules",
     "review_form_headers",
     "validate_official_source_url",
@@ -597,10 +598,13 @@ def _sha256_json(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _normalize_header(header: str) -> str:
+def normalize_header(header: str) -> str:
     normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", header.strip())
     normalized = re.sub(r"[^A-Za-z0-9]+", "_", normalized)
     return normalized.strip("_").lower()
+
+
+_normalize_header = normalize_header
 
 
 def _header_match_texts(header: str) -> tuple[str, str]:

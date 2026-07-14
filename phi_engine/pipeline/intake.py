@@ -1,35 +1,43 @@
-"""Symlink-only intake for the standalone PHI pipeline.
-
-``intake_add`` NEVER copies, moves, or modifies source bytes: every file
-under a study's intake tree is either an ``os.symlink`` pointing at the
-resolved absolute source path, or the ``intake_manifest.json`` bookkeeping
-file. Content is only ever opened for a streamed read (sha256 hashing) --
-never for write, and the walk never deletes a source file.
-
-This is the single ingestion door for the standalone pipeline: everything
-under a project's own data tree (raw variables/datasets, PDFs, xlsx/xls/csv,
-whatever else) is linked in here, unfiltered by extension -- the organizer
-(``organize.py``) is what routes by file type, not intake.
-"""
+"""Symlink-only intake for the standalone PHI pipeline."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import stat
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import phi_engine.config.config as config
+from phi_engine.pipeline.dependencies import is_artifact_id, is_sha256
 from phi_engine.utils._extraction_io.file_discovery import DEFAULT_JUNK_FILENAMES
 
 __all__ = ["intake_add", "load_intake_manifest"]
 
-_HASH_CHUNK_SIZE = 1 << 20  # 1 MiB streamed-read chunks
+_HASH_CHUNK_SIZE = 1 << 20
+_ALLOWED_MANIFEST_KEYS = {"study", "source_root", "entries", "duplicates", "errors", "removals", "schema"}
+_REQUIRED_ENTRY_KEYS = {
+    "artifact_id",
+    "link_name",
+    "relative_path",
+    "original_path",
+    "sha256",
+    "size",
+    "mtime_ns",
+    "device",
+    "inode",
+    "mode",
+}
+
+
+def _empty_manifest(study: str) -> dict[str, Any]:
+    return {"schema": "intake-manifest/v2", "study": study, "source_root": None, "entries": {}, "duplicates": [], "errors": [], "removals": []}
 
 
 def _sha256_stream(path: Path) -> str:
-    """Stream-hash *path*'s content. Read-only; never buffers the whole file."""
     digest = hashlib.sha256()
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(_HASH_CHUNK_SIZE), b""):
@@ -37,136 +45,200 @@ def _sha256_stream(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _sha8_of_path(resolved_path: Path) -> str:
-    """First 8 hex chars of sha256(resolved absolute path) -- deterministic,
-    collision-safe for same-named files living in different source directories."""
-    return hashlib.sha256(str(resolved_path).encode("utf-8")).hexdigest()[:8]
+def _new_artifact_id() -> str:
+    return "a_" + uuid.uuid4().hex
+
+
+def _safe_rel(path: Path) -> str:
+    rel = path.as_posix()
+    if rel.startswith("/") or rel == ".." or rel.startswith("../") or "/../" in rel:
+        raise ValueError(f"unsafe relative path: {rel!r}")
+    return rel
 
 
 def _iter_source_files(source: Path):
-    """Yield every non-hidden, non-junk entry under *source* (recursive).
-
-    Directory symlinks are NOT followed (avoids intake loops / escaping the
-    declared source root); a dangling file symlink IS yielded (so the caller
-    can record it under ``errors``) because ``os.walk`` classifies it by
-    ``lstat``, not by whether it resolves.
-    """
     for root, dirnames, filenames in os.walk(source, followlinks=False):
         root_path = Path(root)
-        dirnames[:] = [
-            d for d in dirnames if not d.startswith(".") and d not in DEFAULT_JUNK_FILENAMES
-        ]
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in DEFAULT_JUNK_FILENAMES]
         for name in filenames:
             if name.startswith(".") or name in DEFAULT_JUNK_FILENAMES:
                 continue
             yield root_path / name
 
 
+def _validate_manifest(study: str, manifest: dict[str, Any], manifest_path: Path, *, check_links: bool = True) -> dict[str, Any]:
+    unknown = set(manifest) - _ALLOWED_MANIFEST_KEYS
+    if unknown:
+        raise ValueError(f"unknown intake manifest keys: {sorted(unknown)}")
+    if manifest.get("study") != study:
+        raise ValueError("intake manifest study mismatch")
+    source_root_raw = manifest.get("source_root")
+    source_root = Path(source_root_raw).resolve(strict=True) if source_root_raw else None
+    entries = manifest.get("entries")
+    if not isinstance(entries, dict):
+        raise ValueError("intake manifest entries must be an object")
+    seen_ids: set[str] = set()
+    seen_paths: set[str] = set()
+    for link_name, entry in entries.items():
+        if not isinstance(entry, dict):
+            raise ValueError("intake manifest entry must be an object")
+        unknown_entry = set(entry) - _REQUIRED_ENTRY_KEYS
+        if unknown_entry:
+            raise ValueError(f"unknown intake entry keys: {sorted(unknown_entry)}")
+        if entry.get("link_name") != link_name:
+            raise ValueError("intake manifest link name mismatch")
+        artifact_id = entry.get("artifact_id")
+        if not is_artifact_id(artifact_id):
+            raise ValueError("invalid artifact_id in intake manifest")
+        if artifact_id in seen_ids:
+            raise ValueError("duplicate artifact_id in intake manifest")
+        seen_ids.add(artifact_id)
+        rel = _safe_rel(Path(str(entry.get("relative_path"))))
+        if rel in seen_paths:
+            raise ValueError("duplicate relative_path in intake manifest")
+        seen_paths.add(rel)
+        if not is_sha256(entry.get("sha256")):
+            raise ValueError("invalid sha256 in intake manifest")
+        if check_links:
+            link_path = manifest_path.parent / link_name
+            if not link_path.is_symlink():
+                raise ValueError(f"broken intake link: {link_name}")
+            try:
+                target = link_path.resolve(strict=True)
+            except OSError as exc:
+                raise ValueError(f"broken intake link: {link_name}") from exc
+            if source_root is None:
+                raise ValueError("intake manifest has entries without source_root")
+            try:
+                target.relative_to(source_root)
+            except ValueError as exc:
+                raise ValueError("intake link target outside source_root") from exc
+            expected = (source_root / rel).resolve(strict=True)
+            if target != expected:
+                raise ValueError("intake link target/path mismatch")
+    for list_key in ("duplicates", "errors", "removals"):
+        if not isinstance(manifest.get(list_key, []), list):
+            raise ValueError(f"intake manifest {list_key} must be a list")
+    return manifest
+
+
 def load_intake_manifest(study: str) -> dict[str, Any]:
-    """Return the current ``intake_manifest.json`` for *study*, or an empty shell."""
     manifest_path = Path(config.INTAKE_DIR) / study / "intake_manifest.json"
     if not manifest_path.is_file():
-        return {"study": study, "source_root": None, "entries": {}, "duplicates": [], "errors": []}
+        return _empty_manifest(study)
     try:
-        return json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {"study": study, "source_root": None, "entries": {}, "duplicates": [], "errors": []}
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ValueError(f"invalid intake manifest: {exc}") from exc
+    return _validate_manifest(study, raw, manifest_path, check_links=True)
+
+
+def _load_existing_for_reconcile(study: str) -> dict[str, Any]:
+    manifest_path = Path(config.INTAKE_DIR) / study / "intake_manifest.json"
+    if not manifest_path.is_file():
+        return _empty_manifest(study)
+    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return _validate_manifest(study, raw, manifest_path, check_links=False)
 
 
 def intake_add(source: Path, study: str) -> dict[str, Any]:
-    """Symlink every file under *source* into ``INTAKE_DIR/<study>/``.
-
-    Idempotent: a link already pointing at the same resolved target is left
-    untouched. Content-duplicate files (same sha256, different source paths)
-    link only the first occurrence and record the rest under ``duplicates``.
-    Unreadable files and dangling symlinks found while walking *source* are
-    recorded under ``errors``; the walk always continues (never raises for a
-    single bad entry).
-
-    Hard rule: this function never opens a SOURCE file for write, never
-    copies bytes (hashing is a streamed read), and never deletes anything
-    under *source*. Only the intake-side symlink (and the manifest file) are
-    ever created/replaced.
-    """
-    source = Path(source).resolve()
+    source = Path(source).resolve(strict=True)
+    if not source.is_dir():
+        raise ValueError(f"source root must be a directory: {source}")
     study_dir = Path(config.INTAKE_DIR) / study
     study_dir.mkdir(parents=True, exist_ok=True)
 
-    existing = load_intake_manifest(study)
-    entries: dict[str, dict[str, Any]] = dict(existing.get("entries") or {})
-    duplicates: list[dict[str, Any]] = list(existing.get("duplicates") or [])
-    seen_content_hashes: dict[str, str] = {
-        e["sha256"]: name for name, e in entries.items() if "sha256" in e
-    }
+    existing = _load_existing_for_reconcile(study)
+    existing_root = existing.get("source_root")
+    if existing_root is not None and Path(existing_root).resolve() != source:
+        raise ValueError(f"intake source_root mismatch: expected {existing_root}, got {source}")
 
+    existing_by_rel = {entry["relative_path"]: entry for entry in (existing.get("entries") or {}).values()}
+    entries: dict[str, dict[str, Any]] = {}
     errors: list[dict[str, Any]] = []
+    removals: list[dict[str, Any]] = list(existing.get("removals") or [])
+    seen_rel: set[str] = set()
+    content_first: dict[str, str] = {}
 
-    for src_file in _iter_source_files(source):
+    for src_file in sorted(_iter_source_files(source), key=lambda p: p.relative_to(source).as_posix()):
+        rel = _safe_rel(src_file.relative_to(source))
         if src_file.is_symlink() and not src_file.exists():
-            errors.append({"path": str(src_file), "reason": "broken-symlink-in-source"})
+            errors.append({"path": rel, "reason": "broken-symlink-in-source"})
             continue
         try:
-            if not src_file.is_file():
+            resolved = src_file.resolve(strict=True)
+            resolved.relative_to(source)
+            st = resolved.stat()
+            if not stat.S_ISREG(st.st_mode):
                 continue
-            resolved = src_file.resolve()
-        except OSError as exc:
-            errors.append({"path": str(src_file), "reason": f"unreadable: {exc}"})
-            continue
-
-        try:
             content_sha = _sha256_stream(resolved)
         except OSError as exc:
-            errors.append({"path": str(src_file), "reason": f"unreadable: {exc}"})
+            errors.append({"path": rel, "reason": f"unreadable: {exc}"})
+            continue
+        except ValueError:
+            errors.append({"path": rel, "reason": "source-target-outside-root"})
             continue
 
-        sha8 = _sha8_of_path(resolved)
-        link_name = f"{sha8}__{resolved.name}"
+        prior = existing_by_rel.get(rel)
+        artifact_id = prior["artifact_id"] if prior is not None else _new_artifact_id()
+        link_name = f"{artifact_id}__{Path(rel).name}"
         link_path = study_dir / link_name
-
-        prior_link_for_content = seen_content_hashes.get(content_sha)
-        if prior_link_for_content is not None and prior_link_for_content != link_name:
-            dup_record = {
-                "path": str(resolved),
-                "sha256": content_sha,
-                "duplicate_of": prior_link_for_content,
-            }
-            if dup_record not in duplicates:
-                duplicates.append(dup_record)
-            continue
-
-        if link_path.is_symlink():
-            try:
-                if link_path.resolve() == resolved:
-                    seen_content_hashes.setdefault(content_sha, link_name)
-                    continue  # idempotent -- already linked to this exact target
-            except OSError:
-                pass  # stale/broken intake-side link -- fall through and relink
-
         try:
             if link_path.exists() or link_path.is_symlink():
                 link_path.unlink()
             os.symlink(resolved, link_path)
         except OSError as exc:
-            errors.append({"path": str(resolved), "reason": f"symlink-failed: {exc}"})
+            errors.append({"path": rel, "reason": f"symlink-failed: {exc}"})
             continue
-
-        stat = resolved.stat()
-        entries[link_name] = {
+        seen_rel.add(rel)
+        duplicate_of = content_first.get(content_sha)
+        entry = {
+            "artifact_id": artifact_id,
             "link_name": link_name,
+            "relative_path": rel,
             "original_path": str(resolved),
             "sha256": content_sha,
-            "size": stat.st_size,
-            "mtime": stat.st_mtime,
+            "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+            "device": st.st_dev,
+            "inode": st.st_ino,
+            "mode": stat.S_IMODE(st.st_mode),
         }
-        seen_content_hashes.setdefault(content_sha, link_name)
+        entries[link_name] = entry
+        content_first.setdefault(content_sha, artifact_id)
+        if duplicate_of and duplicate_of != artifact_id:
+            # Alias artifacts stay first-class entries; this note is provenance only.
+            pass
+
+    removed_rels = sorted(set(existing_by_rel) - seen_rel)
+    removed_link_names: set[str] = set()
+    for rel in removed_rels:
+        old = existing_by_rel[rel]
+        removed_link_names.add(str(old["link_name"]))
+        removals.append(
+            {
+                "artifact_id": old["artifact_id"],
+                "relative_path": rel,
+                "sha256": old.get("sha256"),
+                "removed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        )
+    for link_path in study_dir.iterdir():
+        if link_path.name == "intake_manifest.json":
+            continue
+        if link_path.name not in entries:
+            link_path.unlink(missing_ok=True)
 
     manifest = {
+        "schema": "intake-manifest/v2",
         "study": study,
         "source_root": str(source),
         "entries": entries,
-        "duplicates": duplicates,
+        "duplicates": [],
         "errors": errors,
+        "removals": removals,
     }
     manifest_path = study_dir / "intake_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    manifest_path.chmod(0o600)
     return manifest

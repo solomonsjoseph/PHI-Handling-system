@@ -24,8 +24,11 @@ class ReviewStudy:
 
 def _drop_phi_runtime_modules() -> None:
     """Force import-time phi_engine paths to resolve from the current test env."""
+    keep = {"phi_engine", "phi_engine.utils", "phi_engine.utils.pipeline_lock"}
     for name in list(sys.modules):
-        if name == "phi_engine" or name.startswith("phi_engine."):
+        if name in keep:
+            continue
+        if name.startswith("phi_engine."):
             del sys.modules[name]
 
 
@@ -234,10 +237,12 @@ def test_list_review_items_reports_organizer_bucket_and_decisions(review_study: 
         for item in review_items["organizer_review_bucket"]
     )
     assert review_items["decisions_on_file"]["ANALYSIS_GROUP"]["decision"] == "drop"
+    assert review_items["dependency_recommendations"] == []
     assert set(review_items) == {
         "study",
         "organizer_review_bucket",
         "held_forms",
         "llm_uncertain_queue",
+        "dependency_recommendations",
         "decisions_on_file",
     }

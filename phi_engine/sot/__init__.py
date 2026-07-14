@@ -6,11 +6,6 @@ from pathlib import Path
 
 import phi_engine.config.config as config
 from phi_engine.audit.review_paths import is_sot_review_report_path
-from phi_engine.sot.generate_lean_outputs import (
-    _cleanup_sot_temps,
-    discover_pdf_backed_forms_with_reviews,
-    generate_form,
-)
 
 __all__ = ["generate_sot"]
 
@@ -22,6 +17,12 @@ def generate_sot(study: str) -> int:
     dataset discrepancies simply leave that form without LLM-facing SoT signals,
     and the downstream PHI review loader is intentionally fail-soft.
     """
+    from phi_engine.sot.generate_lean_outputs import (
+        _cleanup_sot_temps,
+        discover_pdf_backed_forms_with_reviews,
+        generate_form,
+    )
+
 
     repo_root = Path(config.BASE_DIR).resolve()
     study_dir = Path(config.RAW_DATA_DIR) / study

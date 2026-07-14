@@ -120,8 +120,11 @@ def _drop_phi_runtime_modules() -> None:
     An explicit allowlist would silently go stale the next time a new
     pipeline module is added; a prefix sweep cannot.
     """
+    keep = {"phi_engine", "phi_engine.utils", "phi_engine.utils.pipeline_lock"}
     for name in list(sys.modules):
-        if name == "phi_engine" or name.startswith("phi_engine."):
+        if name in keep:
+            continue
+        if name.startswith("phi_engine."):
             del sys.modules[name]
 
 

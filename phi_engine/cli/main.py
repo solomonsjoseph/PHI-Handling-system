@@ -81,11 +81,39 @@ def _cmd_run(args: argparse.Namespace) -> int:
 def _cmd_review(args: argparse.Namespace) -> int:
     _set_workspace_env(args)
     from phi_engine.pipeline.review import decide as review_decide
-    from phi_engine.pipeline.review import list_review_items
+    from phi_engine.pipeline.review import decide_dependency, list_review_items
 
     if args.review_action == "list":
         items = list_review_items(args.study)
         print(json.dumps(items, indent=2, sort_keys=True))
+        return 0
+
+    if args.review_action == "dependency-decide":
+        try:
+            decision = decide_dependency(
+                args.study,
+                dataset=args.dataset,
+                recommendation=args.recommendation,
+                support=args.support,
+                level=args.level,
+                sensitivity=args.sensitivity,
+                reason_code=args.reason_code,
+                detail_file=Path(args.detail_file) if args.detail_file else None,
+                decided_by=args.decided_by,
+            )
+        except (OSError, ValueError):
+            print("dependency decision rejected", file=sys.stderr)
+            return 2
+        print(
+            json.dumps(
+                {
+                    "decision_id": decision.decision_id,
+                    "recommendation_id": decision.recommendation_id,
+                    "dataset_artifact_id": decision.dataset_artifact_id,
+                },
+                sort_keys=True,
+            )
+        )
         return 0
 
     # decide
@@ -148,6 +176,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_decide.add_argument("--decision", required=True, choices=["keep", "drop", "override"])
     p_decide.add_argument("--action", default=None, help="Required when --decision override")
     p_decide.add_argument("--decided-by", default=None)
+    p_dependency = review_sub.add_parser(
+        "dependency-decide",
+        help="Record a decision for a current dependency recommendation",
+    )
+    p_dependency.add_argument("--dataset", required=True)
+    p_dependency.add_argument("--recommendation", required=True)
+    p_dependency.add_argument("--support", default=None)
+    p_dependency.add_argument(
+        "--level",
+        required=True,
+        choices=["required", "helpful", "ignored"],
+    )
+    p_dependency.add_argument(
+        "--sensitivity",
+        required=True,
+        choices=["confidential", "non_confidential"],
+    )
+    p_dependency.add_argument(
+        "--reason-code",
+        required=True,
+        choices=[
+            "manifest_declared",
+            "same_stem_companion",
+            "exact_header_match",
+            "only_interpretation",
+            "transform_parameters_missing",
+        ],
+    )
+    p_dependency.add_argument("--detail-file", default=None)
+    p_dependency.add_argument("--decided-by", required=True)
     p_review.set_defaults(func=_cmd_review)
 
     p_status = sub.add_parser("status", help="Show the latest run status for a study")
