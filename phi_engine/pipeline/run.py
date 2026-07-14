@@ -42,13 +42,16 @@ from phi_engine.pipeline.organize import organize
 from phi_engine.pipeline.profile import profile_column
 from phi_engine.pipeline.dependencies import (
     DependencyDecision,
+    DependencyDecisionBasis,
     DependencyKind,
     DependencyLevel,
+    DependencyReasonCode,
     DependencyRecommendation,
     OrganizedDataset,
     OrganizedHeader,
     ParsedSupportArtifact,
     PrivateDependencyRecommendation,
+    Sensitivity,
     RoleSource,
     StructuredTransformKind,
     SupportFailureCode,
@@ -79,6 +82,11 @@ from phi_engine.security.phi_review import (
     refresh_jurisdiction_rules,
     review_form_headers,
 )
+from scripts.extraction.forms_manifest import (
+    DependencyRelation,
+    DependencyRelationState,
+    check_forms_manifest,
+)
 from phi_engine.utils.pipeline_lock import (
     PipelineBusyError,
     acquire_pipeline_lock,
@@ -89,6 +97,9 @@ from phi_engine.utils.pipeline_lock import (
 __all__ = ["PipelineResult", "run_pipeline"]
 
 _JURISDICTION_LABELS = {"in": "INDIA", "us": "USA"}
+_PENDING_DEPENDENCY_RECOMMENDATIONS_FILENAME = (
+    "pending_dependency_recommendations.jsonl"
+)
 
 
 @dataclass
@@ -142,11 +153,26 @@ def _raw_rows_from_organized(organized_root: Path, entry: dict[str, Any], rows: 
     if not protected_path.is_file():
         headers = list(rows[0].keys()) if rows else []
         return headers, rows
-    protected = json.loads(protected_path.read_text(encoding="utf-8"))
-    ordered = sorted(protected.get("headers") or [], key=lambda item: int(item.get("column_index", 0)))
-    headers = [str(item.get("raw_name", "")) for item in ordered]
-    id_to_raw = {str(item.get("header_id")): str(item.get("raw_name", "")) for item in ordered}
-    raw_rows = [{id_to_raw.get(key, key): value for key, value in row.items()} for row in rows]
+    protected = _load_mode_0600_json(
+        protected_path,
+        {"artifact_id", "source_sha256", "headers", "source_relative_path"},
+        "protected dataset metadata",
+    )
+    if protected["artifact_id"] != artifact_id:
+        raise ValueError("protected dataset identity mismatch")
+    ordered = sorted(
+        _parse_protected_headers(protected["headers"]),
+        key=lambda item: item.column_index,
+    )
+    headers = [item.raw_name for item in ordered]
+    id_to_raw = {
+        item.header_id: item.raw_name
+        for item in ordered
+    }
+    raw_rows = [
+        {id_to_raw.get(key, key): value for key, value in row.items()}
+        for row in rows
+    ]
     return headers, raw_rows
 
 
@@ -163,6 +189,49 @@ class _HydratedDependencyInputs:
 class _DependencyDisposition:
     held_dataset_ids: frozenset[str]
     review_recommendation_ids: frozenset[str]
+
+
+def _load_manifest_dependency_relations(
+    study: str,
+    intake_manifest: object,
+) -> Mapping[str, tuple[DependencyRelation, ...]]:
+    if not isinstance(intake_manifest, Mapping):
+        return {}
+    source_root = intake_manifest.get("source_root")
+    if not isinstance(source_root, str):
+        return {}
+    return check_forms_manifest(
+        Path(source_root).resolve(strict=True) / "datasets"
+    ).dependency_relations
+
+
+def _write_pending_dependency_recommendations(
+    run_dir: Path,
+    recommendations: tuple[DependencyRecommendation, ...],
+    pending_ids: frozenset[str],
+) -> Path:
+    recommendations_by_id = {
+        recommendation.recommendation_id: recommendation
+        for recommendation in recommendations
+    }
+    if len(recommendations_by_id) != len(recommendations):
+        raise ValueError("duplicate dependency recommendation identity")
+    unknown = pending_ids - recommendations_by_id.keys()
+    if unknown:
+        raise ValueError("pending dependency recommendation is unavailable")
+    path = (
+        Path(run_dir)
+        / _PENDING_DEPENDENCY_RECOMMENDATIONS_FILENAME
+    )
+    _write_jsonl_rows(
+        path,
+        [
+            recommendations_by_id[recommendation_id].to_json()
+            for recommendation_id in sorted(pending_ids)
+        ],
+    )
+    path.chmod(0o600)
+    return path
 
 
 def _sha256_regular_file(path: Path, label: str) -> str:
@@ -213,6 +282,38 @@ def _load_mode_0600_json(path: Path, expected_keys: set[str], label: str) -> dic
     return payload
 
 
+def _parse_protected_headers(raw_headers: object) -> tuple[OrganizedHeader, ...]:
+    if not isinstance(raw_headers, list):
+        raise ValueError("protected dataset headers must be a list")
+    protected_header_keys = {
+        "header_id",
+        "column_index",
+        "raw_name",
+        "normalized_name",
+    }
+    headers: list[OrganizedHeader] = []
+    for item in raw_headers:
+        if not isinstance(item, Mapping) or set(item) != protected_header_keys:
+            raise ValueError("protected dataset header schema mismatch")
+        if (
+            not isinstance(item["header_id"], str)
+            or not isinstance(item["column_index"], int)
+            or isinstance(item["column_index"], bool)
+            or not isinstance(item["raw_name"], str)
+            or not isinstance(item["normalized_name"], str)
+        ):
+            raise ValueError("protected dataset header types mismatch")
+        headers.append(
+            OrganizedHeader(
+                header_id=item["header_id"],
+                column_index=item["column_index"],
+                raw_name=item["raw_name"],
+                normalized_name=item["normalized_name"],
+            )
+        )
+    return tuple(headers)
+
+
 def _hydrate_dependency_inputs(
     organized_root: Path,
     organize_manifest: Mapping[str, Any],
@@ -232,21 +333,7 @@ def _hydrate_dependency_inputs(
         )
         if protected["artifact_id"] != artifact_id:
             raise ValueError("protected dataset identity mismatch")
-        raw_headers = protected["headers"]
-        if not isinstance(raw_headers, list):
-            raise ValueError("protected dataset headers must be a list")
-        headers = tuple(
-            OrganizedHeader(
-                header_id=str(item["header_id"]),
-                column_index=int(item["column_index"]),
-                raw_name=str(item["raw_name"]),
-                normalized_name=str(item["normalized_name"]),
-            )
-            for item in raw_headers
-            if isinstance(item, Mapping)
-        )
-        if len(headers) != len(raw_headers):
-            raise ValueError("protected dataset header schema mismatch")
+        headers = _parse_protected_headers(protected["headers"])
         public_headers = entry.get("headers")
         if not isinstance(public_headers, list) or [
             {
@@ -634,6 +721,87 @@ def _evaluate_dependency_state(
     )
 
 
+def _build_unavailable_manifest_recommendations(
+    hydrated: _HydratedDependencyInputs,
+    dependency_relations: Mapping[str, tuple[DependencyRelation, ...]],
+    *,
+    rulebook_sha256: str,
+    scrub_config_sha256: str,
+) -> tuple[DependencyRecommendation, ...]:
+    datasets_by_path = {
+        hydrated.dataset_paths_by_id[dataset.artifact_id]: dataset
+        for dataset in hydrated.datasets
+    }
+    support_ids = {
+        support.artifact_id for support in hydrated.support_artifacts
+    }
+    recommendations: dict[str, DependencyRecommendation] = {}
+    for relations in dependency_relations.values():
+        for relation in relations:
+            if (
+                relation.dataset_state is DependencyRelationState.MISSING
+                or relation.support_state is DependencyRelationState.CURRENT
+            ):
+                continue
+            dependency = relation.dependency
+            if (
+                dependency.support_artifact_id is not None
+                and dependency.support_artifact_id in support_ids
+            ):
+                # Stale bytes that still organized produce an ordinary current
+                # recommendation through recommend_dependencies.
+                continue
+            dataset = datasets_by_path.get(dependency.dataset_path)
+            if dataset is None:
+                continue
+            recommendation_id = dependency.recommendation_id
+            basis = DependencyDecisionBasis(
+                rulebook_sha256=rulebook_sha256,
+                scrub_config_sha256=scrub_config_sha256,
+                support_role_sha256=support_role_sha256(
+                    recommendation_id=recommendation_id,
+                    dataset_artifact_id=dataset.artifact_id,
+                    support_artifact_id=None,
+                    kind=dependency.kind,
+                    role_source=RoleSource.MANIFEST,
+                    organizer_role_version=1,
+                ),
+            )
+            recommendation = DependencyRecommendation(
+                schema_version="dependency-recommendation/v1",
+                recommendation_id=recommendation_id,
+                dataset_artifact_id=dataset.artifact_id,
+                dataset_sha256=dataset.source_sha256,
+                support_artifact_id=None,
+                support_sha256=None,
+                normalized_support_sha256=None,
+                kind=dependency.kind,
+                suggested_level=(
+                    DependencyLevel.REQUIRED
+                    if dependency.level is DependencyLevel.REQUIRED
+                    else DependencyLevel.HELPFUL
+                ),
+                default_sensitivity=Sensitivity.CONFIDENTIAL,
+                reason_code=DependencyReasonCode.MANIFEST_DECLARED,
+                header_ids=(),
+                matched_rule_ids=(),
+                transform_requirement_ids=(),
+                basis=basis,
+            )
+            prior = recommendations.setdefault(
+                recommendation.recommendation_id,
+                recommendation,
+            )
+            if prior != recommendation:
+                raise ValueError(
+                    "manifest dependency recommendation identity conflict"
+                )
+    return tuple(
+        recommendations[recommendation_id]
+        for recommendation_id in sorted(recommendations)
+    )
+
+
 def _recommendation_role_source(
     recommendation: DependencyRecommendation,
 ) -> RoleSource:
@@ -658,11 +826,30 @@ def _recommendation_role_source(
 def _build_private_dependency_recommendations(
     recommendations: tuple[DependencyRecommendation, ...],
     hydrated: _HydratedDependencyInputs,
+    dependency_relations: Mapping[
+        str,
+        tuple[DependencyRelation, ...],
+    ] | None = None,
 ) -> tuple[PrivateDependencyRecommendation, ...]:
     datasets_by_id = {
         dataset.artifact_id: dataset
         for dataset in hydrated.datasets
     }
+    expected_missing_support_paths: dict[str, str] = {}
+    for relations in (dependency_relations or {}).values():
+        for relation in relations:
+            if relation.support_state is DependencyRelationState.CURRENT:
+                continue
+            recommendation_id = relation.dependency.recommendation_id
+            support_path = relation.dependency.support
+            prior = expected_missing_support_paths.setdefault(
+                recommendation_id,
+                support_path,
+            )
+            if prior != support_path:
+                raise ValueError(
+                    "manifest recommendation has conflicting support paths"
+                )
     private_records: list[PrivateDependencyRecommendation] = []
     for recommendation in recommendations:
         dataset = datasets_by_id.get(recommendation.dataset_artifact_id)
@@ -679,9 +866,16 @@ def _build_private_dependency_recommendations(
             raw_names = tuple(raw_by_id[header_id] for header_id in recommendation.header_ids)
         except KeyError as exc:
             raise ValueError("recommendation header lacks protected context") from exc
+        role_source = _recommendation_role_source(recommendation)
         support_path = (
-            hydrated.support_paths_by_id.get(recommendation.support_artifact_id)
+            hydrated.support_paths_by_id.get(
+                recommendation.support_artifact_id
+            )
             if recommendation.support_artifact_id is not None
+            else expected_missing_support_paths.get(
+                recommendation.recommendation_id
+            )
+            if role_source is RoleSource.MANIFEST
             else None
         )
         if recommendation.support_artifact_id is not None and support_path is None:
@@ -695,7 +889,7 @@ def _build_private_dependency_recommendations(
                 support_artifact_id=recommendation.support_artifact_id,
                 support_path=support_path,
                 raw_header_names=raw_names,
-                role_source=_recommendation_role_source(recommendation),
+                role_source=role_source,
                 organizer_role_version=1,
                 basis=recommendation.basis,
             )
@@ -847,7 +1041,11 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
     # can never be skipped by a stale organizer cache.  Keep the intake manifest
     # hash inside organize_manifest as provenance only.
     organized_root = Path(config.ORGANIZED_DIR) / study
-    load_intake_manifest(study)  # validate current intake manifest before organizing
+    intake_manifest = load_intake_manifest(study)
+    dependency_relations = _load_manifest_dependency_relations(
+        study,
+        intake_manifest,
+    )
     organize_manifest = organize(study)
     hydrated_dependencies = _hydrate_dependency_inputs(
         organized_root,
@@ -864,6 +1062,11 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
             run_dir=run_dir,
             recommendations=(),
             private_records=(),
+        )
+        _write_pending_dependency_recommendations(
+            run_dir,
+            (),
+            frozenset(),
         )
         result = PipelineResult(
             study=study,
@@ -893,9 +1096,9 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
 
             rc = generate_sot(study)
             if rc != 0:
-                sot_generation_error = f"generate_sot returned {rc}"
-        except Exception as exc:  # noqa: BLE001 -- SoT is fail-soft enrichment
-            sot_generation_error = f"{type(exc).__name__}: {exc}"
+                sot_generation_error = "sot_generation_nonzero_exit"
+        except Exception:  # noqa: BLE001 -- SoT is fail-soft enrichment
+            sot_generation_error = "sot_generation_exception"
 
     # -- c. classify every form's headers (metadata only) -------------------
     # Load the CURRENT effective scrub config (packaged defaults + whatever
@@ -1034,7 +1237,7 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
         )
     )
     dependency_decisions = load_study_dependency_decisions(study)
-    dependency_recommendations = recommend_dependencies(
+    generated_dependency_recommendations = recommend_dependencies(
         datasets=hydrated_dependencies.datasets,
         support_artifacts=hydrated_dependencies.support_artifacts,
         published_raw_headers_by_dataset=published_raw_header_ids,
@@ -1042,7 +1245,31 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
         confirmed_links=dependency_decisions,
         rule_bundle=bundle,
     )
-    if scrub_config_hash is None or any(
+    if scrub_config_hash is None:
+        raise ValueError("dependency scrub config hash is unavailable")
+    recommendations_by_id = {
+        recommendation.recommendation_id: recommendation
+        for recommendation in generated_dependency_recommendations
+    }
+    for recommendation in _build_unavailable_manifest_recommendations(
+        hydrated_dependencies,
+        dependency_relations,
+        rulebook_sha256=bundle.rules_sha256,
+        scrub_config_sha256=scrub_config_hash,
+    ):
+        prior = recommendations_by_id.setdefault(
+            recommendation.recommendation_id,
+            recommendation,
+        )
+        if prior != recommendation:
+            raise ValueError(
+                "dependency recommendation identity conflict"
+            )
+    dependency_recommendations = tuple(
+        recommendations_by_id[recommendation_id]
+        for recommendation_id in sorted(recommendations_by_id)
+    )
+    if any(
         recommendation.basis.scrub_config_sha256 != scrub_config_hash
         for recommendation in dependency_recommendations
     ):
@@ -1051,6 +1278,7 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
         _build_private_dependency_recommendations(
             dependency_recommendations,
             hydrated_dependencies,
+            dependency_relations,
         )
     )
     write_dependency_recommendations(
@@ -1062,6 +1290,11 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
         dependency_recommendations,
         dependency_decisions,
         hydrated_dependencies.support_artifacts,
+    )
+    _write_pending_dependency_recommendations(
+        run_dir,
+        dependency_recommendations,
+        dependency_disposition.review_recommendation_ids,
     )
     dependency_held_outputs = {
         output
@@ -1122,8 +1355,8 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
     scrub_raised: str | None = None
     try:
         phi_scrub.run_scrub(study, run_id=run_id, runs_dir=runs_dir, partial_on_review=True)
-    except Exception as exc:  # noqa: BLE001 -- captured for the result JSON
-        scrub_raised = f"{type(exc).__name__}: {exc}"
+    except Exception:  # noqa: BLE001 -- controlled code only in result JSON
+        scrub_raised = "scrub_exception"
 
     if scrub_raised is not None:
         result = PipelineResult(

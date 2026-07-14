@@ -240,6 +240,97 @@ def test_hydrates_exact_alias_datasets_and_support_only_from_protected_0600_meta
         _hydrate_dependency_inputs(organized, manifest)
 
 
+@pytest.mark.parametrize(
+    "header_payload",
+    [
+        {
+            "header_id": _header("a"),
+            "column_index": 0,
+            "raw_name": "PRIVATE-ALPHA",
+            "normalized_name": "private-alpha",
+            "unexpected": "metadata",
+        },
+        {
+            "header_id": _header("a"),
+            "column_index": 0,
+            "normalized_name": "private-alpha",
+        },
+        {
+            "header_id": _header("a"),
+            "column_index": "0",
+            "raw_name": "PRIVATE-ALPHA",
+            "normalized_name": "private-alpha",
+        },
+        {
+            "header_id": _header("a"),
+            "column_index": True,
+            "raw_name": "PRIVATE-ALPHA",
+            "normalized_name": "private-alpha",
+        },
+        {
+            "header_id": 123,
+            "column_index": 0,
+            "raw_name": "PRIVATE-ALPHA",
+            "normalized_name": "private-alpha",
+        },
+        {
+            "header_id": _header("a"),
+            "column_index": 0,
+            "raw_name": 123,
+            "normalized_name": "private-alpha",
+        },
+        {
+            "header_id": _header("a"),
+            "column_index": 0,
+            "raw_name": "PRIVATE-ALPHA",
+            "normalized_name": None,
+        },
+    ],
+)
+def test_hydration_rejects_non_exact_or_coerced_protected_header_mappings(
+    tmp_path: Path,
+    header_payload: dict[str, object],
+) -> None:
+    from phi_engine.pipeline.run import _hydrate_dependency_inputs
+
+    organized, manifest, first_id, _second_id, _support_id = (
+        _organized_alias_fixture(tmp_path)
+    )
+    protected_path = (
+        organized / ".protected" / "headers" / f"{first_id}.json"
+    )
+    protected = json.loads(protected_path.read_text(encoding="utf-8"))
+    protected["headers"] = [header_payload]
+    _write_0600_json(protected_path, protected)
+
+    with pytest.raises(ValueError, match="protected dataset header"):
+        _hydrate_dependency_inputs(organized, manifest)
+
+
+def test_raw_row_header_mapping_rejects_types_instead_of_coercing(
+    tmp_path: Path,
+) -> None:
+    from phi_engine.pipeline.run import _raw_rows_from_organized
+
+    organized, manifest, first_id, _second_id, _support_id = (
+        _organized_alias_fixture(tmp_path)
+    )
+    protected_path = (
+        organized / ".protected" / "headers" / f"{first_id}.json"
+    )
+    protected = json.loads(protected_path.read_text(encoding="utf-8"))
+    protected["headers"][0]["column_index"] = "0"
+    _write_0600_json(protected_path, protected)
+    entry = manifest["datasets"][0]
+
+    with pytest.raises(ValueError, match="protected dataset header"):
+        _raw_rows_from_organized(
+            organized,
+            entry,
+            [{_header("a"): "value"}],
+        )
+
+
 class _EffectiveConfig:
     def field_is_keep(self, name: str) -> bool:
         return name == "KEEP"
