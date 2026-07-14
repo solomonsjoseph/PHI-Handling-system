@@ -45,6 +45,10 @@ import yaml
 import phi_engine.config.config as config
 from phi_engine.audit import review_paths
 from phi_engine.security.phi_review import Action, HeaderClassification
+from phi_engine.security.phi_review import (
+    load_study_privacy_config,
+    refresh_jurisdiction_rules,
+)
 from phi_engine.pipeline import dependencies as dependency_contracts
 from phi_engine.pipeline.dependencies import (
     CODE_TABLE_VERSION,
@@ -57,7 +61,9 @@ from phi_engine.pipeline.dependencies import (
     DependencyReasonCode,
     DependencyRecommendation,
     PrivateDependencyRecommendation,
+    RoleSource,
     Sensitivity,
+    SupportFailureCode,
     append_dependency_decision,
     is_artifact_id,
     is_recommendation_id,
@@ -67,6 +73,7 @@ from phi_engine.pipeline.dependencies import (
     support_role_sha256,
     utc_now_z,
 )
+from phi_engine.utils.pipeline_lock import PipelineBusyError, pipeline_lock
 
 __all__ = [
     "DECISIONS_FILENAME",
@@ -86,8 +93,12 @@ DECISIONS_FILENAME = "review_decisions.yaml"
 DECISIONS_TRAIL_FILENAME = "decisions.jsonl"
 _VALID_DECISIONS = frozenset({"keep", "drop", "override"})
 DEPENDENCY_DECISION_DETAILS_FILENAME = "dependency_decision_details.jsonl"
+PENDING_DEPENDENCY_RECOMMENDATIONS_FILENAME = (
+    "pending_dependency_recommendations.jsonl"
+)
 _DATASET_DEPENDENCIES_SCHEMA = "dataset-dependencies/v1"
 _DECIDED_BY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
+_ORGANIZER_ROLE_VERSION = 1
 
 
 def DEFAULT_LLM_QUEUE_PATH() -> Path:  # noqa: N802 -- reads as a named constant at call sites
@@ -138,9 +149,46 @@ def decide_dependency(
     selected_reason = _dependency_enum(DependencyReasonCode, reason_code, "reason_code")
     detail = _read_private_detail(detail_file)
 
+    try:
+        with pipeline_lock(study):
+            return _decide_dependency_locked(
+                study,
+                dataset=dataset,
+                recommendation=recommendation,
+                support=support,
+                level=selected_level,
+                sensitivity=selected_sensitivity,
+                reason_code=selected_reason,
+                detail=detail,
+                decided_by=decided_by,
+            )
+    except PipelineBusyError:
+        raise ValueError("study pipeline lock is busy") from None
+    except OSError:
+        raise ValueError("study pipeline lock infrastructure failure") from None
+    except RuntimeError:
+        raise ValueError("study pipeline lock infrastructure failure") from None
+
+
+def _decide_dependency_locked(
+    study: str,
+    *,
+    dataset: str,
+    recommendation: str,
+    support: str | None,
+    level: DependencyLevel,
+    sensitivity: Sensitivity,
+    reason_code: DependencyReasonCode,
+    detail: str | None,
+    decided_by: str,
+) -> DependencyDecision:
     recommendations, private_records, _run_dir = _load_latest_dependency_records(study)
-    recommendations_by_id = _records_by_recommendation_id(recommendations, "recommendations")
-    private_by_id = _records_by_recommendation_id(private_records, "private recommendations")
+    recommendations_by_id = _records_by_recommendation_id(
+        recommendations, "recommendations"
+    )
+    private_by_id = _records_by_recommendation_id(
+        private_records, "private recommendations"
+    )
     current = recommendations_by_id.get(recommendation)
     private = private_by_id.get(recommendation)
     if current is None or private is None or current.dataset_artifact_id != dataset:
@@ -153,17 +201,39 @@ def decide_dependency(
         raise ValueError("stale protected recommendation identity")
     if support != current.support_artifact_id:
         raise ValueError("support identity mismatch")
-    if selected_reason is not current.reason_code:
+    if reason_code is not current.reason_code:
         raise ValueError("reason code mismatch")
-    if current.support_artifact_id is None and selected_level is DependencyLevel.IGNORED:
-        raise ValueError("missing support cannot be ignored")
-    if current.support_artifact_id is None and private.support_path is None:
-        raise ValueError(
-            "missing support recommendation lacks an expected protected path"
-        )
+    if private.organizer_role_version != _ORGANIZER_ROLE_VERSION:
+        raise ValueError("stale recommendation role")
+
+    manifest_path = _decisions_dir(study) / "_forms_manifest.yaml"
+    manifest = _load_forms_manifest_for_update(manifest_path)
+    if current.support_artifact_id is None:
+        if level is DependencyLevel.IGNORED:
+            raise ValueError("missing support cannot be ignored")
+        if sensitivity is Sensitivity.NON_CONFIDENTIAL:
+            raise ValueError(
+                "non_confidential sensitivity requires parsed support"
+            )
+        if not _is_manifest_declared_missing_support(
+            manifest, current, private
+        ):
+            raise ValueError(
+                "missing support requires a manifest-declared expected support path"
+            )
+    elif (
+        sensitivity is Sensitivity.NON_CONFIDENTIAL
+        and current.normalized_support_sha256 is None
+    ):
+        raise ValueError("non_confidential sensitivity requires parsed support")
 
     organized_root = Path(config.ORGANIZED_DIR) / study
-    _verify_current_dependency_identity(organized_root, current, private)
+    support_is_parsed = _verify_current_dependency_identity(
+        organized_root, current, private
+    )
+    if sensitivity is Sensitivity.NON_CONFIDENTIAL and not support_is_parsed:
+        raise ValueError("non_confidential sensitivity requires parsed support")
+
     role_hash = support_role_sha256(
         recommendation_id=current.recommendation_id,
         dataset_artifact_id=current.dataset_artifact_id,
@@ -172,13 +242,15 @@ def decide_dependency(
         role_source=private.role_source,
         organizer_role_version=private.organizer_role_version,
     )
+    current_rulebook_sha256 = _current_rulebook_sha256(study)
+    current_scrub_sha256 = _current_scrub_config_sha256()
     if (
         role_hash != current.basis.support_role_sha256
-        or dependency_contracts._effective_scrub_config_sha256() != current.basis.scrub_config_sha256
+        or current_scrub_sha256 != current.basis.scrub_config_sha256
+        or current_rulebook_sha256 != current.basis.rulebook_sha256
     ):
         raise ValueError("stale recommendation basis")
 
-    decided_at = utc_now_z()
     decision = DependencyDecision(
         schema_version="dependency-decision/v1",
         decision_id="dd_" + secrets.token_hex(16),
@@ -189,15 +261,13 @@ def decide_dependency(
         support_sha256=current.support_sha256,
         normalized_support_sha256=current.normalized_support_sha256,
         kind=current.kind,
-        level=selected_level,
-        sensitivity=selected_sensitivity,
-        reason_code=selected_reason,
+        level=level,
+        sensitivity=sensitivity,
+        reason_code=reason_code,
         basis=current.basis,
         decided_by=decided_by,
-        decided_at=decided_at,
+        decided_at=utc_now_z(),
     )
-    manifest_path = _decisions_dir(study) / "_forms_manifest.yaml"
-    manifest = _load_forms_manifest_for_update(manifest_path)
     dependencies = manifest.get("dataset_dependencies")
     if dependencies is None:
         dependencies = {}
@@ -209,7 +279,8 @@ def decide_dependency(
     updated = [
         item
         for item in existing
-        if not isinstance(item, dict) or item.get("recommendation_id") != current.recommendation_id
+        if not isinstance(item, dict)
+        or item.get("recommendation_id") != current.recommendation_id
     ]
     updated.append(_manifest_dependency_record(current, private, decision))
     dependencies[private.dataset_path] = updated
@@ -227,14 +298,15 @@ def decide_dependency(
         "detail": detail,
     }
     _serialize_json_record(private_decision_record)
-    _atomic_write_yaml(manifest_path, manifest)
-    append_dependency_decision(
-        _decisions_dir(study) / DEPENDENCY_DECISIONS_FILENAME,
-        decision,
-    )
-    _append_private_jsonl(
-        _decisions_dir(study) / DEPENDENCY_DECISION_DETAILS_FILENAME,
-        private_decision_record,
+    _persist_dependency_decision(
+        manifest_path=manifest_path,
+        manifest=manifest,
+        decision_path=_decisions_dir(study) / DEPENDENCY_DECISIONS_FILENAME,
+        decision=decision,
+        private_path=(
+            _decisions_dir(study) / DEPENDENCY_DECISION_DETAILS_FILENAME
+        ),
+        private_record=private_decision_record,
     )
     return decision
 
@@ -286,6 +358,62 @@ def _dependency_enum(enum_type: type[Any], value: object, field: str) -> Any:
         raise ValueError(f"invalid {field}") from exc
 
 
+def _current_rulebook_sha256(study: str) -> str:
+    try:
+        privacy = load_study_privacy_config(Path(config.RAW_DATA_DIR) / study)
+        value = refresh_jurisdiction_rules(privacy).rules_sha256
+    except Exception as exc:
+        raise ValueError("current rulebook is unavailable") from exc
+    if not dependency_contracts.is_sha256(value):
+        raise ValueError("current rulebook is unavailable")
+    return value
+
+
+def _current_scrub_config_sha256() -> str:
+    try:
+        value = dependency_contracts._effective_scrub_config_sha256()
+    except Exception as exc:
+        raise ValueError("current scrub config is unavailable") from exc
+    if not dependency_contracts.is_sha256(value):
+        raise ValueError("current scrub config is unavailable")
+    return value
+
+
+def _is_manifest_declared_missing_support(
+    manifest: dict[str, Any],
+    recommendation: DependencyRecommendation,
+    private: PrivateDependencyRecommendation,
+) -> bool:
+    if (
+        recommendation.support_artifact_id is not None
+        or recommendation.support_sha256 is not None
+        or recommendation.normalized_support_sha256 is not None
+        or recommendation.reason_code is not DependencyReasonCode.MANIFEST_DECLARED
+        or private.role_source is not RoleSource.MANIFEST
+        or private.support_path is None
+    ):
+        return False
+    dependencies = manifest.get("dataset_dependencies")
+    if not isinstance(dependencies, dict):
+        return False
+    records = dependencies.get(private.dataset_path)
+    if not isinstance(records, list):
+        return False
+    return any(
+        isinstance(record, dict)
+        and record.get("dataset_artifact_id")
+        == recommendation.dataset_artifact_id
+        and record.get("dataset_source_sha256") == recommendation.dataset_sha256
+        and record.get("support") == private.support_path
+        and record.get("kind") == recommendation.kind.value
+        and record.get("reason_code")
+        == DependencyReasonCode.MANIFEST_DECLARED.value
+        and record.get("recommendation_id")
+        == recommendation.recommendation_id
+        for record in records
+    )
+
+
 def _read_private_detail(path: Path | None) -> str | None:
     if path is None:
         return None
@@ -318,9 +446,12 @@ def _verify_current_dependency_identity(
     organized_root: Path,
     recommendation: DependencyRecommendation,
     private: PrivateDependencyRecommendation,
-) -> None:
+) -> bool:
     dataset_metadata = _load_private_json(
-        organized_root / ".protected" / "headers" / f"{recommendation.dataset_artifact_id}.json",
+        organized_root
+        / ".protected"
+        / "headers"
+        / f"{recommendation.dataset_artifact_id}.json",
         {
             "artifact_id",
             "source_sha256",
@@ -334,16 +465,22 @@ def _verify_current_dependency_identity(
         or dataset_metadata["source_sha256"] != recommendation.dataset_sha256
         or dataset_metadata["source_relative_path"] != private.dataset_path
         or _sha256_file(
-            organized_root / ".verified_sources" / recommendation.dataset_artifact_id,
+            organized_root
+            / ".verified_sources"
+            / recommendation.dataset_artifact_id,
             "dataset source",
-        ) != recommendation.dataset_sha256
+        )
+        != recommendation.dataset_sha256
     ):
         raise ValueError("stale dataset identity")
 
     if recommendation.support_artifact_id is None:
-        return
+        return False
     support_metadata = _load_private_json(
-        organized_root / ".protected" / "support" / f"{recommendation.support_artifact_id}.json",
+        organized_root
+        / ".protected"
+        / "support"
+        / f"{recommendation.support_artifact_id}.json",
         {
             "artifact_id",
             "source_sha256",
@@ -358,27 +495,61 @@ def _verify_current_dependency_identity(
         },
         "support metadata",
     )
-    normalized_path_value = support_metadata["normalized_rows_path"]
-    if not isinstance(normalized_path_value, str):
-        raise ValueError("stale support identity")
-    normalized_path = Path(normalized_path_value)
-    try:
-        normalized_path.resolve(strict=True).relative_to(organized_root.resolve(strict=True))
-    except (OSError, ValueError) as exc:
-        raise ValueError("stale support identity") from exc
     if (
         support_metadata["artifact_id"] != recommendation.support_artifact_id
         or support_metadata["source_sha256"] != recommendation.support_sha256
-        or support_metadata["normalized_rows_sha256"] != recommendation.normalized_support_sha256
         or support_metadata["kind"] != recommendation.kind.value
         or support_metadata["source_relative_path"] != private.support_path
         or _sha256_file(
-            organized_root / ".verified_sources" / recommendation.support_artifact_id,
+            organized_root
+            / ".verified_sources"
+            / recommendation.support_artifact_id,
             "support source",
-        ) != recommendation.support_sha256
-        or _sha256_file(normalized_path, "normalized support") != recommendation.normalized_support_sha256
+        )
+        != recommendation.support_sha256
     ):
         raise ValueError("stale support identity")
+
+    parse_status = support_metadata["parse_status"]
+    if parse_status == "failed":
+        failure_code = support_metadata["failure_code"]
+        if (
+            recommendation.normalized_support_sha256 is not None
+            or support_metadata["normalized_rows_sha256"] is not None
+            or support_metadata["normalized_rows_path"] is not None
+            or not isinstance(failure_code, str)
+        ):
+            raise ValueError("stale support identity")
+        try:
+            SupportFailureCode(failure_code)
+        except ValueError as exc:
+            raise ValueError("stale support identity") from exc
+        return False
+
+    if parse_status != "parsed":
+        raise ValueError("stale support identity")
+    normalized_path_value = support_metadata["normalized_rows_path"]
+    if (
+        recommendation.normalized_support_sha256 is None
+        or support_metadata["normalized_rows_sha256"]
+        != recommendation.normalized_support_sha256
+        or support_metadata["failure_code"] is not None
+        or not isinstance(normalized_path_value, str)
+    ):
+        raise ValueError("stale support identity")
+    normalized_path = Path(normalized_path_value)
+    try:
+        normalized_path.resolve(strict=True).relative_to(
+            organized_root.resolve(strict=True)
+        )
+    except (OSError, ValueError) as exc:
+        raise ValueError("stale support identity") from exc
+    if (
+        _sha256_file(normalized_path, "normalized support")
+        != recommendation.normalized_support_sha256
+    ):
+        raise ValueError("stale support identity")
+    return True
 
 
 def _load_private_json(path: Path, keys: set[str], label: str) -> dict[str, Any]:
@@ -514,7 +685,6 @@ def _atomic_write_yaml(path: Path, payload: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
-        path.chmod(0o600)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
@@ -544,6 +714,150 @@ def _append_private_jsonl(path: Path, record: dict[str, Any]) -> None:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _persist_dependency_decision(
+    *,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    decision_path: Path,
+    decision: DependencyDecision,
+    private_path: Path,
+    private_record: dict[str, Any],
+) -> None:
+    manifest_snapshot = _snapshot_complete_file(manifest_path, "forms manifest")
+    decision_snapshot = _snapshot_append_file(
+        decision_path, "dependency decision trail"
+    )
+    private_snapshot = _snapshot_append_file(
+        private_path, "private dependency decision trail"
+    )
+    manifest_mutated = False
+    decision_attempted = False
+    private_attempted = False
+    try:
+        _atomic_write_yaml(manifest_path, manifest)
+        manifest_mutated = True
+        decision_attempted = True
+        append_dependency_decision(decision_path, decision)
+        private_attempted = True
+        _append_private_jsonl(private_path, private_record)
+    except Exception as exc:
+        recovery_failed = False
+        if private_attempted:
+            try:
+                _restore_append_file(private_path, private_snapshot)
+            except Exception:
+                recovery_failed = True
+        if decision_attempted:
+            try:
+                _restore_append_file(decision_path, decision_snapshot)
+            except Exception:
+                recovery_failed = True
+        if manifest_mutated:
+            try:
+                _restore_complete_file(manifest_path, manifest_snapshot)
+            except Exception:
+                recovery_failed = True
+        if recovery_failed:
+            raise ValueError("dependency decision recovery failed") from exc
+        raise ValueError("dependency decision persistence failed") from exc
+
+
+def _snapshot_complete_file(
+    path: Path,
+    label: str,
+) -> tuple[bool, bytes, int]:
+    path = Path(path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False, b"", 0o600
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    if path.is_symlink() or not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"{label} is unavailable")
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    return True, content, stat.S_IMODE(info.st_mode)
+
+
+def _snapshot_append_file(
+    path: Path,
+    label: str,
+) -> tuple[bool, int, int]:
+    path = Path(path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False, 0, 0o600
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    if path.is_symlink() or not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"{label} is unavailable")
+    return True, info.st_size, stat.S_IMODE(info.st_mode)
+
+
+def _restore_complete_file(
+    path: Path,
+    snapshot: tuple[bool, bytes, int],
+) -> None:
+    existed, content, mode = snapshot
+    if existed:
+        _atomic_write_bytes(path, content, mode)
+    else:
+        Path(path).unlink(missing_ok=True)
+
+
+def _restore_append_file(
+    path: Path,
+    snapshot: tuple[bool, int, int],
+) -> None:
+    existed, size, mode = snapshot
+    path = Path(path)
+    if not existed:
+        path.unlink(missing_ok=True)
+        return
+    flags = os.O_WRONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("decision trail is not a regular file")
+        os.ftruncate(descriptor, size)
+        os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write_bytes(path: Path, content: bytes, mode: int) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            os.fchmod(handle.fileno(), mode)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def load_review_decisions(study: str) -> dict[str, dict[str, Any]]:
@@ -688,14 +1002,42 @@ def list_review_items(study: str) -> dict[str, Any]:
             if path.is_dir() and not path.is_symlink()
         )
         if run_dirs:
+            run_dir = run_dirs[-1]
             recommendation_path = (
-                run_dirs[-1] / DEPENDENCY_RECOMMENDATIONS_FILENAME
+                run_dir / DEPENDENCY_RECOMMENDATIONS_FILENAME
             )
             if recommendation_path.is_file():
+                ordinary = load_dependency_recommendations(
+                    recommendation_path
+                )
+                selected = ordinary
+                pending_path = (
+                    run_dir
+                    / PENDING_DEPENDENCY_RECOMMENDATIONS_FILENAME
+                )
+                if pending_path.is_file():
+                    pending = load_dependency_recommendations(pending_path)
+                    ordinary_by_id = _records_by_recommendation_id(
+                        ordinary, "recommendations"
+                    )
+                    pending_by_id = _records_by_recommendation_id(
+                        pending, "pending recommendations"
+                    )
+                    if any(
+                        ordinary_by_id.get(recommendation_id)
+                        != recommendation
+                        for recommendation_id, recommendation
+                        in pending_by_id.items()
+                    ):
+                        raise ValueError(
+                            "pending dependency recommendation mismatch"
+                        )
+                    selected = pending
                 dependency_recommendations = [
                     recommendation.to_json()
-                    for recommendation in load_dependency_recommendations(
-                        recommendation_path
+                    for recommendation in sorted(
+                        selected,
+                        key=lambda item: item.recommendation_id,
                     )
                 ]
 

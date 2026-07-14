@@ -848,12 +848,13 @@ def _decision_workflow_fixture(
     support_sha = hashlib.sha256(support_bytes).hexdigest()
     normalized_sha = hashlib.sha256(normalized_bytes).hexdigest()
     support_id = None if missing_support else B
+    role_source = RoleSource.MANIFEST if missing_support else RoleSource.INFERRED
     role_hash = depmod.support_role_sha256(
         recommendation_id=DR,
         dataset_artifact_id=A,
         support_artifact_id=support_id,
         kind=DependencyKind.DICTIONARY,
-        role_source=RoleSource.INFERRED,
+        role_source=role_source,
         organizer_role_version=1,
     )
     current_basis = DependencyDecisionBasis(
@@ -872,7 +873,7 @@ def _decision_workflow_fixture(
         kind=DependencyKind.DICTIONARY,
         suggested_level=DependencyLevel.REQUIRED,
         default_sensitivity=Sensitivity.CONFIDENTIAL,
-        reason_code=DependencyReasonCode.ONLY_INTERPRETATION,
+        reason_code=DependencyReasonCode.MANIFEST_DECLARED if missing_support else DependencyReasonCode.ONLY_INTERPRETATION,
         header_ids=(H,),
         matched_rule_ids=("rule-1",),
         transform_requirement_ids=(),
@@ -884,9 +885,9 @@ def _decision_workflow_fixture(
         dataset_artifact_id=A,
         dataset_path="datasets/labs.csv",
         support_artifact_id=support_id,
-        support_path="data_dictionary/not_yet.csv" if missing_support else "data_dictionary/labs.csv",
+        support_path="data_dictionary/expected-labs.csv" if missing_support else "data_dictionary/labs.csv",
         raw_header_names=("Subject ID",),
-        role_source=RoleSource.INFERRED,
+        role_source=role_source,
         organizer_role_version=1,
         basis=current_basis,
     )
@@ -942,6 +943,27 @@ def _decision_workflow_fixture(
         )
         support_path.chmod(0o600)
 
+    manifest_dependencies: dict[str, list[dict[str, object]]] = {
+        "datasets/other.csv": []
+    }
+    if missing_support:
+        manifest_dependencies[private.dataset_path] = [
+            {
+                "dataset_artifact_id": rec.dataset_artifact_id,
+                "dataset_source_sha256": rec.dataset_sha256,
+                "support": private.support_path,
+                "support_artifact_id": None,
+                "support_source_sha256": None,
+                "kind": rec.kind.value,
+                "level": "required",
+                "sensitivity": "confidential",
+                "reason_code": rec.reason_code.value,
+                "recommendation_id": rec.recommendation_id,
+                "basis": rec.basis.to_json(),
+                "confirmed_by": "prior-reviewer",
+                "confirmed_at": "2026-07-14T10:00:00Z",
+            }
+        ]
     config_dir.mkdir(parents=True)
     manifest_path = config_dir / "_forms_manifest.yaml"
     manifest_path.write_text(
@@ -953,7 +975,7 @@ def _decision_workflow_fixture(
                 "date_locales": {"VISIT_DT": "DMY"},
                 "dataset_dependencies_schema": "dataset-dependencies/v1",
                 "dataset_dependencies_code_table_version": 1,
-                "dataset_dependencies": {"datasets/other.csv": []},
+                "dataset_dependencies": manifest_dependencies,
             },
             sort_keys=False,
         ),
@@ -961,8 +983,10 @@ def _decision_workflow_fixture(
     )
     monkeypatch.setattr(reviewmod.config, "STUDY_OUTPUT_DIR", output_dir)
     monkeypatch.setattr(reviewmod.config, "ORGANIZED_DIR", workspace / "organized")
+    monkeypatch.setattr(reviewmod.config, "TMP_DIR", workspace / "tmp")
     monkeypatch.setattr(reviewmod.config, "study_config_dir", lambda selected=None: workspace / "config" / (selected or study))
     monkeypatch.setattr(depmod, "_effective_scrub_config_sha256", lambda: SHA2)
+    monkeypatch.setattr(reviewmod, "_current_rulebook_sha256", lambda _study: SHA1)
     return manifest_path, rec, private
 
 
@@ -1057,7 +1081,7 @@ def test_decide_dependency_updates_only_manifest_dependency_fields_and_appends_e
     assert stat.S_IMODE(private_path.stat().st_mode) == 0o600
 
 
-def test_decide_dependency_accepts_omitted_support_only_for_missing_support_recommendation(
+def test_decide_dependency_accepts_omitted_support_only_for_manifest_declared_missing_support(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1071,13 +1095,13 @@ def test_decide_dependency_accepts_omitted_support_only_for_missing_support_reco
         support=None,
         level="required",
         sensitivity="confidential",
-        reason_code="only_interpretation",
+        reason_code="manifest_declared",
         detail_file=None,
         decided_by="reviewer-id",
     )
     assert decision.support_artifact_id is None
     dependency = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))["dataset_dependencies"]["datasets/labs.csv"][0]
-    assert dependency["support"] == "data_dictionary/not_yet.csv"
+    assert dependency["support"] == "data_dictionary/expected-labs.csv"
     assert dependency["support_artifact_id"] is None
     assert dependency["support_source_sha256"] is None
     assert rec.support_sha256 is None
@@ -1135,7 +1159,7 @@ def test_decide_dependency_manifest_replace_failure_preserves_original_and_no_tr
         raise OSError("simulated atomic replace failure")
 
     monkeypatch.setattr(reviewmod.os, "replace", fail_replace)
-    with pytest.raises(OSError, match="simulated atomic replace failure"):
+    with pytest.raises(ValueError, match="dependency decision persistence failed"):
         reviewmod.decide_dependency(
             "DependencyStudy",
             dataset=A,
