@@ -29,12 +29,10 @@ reasons, source URLs, SHA-256s) — never any study data.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
-from urllib.request import Request, urlopen
 
 import phi_engine.config.config as config
 from phi_engine.security.phi_review import (
@@ -306,34 +304,6 @@ _PROTECTION_PROBES: tuple[str, ...] = (
     "dob",
 )
 
-_EXTRACT_SYSTEM_PROMPT = (
-    "You extract de-identification rules from OFFICIAL privacy-regulation text "
-    "(public law — never patient data). Return STRICT JSON: a list of rules, each "
-    '{"id","action","patterns","reason"}. id MUST start with '
-    '"live_<jurisdiction-lowercase>_". action MUST be exactly one of: keep, drop, '
-    "jitter_date, pseudonymize, generalize, cap, suppress. patterns is a list of "
-    "case-insensitive, WORD-ANCHORED Python regexes (use \\b boundaries) that "
-    "recognize a column NAME for the identifier the rule covers — never a catch-all "
-    "like .* . reason briefly cites the clause. Output ONLY the JSON list."
-)
-
-
-def _fetch_source_text(url: str, *, timeout: float = 3.0) -> tuple[bytes | None, str | None]:
-    """Fetch an official source body + its SHA-256 (validated HTTPS); fail-soft.
-
-    Returns ``(body, sha)`` or ``(None, None)`` when offline/unreachable. The body
-    is only used transiently for AI extraction and is never persisted or exposed
-    to any LLM as anything but the extraction prompt input.
-    """
-    try:
-        validate_official_source_url(url)
-        request = Request(url, headers={"User-Agent": "RePORT-AI-Portal/phi-rulebook"})  # noqa: S310 - validated official HTTPS.
-        with urlopen(request, timeout=timeout) as response:  # noqa: S310 - validated official HTTPS.
-            body = response.read(4_000_000)
-    except Exception:
-        return None, None
-    return body, hashlib.sha256(body).hexdigest()
-
 
 def _pattern_is_safe(pattern: str) -> tuple[re.Pattern[str] | None, str | None]:
     """Compile + safety-check an extracted pattern (no catch-all, no benign match)."""
@@ -443,21 +413,6 @@ def detect_protection_weakening(
     return tuple(weakened)
 
 
-def _extract_rules_via_ai(
-    body: bytes, jurisdiction: str, source_url: str, *, client: object
-) -> list[dict]:
-    """Call the LLM to extract structured rules from PUBLIC regulation text."""
-    text = body.decode("utf-8", errors="replace")[:20_000]
-    user_prompt = (
-        f"Jurisdiction: {jurisdiction}\n"
-        f"Official source: {source_url}\n"
-        f"Regulation text (public):\n{text}\n"
-        "Return the rules JSON list."
-    )
-    result = client.invoke_json(_EXTRACT_SYSTEM_PROMPT, user_prompt)  # type: ignore[attr-defined]
-    return result if isinstance(result, list) else []
-
-
 def _live_cache_payload(
     bundle: RuleBundle, jurisdictions: tuple[str, ...], fetched_sha: dict[str, str]
 ) -> dict:
@@ -514,15 +469,89 @@ def _write_live_cache(
     return path
 
 
+def _live_rules_from_cache(entry: dict) -> tuple[HeaderRule, ...] | None:
+    """Re-verify and rebuild ONLY the ``live_*`` rules held in a live cache entry.
+
+    A live cache file lives in the audit zone. Its persisted copy of the pinned
+    floor is never trusted (the floor is always re-derived from code); only the
+    AI-extracted ``live_*`` rules are read back, and each is re-run through the
+    same deterministic safety checks applied at extraction time (known action,
+    at least one word-anchored non-catch-all, non-benign-matching pattern). Any
+    malformed/over-broad/non-enum rule fails the whole entry (``None``); an entry
+    with no live rules is also rejected (a live cache always carries at least one).
+    No LLM and no network.
+    """
+    rules_raw = entry.get("rules")
+    if not isinstance(rules_raw, list):
+        return None
+    allowed = {action.value for action in Action}
+    live: list[HeaderRule] = []
+    for rule in rules_raw:
+        if not isinstance(rule, dict):
+            return None
+        rule_id = str(rule.get("id", ""))
+        if not rule_id.startswith("live_"):
+            continue  # pinned floor copy — re-derived fresh, cached copy ignored
+        action = str(rule.get("action", ""))
+        if action not in allowed:
+            return None
+        patterns = rule.get("patterns")
+        if not isinstance(patterns, list) or not patterns:
+            return None
+        compiled: list[re.Pattern[str]] = []
+        for pattern in patterns:
+            safe, _err = _pattern_is_safe(str(pattern))
+            if safe is None:
+                return None
+            compiled.append(safe)
+        live.append(
+            HeaderRule(
+                id=rule_id,
+                jurisdiction=str(rule.get("jurisdiction", "")),
+                action=Action(action),
+                patterns=tuple(compiled),
+                reason=str(rule.get("reason", "")),
+            )
+        )
+    return tuple(live) if live else None
+
+
+def _verified_live_bundle(
+    entry: dict, pinned: RuleBundle, privacy_config: StudyPrivacyConfig
+) -> RuleBundle | None:
+    """Return a trustworthy bundle from a live cache entry, else ``None``.
+
+    Rebuilds by merging the re-verified ``live_*`` rules OVER a freshly re-derived
+    pinned floor (so the floor never depends on cache bytes), then runs an explicit
+    protection-weakening probe against that floor. Additive merge + strictest-wins
+    already mean a live rule can only strengthen a decision; this probe is the
+    keyless backstop that makes the no-weakening invariant enforced, not assumed.
+    """
+    live = _live_rules_from_cache(entry)
+    if live is None:
+        return None
+    merged = _merge_over_pinned(
+        pinned, live, sources=[dict(source) for source in pinned.sources]
+    )
+    if detect_protection_weakening(pinned, merged, privacy_config):
+        return None
+    return merged
+
+
 def _reuse_live_cache(
-    cache_dir: Path, jurisdictions: tuple[str, ...], *, warning: str | None
+    cache_dir: Path,
+    jurisdictions: tuple[str, ...],
+    privacy_config: StudyPrivacyConfig,
+    *,
+    warning: str | None,
 ) -> RulebookResolution | None:
     """Reuse the last verified v2 live extraction when a fresh fetch is impossible.
 
-    Returns ``None`` when no v2 live cache exists (caller then falls back to the
-    pinned floor or fail-closes under REQUIRE_LIVE). The cached rules were
-    deterministically verified when first extracted, so reusing them is safe; the
-    ``offline_warning`` records that a freshness check could not be performed.
+    Returns ``None`` when no v2 live cache exists OR the cached rules fail the
+    integrity re-check (caller then falls back to the pinned floor or fail-closes
+    under REQUIRE_LIVE). The cached rules were verified when first extracted; they
+    are re-verified here before reuse and the ``offline_warning`` records that a
+    freshness check could not be performed.
     """
     entry = read_cache_entry(
         cache_dir / cache_filename(jurisdictions, version=RULEBOOK_LIVE_CACHE_VERSION),
@@ -531,8 +560,12 @@ def _reuse_live_cache(
     )
     if not entry:
         return None
+    pinned = refresh_jurisdiction_rules(privacy_config, allow_network=False)
+    bundle = _verified_live_bundle(entry, pinned, privacy_config)
+    if bundle is None:
+        return None
     return RulebookResolution(
-        bundle=_bundle_from_live_cache(entry),
+        bundle=bundle,
         jurisdictions=jurisdictions,
         cache_status="cache_hit_live_offline",
         drift_detected=False,
@@ -546,30 +579,37 @@ def resolve_live_rulebook(
     privacy_config: StudyPrivacyConfig,
     *,
     allow_network: bool = False,
-    fetcher: object = None,
-    client: object = None,
+    router: object = None,
     cache_dir: Path | None = None,
     seed_dir: Path | None = None,
 ) -> RulebookResolution:
-    """Fetch latest official regs → AI-extract → verify → merge over pinned floor.
+    """Fetch latest official regs -> AI-extract -> verify -> merge over pinned floor.
 
-    Reuse-if-unchanged: when every fetched source hash matches the v2 live cache,
-    the cached (verified) rules are reused with NO LLM call. Use-latest-on-change:
-    a changed/new source is re-extracted. Offline/extraction-failure falls back to
-    the pinned floor with an ``offline_warning``. ``fetcher``/``client`` are
-    injectable so tests run with no network and no live model. ``REQUIRE_LIVE``
-    hard-fails (fail-closed) when no live rules can be obtained.
+    Extraction routes EXCLUSIVELY through the hardened official-source registry
+    (:mod:`phi_engine.security.official_sources`) and the sealed
+    :class:`~phi_engine.security.model_routing.ModelTaskRouter`: the model only
+    ever sees registry-verified PUBLIC regulation text (never study data -- GR-1),
+    and every extracted candidate is re-verified deterministically
+    (:func:`verify_extracted_rules`) before it can merge OVER the pinned floor.
+
+    Reuse-if-unchanged skips the model when every registered source hash matches
+    the (re-verified) v2 cache. Offline / model-unavailable / unverifiable falls
+    back to the pinned floor with an ``offline_warning``;
+    ``REPORTAL_RULEBOOK_REQUIRE_LIVE`` makes that fail-closed
+    (:class:`RulebookUnavailableError`). ``router`` is injectable so tests run
+    with no network and no live model.
     """
+    from phi_engine.security import official_sources
+    from phi_engine.security.model_routing import ModelTaskRouter
+
     jurisdictions = tuple(privacy_config.jurisdictions)
     cache_dir = Path(cache_dir) if cache_dir is not None else default_cache_dir()
     seed_dir = Path(seed_dir) if seed_dir is not None else default_seed_dir()
 
     def _fallback(warning: str | None) -> RulebookResolution:
-        # Prefer the last verified live extraction (the "saved latest") when a
-        # fresh fetch isn't possible — N7: keep/reuse the cached rules when the
-        # law is unchanged or the network is unavailable, rather than dropping all
-        # the way to pinned-only. These rules were verified when extracted.
-        reused = _reuse_live_cache(cache_dir, jurisdictions, warning=warning)
+        reused = _reuse_live_cache(
+            cache_dir, jurisdictions, privacy_config, warning=warning
+        )
         if reused is not None:
             return reused
         if config.RULEBOOK_REQUIRE_LIVE:
@@ -586,55 +626,82 @@ def resolve_live_rulebook(
 
     pinned = refresh_jurisdiction_rules(privacy_config, allow_network=False)  # the floor
     sources = [dict(s) for s in pinned.sources]
-    fetch = fetcher if fetcher is not None else _fetch_source_text
-    fetched: dict[str, tuple[bytes | None, str | None]] = {}
-    any_unreachable = False
-    for src in sources:
-        body, sha = fetch(src["url"])  # type: ignore[operator]
-        fetched[src["url"]] = (body, sha)
-        if body is None:
-            any_unreachable = True
 
-    # Reuse-if-unchanged: every fetched hash matches the recorded v2 cache.
+    # Only pinned sources with an exact registered identity can be live-extracted
+    # through the closed official-source + model stack; the registry is the single
+    # source of truth. Unregistered pinned sources stay covered by the floor.
+    registered: list[tuple[str, str, str]] = []
+    for src in sources:
+        registry_source_id = official_sources.registry_id_for_url(
+            str(src["url"]), str(src["jurisdiction"])
+        )
+        if registry_source_id is not None:
+            registered.append(
+                (registry_source_id, str(src["jurisdiction"]), str(src["url"]))
+            )
+    if not registered:
+        return _fallback("no official source maps to a registered live-extract id")
+
+    # Freshness probe (no model): one source hash per registered id, fail-soft.
+    fetched_sha: dict[str, str] = {}
+    any_unreachable = False
+    for registry_source_id, juris, _url in registered:
+        try:
+            fetched = official_sources.fetch_registered_source(registry_source_id, juris)
+        except Exception:  # unreachable/invalid source -> pinned floor covers it
+            any_unreachable = True
+            continue
+        fetched_sha[registry_source_id] = fetched.source_sha256
+
+    # Reuse-if-unchanged: every fetched hash matches the recorded (re-verified) v2 cache.
     live_cache = read_cache_entry(
         cache_dir / cache_filename(jurisdictions, version=RULEBOOK_LIVE_CACHE_VERSION),
         jurisdictions=jurisdictions,
         version=RULEBOOK_LIVE_CACHE_VERSION,
     )
-    if live_cache:
+    if live_cache and fetched_sha:
         cached_hashes = live_cache.get("fetched_source_hashes", {})
-        live_shas = {u: sha for u, (_b, sha) in fetched.items() if sha}
-        if live_shas and cached_hashes == dict(sorted(live_shas.items())):
-            bundle = _bundle_from_live_cache(live_cache)
-            return RulebookResolution(
-                bundle=bundle,
-                jurisdictions=jurisdictions,
-                cache_status="cache_hit_live",
-                drift_detected=False,
-                baseline_sha256=str(live_cache["rules_sha256"]),
-                cache_version=RULEBOOK_LIVE_CACHE_VERSION,
-            )
+        if cached_hashes == dict(sorted(fetched_sha.items())):
+            bundle = _verified_live_bundle(live_cache, pinned, privacy_config)
+            if bundle is not None:
+                return RulebookResolution(
+                    bundle=bundle,
+                    jurisdictions=jurisdictions,
+                    cache_status="cache_hit_live",
+                    drift_detected=False,
+                    baseline_sha256=str(live_cache["rules_sha256"]),
+                    cache_version=RULEBOOK_LIVE_CACHE_VERSION,
+                )
+            # tampered/unverifiable cache -> treat as miss and re-extract below.
 
-    # Use-latest-on-change: extract from each reachable source.
-    extraction_client = client
+    # Use-latest-on-change: extract each reachable registered source via the router.
+    task_router = router if router is not None else ModelTaskRouter()
     extracted: list[HeaderRule] = []
-    for src in sources:
-        body, _sha = fetched[src["url"]]
-        if body is None:
-            continue
-        if extraction_client is None:
-            from scripts.ai_assistant.llm_adapter import LLMJsonClient
-
-            extraction_client = LLMJsonClient()
+    for registry_source_id, juris, url in registered:
+        if registry_source_id not in fetched_sha:
+            continue  # unreachable this run; pinned floor covers it
         try:
-            raw = _extract_rules_via_ai(
-                body, src["jurisdiction"], src["url"], client=extraction_client
+            extraction = task_router.extract_official_rules(registry_source_id, juris)
+        except Exception as exc:  # model/source failure -> pinned covers this source
+            _logger.warning(
+                "rulebook extraction failed for %s: %s",
+                registry_source_id,
+                type(exc).__name__,
             )
-        except Exception as exc:  # extraction failure → pinned covers this source
-            _logger.warning("rulebook extraction failed for %s: %s", src["url"], type(exc).__name__)
             continue
+        raw_rules = [
+            {
+                "id": candidate.rule_id,
+                "action": candidate.action.value,
+                "patterns": [
+                    rf"\b{re.escape(alias)}\b" for alias in candidate.literal_aliases
+                ],
+                "reason": candidate.citation,
+            }
+            for candidate in extraction.candidates
+        ]
         extracted.extend(
-            verify_extracted_rules(raw, jurisdiction=src["jurisdiction"], source_url=src["url"])
+            verify_extracted_rules(raw_rules, jurisdiction=juris, source_url=url)
         )
 
     if not extracted:
@@ -653,7 +720,6 @@ def resolve_live_rulebook(
             _juris_key(jurisdictions),
             list(weakened),
         )
-    fetched_sha = {u: sha for u, (_b, sha) in fetched.items() if sha}
     try:
         _write_live_cache(cache_dir, merged, jurisdictions, fetched_sha)
     except OSError:  # pragma: no cover - best-effort

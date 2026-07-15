@@ -274,7 +274,7 @@ _ALIGN_SYSTEM_PROMPT = (
 
 @dataclass(frozen=True)
 class LLMHeaderAligner:
-    """Production aligner — wraps the shared :class:`LLMJsonClient` (Note 9).
+    """Production aligner — wraps an injected ``invoke_json`` client (Note 9).
 
     Constructed only when alignment is enabled; the deterministic test suite
     injects a fake aligner instead, so no real model is ever built in tests.
@@ -285,9 +285,15 @@ class LLMHeaderAligner:
     def _resolved_client(self) -> Any:
         if self.client is not None:
             return self.client
-        from scripts.ai_assistant.llm_adapter import LLMJsonClient
-
-        return LLMJsonClient()
+        # This standalone engine ships no bundled LLM adapter. Alignment is
+        # opt-in and always injected (a real client in production, a fake in
+        # tests); a bare aligner with no client is a misconfiguration, surfaced
+        # clearly here rather than as a stale missing-module ImportError.
+        raise RuntimeError(
+            "LLMHeaderAligner requires an injected `client` exposing "
+            "invoke_json(system_prompt, user_prompt); none was provided. Inject a "
+            "client or disable alignment (REPORTAL_PHI_ALIGNMENT_ENABLED=0)."
+        )
 
     def align_one(
         self, header: str, rulebook_json: dict[str, Any], jurisdictions: tuple[str, ...]

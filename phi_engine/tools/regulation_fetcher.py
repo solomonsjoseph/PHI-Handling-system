@@ -9,6 +9,16 @@ Flow:
   6. Human reviews and accepts via `phi-authority accept <file>`
 
 The LLM never fetches arbitrary URLs -- only the hardcoded official sources.
+
+Scope: this is an OFFLINE AUTHORING CLI (``phi-authority``) that maintains the
+human-readable ``authorities/*.md`` corpus. It does **not** feed
+``phi_engine.pipeline.run.run_pipeline``: the runtime rulebook resolves its rules
+and official-source list from ``phi_engine.security.phi_review._PINNED_SOURCES``
+and the closed ``phi_engine.security.official_sources._REGISTRY`` (the single
+source of truth for live extraction). ``OFFICIAL_SOURCES`` below is intentionally
+a SUPERSET (it also covers GDPR/LGPD/AU/UG jurisdictions this authoring corpus
+documents but the runtime engine does not classify), so the two lists serve
+different purposes and are deliberately separate.
 """
 
 from __future__ import annotations

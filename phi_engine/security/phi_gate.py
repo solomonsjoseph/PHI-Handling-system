@@ -1,7 +1,7 @@
 """Query-time PHI gate for the RePORT AI Portal agent boundary.
 
-Uses the shared :mod:`scripts.security.phi_patterns` catalog and the
-:mod:`scripts.security.phi_allowlist` clinical-phrase allowlist. The
+Uses the shared :mod:`phi_engine.security.phi_patterns` catalog and the
+:mod:`phi_engine.security.phi_allowlist` clinical-phrase allowlist. The
 allowlist suppresses obvious-false-positive warnings on clinical
 verbatim like "Treatment Completed" that would otherwise match the
 generic name-like heuristic.
@@ -15,9 +15,6 @@ The gate is the **defence-in-depth** layer at the LLM tool boundary:
 :func:`phi_engine.security.llm_tool_guard.guard_llm_output` calls
 :func:`phi_gate_check` on every payload before it reaches an LLM, so even
 if an upstream scrub missed a token the live call cannot surface it.
-``scripts.ai_assistant.agent_tools`` does not exist in this repository --
-that boundary description belonged to a different (RePORTaLiN-RAG) codebase
-and was left over from an earlier draft of this file.
 
 IRB-grade benchmark anchors:
     * Pillar 2.4 — every tool return passes through a PHI gate

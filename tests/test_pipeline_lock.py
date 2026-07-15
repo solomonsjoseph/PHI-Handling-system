@@ -6,6 +6,7 @@ import os
 import queue
 import stat
 import threading
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
 
@@ -672,11 +673,11 @@ def test_locked_body_creates_run_and_resolves_rulebook_before_mutable_intake(
 
     def record_load_privacy(_study_root: Path) -> object:
         calls.append("load_privacy")
-        return object()
+        return SimpleNamespace(rule_refresh="pinned_only")
 
-    def record_refresh(_privacy: object) -> object:
+    def record_resolve(_privacy: object, **_kwargs: object) -> object:
         calls.append("resolve_rulebook")
-        return object()
+        return SimpleNamespace(bundle=object(), protection_weakened=False)
 
     def record_load_manifest(_study: str) -> object:
         calls.append("load_intake_manifest")
@@ -689,7 +690,7 @@ def test_locked_body_creates_run_and_resolves_rulebook_before_mutable_intake(
     monkeypatch.setattr(pipeline_run, "datetime", RecordingDateTime)
     monkeypatch.setattr(pipeline_run, "bootstrap_study_privacy", record_bootstrap)
     monkeypatch.setattr(pipeline_run, "load_study_privacy_config", record_load_privacy)
-    monkeypatch.setattr(pipeline_run, "refresh_jurisdiction_rules", record_refresh)
+    monkeypatch.setattr(pipeline_run, "resolve_rulebook", record_resolve)
     monkeypatch.setattr(pipeline_run, "load_intake_manifest", record_load_manifest)
     monkeypatch.setattr(pipeline_run, "organize", record_organize)
     monkeypatch.setattr(config, "ORGANIZED_DIR", tmp_path / "organized")

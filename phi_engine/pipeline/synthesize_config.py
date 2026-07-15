@@ -21,7 +21,7 @@ import re
 from datetime import datetime as _dt
 from datetime import timezone as _tz
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import yaml
 
@@ -99,6 +99,8 @@ def synthesize_study_config(
     study: str,
     jurisdiction: str,
     classifications: Iterable[HeaderClassification],
+    *,
+    generalization_map_overlay: Mapping[str, Mapping[str, str]] | None = None,
 ) -> Path:
     """Regenerate ``<study>/phi_scrub.yaml`` from the CURRENT classification set.
 
@@ -186,7 +188,14 @@ def synthesize_study_config(
             pass
         elif action == Action.GENERALIZE:
             map_name = f"_synth_generalize_{header.lower()}"
-            generalization_maps.setdefault(map_name, {})
+            overlay_map = (generalization_map_overlay or {}).get(map_name)
+            if overlay_map:
+                # Eligible dictionary/mapping support supplied this header's value
+                # taxonomy -> fill the map so the GENERALIZE column can publish as
+                # categories instead of staying fail-closed (quarantined).
+                generalization_maps[map_name] = dict(overlay_map)
+            else:
+                generalization_maps.setdefault(map_name, {})
             generalize_fields.append({"pattern": pattern, "mapping": map_name})
         # No BAND action exists in the classification Action enum -- band
         # rules are scrub-config-only and never reached via classification.

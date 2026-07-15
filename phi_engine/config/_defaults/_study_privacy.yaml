@@ -4,7 +4,10 @@ jurisdictions:
   - USA
   - INDIA
 data_as_of: "YYYY-MM-DD"
-rule_refresh: online_preferred
+# Default pinned_only: offline, deterministic, no network at run time.
+# Operators wanting live official-rule refresh set online_preferred here
+# AND export REPORTAL_RULEBOOK_AI_EXTRACT=1 (+ --allow-network).
+rule_refresh: pinned_only
 conflict_policy: strictest_wins
 approval:
   mode: hybrid

@@ -1058,6 +1058,14 @@ def _decision_matches_recommendation(
     )
 
 
+def dependency_decision_is_current(
+    decision: DependencyDecision, recommendation: DependencyRecommendation
+) -> bool:
+    """A decision is current for a recommendation when every identity and basis
+    field matches (dataset/support hashes, kind, sensitivity, reason, basis)."""
+    return _decision_matches_recommendation(decision, recommendation)
+
+
 def _ignored_exact_recommendation(
     decisions_by_recommendation: Mapping[str, DependencyDecision],
     recommendation: DependencyRecommendation,

@@ -48,11 +48,36 @@ _REGISTRY: dict[tuple[str, str], _RegisteredSource] = {
         url="https://www.indiacode.nic.in/indiacode/handle/123456789/22037",
         citation="Digital Personal Data Protection Act, 2023",
     ),
+    ("india_icmr_ethics_2017", "INDIA"): _RegisteredSource(
+        registry_source_id="india_icmr_ethics_2017",
+        jurisdiction="INDIA",
+        url="https://www.icmr.gov.in/guidelines",
+        citation="ICMR National Ethical Guidelines for Biomedical and Health Research",
+    ),
+    ("india_aadhaar_act_2016", "INDIA"): _RegisteredSource(
+        registry_source_id="india_aadhaar_act_2016",
+        jurisdiction="INDIA",
+        url="https://uidai.gov.in/en/about-uidai/legal-framework/2033-aadhaar-targeted-delivery-of-financial-and-other-subsidies%2C-benefits-and-services-act%2C-2016.html",
+        citation="Aadhaar (Targeted Delivery of Financial and Other Subsidies, Benefits and Services) Act, 2016",
+    ),
 }
 
 
 def is_registered_source(registry_source_id: str, jurisdiction: str) -> bool:
     return (registry_source_id, jurisdiction) in _REGISTRY
+
+
+def registry_id_for_url(url: str, jurisdiction: str) -> str | None:
+    """Return the registered source id whose exact URL + jurisdiction match.
+
+    The registry is the single source of truth for live official-rule extraction:
+    a pinned source can be live-extracted only when it maps to exactly one
+    registered identity here (else it stays covered by the pinned floor).
+    """
+    for (registry_source_id, source_jurisdiction), source in _REGISTRY.items():
+        if source_jurisdiction == jurisdiction and source.url == url:
+            return registry_source_id
+    return None
 
 
 def fetch_registered_source(

@@ -59,6 +59,7 @@ from phi_engine.pipeline.dependencies import (
     TransformRequirement,
     TransformRequirementOrigin,
     canonical_sha256,
+    dependency_decision_is_current,
     recommendation_identity,
     recommend_dependencies,
     support_role_sha256,
@@ -72,6 +73,11 @@ from phi_engine.pipeline.review import (
     load_study_dependency_decisions,
 )
 from phi_engine.pipeline.synthesize_config import bootstrap_study_privacy, synthesize_study_config
+from phi_engine.pipeline.support_policy import (
+    apply_support_signal_actions,
+    build_transform_maps_from_support,
+    extract_support_signals,
+)
 from phi_engine.security import phi_scrub
 from phi_engine.security.phi_guard_gate import run_phi_guard_gate
 from phi_engine.security.phi_review import (
@@ -80,8 +86,11 @@ from phi_engine.security.phi_review import (
     HeaderClassification,
     load_sot_variable_signals,
     load_study_privacy_config,
-    refresh_jurisdiction_rules,
     review_form_headers,
+)
+from phi_engine.security.phi_rulebook import (
+    RulebookUnavailableError,
+    resolve_rulebook,
 )
 from scripts.extraction.forms_manifest import (
     DependencyRelation,
@@ -119,6 +128,8 @@ class PipelineResult:
     scrub_raised: str | None = None
     scrub_config_hash: str | None = None
     rulebook_sha256: str | None = None
+    rulebook_cache_status: str | None = None
+    rulebook_source_mode: str | None = None
     published_count: int = 0
     profile_escalations: int = 0
     profile_auto_clears: int = 0
@@ -637,34 +648,12 @@ def _build_preliminary_dependency_inputs(
     return published_raw, requirements_by_dataset
 
 
-def _dependency_decision_is_current(
-    decision: DependencyDecision,
-    recommendation: DependencyRecommendation,
-) -> bool:
-    return (
-        decision.recommendation_id == recommendation.recommendation_id
-        and decision.dataset_artifact_id == recommendation.dataset_artifact_id
-        and decision.dataset_sha256 == recommendation.dataset_sha256
-        and decision.support_artifact_id == recommendation.support_artifact_id
-        and decision.support_sha256 == recommendation.support_sha256
-        and decision.normalized_support_sha256
-        == recommendation.normalized_support_sha256
-        and decision.kind is recommendation.kind
-        and decision.sensitivity is recommendation.default_sensitivity
-        and decision.reason_code is recommendation.reason_code
-        and decision.basis.rulebook_sha256
-        == recommendation.basis.rulebook_sha256
-        and decision.basis.scrub_config_sha256
-        == recommendation.basis.scrub_config_sha256
-        and decision.basis.support_role_sha256
-        == recommendation.basis.support_role_sha256
-    )
-
-
 def _evaluate_dependency_state(
     recommendations: tuple[DependencyRecommendation, ...],
     decisions: tuple[DependencyDecision, ...],
     support_artifacts: tuple[ParsedSupportArtifact, ...],
+    *,
+    support_filled_header_ids: frozenset[str] = frozenset(),
 ) -> _DependencyDisposition:
     decisions_by_id = {
         decision.recommendation_id: decision
@@ -677,10 +666,20 @@ def _evaluate_dependency_state(
     held: set[str] = set()
     review: set[str] = set()
     for recommendation in recommendations:
+        # A GENERALIZE header's "missing mapping" requirement is SATISFIED once
+        # eligible support has filled that header's value taxonomy — the dataset
+        # must not be held (nor queued for review) for a mapping it now has.
+        if (
+            recommendation.reason_code
+            is DependencyReasonCode.TRANSFORM_PARAMETERS_MISSING
+            and recommendation.header_ids
+            and set(recommendation.header_ids) <= support_filled_header_ids
+        ):
+            continue
         decision = decisions_by_id.get(recommendation.recommendation_id)
         current = (
             decision is not None
-            and _dependency_decision_is_current(decision, recommendation)
+            and dependency_decision_is_current(decision, recommendation)
         )
         support = (
             support_by_id.get(recommendation.support_artifact_id)
@@ -974,6 +973,22 @@ def _write_held_note(form_name: str, approval: FormReviewApproval) -> None:
     note_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_support_transform_provenance(run_dir: Path, result: Any) -> None:
+    """Persist applied support->generalize-map provenance to the protected run zone.
+
+    Audit-only (never a dataset value): dataset/header ids, the synth map name,
+    the support artifact + evidence hashes, and the entry count. Written mode-0600
+    beside the private dependency records.
+    """
+    if not result.provenance:
+        return
+    path = Path(run_dir) / ".protected" / "support_transform_maps.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(asdict(record), sort_keys=True) for record in result.provenance]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
 def run_pipeline(study: str, jurisdiction: str) -> PipelineResult:
     """Run the operational pipeline while owning its canonical per-study lock."""
     if jurisdiction not in _JURISDICTION_LABELS:
@@ -1067,7 +1082,30 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
             exit_code=2,
             message=f"privacy config load failed: {exc}",
         )
-    bundle = refresh_jurisdiction_rules(privacy)  # offline (pinned) default
+    # Resolve the active rulebook honoring the study's rule_refresh posture:
+    # pinned_only (default) never touches the network; online_preferred opts
+    # into the live AI-extract path (still gated by REPORTAL_RULEBOOK_AI_EXTRACT).
+    allow_network = privacy.rule_refresh == "online_preferred"
+    try:
+        resolution = resolve_rulebook(privacy, allow_network=allow_network)
+    except RulebookUnavailableError:
+        return PipelineResult(
+            study=study,
+            jurisdiction=jurisdiction,
+            run_id=run_id,
+            exit_code=8,
+            message="rulebook_unavailable",
+        )
+    if resolution.protection_weakened:
+        return PipelineResult(
+            study=study,
+            jurisdiction=jurisdiction,
+            run_id=run_id,
+            exit_code=8,
+            message="rulebook_protection_weakened",
+            rulebook_sha256=resolution.bundle.rules_sha256,
+        )
+    bundle = resolution.bundle  # offline (pinned) default; live merge when enabled
 
     # -- a. organize every locked run so descriptor verification and dependency roles
     # can never be skipped by a stale organizer cache.  Keep the intake manifest
@@ -1154,6 +1192,7 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
     held_forms: list[str] = []
     approved_forms: list[str] = []
     preliminary_classifications: dict[str, list[HeaderClassification]] = {}
+    final_classifications_by_dataset: dict[str, list[HeaderClassification]] = {}
 
     decisions = load_review_decisions(study)
     keep_headers = confirmed_keep_headers(decisions)
@@ -1245,6 +1284,9 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
             )
         approvals[form_name] = approval
         all_classifications.extend(approval.classifications)
+        final_classifications_by_dataset.setdefault(
+            str(entry["artifact_id"]), []
+        ).extend(approval.classifications)
 
         if approval.status == "held":
             held_forms.append(form_name)
@@ -1252,8 +1294,10 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
         else:
             approved_forms.append(form_name)
 
-    # -- classification -> scrub-config synthesis (threads EVERY action, ---
-    # -- not just force-drop/suppress, into the row scrubber) --------------
+    # -- classification -> baseline scrub-config synthesis (threads EVERY ---
+    # -- action, not just force-drop/suppress, into the row scrubber). This is
+    # -- the AUTHORITATIVE config the dependency recommendations are hashed
+    # -- against; support maps are overlaid onto it further below for the scrubber.
     synthesize_study_config(study, jurisdiction_label, all_classifications)
     scrub_config_hash = phi_scrub.effective_scrub_config_hash(study=study)
     effective_dependency_config = phi_scrub.load_scrub_config(study=study)
@@ -1335,10 +1379,92 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
         recommendations=dependency_recommendations,
         private_records=private_dependency_recommendations,
     )
+
+    # -- support -> scrub-parameter continuity + optional strengthen-only ----
+    # -- signals. The recommendations written above are the AUTHORITATIVE
+    # -- snapshot at the baseline config hash, so a human dependency decision
+    # -- stays current run-to-run. Here support fills each ELIGIBLE GENERALIZE
+    # -- header's value taxonomy and the config is re-synthesized so the SCRUBBER
+    # -- sees the maps; a support-filled GENERALIZE header then no longer holds
+    # -- the dataset for a "missing" mapping it now has. Model signals (opt-in,
+    # -- fail-soft) strengthen only.
+    support_signals = extract_support_signals(
+        datasets=hydrated_dependencies.datasets,
+        support_artifacts=hydrated_dependencies.support_artifacts,
+        recommendations=dependency_recommendations,
+        decisions=dependency_decisions,
+        rule_bundle=bundle,
+    )
+    signals_applied = False
+    if support_signals:
+        header_name_by_id = {
+            header.header_id: header.raw_name
+            for dataset in hydrated_dependencies.datasets
+            for header in dataset.headers
+        }
+        candidate_rule_ids = frozenset(rule.id for rule in getattr(bundle, "rules", ()))
+        artifact_by_form = {
+            str(entry["output"]): str(entry["artifact_id"]) for entry in datasets
+        }
+        for form_name, approval in list(approvals.items()):
+            updated = tuple(
+                apply_support_signal_actions(
+                    approval.classifications,
+                    support_signals,
+                    header_name_by_id=header_name_by_id,
+                    candidate_rule_ids=candidate_rule_ids,
+                )
+            )
+            if updated != tuple(approval.classifications):
+                approvals[form_name] = _dc_replace(
+                    approval,
+                    classifications=updated,
+                    actions={item.header: item.action.value for item in updated},
+                )
+                signals_applied = True
+        if signals_applied:
+            all_classifications = [
+                classification
+                for form_name in approvals
+                for classification in approvals[form_name].classifications
+            ]
+            final_classifications_by_dataset = {}
+            for form_name, approval in approvals.items():
+                artifact_id = artifact_by_form.get(form_name)
+                if artifact_id is not None:
+                    final_classifications_by_dataset.setdefault(
+                        artifact_id, []
+                    ).extend(approval.classifications)
+
+    support_policy = build_transform_maps_from_support(
+        datasets=hydrated_dependencies.datasets,
+        support_artifacts=hydrated_dependencies.support_artifacts,
+        recommendations=dependency_recommendations,
+        decisions=dependency_decisions,
+        classifications_by_dataset={
+            artifact_id: tuple(classifications)
+            for artifact_id, classifications in final_classifications_by_dataset.items()
+        },
+    )
+    if support_policy.generalization_maps or signals_applied:
+        synthesize_study_config(
+            study,
+            jurisdiction_label,
+            all_classifications,
+            generalization_map_overlay=support_policy.generalization_maps or None,
+        )
+        # The scrubber loads this re-synthesized config directly; scrub_config_hash
+        # is updated for run-result truthfulness. The persisted recommendations keep
+        # their baseline-hash basis (written above) so decisions stay current.
+        scrub_config_hash = phi_scrub.effective_scrub_config_hash(study=study)
+        if support_policy.generalization_maps:
+            _write_support_transform_provenance(run_dir, support_policy)
+
     dependency_disposition = _evaluate_dependency_state(
         dependency_recommendations,
         dependency_decisions,
         hydrated_dependencies.support_artifacts,
+        support_filled_header_ids=support_policy.applied_header_ids,
     )
     _write_pending_dependency_recommendations(
         run_dir,
@@ -1383,6 +1509,8 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
             forms_processed=[], forms_held=held_forms,
             review_queue_size=review_queue_size, organizer_review_count=organizer_review_count,
             scrub_config_hash=scrub_config_hash, rulebook_sha256=bundle.rules_sha256,
+            rulebook_cache_status=resolution.cache_status,
+            rulebook_source_mode=bundle.source_mode,
             sot_generation_error=sot_generation_error,
             dependency_review_count=dependency_review_count,
             dependency_held_dataset_ids=sorted(
@@ -1415,6 +1543,8 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
             review_queue_size=review_queue_size, organizer_review_count=organizer_review_count,
             scrub_raised=scrub_raised, scrub_config_hash=scrub_config_hash,
             rulebook_sha256=bundle.rules_sha256, sot_generation_error=sot_generation_error,
+            rulebook_cache_status=resolution.cache_status,
+            rulebook_source_mode=bundle.source_mode,
             dependency_review_count=dependency_review_count,
             dependency_held_dataset_ids=sorted(
                 dependency_disposition.held_dataset_ids
@@ -1460,6 +1590,8 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
         guard_ok=guard_ok, guard_failed=not guard_ok,
         scrub_config_hash=scrub_config_hash, rulebook_sha256=bundle.rules_sha256,
         published_count=published_count, sot_generation_error=sot_generation_error,
+        rulebook_cache_status=resolution.cache_status,
+        rulebook_source_mode=bundle.source_mode,
         profile_escalations=profile_escalations, profile_auto_clears=profile_auto_clears,
         dependency_review_count=dependency_review_count,
         dependency_held_dataset_ids=sorted(

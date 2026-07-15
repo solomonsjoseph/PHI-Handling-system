@@ -311,6 +311,7 @@ class _EffectiveConfig:
 
 class _RuleBundle:
     rules_sha256 = _RULEBOOK_SHA
+    source_mode = "pinned"
 
     def to_json(self) -> dict[str, object]:
         return {"rules_sha256": self.rules_sha256, "rules": []}
@@ -353,9 +354,15 @@ def _run_two_dataset_scenario(
     monkeypatch.setattr(
         pipeline_run,
         "load_study_privacy_config",
-        lambda *_: SimpleNamespace(),
+        lambda *_: SimpleNamespace(rule_refresh="pinned_only"),
     )
-    monkeypatch.setattr(pipeline_run, "refresh_jurisdiction_rules", lambda *_: _RuleBundle())
+    monkeypatch.setattr(
+        pipeline_run,
+        "resolve_rulebook",
+        lambda *_a, **_k: SimpleNamespace(
+            bundle=_RuleBundle(), protection_weakened=False, cache_status="cache_hit"
+        ),
+    )
     monkeypatch.setattr(
         pipeline_run,
         "load_intake_manifest",

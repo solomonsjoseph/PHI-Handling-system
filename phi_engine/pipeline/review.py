@@ -47,8 +47,8 @@ from phi_engine.audit import review_paths
 from phi_engine.security.phi_review import Action, HeaderClassification
 from phi_engine.security.phi_review import (
     load_study_privacy_config,
-    refresh_jurisdiction_rules,
 )
+from phi_engine.security.phi_rulebook import resolve_rulebook
 from phi_engine.pipeline import dependencies as dependency_contracts
 from phi_engine.pipeline.dependencies import (
     CODE_TABLE_VERSION,
@@ -367,7 +367,9 @@ def _dependency_enum(enum_type: type[Any], value: object, field: str) -> Any:
 def _current_rulebook_sha256(study: str) -> str:
     try:
         privacy = load_study_privacy_config(Path(config.RAW_DATA_DIR) / study)
-        value = refresh_jurisdiction_rules(privacy).rules_sha256
+        value = resolve_rulebook(
+            privacy, allow_network=privacy.rule_refresh == "online_preferred"
+        ).bundle.rules_sha256
     except Exception as exc:
         raise ValueError("current rulebook is unavailable") from exc
     if not dependency_contracts.is_sha256(value):

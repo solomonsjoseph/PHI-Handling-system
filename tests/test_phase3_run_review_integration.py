@@ -546,7 +546,7 @@ def test_every_declared_decision_basis_and_identity_field_is_stale(
     field: str,
     replacement: object,
 ) -> None:
-    from phi_engine.pipeline.run import _dependency_decision_is_current
+    from phi_engine.pipeline.dependencies import dependency_decision_is_current
 
     rec = _recommendation(
         recommendation_id=_recommendation_id("1"),
@@ -567,8 +567,8 @@ def test_every_declared_decision_basis_and_identity_field_is_stale(
         values[field] = replacement
     stale = DependencyDecision(**values)
 
-    assert _dependency_decision_is_current(dec, rec)
-    assert not _dependency_decision_is_current(stale, rec)
+    assert dependency_decision_is_current(dec, rec)
+    assert not dependency_decision_is_current(stale, rec)
 
 
 def test_required_holds_only_its_dataset_helpful_reviews_and_exact_ignored_suppresses() -> None:
