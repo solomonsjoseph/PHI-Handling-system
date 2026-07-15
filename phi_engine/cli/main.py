@@ -33,6 +33,9 @@ def _set_workspace_env(args: argparse.Namespace) -> None:
     if getattr(args, "workspace", None):
         os.environ["PHI_WORKSPACE"] = str(Path(args.workspace).resolve())
     os.environ["STUDY_NAME"] = args.study
+    from phi_engine.config import config
+
+    config.get_local_llm_config()
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -218,7 +221,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except Exception as exc:
+        if exc.__class__.__name__ == "LocalLLMConfigurationError":
+            print("invalid local LLM configuration", file=sys.stderr)
+            return 2
+        raise
 
 
 if __name__ == "__main__":

@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, overload
+from typing import Any, Mapping, overload
 
 import yaml
 
@@ -605,6 +607,157 @@ def _infer_provider(model_name: str) -> str:
     return "ollama"  # safe default — local inference, no key needed
 
 
+_LOCAL_MODEL_SPEC_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}@sha256:[0-9a-f]{64}$"
+)
+_ASCII_WHITESPACE = " \t\n\r\v\f"
+
+
+class LocalLLMConfigurationError(ValueError):
+    """Raised for malformed security-sensitive local-model configuration."""
+
+
+@dataclass(frozen=True)
+class LocalLLMConfig:
+    provider: str
+    models: tuple[str, ...]
+    base_url: str
+    allowed_base_urls: tuple[str, ...]
+    offline_approved: bool
+    timeout_s: int
+    max_retries: int
+
+    def to_yaml_value(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "models": list(self.models),
+            "base_url": self.base_url,
+            "allowed_base_urls": list(self.allowed_base_urls),
+            "offline_approved": self.offline_approved,
+            "timeout_s": self.timeout_s,
+            "max_retries": self.max_retries,
+        }
+
+
+def _local_config_list(value: object, field: str) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or isinstance(value, (str, bytes)):
+        raise LocalLLMConfigurationError(f"{field} must be a sequence")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item or "," in item:
+            raise LocalLLMConfigurationError(f"invalid {field}")
+        result.append(item)
+    if len(set(result)) != len(result):
+        raise LocalLLMConfigurationError(f"duplicate {field}")
+    return tuple(result)
+
+
+def _local_env_list(raw: str, field: str) -> tuple[str, ...]:
+    items = tuple(item.strip(_ASCII_WHITESPACE) for item in raw.split(","))
+    if not items or any(not item or "," in item for item in items):
+        raise LocalLLMConfigurationError(f"invalid {field}")
+    if len(set(items)) != len(items):
+        raise LocalLLMConfigurationError(f"duplicate {field}")
+    return items
+
+
+def _local_int(value: object, field: str, *, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise LocalLLMConfigurationError(f"invalid {field}")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise LocalLLMConfigurationError(f"invalid {field}") from exc
+    if str(parsed) != str(value).strip() or not minimum <= parsed <= maximum:
+        raise LocalLLMConfigurationError(f"invalid {field}")
+    return parsed
+
+
+def _local_bool(value: object, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in {"true", "false"}:
+        return value.lower() == "true"
+    raise LocalLLMConfigurationError(f"invalid {field}")
+
+
+def _load_local_llm_config(
+    yaml_config: Mapping[str, Any],
+    environ: Mapping[str, str],
+) -> LocalLLMConfig:
+    defaults: dict[str, Any] = {
+        "provider": "none",
+        "models": [],
+        "base_url": "http://127.0.0.1:11434",
+        "allowed_base_urls": ["http://127.0.0.1:11434"],
+        "offline_approved": False,
+        "timeout_s": 60,
+        "max_retries": 1,
+    }
+    block = yaml_config.get("local_llm", {})
+    if not isinstance(block, Mapping):
+        raise LocalLLMConfigurationError("local_llm must be a mapping")
+    unknown = set(block) - set(defaults)
+    if unknown:
+        raise LocalLLMConfigurationError("unknown local_llm key")
+    values = {**defaults, **block}
+
+    provider = environ.get("PHI_LOCAL_LLM_PROVIDER", values["provider"])
+    base_url = environ.get("PHI_LOCAL_LLM_BASE_URL", values["base_url"])
+    if not isinstance(provider, str) or not provider:
+        raise LocalLLMConfigurationError("invalid provider")
+    if not isinstance(base_url, str) or not base_url:
+        raise LocalLLMConfigurationError("invalid base_url")
+
+    if "PHI_LOCAL_LLM_MODELS" in environ:
+        models = _local_env_list(environ["PHI_LOCAL_LLM_MODELS"], "models")
+    else:
+        models = _local_config_list(values["models"], "models")
+    if "PHI_LOCAL_LLM_ALLOWED_BASE_URLS" in environ:
+        allowed_base_urls = _local_env_list(
+            environ["PHI_LOCAL_LLM_ALLOWED_BASE_URLS"], "allowed_base_urls"
+        )
+    else:
+        allowed_base_urls = _local_config_list(
+            values["allowed_base_urls"], "allowed_base_urls"
+        )
+    if any(not _LOCAL_MODEL_SPEC_RE.fullmatch(model) for model in models):
+        raise LocalLLMConfigurationError("invalid models")
+
+    offline_approved = _local_bool(
+        environ.get(
+            "PHI_LOCAL_LLM_OFFLINE_APPROVED", values["offline_approved"]
+        ),
+        "offline_approved",
+    )
+    timeout_s = _local_int(
+        environ.get("PHI_LOCAL_LLM_TIMEOUT_S", values["timeout_s"]),
+        "timeout_s",
+        minimum=1,
+        maximum=3600,
+    )
+    max_retries = _local_int(
+        environ.get("PHI_LOCAL_LLM_MAX_RETRIES", values["max_retries"]),
+        "max_retries",
+        minimum=0,
+        maximum=1,
+    )
+    return LocalLLMConfig(
+        provider=provider,
+        models=models,
+        base_url=base_url,
+        allowed_base_urls=allowed_base_urls,
+        offline_approved=offline_approved,
+        timeout_s=timeout_s,
+        max_retries=max_retries,
+    )
+
+
+def get_local_llm_config() -> LocalLLMConfig:
+    """Load and strictly validate local-model security configuration."""
+    return _load_local_llm_config(_YAML_CFG, os.environ)
+
+
 LLM_MODEL = _get_env("LLM_MODEL", yaml_get("ai_assistant", "llm_model", default="qwen3:8b"))
 # LLM_PROVIDER: explicit env var wins; otherwise infer from model name.
 LLM_PROVIDER: str = _get_env("LLM_PROVIDER") or _infer_provider(LLM_MODEL)
@@ -678,6 +831,30 @@ class LLMClient:
                 f"outbound LLM prompt blocked by phi_gate_check; matched pattern "
                 f"categories: {sorted(gate.findings)}"
             )
+        dispatch = {
+            "anthropic": self._complete_anthropic,
+            "openai": self._complete_openai,
+            "openai-oauth": self._complete_openai_oauth,
+            "google-genai": self._complete_google,
+        }
+        fn = dispatch.get(self.provider, self._complete_ollama)
+        return fn(prompt)
+
+    def _complete_verified_public(
+        self,
+        fixed_prefix: str,
+        public_document: str,
+        fixed_suffix: str,
+    ) -> str:
+        """Dispatch a registry-verified public document through the configured provider."""
+        if self.provider == "none" or self.model == "none":
+            raise RuntimeError("PHI LLM provider is disabled (provider/model is 'none')")
+        from phi_engine.security.phi_gate import PHIEgressBlockedError, phi_gate_check
+
+        gate = phi_gate_check([fixed_prefix, fixed_suffix])
+        if gate.blocked:
+            raise PHIEgressBlockedError("verified-public fixed prompt segment blocked")
+        prompt = fixed_prefix + public_document + fixed_suffix
         dispatch = {
             "anthropic": self._complete_anthropic,
             "openai": self._complete_openai,

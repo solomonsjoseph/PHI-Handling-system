@@ -73,3 +73,13 @@ llm:
   timeout_s: 60
   max_retries: 3
   confidence_threshold: 0.75  # LLM confidence below this threshold → flag for human review
+
+local_llm:
+  provider: none
+  models: []
+  base_url: http://127.0.0.1:11434
+  allowed_base_urls:
+    - http://127.0.0.1:11434
+  offline_approved: false
+  timeout_s: 60
+  max_retries: 1
