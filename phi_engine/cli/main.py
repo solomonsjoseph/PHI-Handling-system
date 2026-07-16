@@ -2,7 +2,7 @@
 
     python -m phi_engine intake   --study S --source PATH [--workspace W]
     python -m phi_engine organize --study S [--workspace W]
-    python -m phi_engine run      --study S --jurisdiction in|us [--workspace W]
+    python -m phi_engine run      --study S --jurisdiction us [--workspace W]
     python -m phi_engine review   --study S list [--workspace W]
     python -m phi_engine review   --study S decide --header H --decision keep|drop|override [--action ACTION] [--workspace W]
     python -m phi_engine status   --study S [--workspace W]
@@ -11,10 +11,9 @@ Every subcommand accepts ``--workspace`` (sets ``PHI_WORKSPACE``) and
 ``--study`` (sets ``STUDY_NAME``), and sets BOTH env vars BEFORE importing
 ``phi_engine.config.config`` -- the same import-time-resolution pattern
 ``harness/run_phi_system.py`` used for ``STUDY_NAME``. ``--jurisdiction``
-choices stay ``in``/``us``: pinned rule specs exist only for INDIA/USA
+choices stay ``us``: pinned rule specs currently exist only for USA
 (``phi_engine/security/phi_review.py`` ``_PINNED_RULE_SPECS``). Extending to
 another jurisdiction needs its own pinned rule-spec entries with authority
-citations -- out of this CLI's scope; corpus-side jurisdictions (eu/br/au/ug)
 remain generator-only.
 """
 
@@ -167,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="Run the full organize->classify->scrub->publish pipeline")
     _add_common_args(p_run)
-    p_run.add_argument("--jurisdiction", required=True, choices=["in", "us"])
+    p_run.add_argument("--jurisdiction", required=True, choices=["us"])
     p_run.set_defaults(func=_cmd_run)
 
     p_review = sub.add_parser("review", help="List or decide on held/uncertain PHI review items")

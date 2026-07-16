@@ -271,7 +271,7 @@ class FormReviewApproval:
         return payload
 
 
-_SUPPORTED_JURISDICTIONS = frozenset({"USA", "INDIA"})
+_SUPPORTED_JURISDICTIONS = frozenset({"USA"})
 _SUPPORTED_REFRESH_MODES = frozenset({"online_preferred", "pinned_only"})
 _SUPPORTED_CONFLICT_POLICIES = frozenset({"strictest_wins"})
 
@@ -281,14 +281,6 @@ _OFFICIAL_SOURCE_HOSTS = frozenset(
         "www.hhs.gov",
         "ecfr.gov",
         "www.ecfr.gov",
-        "indiacode.nic.in",
-        "www.indiacode.nic.in",
-        "icmr.gov.in",
-        "www.icmr.gov.in",
-        "uidai.gov.in",
-        "www.uidai.gov.in",
-        "meity.gov.in",
-        "www.meity.gov.in",
     }
 )
 
@@ -302,21 +294,6 @@ _PINNED_SOURCES: tuple[dict[str, str], ...] = (
         "jurisdiction": "USA",
         "title": "HHS HIPAA de-identification guidance",
         "url": "https://www.hhs.gov/hipaa/for-professionals/privacy/special-topics/de-identification/index.html",
-    },
-    {
-        "jurisdiction": "INDIA",
-        "title": "Digital Personal Data Protection Act, 2023",
-        "url": "https://www.indiacode.nic.in/indiacode/handle/123456789/22037",
-    },
-    {
-        "jurisdiction": "INDIA",
-        "title": "ICMR official guidelines index",
-        "url": "https://www.icmr.gov.in/guidelines",
-    },
-    {
-        "jurisdiction": "INDIA",
-        "title": "Aadhaar Act and UIDAI legal framework",
-        "url": "https://uidai.gov.in/en/about-uidai/legal-framework/2033-aadhaar-targeted-delivery-of-financial-and-other-subsidies%2C-benefits-and-services-act%2C-2016.html",
     },
 )
 
@@ -484,74 +461,6 @@ _PINNED_RULE_SPECS: tuple[dict[str, object], ...] = (
             r"^(?:[a-z]{1,4}[_ -])?fid\d+$",
         ),
     },
-    {
-        "id": "india_dpdpa_contact_identifiers",
-        "jurisdiction": "INDIA",
-        "action": Action.DROP,
-        "reason": "India personal-data direct contact identifier header.",
-        "patterns": (
-            r"\b(email|e[-_ ]?mail|phone|telephone|mobile|cell|address|postal|pin[_ -]?code)\b",
-            r"\b(passport|voter|pan|bank|account)\b",
-            # Ration-card NUMBER is a government ID → drop. The bare ration
-            # CATEGORY (APL/BPL/None, e.g. IC_RATION) is socioeconomic, not an
-            # identifier — require card/no/number so the category is not flagged.
-            r"\bration[_ -]?(?:card|no|num|number)\b",
-            # Note 34: India identity numbers the boundary rules above missed —
-            # voter EPIC (VOTERID), driving licence (DL), ABHA health-account id,
-            # UHID, GSTIN, and a bare PIN/PINCODE postal field. Verified
-            # collision-free against Indo-VAP (bare RATION category untouched).
-            r"\bvoter|\bepic[_ -]?(?:no|number)?\b",
-            r"\babha\b|\buhid\b|\bgst(?:in)?\b",
-            r"(^|[_ -])(?:driving[_ -]?licen\w*|dl(?:[_ -]?(?:no|num|number))?)\d*$",
-            r"(^|[_ -])pin(?:[_ -]?code)?$",
-        ),
-    },
-    {
-        "id": "india_aadhaar_identifier",
-        "jurisdiction": "INDIA",
-        "action": Action.DROP,
-        "reason": "Aadhaar identity number header.",
-        "patterns": (
-            r"\b(aadhaar|adhar|aadhar|uidai)\b",
-            r"\buid[_ -]?(no|number|id)?\b",
-        ),
-    },
-    {
-        "id": "india_date_identifier",
-        "jurisdiction": "INDIA",
-        "action": Action.JITTER_DATE,
-        "reason": "Date-like personal-data header.",
-        "patterns": (
-            r"\b(date|datetime|timestamp|time[_ -]?stamp)\b",
-            r"(^|[_ -])(dob|dod)([_ -]|$)",
-            # DTE/DATE suffixes included so completion-date columns (CXR_COMPDTE,
-            # HHC_COMPDTE) classify as dates, matching the USA rule above.
-            r"(^|[_ -])[a-z0-9]*(date|dat|dte)\d*$",
-            # Bare "dt" only separator-prefixed (VISIT_DT) — not as a word ending
-            # (RESPNDT respondent), matching the USA rule above.
-            r"(^|[_ -])dt\d*$",
-        ),
-    },
-    {
-        "id": "india_free_text_suppression",
-        "jurisdiction": "INDIA",
-        "action": Action.SUPPRESS,
-        "reason": "Free-text personal-data header needs suppression review.",
-        "patterns": (
-            r"\b(comments?|notes?|remarks?|narrative|free[_ -]?text|describe|description|specify|other)\b",
-        ),
-    },
-    {
-        "id": "india_unique_person_identifier",
-        "jurisdiction": "INDIA",
-        "action": Action.PSEUDONYMIZE,
-        "reason": "Unique person or study identifier header.",
-        "patterns": (
-            r"\b(participant|subject|patient|person|study|record|case)[_ -]?(id|code|key|number|no)\b",
-            r"\b(id|identifier|uuid|guid)\b",
-            r"(^|[_ -])(?:subj(?:id)?|fid|pid|ptid|hhid|recordid)$",
-        ),
-    },
 )
 
 
@@ -666,15 +575,9 @@ _PHI_RISKY_TOKENS: frozenset[str] = frozenset(
         "longitude",
         "geocode",
         # specific government / record identifiers
-        "aadhaar",
-        "aadhar",
-        "pan",
         "passport",
-        "voter",
         "mrn",
         "ssn",
-        "uid",
-        "ration",
         # life-event dates tied to an individual
         "dob",
         "dod",
@@ -726,14 +629,9 @@ _STRONG_DIRECT_ID_TOKENS: frozenset[str] = frozenset(
         "email",
         "whatsapp",
         # government / biometric identifiers
-        "aadhaar",
-        "aadhar",
-        "pan",
         "passport",
-        "voter",
         "mrn",
         "ssn",
-        "uid",
     }
 )
 _STRONG_DIRECT_ID_SUBSTRINGS: tuple[str, ...] = (
@@ -1204,29 +1102,16 @@ def _adversarial_header_validation(
 ) -> tuple[str, ...]:
     """Run header-only adversarial probes without emitting fake row values.
 
-    Probe set is jurisdiction-aware (bugfix, standalone refactor 2026-07-07):
-    ``synthetic_aadhaar_header`` names an India-specific government ID
-    (Aadhaar) that only appears in the INDIA rule pack. A single-jurisdiction
-    ``("USA",)`` study is CORRECTLY silent on it -- that is not a rule-bundle
-    defect, so probing for it unconditionally made every USA-only form hold
-    permanently (verified: ``_build_pinned_rules(("USA",))`` classifies
-    ``synthetic_aadhaar_header`` as KEEP, never DROP, by design). The other
-    four probes (participant id / visit date / email / culture result) are
-    genuinely jurisdiction-agnostic -- verified to pass under ``("USA",)``,
-    ``("INDIA",)``, and ``("USA", "INDIA")`` alike -- and stay universal.
+    Universal probes (participant id / visit date / email / culture result)
+    exercise the USA HIPAA Safe Harbor rule pack. Probe headers are synthetic
+    names only — no dataset row values are read.
     """
-    universal_probes = {
+    probes = {
         "synthetic_participant_id_header": Action.PSEUDONYMIZE,
         "synthetic_visit_date_header": Action.JITTER_DATE,
         "synthetic_email_header": Action.DROP,
         "synthetic_culture_result_header": Action.KEEP,
     }
-    jurisdiction_specific_probes: dict[str, dict[str, Action]] = {
-        "INDIA": {"synthetic_aadhaar_header": Action.DROP},
-    }
-    probes = dict(universal_probes)
-    for jurisdiction in privacy_config.jurisdictions:
-        probes.update(jurisdiction_specific_probes.get(jurisdiction, {}))
 
     classified = classify_headers(tuple(probes), privacy_config, rule_bundle)
     failures = [

@@ -4,115 +4,12 @@
     "kind": "jurisdiction",
     "status": "manifested",
     "public_claim": "US/HIPAA synthetic corpus with span-level gold annotations",
-    "authority": ["45 CFR 164.514"],
+    "authority": [
+      "45 CFR 164.514"
+    ],
     "jurisdiction": "us",
     "generator": "harness.generate_corpus:build_us_corpus",
     "output": "corpus/us/*.jsonl"
-  },
-  {
-    "id": "india_dpdpa",
-    "kind": "jurisdiction",
-    "status": "manifested",
-    "public_claim": "India DPDPA synthetic corpus with span-level gold annotations, present in the canonical manifest with PASS validation and end-to-end scrub + benchmark evidence (docs/JURISDICTION_EVIDENCE_REPORT_IN.md)",
-    "authority": ["DPDPA 2023", "DPDP Rules 2025"],
-    "jurisdiction": "in",
-    "generator": "generators.in.in_dpdpa:IndiaDPDPAGenerator.generate_batch",
-    "output": "corpus/in/india_dpdpa.jsonl"
-  },
-  {
-    "id": "india_identifiers",
-    "kind": "jurisdiction",
-    "status": "manifested",
-    "public_claim": "India identifier synthetic corpus with span-level gold annotations, present in the canonical manifest with PASS validation and end-to-end scrub + benchmark evidence (docs/JURISDICTION_EVIDENCE_REPORT_IN.md)",
-    "authority": ["DPDPA 2023", "SPDI Rules 2011"],
-    "jurisdiction": "in",
-    "generator": "generators.in.in_identifiers:IndiaIdentifierGenerator.generate_batch",
-    "output": "corpus/in/india_identifiers.jsonl"
-  },
-  {
-    "id": "eu_gdpr",
-    "kind": "jurisdiction",
-    "status": "tested",
-    "public_claim": "EU/GDPR synthetic identifier generator exists with tests but is not yet in the canonical manifest",
-    "authority": ["GDPR Article 4", "GDPR Article 9"],
-    "jurisdiction": "eu",
-    "generator": "generators.eu.eu_gdpr:EUGDPRGenerator.generate_batch",
-    "output": "corpus/eu/eu_identifiers.jsonl"
-  },
-  {
-    "id": "brazil_lgpd",
-    "kind": "jurisdiction",
-    "status": "tested",
-    "public_claim": "Brazil/LGPD synthetic identifier generator exists with tests but is not yet in the canonical manifest",
-    "authority": ["LGPD"],
-    "jurisdiction": "br",
-    "generator": "generators.br.br_lgpd:BrazilLGPDGenerator.generate_batch",
-    "output": "corpus/br/brazil_identifiers.jsonl"
-  },
-  {
-    "id": "australia_privacy",
-    "kind": "jurisdiction",
-    "status": "tested",
-    "public_claim": "Australia Privacy Act synthetic identifier generator exists with tests but is not yet in the canonical manifest",
-    "authority": ["Australia Privacy Act"],
-    "jurisdiction": "au",
-    "generator": "generators.au.au_privacy:AustraliaPrivacyGenerator.generate_batch",
-    "output": "corpus/au/australia_identifiers.jsonl"
-  },
-  {
-    "id": "uganda_dppa",
-    "kind": "jurisdiction",
-    "status": "tested",
-    "public_claim": "Uganda DPPA synthetic identifier generator exists with tests but is not yet in the canonical manifest",
-    "authority": ["Uganda DPPA"],
-    "jurisdiction": "ug",
-    "generator": "generators.ug.ug_dppa:UgandaDPPAGenerator.generate_batch",
-    "output": "corpus/ug/uganda_identifiers.jsonl"
-  },
-  {
-    "id": "canada_pipeda",
-    "kind": "jurisdiction",
-    "status": "planned",
-    "public_claim": "Canada/PIPEDA corpus coverage is planned and not implemented in the canonical generator path",
-    "authority": ["PIPEDA"],
-    "jurisdiction": "ca",
-    "limitations": ["not implemented in canonical generator path"]
-  },
-  {
-    "id": "uk_gdpr",
-    "kind": "jurisdiction",
-    "status": "planned",
-    "public_claim": "UK GDPR corpus coverage is planned and not implemented in the canonical generator path",
-    "authority": ["UK GDPR"],
-    "jurisdiction": "uk",
-    "limitations": ["not implemented in canonical generator path"]
-  },
-  {
-    "id": "singapore_pdpa",
-    "kind": "jurisdiction",
-    "status": "planned",
-    "public_claim": "Singapore PDPA corpus coverage is planned and not implemented in the canonical generator path",
-    "authority": ["Singapore PDPA"],
-    "jurisdiction": "sg",
-    "limitations": ["not implemented in canonical generator path"]
-  },
-  {
-    "id": "japan_appi",
-    "kind": "jurisdiction",
-    "status": "planned",
-    "public_claim": "Japan APPI corpus coverage is planned and not implemented in the canonical generator path",
-    "authority": ["APPI"],
-    "jurisdiction": "jp",
-    "limitations": ["not implemented in canonical generator path"]
-  },
-  {
-    "id": "china_pipl",
-    "kind": "jurisdiction",
-    "status": "planned",
-    "public_claim": "China PIPL corpus coverage is planned and not implemented in the canonical generator path",
-    "authority": ["PIPL"],
-    "jurisdiction": "cn",
-    "limitations": ["not implemented in canonical generator path"]
   },
   {
     "id": "format_dicom_header",
@@ -166,91 +63,117 @@
     "kind": "file_format",
     "status": "planned",
     "public_claim": "JSON corpus export is planned and not generated in the current canonical corpus",
-    "limitations": ["not generated in current canonical corpus"]
+    "limitations": [
+      "not generated in current canonical corpus"
+    ]
   },
   {
     "id": "format_csv",
     "kind": "file_format",
     "status": "planned",
     "public_claim": "CSV corpus export is planned and not generated in the current canonical corpus",
-    "limitations": ["not generated in current canonical corpus"]
+    "limitations": [
+      "not generated in current canonical corpus"
+    ]
   },
   {
     "id": "format_docx",
     "kind": "file_format",
     "status": "planned",
     "public_claim": "DOCX corpus export is planned and not generated in the current canonical corpus",
-    "limitations": ["not generated in current canonical corpus"]
+    "limitations": [
+      "not generated in current canonical corpus"
+    ]
   },
   {
     "id": "format_pdf",
     "kind": "file_format",
     "status": "planned",
     "public_claim": "PDF corpus export is planned and not generated in the current canonical corpus",
-    "limitations": ["not generated in current canonical corpus"]
+    "limitations": [
+      "not generated in current canonical corpus"
+    ]
   },
   {
     "id": "format_hl7_cda",
     "kind": "file_format",
     "status": "planned",
     "public_claim": "HL7 CDA corpus export is planned and not generated in the current canonical corpus",
-    "limitations": ["not generated in current canonical corpus"]
+    "limitations": [
+      "not generated in current canonical corpus"
+    ]
   },
   {
     "id": "format_parquet",
     "kind": "file_format",
     "status": "planned",
     "public_claim": "Parquet corpus export is planned and not generated in the current canonical corpus",
-    "limitations": ["not generated in current canonical corpus"]
+    "limitations": [
+      "not generated in current canonical corpus"
+    ]
   },
   {
     "id": "format_exif",
     "kind": "file_format",
     "status": "planned",
     "public_claim": "EXIF corpus export is planned and not generated in the current canonical corpus",
-    "limitations": ["not generated in current canonical corpus"]
+    "limitations": [
+      "not generated in current canonical corpus"
+    ]
   },
   {
     "id": "benchmark_presidio_stock",
     "kind": "benchmark",
     "status": "implemented",
     "public_claim": "Stock Presidio benchmark path exists but requires clean stock/tuned adapter split before manifested comparison",
-    "limitations": ["requires clean stock/tuned adapter split before manifested comparison"]
+    "limitations": [
+      "requires clean stock/tuned adapter split before manifested comparison"
+    ]
   },
   {
     "id": "benchmark_presidio_tuned",
     "kind": "benchmark",
     "status": "implemented",
     "public_claim": "Tuned Presidio benchmark path exists and must be labelled separately from stock Presidio",
-    "limitations": ["custom MBI/VIN recognizers must be labelled tuned"]
+    "limitations": [
+      "custom MBI/VIN recognizers must be labelled tuned"
+    ]
   },
   {
     "id": "benchmark_aws_comprehend",
     "kind": "benchmark",
     "status": "planned",
     "public_claim": "AWS Comprehend Medical benchmark is planned and credential-gated",
-    "limitations": ["requires AWS credentials"]
+    "limitations": [
+      "requires AWS credentials"
+    ]
   },
   {
     "id": "benchmark_azure_health",
     "kind": "benchmark",
     "status": "planned",
     "public_claim": "Azure Health benchmark is planned and credential-gated",
-    "limitations": ["requires Azure credentials"]
+    "limitations": [
+      "requires Azure credentials"
+    ]
   },
   {
     "id": "benchmark_john_snow_labs",
     "kind": "benchmark",
     "status": "planned",
     "public_claim": "John Snow Labs Healthcare NLP benchmark is planned and license-gated",
-    "limitations": ["requires John Snow Labs license"]
+    "limitations": [
+      "requires John Snow Labs license"
+    ]
   },
   {
     "id": "benchmark_modified_deidentify",
     "kind": "benchmark",
     "status": "planned",
     "public_claim": "Modified Deidentify benchmark is planned and license-gated",
-    "limitations": ["requires underlying model license confirmation"]
+    "limitations": [
+      "requires underlying model license confirmation"
+    ]
   },
   {
     "id": "validator_suite",
@@ -263,14 +186,19 @@
     "kind": "security_control",
     "status": "implemented",
     "public_claim": "Threat model documentation and release-gate mapping are implemented",
-    "tests": ["tests/test_phi_llm_safety.py", "tests/test_corpus_validators.py"]
+    "tests": [
+      "tests/test_phi_llm_safety.py",
+      "tests/test_corpus_validators.py"
+    ]
   },
   {
     "id": "no_phi_to_llm_boundary",
     "kind": "security_control",
     "status": "implemented",
     "public_claim": "PHI-to-LLM boundary guards exist but are not yet universally wrapped",
-    "limitations": ["existing guards present but not universally wrapped"]
+    "limitations": [
+      "existing guards present but not universally wrapped"
+    ]
   },
   {
     "id": "mia_framework",
@@ -294,56 +222,80 @@
     "id": "format_study_tabular",
     "kind": "file_format",
     "status": "tested",
-    "public_claim": "Clinical-study CRF tabular corpus generator (India/USA) is tested (tests/test_study_tabular.py) but not part of the span-annotated canonical manifest",
-    "authority": ["DPDPA 2023", "DPDP Rules 2025 Rule 14", "SPDI Rules 2011 Rule 3", "ICMR 2017 Section 2.3.5", "45 CFR 164.514(b)(2)"],
-    "generator": "generators.study_tabular:IndiaStudyTabularGenerator.generate_study",
+    "public_claim": "Clinical-study CRF tabular corpus generator (USA) is tested (tests/test_study_tabular.py) but not part of the span-annotated canonical manifest",
+    "authority": [
+      "45 CFR 164.514(b)(2)"
+    ],
+    "generator": "generators.study_tabular:USStudyTabularGenerator.generate_study",
     "output": "benchmarks/results/study_tabular_corpus/",
-    "tests": ["tests/test_study_tabular.py"],
-    "limitations": ["not wired into seeded_generator_specs() -- staged per-run by harness.run_phi_system, not part of the span-annotated canonical corpus"]
+    "tests": [
+      "tests/test_study_tabular.py"
+    ],
+    "limitations": [
+      "not wired into seeded_generator_specs() -- staged per-run by harness.run_phi_system, not part of the span-annotated canonical corpus"
+    ]
   },
   {
     "id": "benchmark_phi_engine",
     "kind": "benchmark",
     "status": "tested",
-    "public_claim": "phi_engine's own detection surface (presidio_gate + phi_gate pattern matching) has a benchmarks/ adapter, tested (tests/test_phi_engine_adapter.py) and run across all 6 corpus jurisdictions (benchmarks/results/comparison_table.md)",
-    "tests": ["tests/test_phi_engine_adapter.py"],
-    "limitations": ["unmapped BLOCKING_PATTERNS/WARN_PATTERNS names count as UNKNOWN (FP under strict scoring)"]
+    "public_claim": "phi_engine's own detection surface (presidio_gate + phi_gate pattern matching) has a benchmarks/ adapter, tested (tests/test_phi_engine_adapter.py) and run against the US corpus (benchmarks/results/comparison_table.md)",
+    "tests": [
+      "tests/test_phi_engine_adapter.py"
+    ],
+    "limitations": [
+      "unmapped BLOCKING_PATTERNS/WARN_PATTERNS names count as UNKNOWN (FP under strict scoring)"
+    ]
   },
   {
     "id": "intake_symlink",
     "kind": "security_control",
     "status": "implemented",
     "public_claim": "Symlink-only ingestion (phi_engine.pipeline.intake.intake_add) links any source tree into <workspace>/intake/<study>/ without ever copying, moving, or modifying source bytes; content-duplicate detection and broken-symlink handling are fail-soft, never fatal",
-    "validators": ["harness/spec_check.py:intake_symlink_invariant"],
-    "limitations": ["dedicated pytest coverage lands with the Phase 6 stress suite (tests/test_stress_standalone.py); verified so far by manual portability smoke tests only"]
+    "validators": [
+      "harness/spec_check.py:intake_symlink_invariant"
+    ],
+    "limitations": [
+      "dedicated pytest coverage lands with the Phase 6 stress suite (tests/test_stress_standalone.py); verified so far by manual portability smoke tests only"
+    ]
   },
   {
     "id": "organizer",
     "kind": "security_control",
     "status": "implemented",
     "public_claim": "phi_engine.pipeline.organize.organize routes messy intake input (.jsonl/.json/.csv/.xlsx/.xls/.pdf, unrecognized formats, broken links) into normalized dataset JSONL or a value-free review bucket, reading only through intake symlinks and never touching the source tree",
-    "limitations": ["dedicated pytest coverage lands with the Phase 6 stress suite (tests/test_stress_standalone.py); verified so far by manual smoke tests exercising every format branch"]
+    "limitations": [
+      "dedicated pytest coverage lands with the Phase 6 stress suite (tests/test_stress_standalone.py); verified so far by manual smoke tests exercising every format branch"
+    ]
   },
   {
     "id": "review_feedback_loop",
     "kind": "review_control",
     "status": "tested",
     "public_claim": "Operator review decisions (keep/drop/override) recorded via phi_engine.pipeline.review.decide persist to review_decisions.yaml and are applied on the NEXT phi_engine run: keep un-holds a risky-named header, drop force-removes a column regardless of its default classification, override changes the applied scrub method",
-    "tests": ["tests/test_review_feedback_loop.py"]
+    "tests": [
+      "tests/test_review_feedback_loop.py"
+    ]
   },
   {
     "id": "prompt_egress_gate",
     "kind": "security_control",
     "status": "tested",
     "public_claim": "LLMClient.complete runs phi_gate_check on every outbound prompt before provider dispatch and raises PHIEgressBlockedError (pattern category only, never matched text) on a match -- closes prior-audit C2 for the pipeline path. Defense-in-depth on top of the structural headers-only prompt construction; the blocking regex tier's documented false negatives (prior-audit C3) still apply",
-    "tests": ["tests/test_llm_egress_gate.py"],
-    "limitations": ["blocking regex tier has documented false negatives (C3); this is a backstop, not a proof of absence"]
+    "tests": [
+      "tests/test_llm_egress_gate.py"
+    ],
+    "limitations": [
+      "blocking regex tier has documented false negatives (C3); this is a backstop, not a proof of absence"
+    ]
   },
   {
     "id": "value_profiler",
     "kind": "review_control",
     "status": "tested",
     "public_claim": "phi_engine.pipeline.profile deterministically profiles column VALUES locally (never leaves the process, never sent to an LLM) and drives two rules in run_pipeline: ESCALATION force-drops a keep-classified header whose values are majority PHI-shaped (catches PHI planted in an unexpectedly-named column); AUTO-CLEAR un-holds a force-dropped header whose value shape structurally proves it cannot be an identifier/date series (closed categorical set, zero blocking/warn/date signal) -- never overrides an explicit human drop decision",
-    "tests": ["tests/test_value_profiler.py"]
+    "tests": [
+      "tests/test_value_profiler.py"
+    ]
   }
 ]

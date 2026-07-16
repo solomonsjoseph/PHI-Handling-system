@@ -146,7 +146,7 @@ def _main() -> None:
     parser.add_argument(
         "--jurisdiction",
         default="",
-        help="Filter by jurisdiction (e.g. HIPAA, DPDPA)",
+        help="Filter by jurisdiction (e.g. HIPAA)",
     )
     args = parser.parse_args()
     run_review(args.queue, jurisdiction_filter=args.jurisdiction)

@@ -15,10 +15,13 @@ def _write_json(path: Path, payload: dict) -> Path:
     return path
 
 
-def test_build_release_evidence_hashes_artifacts_and_l2_claim(tmp_path):
+def test_build_release_evidence_hashes_artifacts_is_l1_for_us_and_file_formats(tmp_path):
+    # "file_formats" is a corpus/ directory category (file-format generator output),
+    # not a regulatory jurisdiction -- it must NOT elevate the claim level. A USA-only
+    # manifest that also includes file_formats output is still L1, not L2-partial.
     manifest_path = _write_json(
         tmp_path / "MANIFEST.json",
-        {"jurisdictions": ["in", "us"], "validation_status": "PASS"},
+        {"jurisdictions": ["file_formats", "us"], "validation_status": "PASS"},
     )
     validation_path = _write_json(tmp_path / "validation.json", {"validation_status": "PASS"})
     mia_path = _write_json(
@@ -36,9 +39,31 @@ def test_build_release_evidence_hashes_artifacts_and_l2_claim(tmp_path):
     assert evidence["manifest_sha256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     assert evidence["validation_report_sha256"] == hashlib.sha256(validation_path.read_bytes()).hexdigest()
     assert evidence["mia_report_sha256"] == hashlib.sha256(mia_path.read_bytes()).hexdigest()
-    assert evidence["claim_level"] == "L2-partial"
-    assert any("canada_pipeda" in limitation for limitation in evidence["limitations"])
+    assert evidence["claim_level"] == "L1"
+    assert "file_formats" not in evidence["claim_level_basis"]
+    assert any("clinician_review" in limitation for limitation in evidence["limitations"])
     assert not any("mia_framework" in limitation for limitation in evidence["limitations"])
+
+
+def test_build_release_evidence_multiple_real_jurisdictions_is_l2_partial(tmp_path):
+    # Regression guard for the mechanism itself: a manifest declaring a genuine
+    # second regulatory jurisdiction (arbitrary placeholder code, not a real
+    # supported one -- this repo is USA-only) still elevates to L2-partial.
+    manifest_path = _write_json(
+        tmp_path / "MANIFEST.json",
+        {"jurisdictions": ["us", "zz"], "validation_status": "PASS"},
+    )
+    validation_path = _write_json(tmp_path / "validation.json", {"validation_status": "PASS"})
+
+    evidence = build_release_evidence(
+        corpus_dir=tmp_path,
+        manifest_path=manifest_path,
+        validation_report_path=validation_path,
+        mia_report_path=None,
+    )
+
+    assert evidence["claim_level"] == "L2-partial"
+    assert "zz" in evidence["claim_level_basis"]
 
 
 def test_build_release_evidence_without_mia_and_us_only_is_l1(tmp_path):
@@ -57,7 +82,7 @@ def test_build_release_evidence_without_mia_and_us_only_is_l1(tmp_path):
 
 
 def test_build_release_evidence_failed_validation_is_l1(tmp_path):
-    manifest_path = _write_json(tmp_path / "MANIFEST.json", {"jurisdictions": ["in", "us"]})
+    manifest_path = _write_json(tmp_path / "MANIFEST.json", {"jurisdictions": ["us"]})
     validation_path = _write_json(tmp_path / "validation.json", {"validation_status": "FAIL"})
 
     evidence = build_release_evidence(
@@ -70,7 +95,7 @@ def test_build_release_evidence_failed_validation_is_l1(tmp_path):
 
 
 def test_release_evidence_cli_writes_json(tmp_path):
-    manifest_path = _write_json(tmp_path / "MANIFEST.json", {"jurisdictions": ["in", "us"]})
+    manifest_path = _write_json(tmp_path / "MANIFEST.json", {"jurisdictions": ["us"]})
     validation_path = _write_json(tmp_path / "validation.json", {"validation_status": "PASS"})
     output_path = tmp_path / "evidence.json"
 
@@ -100,7 +125,7 @@ def test_release_evidence_cli_writes_json(tmp_path):
 
 
 def test_release_evidence_cli_refuses_on_failed_validation(tmp_path):
-    manifest_path = _write_json(tmp_path / "MANIFEST.json", {"jurisdictions": ["in", "us"]})
+    manifest_path = _write_json(tmp_path / "MANIFEST.json", {"jurisdictions": ["us"]})
     validation_path = _write_json(tmp_path / "validation.json", {"validation_status": "FAIL"})
     output_path = tmp_path / "evidence.json"
 
@@ -128,7 +153,7 @@ def test_release_evidence_cli_refuses_on_failed_validation(tmp_path):
 
 
 def test_release_evidence_cli_allow_failed_validation_override(tmp_path):
-    manifest_path = _write_json(tmp_path / "MANIFEST.json", {"jurisdictions": ["in", "us"]})
+    manifest_path = _write_json(tmp_path / "MANIFEST.json", {"jurisdictions": ["us"]})
     validation_path = _write_json(tmp_path / "validation.json", {"validation_status": "FAIL"})
     output_path = tmp_path / "evidence.json"
 

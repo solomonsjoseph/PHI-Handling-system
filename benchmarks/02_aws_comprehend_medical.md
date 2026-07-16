@@ -10,13 +10,8 @@ Specific F1 score claims for AWS Comprehend Medical (e.g., "83% F1 on clinical P
 
 ## Coverage gaps relative to this corpus
 
-- No Indian identifiers: PAN, Aadhaar, ABHA, CTRI, UAN, ESI, CGHS, BPL, state-variant driving licenses, ration cards
-- No DPDPA Rule 14 identifier coverage
-- No ICMR 2017 risk tier tagging
-- No GDPR-specific annotations (genetic data as distinct from health data)
 - No detection regime tagging (rule_applicable vs contextual_ner_required per i2b2 taxonomy)
-- No conflict case coverage (ZIP code HIPAA vs GDPR jurisdictional disagreement)
-- US-only: no multilingual support, English only
+- English only (no multilingual support)
 - The ID mega-category collapses 9 HIPAA categories (G, H, I, J, K, L, M, P, R) into one, eliminating per-category diagnostic precision
 
 ## DetectPHI Entity Types (9 total)
@@ -46,7 +41,6 @@ Specific F1 score claims for AWS Comprehend Medical (e.g., "83% F1 on clinical P
 
 ## Known Amazon Comprehend Medical limitations
 
-- No Indian identifiers (no PAN, Aadhaar, ABHA, MRN format awareness for Indian institutions)
 - No geographical reasoning about ZIP3 (cannot tell if a ZIP is one of the 17 restricted ZIP3 codes)
 - No date shifting or age-binning (only detection)
 - No distinguishing of household members vs. patient
@@ -73,13 +67,12 @@ For context, Comprehend Medical has 6 non-PHI categories:
 2. **The "PROFESSION" entity** is not in Presidio but IS in Comprehend Medical — our corpus should include profession-only test cases to benchmark both
 3. **The DATE entity in Comprehend Medical** combines all date types; our corpus should measure their performance on age-over-89 edge cases (HIPAA C) vs. normal dates
 4. **Document size** — corpus records should include at least some <20,000 byte narratives for direct Comprehend Medical compatibility
-5. **Comprehend Medical is US-biased** — our corpus should explicitly measure its degraded performance on Indian text (PAN, Aadhaar, ABHA-style IDs should NOT be detected correctly)
+5. **Comprehend Medical is US-biased** — this corpus is USA-only, so this bias is aligned rather than a gap to measure
 
 ## Recommended benchmark metrics vs. Comprehend Medical
 
 - Macro-F1 per Comprehend Medical entity type mapped to our taxonomy
 - **Mega-category resolution rate:** can we distinguish SSN vs MRN vs license within their ID category?
-- **Jurisdiction sensitivity:** performance on US records vs. IN records (expected steep dropoff)
 - **HIPAA category coverage:** Comprehend Medical covers 12-14 of 18; our system must demonstrate coverage of all 18
 
 ## Integration harness strategy

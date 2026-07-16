@@ -25,7 +25,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 # Known jurisdiction codes this repo's canonical corpus covers (harness/generate_corpus.py).
-JURISDICTIONS = ("us", "in", "eu", "br", "au", "ug")
+JURISDICTIONS = ("us",)
 
 # Result-directory-name prefix -> (display name, result-file basename prefix).
 # Directory names are "<prefix>-<jurisdiction>" (e.g. "presidio-stock-us").
@@ -39,7 +39,7 @@ RUN_TOOL_PREFIXES: Dict[str, str] = {
 # Tools that were NOT run in this evidence pass, with the precise, evidence-
 # backed reason (evidence plan Phase 4.2/4.3 contingencies; philter/pydeid
 # reasons are from direct investigation this session -- see
-# docs/JURISDICTION_EVIDENCE_REPORT_IN.md "Benchmark matrix" for the full
+# docs/JURISDICTION_EVIDENCE_REPORT_US.md "Benchmark matrix" for the full
 # writeup). Applies identically across every jurisdiction (availability /
 # credential gates are not jurisdiction-specific).
 NOT_RUN_TOOLS: List[Dict[str, str]] = [

@@ -6,7 +6,6 @@ seeded PRNG state. The same seed produces bitwise-identical corpora -- a
 requirement for IRB reproducibility attestation.
 
 Authority: See authorities/AUTHORITY_MATRIX.md for the full citation index.
-Multi-jurisdiction architecture: See authorities/06_regulatory_philosophy_comparison.md
 Detection regime taxonomy: See AUTHORITY_MATRIX.md Table F (arXiv 2412.10918)
 """
 from __future__ import annotations
@@ -32,28 +31,6 @@ AUTH_HIPAA_VERIFICATION = "45 CFR 164.514(h)"
 AUTH_HIPAA_ACTUAL_KNOWLEDGE = "45 CFR 164.514(b)(2)(ii)"
 AUTH_HIPAA_MINIMUM_NECESSARY = "45 CFR 164.514(d)"
 
-AUTH_DPDPA_ACT = "DPDPA 2023 Act 22"
-AUTH_DPDPA_RULES_6 = "DPDP Rules 2025 Rule 6 (Security Safeguards)"
-AUTH_DPDPA_RULES_7 = "DPDP Rules 2025 Rule 7 (Breach Notification)"
-AUTH_DPDPA_RULES_10 = "DPDP Rules 2025 Rule 10 (Verifiable Parental Consent)"
-AUTH_DPDPA_RULES_13 = "DPDP Rules 2025 Rule 13 (SDF Obligations)"
-AUTH_DPDPA_RULES_14 = "DPDP Rules 2025 Rule 14 (Data Principal Rights; Identifier)"
-AUTH_DPDPA_RULES_16 = "DPDP Rules 2025 Rule 16 (Research Exemption)"
-AUTH_DPDPA_SECOND_SCHEDULE = "DPDP Rules 2025 Second Schedule"
-AUTH_DPDPA_FOURTH_SCHEDULE_A = "DPDP Rules 2025 Fourth Schedule Part A"
-
-AUTH_SPDI_RULE_3 = "IT Act SPDI Rules 2011 Rule 3"
-AUTH_IT_ACT_43A = "Section 43A IT Act 2000"
-AUTH_IT_ACT_72A = "Section 72A IT Act 2000"
-
-AUTH_ICMR_PRIVACY = "ICMR 2017 Section 1.1.5"
-AUTH_ICMR_RISK_TIER = "ICMR 2017 Section 2.1 Table 2.1"
-AUTH_ICMR_CODING = "ICMR 2017 Section 2.3.5"
-AUTH_ICMR_VULNERABILITY = "ICMR 2017 Section 2.9.1"
-AUTH_ICMR_DATA_OWNERSHIP = "ICMR 2017 Section 3.3.2"
-AUTH_ICMR_HMSC = "ICMR 2017 Section 3.8.3"
-AUTH_ICMR_REVIEW_TYPES = "ICMR 2017 Section 4.8 Table 4.2"
-
 AUTH_DICOM_BACP = "DICOM PS3.15 Annex E Basic Confidentiality Profile"
 AUTH_FHIR_R4 = "HL7 FHIR R4 v4.0.1"
 
@@ -71,23 +48,6 @@ AUTH_GDPR_ARTICLE_9 = "GDPR Article 9(1) (special categories)"
 AUTH_GDPR_ARTICLE_89 = "GDPR Article 89 (research safeguards)"
 AUTH_EHDS_2024 = "EU EHDS Regulation 2024/3175 Article 3"
 
-AUTH_PIPEDA_S1 = "PIPEDA Schedule 1 Principles"
-AUTH_PHIPA_ON = "PHIPA Ontario 2004 (personal health information)"
-AUTH_HIA_AB = "HIA Alberta 2000 (health information)"
-AUTH_PIPA_BC = "PIPA BC 2003 (personal information)"
-
-AUTH_UK_GDPR = "UK GDPR Article 4(1) (retained EU law)"
-AUTH_UK_NHS_NUMBER = "NHS Data Security and Protection Toolkit"
-
-AUTH_AU_PRIVACY = "Privacy Act 1988 (Cth) Australian Privacy Principles"
-AUTH_AU_MY_HEALTH = "Healthcare Identifiers Act 2010 (Cth)"
-
-AUTH_PDPA_SG = "PDPA Singapore 2012 (2021 amendments)"
-AUTH_APPI_JP = "APPI Japan 2022 amendments"
-AUTH_LGPD_BR = "LGPD Brazil 2020 Article 5"
-AUTH_PIPL_CN = "PIPL China 2021 (sensitive personal information)"
-
-AUTH_PUTTASWAMY = "Puttaswamy v Union of India (2017) 10 SCC 1"
 
 # -----------------------------------------------------------------------------
 # Detection regime constants (i2b2 taxonomy, arXiv 2412.10918 December 2024)
@@ -106,16 +66,7 @@ DETECTION_REGIME_CONFLICT = "conflict_case"
 
 LAYER_COMMON = "common"
 LAYER_HIPAA = "hipaa_specific"
-LAYER_INDIA = "india_specific"
-LAYER_GDPR = "gdpr_specific"
 LAYER_CONFLICT = "conflict_cases"
-LAYER_CANADA = "canada_specific"
-LAYER_UK = "uk_specific"
-LAYER_AUSTRALIA = "australia_specific"
-LAYER_SINGAPORE = "singapore_specific"
-LAYER_JAPAN = "japan_specific"
-LAYER_BRAZIL = "brazil_specific"
-LAYER_CHINA_PIPL = "china_pipl"  # STRUCTURALLY SEPARATE -- not comparable to other layers
 
 
 # -----------------------------------------------------------------------------
@@ -165,10 +116,10 @@ class GoldSpan:
     end: int
     category: str               # HIPAA Safe Harbor A-R, or extended category
     hipaa_category: Optional[str] = None   # A-R or None for non-HIPAA
-    jurisdiction: str = "universal"        # "us" | "in" | "eu" | "universal" | ...
+    jurisdiction: str = "universal"        # "us" | "universal" | ...
     authority: str = ""
     value: str = ""
-    entity_type: str = ""       # i2b2 semantic type (PATIENT, MRN, AADHAAR, etc.)
+    entity_type: str = ""       # i2b2 semantic type (PATIENT, MRN, SSN, etc.)
     detection_regime: str = DETECTION_REGIME_NER  # rule_applicable | contextual_ner_required | conflict_case
 
     def verify(self, text: str) -> bool:
@@ -183,10 +134,10 @@ class Record:
     text: str
     gold_spans: List[GoldSpan] = field(default_factory=list)
     layer: str = LAYER_COMMON              # corpus layer taxonomy (LAYER_* constants)
-    jurisdiction: str = "universal"        # "us" | "in" | "eu" | "universal" | ...
+    jurisdiction: str = "universal"        # "us" | "universal" | ...
     detection_regime: str = DETECTION_REGIME_NER  # record-level regime: rule_applicable | contextual_ner_required | conflict_case
     de_id_tier: str = "identifiable"       # "identifiable" | "limited_data_set" | "safe_harbor"
-    risk_tier: str = "minimal"             # ICMR four-tier: less_than_minimal | minimal | minor_increase | more_than_minimal
+    risk_tier: str = "minimal"             # risk tier label (corpus metadata)
     vulnerability_tags: List[str] = field(default_factory=list)
     context: str = ""                      # "research" | "fundraising" | "treatment" | "payment" | "operations"
     format: str = "text"
@@ -304,73 +255,6 @@ def write_jsonl(records: Iterable[Record], path: Path) -> int:
             f.write("\n")
             count += 1
     return count
-
-
-# -----------------------------------------------------------------------------
-# Checksum validators for identifier formats
-# -----------------------------------------------------------------------------
-
-def verhoeff_check(digits: str) -> bool:
-    """Verhoeff algorithm for Aadhaar validation."""
-    d = [
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-        [1, 2, 3, 4, 0, 6, 7, 8, 9, 5],
-        [2, 3, 4, 0, 1, 7, 8, 9, 5, 6],
-        [3, 4, 0, 1, 2, 8, 9, 5, 6, 7],
-        [4, 0, 1, 2, 3, 9, 5, 6, 7, 8],
-        [5, 9, 8, 7, 6, 0, 4, 3, 2, 1],
-        [6, 5, 9, 8, 7, 1, 0, 4, 3, 2],
-        [7, 6, 5, 9, 8, 2, 1, 0, 4, 3],
-        [8, 7, 6, 5, 9, 3, 2, 1, 0, 4],
-        [9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
-    ]
-    p = [
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-        [1, 5, 7, 6, 2, 8, 3, 0, 9, 4],
-        [5, 8, 0, 3, 7, 9, 6, 1, 4, 2],
-        [8, 9, 1, 6, 0, 4, 3, 5, 2, 7],
-        [9, 4, 5, 3, 1, 2, 6, 8, 7, 0],
-        [4, 2, 8, 6, 5, 7, 3, 9, 0, 1],
-        [2, 7, 9, 3, 8, 0, 6, 4, 1, 5],
-        [7, 0, 4, 6, 9, 1, 3, 2, 5, 8],
-    ]
-    c = 0
-    for i, ch in enumerate(reversed(digits)):
-        c = d[c][p[i % 8][int(ch)]]
-    return c == 0
-
-
-def verhoeff_make(digits_11: str) -> str:
-    """Append Verhoeff check digit to 11-digit string."""
-    d = [
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-        [1, 2, 3, 4, 0, 6, 7, 8, 9, 5],
-        [2, 3, 4, 0, 1, 7, 8, 9, 5, 6],
-        [3, 4, 0, 1, 2, 8, 9, 5, 6, 7],
-        [4, 0, 1, 2, 3, 9, 5, 6, 7, 8],
-        [5, 9, 8, 7, 6, 0, 4, 3, 2, 1],
-        [6, 5, 9, 8, 7, 1, 0, 4, 3, 2],
-        [7, 6, 5, 9, 8, 2, 1, 0, 4, 3],
-        [8, 7, 6, 5, 9, 3, 2, 1, 0, 4],
-        [9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
-    ]
-    p = [
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-        [1, 5, 7, 6, 2, 8, 3, 0, 9, 4],
-        [5, 8, 0, 3, 7, 9, 6, 1, 4, 2],
-        [8, 9, 1, 6, 0, 4, 3, 5, 2, 7],
-        [9, 4, 5, 3, 1, 2, 6, 8, 7, 0],
-        [4, 2, 8, 6, 5, 7, 3, 9, 0, 1],
-        [2, 7, 9, 3, 8, 0, 6, 4, 1, 5],
-        [7, 0, 4, 6, 9, 1, 3, 2, 5, 8],
-    ]
-    inv = [0, 4, 3, 2, 1, 5, 6, 7, 8, 9]
-    c = 0
-    # placeholder "0" for the check digit goes at position 0 of the full 12-digit string,
-    # which is the last element when reversed. Append, then reverse.
-    for i, ch in enumerate(reversed(digits_11 + "0")):
-        c = d[c][p[i % 8][int(ch)]]
-    return digits_11 + str(inv[c])
 
 
 def luhn_check(digits: str) -> bool:

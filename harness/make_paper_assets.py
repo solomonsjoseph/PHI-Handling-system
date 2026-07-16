@@ -11,7 +11,7 @@ Emits:
         output re-rendered as booktabs LaTeX), one tabular per jurisdiction
         (rows=tools; cols=strict P/R/F1, macro-F1, gap rate; not_run rows kept
         with a reason footnote).
-    (b) table_system.tex + .md -- Phase-3 system results for IN/US/held-out
+    (b) table_system.tex + .md -- Phase-3 system results for USA
         (redaction recall, leaks, residual findings, quarantine/blank/cap
         counts, human_review_rate, header_classification_agreement,
         classifier_path).
@@ -32,9 +32,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from benchmarks.collect_results import JURISDICTIONS, collect
 
 SYSTEM_RUNS: List[tuple[str, str]] = [
-    ("India (seed 42)", "phi-system-in"),
     ("USA (seed 42)", "phi-system-us"),
-    ("India held-out (seed 1337)", "phi-system-in-heldout"),
 ]
 
 

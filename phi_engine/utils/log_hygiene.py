@@ -13,9 +13,9 @@ substrings from every log record before the handler emits. Specifically:
   ``subject_id_fields`` regex catalogue is replaced with a stable HMAC
   tag ``<SUBJ_{HMAC[:8]}>``. Same-subject redaction is deterministic
   across a run (the HMAC key is loaded once at filter install time).
-* **Common PHI regex classes** — Aadhaar, PAN, Indian phone, email,
-  SSN, ISO/M-D-Y dates, Indian PIN-code patterns are replaced with a
-  category tag like ``<AADHAAR>`` or ``<EMAIL>``.
+* **Common PHI regex classes** — SSN, email, US phone, and
+  ISO/M-D-Y date patterns are replaced with a
+  category tag like ``<SSN>`` or ``<EMAIL>``.
 
 Design constraints:
 
@@ -108,7 +108,7 @@ class PHIRedactingFilter(logging.Filter):
        replaced with ``<SUBJ_{HMAC-SHA256[:8]}>`` — deterministic per
        subject within a run, unrecoverable across the filter instance.
     2. **Generic pass** — :data:`_GENERIC_PATTERNS` catches the common
-       PHI classes (Aadhaar, PAN, email, phone, date, pincode, SSN).
+       PHI classes (SSN, email, phone, date).
     """
 
     def __init__(

@@ -1,7 +1,7 @@
 """
 PHI corpus generators package.
 
-Generator inventory by jurisdiction:
+Generator inventory (USA/HIPAA only for now; other jurisdictions deferred):
   USA (HIPAA):
     hipaa_safe_harbor  -- All 18 Safe Harbor categories (164.514(b)(2)(i)(A-R)) + quasi-identifiers
     hipaa_lds          -- Limited Data Set tier (164.514(e))
@@ -22,14 +22,6 @@ from .hipaa_biometric import HIPAABiometricGenerator
 from .hipaa_device import HIPAADeviceGenerator
 from .hipaa_fax import HIPAAFaxGenerator
 from .hipaa_vehicle import HIPAAVehicleGenerator
-from importlib import import_module
-
-IndiaDPDPAGenerator = import_module("generators.in.in_dpdpa").IndiaDPDPAGenerator
-IndiaIdentifierGenerator = import_module("generators.in.in_identifiers").IndiaIdentifierGenerator
-from .eu.eu_gdpr import EUGDPRGenerator
-from .br.br_lgpd import BrazilLGPDGenerator
-from .au.au_privacy import AustraliaPrivacyGenerator
-from .ug.ug_dppa import UgandaDPPAGenerator
 from .file_formats.dicom_header_gen import DICOMHeaderGenerator
 from .file_formats.fhir_gen import FHIRGenerator
 from .file_formats.hl7v2_gen import HL7v2Generator
@@ -47,12 +39,6 @@ __all__ = [
     "HIPAADeviceGenerator",
     "HIPAAFaxGenerator",
     "HIPAAVehicleGenerator",
-    "IndiaDPDPAGenerator",
-    "IndiaIdentifierGenerator",
-    "EUGDPRGenerator",
-    "BrazilLGPDGenerator",
-    "AustraliaPrivacyGenerator",
-    "UgandaDPPAGenerator",
     "DICOMHeaderGenerator",
     "FHIRGenerator",
     "HL7v2Generator",

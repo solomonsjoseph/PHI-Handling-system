@@ -1,7 +1,6 @@
 """Behavior tests for the phi_engine benchmark adapter."""
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
@@ -12,7 +11,6 @@ from benchmarks.phi_engine_adapter import (
     PhiEngineAdapter,
     _map_phi_engine_type,
 )
-from phi_engine.security.phi_patterns import _verhoeff_validate
 
 
 REQUIRED_SCORE_KEYS = {
@@ -32,29 +30,6 @@ REQUIRED_SCORE_KEYS = {
     "text_sha256",
     "strict_all_span_score",
 }
-
-
-def _load_india_identifiers_module():
-    """Load generators/in/in_identifiers.py; ``in`` is a Python keyword."""
-    spec = importlib.util.spec_from_file_location(
-        "in_identifiers",
-        str(Path(__file__).resolve().parents[1] / "generators" / "in" / "in_identifiers.py"),
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
-
-
-_in_identifiers = _load_india_identifiers_module()
-
-
-def _valid_aadhaar() -> str:
-    aadhaar = _in_identifiers._verhoeff_make("23456789012")
-    assert aadhaar.startswith(tuple("23456789"))
-    assert len(aadhaar) == 12
-    assert _verhoeff_validate(aadhaar)
-    return aadhaar
 
 
 def _record(record_id: str, text: str, spans: list[dict]) -> dict:
@@ -89,16 +64,16 @@ def _gold_span(text: str, value: str, entity_type: str, jurisdiction: str) -> di
 
 @pytest.fixture
 def three_record_corpus(tmp_path):
-    aadhaar = _valid_aadhaar()
     ssn = "123-45-6789"
+    phone = "415-555-2671"
 
-    aadhaar_text = f"Aadhaar number {aadhaar} verified for study screening."
     ssn_text = f"Study intake lists SSN {ssn} for insurance routing."
+    phone_text = f"Callback number {phone} is listed for ambulatory follow-up."
     no_phi_text = "clinical note states symptoms improved after hydration and rest."
 
     records = [
-        _record("aadhaar-record", aadhaar_text, [_gold_span(aadhaar_text, aadhaar, "AADHAAR", "in")]),
         _record("ssn-record", ssn_text, [_gold_span(ssn_text, ssn, "SSN", "us")]),
+        _record("phone-record", phone_text, [_gold_span(phone_text, phone, "PHONE", "us")]),
         _record("no-phi-record", no_phi_text, []),
     ]
 
@@ -108,8 +83,8 @@ def three_record_corpus(tmp_path):
         "dir": tmp_path,
         "jsonl_path": jsonl_path,
         "records": records,
-        "aadhaar": aadhaar,
         "ssn": ssn,
+        "phone": phone,
     }
 
 
@@ -120,27 +95,22 @@ def adapter():
     return adapter
 
 
-def test_mapping_contracts_include_aadhaar_ssn_and_unknown_fallback():
-    assert PHI_ENGINE_TO_CORPUS["AADHAAR"] == frozenset({"AADHAAR"})
+def test_mapping_contracts_include_ssn_and_unknown_fallback():
     assert PHI_ENGINE_TO_CORPUS["SSN"] == frozenset({"SSN"})
+    assert PHI_ENGINE_TO_CORPUS["US_PHONE"] == frozenset(
+        {"PHONE", "PHONE_HOME", "PHONE_WORK", "PHONE_REQUESTOR"}
+    )
     assert _map_phi_engine_type("SOME_MADE_UP_UNMAPPED_NAME") == frozenset({"UNKNOWN"})
 
 
-def test_analyze_text_emits_aadhaar_and_ssn_spans(adapter, three_record_corpus):
-    aadhaar_record, ssn_record, _ = three_record_corpus["records"]
-    aadhaar_span = aadhaar_record["gold_spans"][0]
+def test_analyze_text_emits_ssn_and_us_phone_spans(adapter, three_record_corpus):
+    ssn_record, phone_record, _ = three_record_corpus["records"]
     ssn_span = ssn_record["gold_spans"][0]
+    phone_span = phone_record["gold_spans"][0]
 
-    aadhaar_predictions = adapter.analyze_text(aadhaar_record["text"])
     ssn_predictions = adapter.analyze_text(ssn_record["text"])
+    phone_predictions = adapter.analyze_text(phone_record["text"])
 
-    assert any(
-        span.entity_type == "AADHAAR"
-        and span.start == aadhaar_span["start"]
-        and span.end == aadhaar_span["end"]
-        and span.mapped_types == frozenset({"AADHAAR"})
-        for span in aadhaar_predictions
-    ), aadhaar_predictions
     assert any(
         span.entity_type == "SSN"
         and span.start == ssn_span["start"]
@@ -148,6 +118,13 @@ def test_analyze_text_emits_aadhaar_and_ssn_spans(adapter, three_record_corpus):
         and span.mapped_types == frozenset({"SSN"})
         for span in ssn_predictions
     ), ssn_predictions
+    assert any(
+        span.entity_type == "US_PHONE"
+        and span.start == phone_span["start"]
+        and span.end == phone_span["end"]
+        and "PHONE" in span.mapped_types
+        for span in phone_predictions
+    ), phone_predictions
 
 
 def test_run_file_scores_fixture_records_and_keeps_clean_record_clean(adapter, three_record_corpus):
@@ -160,7 +137,7 @@ def test_run_file_scores_fixture_records_and_keeps_clean_record_clean(adapter, t
 
     assert len(scores) == 3
     scores_by_id = {score["record_id"]: score for score in scores}
-    assert set(scores_by_id) == {"aadhaar-record", "ssn-record", "no-phi-record"}
+    assert set(scores_by_id) == {"ssn-record", "phone-record", "no-phi-record"}
     for score in scores:
         assert REQUIRED_SCORE_KEYS.issubset(score.keys())
         assert {"tp", "fp", "fn", "gap_spans", "matched_gold"}.issubset(
@@ -170,8 +147,8 @@ def test_run_file_scores_fixture_records_and_keeps_clean_record_clean(adapter, t
         for prediction in score["predictions"]:
             assert "text" not in prediction
 
-    assert scores_by_id["aadhaar-record"]["tp"] >= 1
     assert scores_by_id["ssn-record"]["tp"] >= 1
+    assert scores_by_id["phone-record"]["tp"] >= 1
     assert scores_by_id["no-phi-record"]["gold_count"] == 0
     assert scores_by_id["no-phi-record"]["predicted_count"] == 0
     assert scores_by_id["no-phi-record"]["predictions"] == []
@@ -203,5 +180,5 @@ def test_run_all_write_results_outputs_dual_scoring_profile(adapter, three_recor
     assert summary["strict_all_span_f1"] > 0
     assert result.strict_all_span.tp >= 2
     assert len(raw_rows) == 3
-    assert {row["record_id"] for row in raw_rows} == {"aadhaar-record", "ssn-record", "no-phi-record"}
+    assert {row["record_id"] for row in raw_rows} == {"ssn-record", "phone-record", "no-phi-record"}
     assert all("text" not in row for row in raw_rows)

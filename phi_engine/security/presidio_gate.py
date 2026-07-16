@@ -18,10 +18,8 @@ Two design choices keep this airgapped and value-free:
   confidence score, and source location — never the matched substring — so a gate
   report can never become a PHI side channel (mirrors ``LeakScanFinding``).
 
-The Verhoeff (Aadhaar) and Indian-phone recognizers reuse the *same*
-``.validate()`` logic as the ``phi_patterns`` wrappers via a post-match validator,
-so the Presidio path and the legacy path can never drift on what counts as a
-real identifier vs. a placeholder.
+The custom recognizers are built directly from ``BLOCKING_PATTERNS`` so the
+Presidio path and the legacy regex path share one catalog.
 """
 
 from __future__ import annotations
@@ -39,8 +37,6 @@ from phi_engine.security.llm_source_gate import (
 )
 from phi_engine.security.phi_patterns import (
     BLOCKING_PATTERNS,
-    IndianPhonePattern,
-    VerhoeffPattern,
 )
 from phi_engine.utils.logging_system import get_logger
 
@@ -133,9 +129,7 @@ def _build_analyzer() -> Any:
             patterns=[Pattern(name=name, regex=_regex_string(obj), score=_BASE_SCORE)],
         )
         registry.add_recognizer(recognizer)
-        if isinstance(obj, (VerhoeffPattern, IndianPhonePattern)):
-            # Reuse the wrapper's own validation so the two paths cannot drift.
-            validators[name] = obj.validate
+        # Reserved for future checksum/shape validators on pattern wrappers.
 
     engine = _TokenizerOnlyNlpEngine()
     _ANALYZER = AnalyzerEngine(
@@ -151,9 +145,8 @@ def _build_analyzer() -> Any:
 def analyze_text(text: str) -> list[PresidioFinding]:
     """Return value-free findings for *text* (offsets + entity types, no values).
 
-    Checksum-bearing entities (Aadhaar, Indian phone) are confirmed with the
-    shared ``phi_patterns`` validator on the matched span; placeholder matches
-    (e.g. all-9 phone) are dropped.
+    Any entity with a registered post-match validator is confirmed on the
+    matched span before it is reported as a finding.
     """
     analyzer = _build_analyzer()
     results = analyzer.analyze(text=text, language="en")

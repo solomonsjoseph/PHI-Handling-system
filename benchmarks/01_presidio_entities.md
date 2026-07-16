@@ -11,41 +11,15 @@ The following identifier categories are present in this corpus but are NOT
 detected by any predefined Presidio recognizer as of the retrieved date.
 Gaps are derived from authorities/AUTHORITY_MATRIX.md Table A and Table C.
 
-- No ABHA (14-digit Ayushman Bharat Health Account number) or ABHA Address
-  (user@abdm format) coverage. These are the primary patient health identity
-  tokens under India's ABDM scheme and are missing from all 62 Presidio entities.
-- No CTRI registration ID coverage. CTRI is India's Clinical Trials Registry
-  (ICMR-mandated), and CTRI IDs appear as linkable quasi-identifiers in trial
-  documents. Neither the global nor India-specific Presidio recognizers include
-  this pattern.
-- No UAN (Employees Provident Fund Universal Account Number), ESI (Employees
-  State Insurance), CGHS (Central Government Health Scheme) beneficiary number,
-  or BPL (Below Poverty Line) card number coverage. All four appear in Indian
-  government health and social records and are within SPDI scope.
-- No state-variant driving license formats. India has 30+ state-specific driving
-  license formats (e.g., MH-01-2023-1234567, DL-08-2020-0012345). Presidio's
-  IN_VEHICLE_REGISTRATION entity covers transport vehicles; driving license is a
-  distinct identifier covered only partially by its generic MEDICAL_LICENSE
-  recognizer.
-- No ration card coverage. India has 29 state-variant ration card number formats.
-  These serve as address-linked household identifiers and appear in clinical trial
-  socioeconomic data. No Presidio recognizer covers them.
-- No GDPR-specific annotations. Presidio does not distinguish genetic data as a
-  distinct special category (Article 9 GDPR) from ordinary health data, and does
-  not tag pseudonymous data status separately from anonymised data. This matters
-  for EU-India cross-jurisdiction corpus records.
 - No detection regime tagging. Presidio does not emit a flag indicating whether
   a detection was made by deterministic pattern matching (rule_applicable) or
   by contextual NER (contextual_ner_required) as defined in the i2b2 2014
   taxonomy. Our corpus records this distinction per span; Presidio results must
   be post-processed to infer it.
-- No conflict case coverage. ZIP code is PHI under HIPAA Safe Harbor (category B,
-  first 3 digits restricted for 17 ZIP3 codes) but is not PHI under GDPR without
-  additional linkage. Presidio's LOCATION entity does not implement ZIP3-level
-  HIPAA logic and does not emit jurisdiction-conditional PHI flags. Our corpus
-  includes explicit conflict cases; Presidio will produce both false positives
-  (flagging non-HIPAA ZIP under GDPR-only rules) and false negatives (missing
-  restricted ZIP3 logic) in these records.
+- No ZIP3-restricted-code logic. ZIP code is PHI under HIPAA Safe Harbor
+  (category B, first 3 digits restricted for 17 ZIP3 codes). Presidio's
+  LOCATION entity does not implement ZIP3-level HIPAA logic, producing false
+  negatives (missing restricted ZIP3 flags) on these records.
 
 ## Performance claims
 
@@ -92,32 +66,13 @@ UK_NHS (10 digits+checksum), UK_NINO (National Insurance), UK_PASSPORT (2 letter
 
 ## Australia (4): AU_ABN, AU_ACN, AU_TFN, AU_MEDICARE
 
-## India entities (6) -- relevant to RePORTaLiN
-
-| Entity | Description |
-|---|---|
-| IN_PAN | Indian Permanent Account Number (12 char alphanumeric) |
-| IN_AADHAAR | Indian Unique Identity Number (12 digits+checksum) |
-| IN_VEHICLE_REGISTRATION | Transport vehicle registration |
-| IN_VOTER | Election Commission 10 digit alphanumeric voter ID |
-| IN_PASSPORT | Indian Passport Number |
-| IN_GSTIN | Goods and Services Tax ID (15 char with state code 01-37) |
-
-## Finland (1): FI_PERSONAL_IDENTITY_CODE
-
-## Korea (5): KR_DRIVER_LICENSE, KR_FRN, KR_PASSPORT, KR_BRN, KR_RRN
-
-## Nigeria (2): NG_NIN, NG_VEHICLE_REGISTRATION
-
-## Thai (1): TH_TNIN
-
 ## Medical/Clinical (8 -- requires transformers extra, uses blaze999/Medical-NER)
 
 MEDICAL_DISEASE_DISORDER, MEDICAL_MEDICATION, MEDICAL_THERAPEUTIC_PROCEDURE, MEDICAL_CLINICAL_EVENT, MEDICAL_BIOLOGICAL_ATTRIBUTE, MEDICAL_BIOLOGICAL_STRUCTURE, MEDICAL_FAMILY_HISTORY, MEDICAL_HISTORY
 
 ---
 
-## Total Presidio entity count: 62 predefined entities across 13 jurisdictions + 8 clinical entities
+## Total Presidio entity count: 62 predefined entities (this repo scopes only the USA + global entity sets) + 8 clinical entities
 
 ## Gap analysis -- Presidio vs. HIPAA Safe Harbor 18 categories
 
@@ -134,7 +89,7 @@ MEDICAL_DISEASE_DISORDER, MEDICAL_MEDICATION, MEDICAL_THERAPEUTIC_PROCEDURE, MED
 | I. Health plan beneficiary numbers | US_MBI (yes, for Medicare) |
 | J. Account numbers | US_BANK_NUMBER (partial) |
 | K. Certificate/license numbers | US_DRIVER_LICENSE, MEDICAL_LICENSE (partial) |
-| L. Vehicle identifiers including license plates | IN_VEHICLE_REGISTRATION, UK_VEHICLE_REGISTRATION, NG_VEHICLE_REGISTRATION (partial, no US, no VIN pattern) |
+| L. Vehicle identifiers including license plates | **NOT COVERED for US** (no VIN pattern; Presidio only ships non-US vehicle-registration recognizers) |
 | M. Device identifiers and serial numbers | **NOT COVERED** |
 | N. Web URLs | URL (yes) |
 | O. IP addresses | IP_ADDRESS (yes) |
@@ -142,44 +97,20 @@ MEDICAL_DISEASE_DISORDER, MEDICAL_MEDICATION, MEDICAL_THERAPEUTIC_PROCEDURE, MED
 | Q. Full-face photographs | **NOT COVERED** (image redactor is separate) |
 | R. Any other unique identifying code | (catchall, not implemented) |
 
-## Gap analysis -- Presidio vs. DPDPA Rule 14 identifiers
+## Critical Presidio gaps vs. this corpus's requirements
 
-| DPDPA identifier type | Presidio coverage |
-|---|---|
-| Customer ID file number | **NOT COVERED** |
-| Customer acquisition form number | **NOT COVERED** |
-| Application reference number | **NOT COVERED** |
-| Enrolment ID | **NOT COVERED** |
-| Email address | EMAIL_ADDRESS (yes) |
-| Mobile number | PHONE_NUMBER (yes) |
-| Licence number | partial (driver/medical) |
-
-## Gap analysis -- SPDI Rules 2011 (Indian sensitive personal data)
-
-| SPDI category | Presidio coverage |
-|---|---|
-| Password | **NOT COVERED** |
-| Financial information (bank/credit/debit) | CREDIT_CARD, US_BANK_NUMBER, IBAN_CODE (partial) |
-| Physical/physiological/mental health condition | partial (MEDICAL_DISEASE_DISORDER) |
-| Sexual orientation | **NOT COVERED** |
-| Medical records/history | MEDICAL_HISTORY (partial) |
-| Biometric information | **NOT COVERED** (image redaction separate) |
-
-## Critical Presidio gaps vs. RePORTaLiN requirements
-
-1. **Indian identifiers missing:** ABHA (14-digit Ayushman Bharat Health Account), Ration Card (29 state-specific formats), UAN (EPF), ESI, CGHS beneficiary, BPL card number, CTRI enrolment ID
-2. **US identifiers missing:** VIN pattern (17-char), HICN legacy Medicare, state-specific license plate patterns, UDI-DI (device identifier), Clinical Trial NCT ID as linkable
-3. **Biometric signals missing:** fingerprint references, voice print references, DNA sequence references, face image metadata
-4. **Medical identifiers missing:** CTRI ID, NCT/ClinicalTrials.gov ID, WHO ICTRP ID, EudraCT ID, ISRCTN ID
-5. **Household identifiers missing:** HIPAA Safe Harbor covers identifiers of relatives/employers/household members -- Presidio does not have relative-relationship tags
-6. **Quasi-identifier detection absent:** Presidio does not have built-in k-anonymity or combination-attack detection
+1. **US identifiers missing:** VIN pattern (17-char), HICN legacy Medicare, state-specific license plate patterns, UDI-DI (device identifier), Clinical Trial NCT ID as linkable
+2. **Biometric signals missing:** fingerprint references, voice print references, DNA sequence references, face image metadata
+3. **Medical identifiers missing:** NCT/ClinicalTrials.gov ID, WHO ICTRP ID, EudraCT ID, ISRCTN ID
+4. **Household identifiers missing:** HIPAA Safe Harbor covers identifiers of relatives/employers/household members -- Presidio does not have relative-relationship tags
+5. **Quasi-identifier detection absent:** Presidio does not have built-in k-anonymity or combination-attack detection
 
 ## Implications for corpus benchmarking
 
 For our corpus to be meaningfully benchmark-comparable:
 
 1. **Include explicit Presidio-aligned entity tags** on every test case so Presidio can be run against the corpus using only its predefined entity set
-2. **Include gap-fill entity tags** for categories Presidio cannot detect (biometric, device, fax, MRN, household relations, Indian health-scheme, CTRI, ABHA)
+2. **Include gap-fill entity tags** for categories Presidio cannot detect (biometric, device, fax, MRN, household relations)
 3. **Report Presidio baseline score** on our corpus as a point of comparison -- expected to be high on global entities, lower on gap categories
 4. **Provide a Presidio configuration file** showing which custom recognizers would be needed to bring Presidio to full coverage on our corpus
 5. **Document the false-positive profile** -- Presidio context-aware detection may flag non-PHI as PHI; our corpus validation must handle this
@@ -205,4 +136,4 @@ Recommended metrics:
 - Per-entity-type precision and recall
 - Gap-detection rate (entities Presidio cannot detect that gold has)
 - False-positive rate (Presidio detections not in gold)
-- Per-jurisdiction F1 (US-only, IN-only, mixed)
+- Per-entity-type F1 on the US corpus

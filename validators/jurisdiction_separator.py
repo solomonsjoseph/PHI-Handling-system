@@ -5,7 +5,7 @@ from pathlib import Path
 from .common import ValidationIssue, ValidationResult, corpus_files, iter_jsonl
 
 NAME = "jurisdiction_separator"
-IMPLEMENTED_JURISDICTIONS = {"us", "in", "eu", "br", "au", "ug"}
+IMPLEMENTED_JURISDICTIONS = {"us"}
 
 
 def _expected_folder(corpus_dir: Path, path: Path) -> str:

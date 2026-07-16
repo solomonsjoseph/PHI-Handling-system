@@ -34,11 +34,10 @@
 # intent; leave unanchored for substring-in-column-name intent.
 #
 # IRB-grade benchmark anchors (see docs/sphinx/irb_auditor/):
-#   HIPAA §164.514(b)(2), ICMR §11, SPDI Rule 3, Aadhaar Act §29,
-#   DPDPA 2023 §2(t), NIST SP 800-188, RePORT India Common Protocol.
+#   HIPAA §164.514(b)(2), NIST SP 800-188.
 #
-# Provenance: rule catalog ported from scripts/archive/phi_rules.py (1033-line
-# IN-jurisdiction field-rule registry), Indo-VAP-calibrated.
+# Provenance: rule catalog ported from scripts/archive/phi_rules.py field-rule
+# registry; calibrated to the active study schema.
 # ---------------------------------------------------------------------------
 
 # ── Compliance posture ────────────────────────────────────────────────────
@@ -120,7 +119,7 @@ age_cap:
   threshold: 89
   label: "90+"
 
-# ── Small-cell suppression threshold (k-anonymity proxy; ICMR §11.7) ──────
+# ── Small-cell suppression threshold (k-anonymity proxy) ──────────────────
 # Contact / household counts ≥ this value are clamped to this value.
 small_cell_threshold: 5
 
@@ -374,7 +373,7 @@ death_date_fields:
 # DROP FIELDS (entire column removed from every row)
 # ──────────────────────────────────────────────────────────────────────────
 # Archive catalog: 93 rules across 14 categories. HIPAA §164.514(b)(2)(i)(A-R)
-# coverage + DPDPA §2(t) identifier categories + India-government-ID catalog.
+# coverage.
 # Each rule drops fields where the column NAME matches; values are removed
 # from every row. Former FREE_TEXT_PHI whole-hash rules converted to DROP
 # because whole-value hashing of narrative strings did not remove
@@ -499,11 +498,11 @@ drop_fields:
   # accidentally swept into the ^TC_ keep prefix. Aligned to A1 facility-specify policy.
   - "^TC_NOCARDSP$"
   # ── Geography (HIPAA §164.514(b)(2)(i)(B) — raw sub-state identifiers) ─────
-  # Raw village / hamlet / district / block / tehsil / address / pincode / GPS
-  # always dropped (HIPAA §164.514(b)(2)(i)(B) catalog coverage). The Indo-VAP
-  # study carries none of these generic-geography column names — the specific
-  # coded municipality / facility codes it DOES carry are kept above.
-  - "(?:VILLAGE|CITY|TOWN|DISTRICT|TALUK|BLOCK|WARD|LOCALITY|PANCHAYAT|MANDAL|TEHSIL|STATE|PROVINCE|REGION|AREA|ZONE|HAMLET)"
+  # Raw village / hamlet / district / block / address / postal / GPS always
+  # dropped (HIPAA §164.514(b)(2)(i)(B) catalog coverage). Study-specific
+  # coded municipality / facility codes that DO carry research value are kept
+  # above.
+  - "(?:VILLAGE|CITY|TOWN|DISTRICT|BLOCK|WARD|LOCALITY|STATE|PROVINCE|REGION|AREA|ZONE|HAMLET)"
   - "(?:ADDR|ADDRESS|RESIDENCE)"
   - "(?:pin_?code|postal|zip)"
   - "(?:zip_?code|postal)"
@@ -518,12 +517,8 @@ drop_fields:
   - "(?:ip[-_]?addr|ip[-_]?address)"
   - "(?:ip[-_]?address|user[-_]?agent|browser)"
   - "(?:web[-_]?url|website|homepage|(?<![A-Za-z])uri(?![A-Za-z]))"
-  # ── India government IDs (Aadhaar Act + DPDPA + SPDI) ───────────────────
-  - "(?:aadhaar|aadhar|uid_no)"
-  - "(?:^|[-_])pan(?:[-_]?(?:no|num|number|card))?(?:$|[-_])"
-  - "(?:voter|epic|election)[-_]?(?:id|no|num|card)?"
+  # ── Passport numbers (HIPAA Safe Harbor #9) ──────────────────────────────
   - "(?:passport)[-_]?(?:no|num|number)?"
-  - "(?:ration[-_]?card)[-_]?(?:no|num|number)?"
   # ── HIPAA catch-alls (#4/#6/#7/#8/#9/#10/#11/#14/#15) ────────────────────
   - "(?:health[-_]?plan|beneficiary|insurance|policy)[-_]?(?:id|no|num|number)"
   - "(?:account|bank[-_]?acct)[-_]?(?:no|num|number)"
@@ -538,17 +533,15 @@ drop_fields:
   - "(?:username|login[-_]?id|user[-_]?id|screen[-_]?name)"
   - "(?:cctv|surveillance|camera[-_]?id|footage)"
   - "(?:medical[-_]?image|xray[-_]?file|ct[-_]?scan[-_]?file|mri[-_]?file|dicom)"
-  # NB: \buid\b (word-bounded) so this Aadhaar/unique-id catch-all does NOT
+  # NB: \buid\b (word-bounded) so this unique-id catch-all does NOT
   # swallow treatment-unit IDs (…TUID/TUIDCHG), which pseudonymize via id_fields.
   - "(?:unique[-_]?id|\\buid\\b|identification[-_]?number)"
-  # ── Staff-adjacent asha/anm/anganwadi worker identifiers ─────────────────
-  - "(?:asha|anm|anganwadi)[-_]?(?:name|id|worker)"
   # ── Children's birth years ──
   # CC_CHILDY{1..8} are child YEARS-of-birth → KEPT (see keep_fields). A bare year
   # is permitted under HIPAA Safe Harbor §164.514(b)(2)(i)(C) and is not jitterable.
   # ── Narrative / free-text / specify / comment fields ─────────────────────
   # Whole-field DROP rather than whole-value HMAC: hashing a free-text
-  # value that contains an Aadhaar or a phone number does not remove the
+  # value that contains an SSN or a phone number does not remove the
   # PHI, it just obscures the containing string. Dropping the field is
   # the honest-safe default until a narrative NER sweep lands.
   - "(?:WITHDRAWEXPLAIN|WITHDRAW_?EXPLAIN)"
@@ -573,12 +566,12 @@ cap_fields:
 # ──────────────────────────────────────────────────────────────────────────
 # GENERALIZE FIELDS (value-level categorical mapping)
 # ──────────────────────────────────────────────────────────────────────────
-# Generalize only columns that phi_review (the dual-jurisdiction regulation
+# Generalize only columns that phi_review (the jurisdiction regulation
 # classifier) also decided to GENERALIZE. Columns it decided KEEP must not be
 # routed here, or they (a) quarantine when their values don't fit the map and
 # (b) fail the decided-vs-applied verifier (assertion 12: keep ≠ generalize).
 #
-# REMOVED (phi_review decides KEEP — not Safe Harbor / DPDPA identifiers):
+# REMOVED (phi_review decides KEEP — not Safe Harbor identifiers):
 #   * marital status (IC_MARISTAT / HC_MARISTAT) — kept as-is.
 #   * the per-option care-seeking INDICATOR columns Govthosp / Munhosp /
 #     MedColl / Medshop / Nonallo — these are binary 0/1 checkboxes, NOT a
@@ -637,10 +630,10 @@ generalization_maps:
 # BAND FIELDS (fail-closed preserve-generalization of socioeconomic vars)
 # ──────────────────────────────────────────────────────────────────────────
 # Education / occupation / income / wages / work-hours are epidemiologically
-# useful for TB analysis. Under the active dual-jurisdiction rule bundle
-# (HIPAA Safe Harbor + India DPDPA), `phi_review` classifies these columns as
-# **KEEP** — they are NOT among the HIPAA Safe Harbor 18 identifiers, so they
-# are published as-is (with a `keep_decision` audit trace) rather than scrubbed.
+# useful for TB analysis. Under the active USA/HIPAA rule bundle, `phi_review`
+# classifies these columns as **KEEP** — they are NOT among the HIPAA Safe
+# Harbor 18 identifiers, so they are published as-is (with a `keep_decision`
+# audit trace) rather than scrubbed.
 #
 # The band rule below is therefore EMPTY by default: routing a KEEP-decided
 # column to a fail-closed empty band would (a) quarantine 100% of every form
@@ -735,7 +728,7 @@ transformation_methods:
       - subject_id_fields
       - date_null_tokens
       - "manifest date_locales (per-column locale precedence)"
-    regulatory_notes: "NIST SP 800-188 date shifting; ICMR §11 date de-identification."
+    regulatory_notes: "NIST SP 800-188 date shifting; HIPAA §164.514(b)(2)(i)(C)."
 
   field_removal:
     applies_to: "drop_fields; birthdate_field when safe_harbor; phi_review force-drop (suppress / direct identifiers)"
@@ -791,7 +784,7 @@ transformation_methods:
   small_cell_clamp:
     applies_to: suppress_small_cell_fields
     ledger_method_id: small_cell_clamp
-    description: ICMR-style contact-count capping (top-code above threshold).
+    description: Contact-count capping (top-code above threshold).
     how_it_applies: >-
       Numeric values strictly greater than small_cell_threshold are clamped down to
       the threshold before publish.

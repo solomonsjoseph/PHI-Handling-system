@@ -20,13 +20,24 @@
 
 **Repository target:** `https://github.com/brucebanner010198-commits/PHI-Handling-IRB-approval-ready.git`
 
-**This repository is SEPARATE from RePORTaLiN-RAG** (Sir's primary work project). Do not conflate them. RePORTaLiN-RAG is a privacy-first, air-gapped, local-first, HPC-deployable agentic RAG system for clinical trial data. This repository is a dual-jurisdiction (HIPAA + DPDPA) PHI test corpus and benchmark framework designed to validate systems like RePORTaLiN-RAG. The corpus is general-purpose.
+**This repository is SEPARATE from RePORTaLiN-RAG** (Sir's primary work project). Do not conflate them. RePORTaLiN-RAG is a privacy-first, air-gapped, local-first, HPC-deployable agentic RAG system for clinical trial data. This repository is a USA/HIPAA PHI test corpus and benchmark framework designed to validate systems like RePORTaLiN-RAG. The corpus is general-purpose.
 
-**The directive (verbatim from Sir):**
+**SCOPE CHANGE (2026-07-16, explicit Sir directive): jurisdiction scope narrowed to USA/HIPAA only.**
+Every non-USA jurisdiction (India/DPDPA, EU/GDPR, Brazil/LGPD, Australia, Uganda, and all
+"planned" jurisdictions -- Canada, UK, Singapore, Japan, China) was deleted: generators,
+corpus data, tests, authority research docs, rulebooks, benchmark result artifacts, and
+registry entries. **Do not rebuild, reference, or re-plan any non-USA jurisdiction content
+from this document's original (2026-04-20) multi-jurisdiction directive below -- that
+directive is historical context only and has been superseded.** The build plan sections in
+this file were edited in place to remove non-USA generator/authority work items; where a
+section still describes multi-jurisdiction work as historical fact (e.g. build-status notes),
+treat it as a closed record, not a live task.
+
+**The original directive (verbatim from Sir, 2026-04-20 -- superseded by the scope change above):**
 > "Do full research no matter how much time it takes, search the web, research and gather all that you need to make it IRB ready to show that our system will handle all PHI cases and result in PHI free IRB audit ready results. Don't stop until you get everything you need to make it IRB approval ready system and corpus."
 
-Sir explicitly requested:
-1. All PHI edge cases for USA and India, with a common/universal layer and strictly separated country-specific layers (never mixed)
+Sir originally requested (item 1 is now superseded by the USA-only scope change above):
+1. ~~All PHI edge cases for USA and India, with a common/universal layer and strictly separated country-specific layers (never mixed)~~ -- superseded: USA only.
 2. All file formats including Excel, CSV, PDF, DICOM, FHIR, email, DOCX, image EXIF, Parquet — "anything presently not constituted include that as well for worst case scenarios"
 3. Benchmark comparisons vs Presidio, Amazon Comprehend Medical, John Snow Labs, Azure Health, i2b2
 4. GitHub delivery via tarball workflow, separate from RePORTaLiN
@@ -44,41 +55,25 @@ All saved to `authorities/`:
    - **Re-identification codes** at 164.514(c) — permitted if not derived from individual AND mechanism not disclosed. Hash-with-salt permitted; hash-of-SSN forbidden.
    - **Fundraising context** at 164.514(f) — name/DOB/address permitted without authorization for fundraising. Context-aware detection required.
 
-2. `02_dpdp_rules_2025.md` — Official Gazette G.S.R. 846(E), notified 2025-11-13. Critical findings:
-   - Phased commencement: Rules 1,2,17-21 immediate; Rule 4 at 2026-11-13; Rules 3,5-16,22-23 at 2027-05-13
-   - Rule 6 security safeguards with 1-year minimum log retention
-   - Rule 7 breach notification: 72-hour Board notification
-   - Rule 13(3) algorithmic due diligence (direct regulatory hook for RAG/LLM audits)
-   - Rule 14 identifier vocabulary: customer ID file number, acquisition form number, application reference number, enrolment ID, email, mobile, licence number
-   - Rule 16 research exemption via Second Schedule (8 compliance conditions)
-   - Fourth Schedule Part A: pediatric clinical/educational exemption
+2. *(items 2-4 of the original 8: DPDPA Rules 2025, ICMR 2017, SPDI Rules 2011 -- deleted
+   under the 2026-07-16 USA-only scope change. `authorities/02_dpdp_rules_2025.md`,
+   `03_icmr_2017.md`, `04_spdi_rules_2011.md` no longer exist in this repo.)*
 
-3. `03_icmr_2017.md` — ICMR National Ethical Guidelines 2017. Critical findings:
-   - Section 1.1.5: right to life supersedes right to privacy in limited cases (suicidal ideation, homicidal tendency, HIV status, court order)
-   - Table 2.1: four-tier risk categorization (less than minimal / minimal / minor increase / more than minimal)
-   - Section 2.3.5: explicit coding/anonymization mandate
-   - Section 3.3.2: institutions are custodians, not owners
-   - Section 3.8.3: HMSC approval required for international collaboration
-   - Table 4.2: review tiers (exempt / expedited / full)
+3. `benchmarks/01_presidio_entities.md` — Microsoft Presidio full entity list with gap analysis against HIPAA 18.
 
-4. `04_spdi_rules_2011.md` — IT Act SPDI Rules 2011 Rule 3 eight categories:
-   - Password, financial, physical/physiological/mental health, sexual orientation, medical records, biometric, any detail related, any info received
+4. `benchmarks/02_aws_comprehend_medical.md` — AWS Comprehend Medical DetectPHI's 9 entity types mapped to HIPAA categories. Key finding: their "ID" mega-category collapses 9 HIPAA categories into one.
 
-5. `benchmarks/01_presidio_entities.md` — Microsoft Presidio full entity list across 13 jurisdictions (62 entities) with gap analysis against HIPAA 18 and DPDPA Rule 14.
+5. `docs/file_formats/01_dicom_ps3_15.md` — DICOM PS3.15 Annex E Basic Confidentiality Profile with all 11 options and specific tags.
 
-6. `benchmarks/02_aws_comprehend_medical.md` — AWS Comprehend Medical DetectPHI's 9 entity types mapped to HIPAA categories. Key finding: their "ID" mega-category collapses 9 HIPAA categories into one.
-
-7. `docs/file_formats/01_dicom_ps3_15.md` — DICOM PS3.15 Annex E Basic Confidentiality Profile with all 11 options and specific tags.
-
-8. `docs/file_formats/02_hl7_fhir_r4.md` — FHIR R4 Patient resource PHI field analysis.
+6. `docs/file_formats/02_hl7_fhir_r4.md` — FHIR R4 Patient resource PHI field analysis.
 
 ### The single most important deliverable so far
 
-**`authorities/AUTHORITY_MATRIX.md`** — consolidated matrix with five tables:
-- Table A: 62 identifier categories mapped across HIPAA / DPDPA / ICMR / SPDI / DICOM / FHIR / Presidio / AWS Comprehend Medical
-- Table B: complete legal citation list (US + India + EU + standards + research)
+**`authorities/AUTHORITY_MATRIX.md`** — consolidated matrix (rewritten USA-only 2026-07-16):
+- Table A: identifier categories mapped across HIPAA / DICOM / FHIR / Presidio / AWS Comprehend Medical
+- Table B: complete legal citation list (US + standards + research)
 - Table C: benchmark tool coverage gaps
-- Table D: 25 file formats with coverage status
+- Table D: file formats with coverage status
 - Table E: OWASP LLM Top 10 + MIA attack surface
 
 This is the document IRB reviewers should read first. Every corpus claim must trace to a row in this matrix.
@@ -106,7 +101,7 @@ Prior corpus layers (reuse):
 - injection (100)
 - reidentification (5 scenarios)
 - unit_identifiers (850)
-- dpdpa_strict (50)
+- ~~dpdpa_strict (50)~~ -- excluded: non-USA, do not reimport under the 2026-07-16 scope change
 - mia_context (6)
 
 Tasks:
@@ -133,26 +128,10 @@ Required new generators:
 - `hipaa_fax.py` — Fax numbers as distinct from phone. Cite: (E)
 - `hipaa_vehicle.py` — VIN (17 char) patterns distinct from license plates. Cite: (L)
 
-**From DPDPA research:**
-- `dpdpa_second_schedule.py` — 8-condition compliance fixtures per Second Schedule
-- `dpdpa_pediatric_exemption.py` — Fourth Schedule Part A clinical/educational exemption cases
-- `dpdpa_algorithmic_dd.py` — Rule 13(3) algorithmic due diligence scenarios
-- `dpdpa_breach_timing.py` — 72-hour breach notification fixtures
-- `dpdpa_consent_manager.py` — Token-forwarding with encrypted content cases
-- `dpdpa_rule14_identifiers.py` — customer ID file number, acquisition form, application reference, enrolment ID
-
-**From ICMR research:**
-- `icmr_risk_categorization.py` — Four-tier risk tags
-- `icmr_vulnerability.py` — Three vulnerability categories (legal/clinical/situational)
-- `icmr_emergency_disclosure.py` — Suicidal ideation, HIV, court order override cases
-- `icmr_hmsc_international.py` — HMSC approval metadata
-
-**Indian identifiers (missing from Presidio):**
-- `in_abha.py` — ABHA 14-digit + ABHA Address (user@abdm)
-- `in_ctri.py` — CTRI registration ID
-- `in_ration_card.py` — 29 state-variant formats
-- `in_uan_esi_cghs_bpl.py` — EPF UAN, ESI, CGHS, BPL numbers
-- `in_driving_license_state.py` — 30+ state-variant driving license formats
+**Non-USA generators (DPDPA, ICMR, Indian identifiers, EU/GDPR, Brazil, Australia, Uganda):**
+REMOVED under the 2026-07-16 USA-only scope change. Do not build these. This entire
+sub-list (previously ~15 planned generators) is dead per the scope-change note at the top
+of this document.
 
 **Quasi-identifier layer:**
 - `quasi_identifier_combinations.py` — Sweeney 2002 k-anonymity violations (DOB + gender + ZIP; rare disease + small geography; profession + ZIP)
@@ -182,7 +161,7 @@ Each goes in `benchmarks/`:
 - `comprehend_medical_adapter.py` — Optional (requires AWS credentials). Uses `boto3.client('comprehendmedical')`.
 - `azure_health_adapter.py` — Optional. Uses Azure Health Data Services De-ID API.
 - `jsl_adapter.py` — John Snow Labs Healthcare NLP (requires license).
-- `metrics.py` — Precision, recall, F1, gap detection rate, per-jurisdiction breakdown.
+- `metrics.py` — Precision, recall, F1, gap detection rate.
 
 ### Phase 5 — Validation harness
 
@@ -320,7 +299,7 @@ These were not resolved in the claude.ai session and need Sir's input:
 4. **Clinician reviewers for ASQ-PHI** — does Sir have access to clinicians for the plausibility review protocol?
 5. **Counsel review** — will Sir's institution's legal counsel review the authority matrix, or does this need external arrangement?
 6. **Corpus size target** — prior v1.0.1 was 5,942 records. Does Sir want a larger v2.0 corpus (e.g., 15,000 records) or keep size similar with expanded taxonomy coverage?
-7. **Pediatric clinical trial data** — does Sir's RePORTaLiN-RAG actually handle pediatric data? This affects whether DPDPA Fourth Schedule fixtures need production density or just sample coverage.
+7. ~~Pediatric clinical trial data / DPDPA Fourth Schedule~~ -- moot: DPDPA scope removed 2026-07-16.
 
 ---
 

@@ -103,10 +103,8 @@ class ModifiedDeidentifyAdapter:
               LOCATION-OTHER, AGE, DATE, TIME, DURATION, SET, PHONE, FAX,
               EMAIL, PAGER, URL, IPADDR, SSN, MEDICALRECORD, HEALTHPLAN,
               ACCOUNT, LICENSE, VEHICLE, DEVICE, BIOID, IDNUM
-            Our corpus adds: ABHA, CTRI_ID, IN_AADHAAR, IN_PAN, IN_VOTER,
-            IN_PASSPORT, IN_GSTIN, IN_DRIVING_LICENSE_STATE, RATION_CARD,
-            UAN, ESI, CGHS, BPL, DPDPA_ENROLMENT_ID, DPDPA_CUSTOMER_ID,
-            DPDPA_ACQUISITION_FORM, DPDPA_APP_REF, VIN.
+            Our corpus also includes extended US identifiers beyond the base
+            i2b2 set (e.g. VIN and other HIPAA Safe Harbor identifiers).
 
     [ ] 5. CLINICAL DANGER SCORE
             The paper defines "clinically dangerous false positive" using the

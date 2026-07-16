@@ -14,19 +14,18 @@ def test_seeded_generator_specs_contains_required_specs():
     spec_ids = {spec.id for spec in seeded_generator_specs()}
 
     assert "us/hipaa_safe_harbor" in spec_ids
-    assert "in/india_dpdpa" in spec_ids
-    assert "eu/eu_identifiers" in spec_ids
     assert "file_formats/dicom_headers" in spec_ids
     assert "file_formats/xlsx_phi_corpus" in spec_ids
+    assert not any(spec_id.startswith(("in/", "eu/", "br/", "au/", "ug/")) for spec_id in spec_ids)
 
 
-def test_build_seeded_corpus_india_writes_registry_outputs(tmp_path):
-    summaries = build_seeded_corpus(seed=42, out_dir=tmp_path, jurisdiction="in")
+def test_build_seeded_corpus_us_writes_registry_outputs(tmp_path):
+    summaries = build_seeded_corpus(seed=42, out_dir=tmp_path, jurisdiction="us")
 
-    assert (tmp_path / "in" / "india_dpdpa.jsonl").exists()
-    assert (tmp_path / "in" / "india_identifiers.jsonl").exists()
-    assert set(summaries) == {"in"}
-    for name, summary in summaries["in"].items():
+    assert (tmp_path / "us" / "hipaa_safe_harbor.jsonl").exists()
+    assert (tmp_path / "us" / "hipaa_quasi_identifiers.jsonl").exists()
+    assert set(summaries) == {"us"}
+    for name, summary in summaries["us"].items():
         if name == "__total__":
             continue
         assert summary["span_errors"] == []
@@ -54,12 +53,17 @@ def test_main_all_creates_v2_manifest_with_registry_jurisdictions(tmp_path):
     assert exit_code == 0
     manifest = json.loads((tmp_path / "MANIFEST.json").read_text())
     assert manifest["version"] == "2.0.0-dev"
-    assert set(manifest["jurisdictions"]) == {"us", "in", "eu", "br", "au", "ug", "file_formats"}
+    assert set(manifest["jurisdictions"]) == {"us", "file_formats"}
     assert manifest["jurisdictions"] == sorted(manifest["jurisdictions"])
     assert manifest["validation_status"] == "PASS"
     assert manifest["claim_level"] == "L2-partial"
     assert len(manifest["capability_registry_sha256"]) == 64
     assert manifest["generated_at_utc"].endswith("Z")
+    assert "in" not in manifest["jurisdictions"]
+    assert "eu" not in manifest["jurisdictions"]
+    assert "br" not in manifest["jurisdictions"]
+    assert "au" not in manifest["jurisdictions"]
+    assert "ug" not in manifest["jurisdictions"]
     assert "ca" not in manifest["jurisdictions"]
     assert "uk" not in manifest["jurisdictions"]
     assert "sg" not in manifest["jurisdictions"]

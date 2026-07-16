@@ -5,7 +5,7 @@ LLM-visible tree and fails if **either** finds PHI:
 
 * primary  — :func:`scripts.security.presidio_gate.scan_tree_with_presidio`
 * secondary — :func:`scripts.security.llm_source_gate.scan_tree_for_phi`
-  (the study-calibrated Verhoeff/Indian-phone catalog, retained as a safety floor)
+  (the study-calibrated structured-identifier catalog, retained as a safety floor)
 
 OR-combination means adopting Presidio never *weakens* the gate: a leak the
 legacy scanner caught still fails the gate even if Presidio's recognizer set ever

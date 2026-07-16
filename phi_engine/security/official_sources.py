@@ -42,24 +42,6 @@ _REGISTRY: dict[tuple[str, str], _RegisteredSource] = {
         url="https://www.hhs.gov/hipaa/for-professionals/privacy/special-topics/de-identification/index.html",
         citation="HHS HIPAA De-identification Guidance",
     ),
-    ("india_dpdp_2023", "INDIA"): _RegisteredSource(
-        registry_source_id="india_dpdp_2023",
-        jurisdiction="INDIA",
-        url="https://www.indiacode.nic.in/indiacode/handle/123456789/22037",
-        citation="Digital Personal Data Protection Act, 2023",
-    ),
-    ("india_icmr_ethics_2017", "INDIA"): _RegisteredSource(
-        registry_source_id="india_icmr_ethics_2017",
-        jurisdiction="INDIA",
-        url="https://www.icmr.gov.in/guidelines",
-        citation="ICMR National Ethical Guidelines for Biomedical and Health Research",
-    ),
-    ("india_aadhaar_act_2016", "INDIA"): _RegisteredSource(
-        registry_source_id="india_aadhaar_act_2016",
-        jurisdiction="INDIA",
-        url="https://uidai.gov.in/en/about-uidai/legal-framework/2033-aadhaar-targeted-delivery-of-financial-and-other-subsidies%2C-benefits-and-services-act%2C-2016.html",
-        citation="Aadhaar (Targeted Delivery of Financial and Other Subsidies, Benefits and Services) Act, 2016",
-    ),
 }
 
 

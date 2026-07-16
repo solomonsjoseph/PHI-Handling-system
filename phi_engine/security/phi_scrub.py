@@ -9,17 +9,16 @@ Nine structural-field action classes, evaluated in strict priority order
 2. **birthdate** (``birthdate_field``) — posture-dependent:
 
    - ``safe_harbor`` (default) → field dropped entirely per HIPAA
-     §164.514(b)(2)(i)(C) + DPDPA. Age fidelity is lost.
+     §164.514(b)(2)(i)(C). Age fidelity is lost.
    - ``limited_dataset`` → field jittered with the same per-subject offset
      as other dates (SANT method), preserving age-at-event. Requires an
      IRB-approved protocol + DUA; the module refuses to run in this
      mode unless ``authorities/phi_limited_dataset.md`` exists.
 
 3. **drop** (``drop_fields``) — field removed from every row. Covers
-   names, initials, signatures, staff identifiers, national IDs (Aadhaar /
-   PAN / voter / passport / DL / ration / ESIC / PM-JAY / Nikshay / ABHA),
-   contact info, exact geography, free-text narratives, system timestamps,
-   and batch/scan artefacts.
+   names, initials, signatures, staff identifiers, national IDs (SSN /
+   passport / DL), contact info, exact geography, free-text narratives,
+   system timestamps, and batch/scan artefacts.
 4. **cap** (``cap_fields``) — numeric values strictly greater than
    ``threshold`` are replaced with ``label`` (default age > 89 → "90+",
    HIPAA §164.514(b)(2)(i)(C)).
@@ -1448,7 +1447,7 @@ def shift_date(
         Per-column locale overrides from the study's ``_forms_manifest.yaml``
         ``date_locales:`` section.  Passed through to :func:`parse_date`.
     default_locale:
-        Study-wide origin default (e.g. ``"DMY"`` for an Indian study) applied
+        Study-wide origin default (e.g. ``"MDY"`` for a US study) applied
         when the column locale is otherwise inconclusive.  Passed to
         :func:`parse_date`.
     """
@@ -2746,9 +2745,9 @@ def run_scrub(
         # scrub leg only needs the date_locales mapping here.
         date_locales: dict[str, str] = check_forms_manifest(config.DATASETS_DIR).date_locales
 
-        # Note 29: study-origin default date locale. An Indian-origin study
-        # defaults ambiguous/undeclared date columns to day-first (DMY) instead
-        # of fail-closing — explicit allowlist/manifest declarations and
+        # Note 29: study-origin default date locale. A US-origin study
+        # defaults ambiguous/undeclared date columns to month-first (MDY)
+        # when configured; explicit allowlist/manifest declarations and
         # provably-decisive values (component > 12) still win (see parse_date
         # precedence). Read jurisdictions directly from config (NOT via
         # phi_review, which would be a forbidden skill→skill import; same
@@ -2761,8 +2760,8 @@ def run_scrub(
             )
             _priv = yaml.safe_load(_priv_path.read_text(encoding="utf-8")) or {}
             _juris = {str(j).upper() for j in (_priv.get("jurisdictions") or [])}
-            if "INDIA" in _juris:
-                default_locale = "DMY"
+            if "USA" in _juris or "US" in _juris:
+                default_locale = "MDY"
         except Exception as exc:  # fail-soft; never block the scrub on config issues
             logger.info(
                 "phi_scrub: origin default_locale unresolved (%s); falling back to None", exc

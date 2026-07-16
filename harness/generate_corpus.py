@@ -5,7 +5,7 @@ Runs all seeded generators and writes JSONL output to corpus/<jurisdiction>/.
 Every run with the same seed produces bitwise-identical output.
 
 Usage:
-    python -m harness.generate_corpus [--seed SEED] [--jurisdiction us] [--out-dir corpus]
+    python -m harness.generate_corpus [--seed SEED] [--jurisdiction us|all|file_formats] [--out-dir corpus]
     python -m harness.generate_corpus --mode llm [--seed SEED] [--jurisdiction HIPAA]
 
 Default seed: 42 (IRB-reproducible baseline).
@@ -27,11 +27,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from generators import (
-    AustraliaPrivacyGenerator,
-    BrazilLGPDGenerator,
     DICOMHeaderGenerator,
     EMLGenerator,
-    EUGDPRGenerator,
     FHIRGenerator,
     HIPAABiometricGenerator,
     HIPAADeviceGenerator,
@@ -44,9 +41,6 @@ from generators import (
     HIPAAVehicleGenerator,
     HIPAAVerificationGenerator,
     HL7v2Generator,
-    IndiaDPDPAGenerator,
-    IndiaIdentifierGenerator,
-    UgandaDPPAGenerator,
     XlsxGenerator,
 )
 from generators.common import Record, write_jsonl
@@ -123,42 +117,6 @@ def seeded_generator_specs() -> list[GeneratorSpec]:
             "us",
             "us/hipaa_vehicle",
             lambda seed: HIPAAVehicleGenerator(seed).generate_batch(count_per_mode=4),
-        ),
-        GeneratorSpec(
-            "in/india_dpdpa",
-            "in",
-            "in/india_dpdpa",
-            lambda seed: IndiaDPDPAGenerator(seed).generate_batch(count_per_type=4),
-        ),
-        GeneratorSpec(
-            "in/india_identifiers",
-            "in",
-            "in/india_identifiers",
-            lambda seed: IndiaIdentifierGenerator(seed).generate_batch(count_per_identifier=4),
-        ),
-        GeneratorSpec(
-            "eu/eu_identifiers",
-            "eu",
-            "eu/eu_identifiers",
-            lambda seed: EUGDPRGenerator(seed).generate_batch(count_per_type=4),
-        ),
-        GeneratorSpec(
-            "br/brazil_identifiers",
-            "br",
-            "br/brazil_identifiers",
-            lambda seed: BrazilLGPDGenerator(seed).generate_batch(count_per_type=4),
-        ),
-        GeneratorSpec(
-            "au/australia_identifiers",
-            "au",
-            "au/australia_identifiers",
-            lambda seed: AustraliaPrivacyGenerator(seed).generate_batch(count_per_type=4),
-        ),
-        GeneratorSpec(
-            "ug/uganda_identifiers",
-            "ug",
-            "ug/uganda_identifiers",
-            lambda seed: UgandaDPPAGenerator(seed).generate_batch(count_per_type=4),
         ),
         GeneratorSpec(
             "file_formats/dicom_headers",
@@ -246,7 +204,7 @@ def run_generator_spec(spec: GeneratorSpec, seed: int, out_dir: Path) -> dict:
 
 def build_seeded_corpus(seed: int, out_dir: Path, jurisdiction: str) -> dict[str, dict]:
     """Build deterministic corpus files for one jurisdiction or all registry-backed specs."""
-    supported = {"all", "us", "in", "eu", "br", "au", "ug", "file_formats"}
+    supported = {"all", "us", "file_formats"}
     if jurisdiction not in supported:
         raise SystemExit(f"Unsupported jurisdiction: {jurisdiction}")
 
@@ -528,7 +486,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--jurisdiction",
         default="us",
-        help="Jurisdiction layer: 'us', 'all', 'in', 'eu', 'br', 'au', 'ug', or 'file_formats' (default: us)",
+        help="Jurisdiction layer: 'us', 'all', or 'file_formats' (default: us)",
     )
     parser.add_argument(
         "--out-dir",

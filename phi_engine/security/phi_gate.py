@@ -55,7 +55,7 @@ class PHIEgressBlockedError(PermissionError):
     egress-direction backstop prior-audit finding C2 identified as missing:
     ``guard_llm_output`` only ever scanned the RETURN value, never the
     OUTBOUND prompt. The message carries the matched PATTERN CATEGORY only
-    (``PHIGateResult.findings``, e.g. ``AADHAAR``/``EMAIL``) -- never the
+    (``PHIGateResult.findings``, e.g. ``SSN``/``EMAIL``) -- never the
     matched text itself and never a position offset (the underlying
     ``phi_gate_check`` API does not expose one; do not fabricate one).
     Known limitation carried from C3: the blocking regex tier has documented
@@ -70,7 +70,7 @@ class PHIGateResult:
     ``blocked`` is ``True`` when any blocking pattern matched.
     ``findings`` is a sorted, unique tuple of category tags recorded
     across the scan (both blocking and warn-only). Safe to show the
-    operator — the tags are category names like ``AADHAAR`` /
+    operator — the tags are category names like ``SSN`` /
     ``EMAIL``, never raw values.
     """
 
@@ -137,7 +137,7 @@ def _is_clinical_allowlist_hit(text: str) -> bool:
 
     Short-circuits the warn tier: clinical phrases like "Bacteriologic
     relapse" or "patient expired" are not PHI. Blocking tier still fires
-    — the allowlist does NOT override Aadhaar / PAN / email matches.
+    — the allowlist does NOT override SSN / email matches.
     """
     return phi_allowlist.is_clinical_phrase(text) or phi_allowlist.is_clinical_free_text(text)
 

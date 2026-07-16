@@ -1,6 +1,6 @@
 ---
 name: phi-rulebook
-description: Resolve and inspect the jurisdiction PHI rulebook (HIPAA Safe Harbor + India DPDPA) with a versioned offline cache, a committed airgapped seed, and drift detection. Use when the user asks about which PHI rules are active, the rulebook version/hash, rule drift, or wants to refresh/inspect jurisdiction classification rules. Metadata only — never reads study data.
+description: Resolve and inspect the jurisdiction PHI rulebook (HIPAA Safe Harbor, USA only) with a versioned offline cache, a committed airgapped seed, and drift detection. Use when the user asks about which PHI rules are active, the rulebook version/hash, rule drift, or wants to refresh/inspect jurisdiction classification rules. Metadata only — never reads study data.
 ---
 
 # PHI Rulebook
@@ -39,7 +39,7 @@ The rulebook engine lives in the host repo at
 When `REPORTAL_RULEBOOK_AI_EXTRACT=1` **and** `--allow-network` **and** the
 study's `rule_refresh: online_preferred`, the engine fetches the **latest**
 official regulation text per jurisdiction (allowlisted gov HTTPS hosts only —
-HHS/eCFR/India Code/ICMR/UIDAI/MeitY), has the AI **extract structured rules from
+HHS/eCFR), has the AI **extract structured rules from
 that PUBLIC text** (never any study data — GR-1), and **merges them OVER the
 pinned floor**. Default off → the deterministic pinned path is unchanged.
 
@@ -74,7 +74,7 @@ uv run --all-groups python -m \
 # Inspect a committed seed rulebook for a jurisdiction set.
 uv run --all-groups python -m \
   phi_engine.skills.phi-rulebook.scripts.rulebook_cli \
-  show --jurisdictions INDIA,USA
+  show --jurisdictions USA
 
 # Fetch latest official regs + AI-extract rules (opt-in; needs --allow-network
 # and REPORTAL_RULEBOOK_AI_EXTRACT=1).

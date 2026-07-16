@@ -3,8 +3,8 @@ phi_engine benchmark adapter -- our own detection surface as an evaluated tool.
 
 Scores phi_engine's structured/regex PHI-detection surface
 (``phi_engine.security.presidio_gate.analyze_text`` -- the BLOCKING_PATTERNS
-catalog wrapped as Presidio PatternRecognizers, with Verhoeff/Indian-phone
-checksum validation -- OR-combined with a direct scan of
+catalog wrapped as Presidio PatternRecognizers, with structured-identifier
+checksum validation where applicable -- OR-combined with a direct scan of
 ``phi_engine.security.phi_patterns.WARN_PATTERNS``, the lower-confidence
 heuristics ``presidio_gate`` does not wire in) against the same JSONL corpus
 files and ``benchmarks.metrics`` scoring pipeline as every other adapter in
@@ -17,14 +17,10 @@ detection surface honestly, including its gaps, not a claim of SOTA free-text
 performance.
 
 Pattern-name -> corpus entity-type mapping (verified empirically against the
-actual seed-42 corpus's gold_spans entity_type strings, NOT assumed from
-Presidio's own predefined-recognizer naming convention, which this repo's
-corpus does not follow for several India-specific types -- see
-benchmarks/presidio_adapter.py's PRESIDIO_TO_CORPUS for a mapping that
-predates this verification and is left as-is, out of scope here).
-Unmapped pattern names (WARN_PATTERNS' NUMERIC_ID_SHORT is too generic to map
-confidently) fall through to "UNKNOWN" and count as false positives under
-strict scoring -- the honest default per the evidence plan.
+actual seed-42 corpus's gold_spans entity_type strings). Unmapped pattern
+names (WARN_PATTERNS' NUMERIC_ID_SHORT is too generic to map confidently)
+fall through to "UNKNOWN" and count as false positives under strict scoring
+-- the honest default per the evidence plan.
 """
 from __future__ import annotations
 
@@ -65,14 +61,8 @@ _NAME_TYPES = frozenset({
 _PHONE_TYPES = frozenset({"PHONE", "PHONE_HOME", "PHONE_WORK", "PHONE_REQUESTOR"})
 
 PHI_ENGINE_TO_CORPUS: Dict[str, FrozenSet[str]] = {
-    # ── BLOCKING_PATTERNS (via presidio_gate.analyze_text; Verhoeff/phone
-    #    checksum-validated so these are structured, not just shape matches) ──
-    "AADHAAR": frozenset({"AADHAAR"}),
-    "PAN": frozenset({"PAN"}),
-    "INDIAN_VOTER_ID": frozenset({"VOTER_ID_EPIC"}),
-    "INDIAN_DL": frozenset({"DRIVING_LICENSE_IN"}),
-    "INDIAN_PASSPORT": frozenset({"IN_PASSPORT"}),
-    "INDIAN_PHONE": frozenset({"MOBILE_IN"}),
+    # ── BLOCKING_PATTERNS (via presidio_gate.analyze_text; structured
+    #    checksum-validated where applicable, not just shape matches) ──
     "EMAIL": frozenset({"EMAIL"}),
     "URL": frozenset({"URL"}),
     "SSN": frozenset({"SSN"}),
@@ -93,8 +83,6 @@ PHI_ENGINE_TO_CORPUS: Dict[str, FrozenSet[str]] = {
     # BADGE_NUMBER, ... -- too ambiguous to credit against any one gold type.
     "DATE_MDY": _DATE_TYPES,
     "PERSON_NAME_GENERIC": _NAME_TYPES,
-    # "INDIAN_PIN" has no corpus gold-span equivalent observed empirically;
-    # left unmapped (falls through to UNKNOWN) rather than guessed.
 }
 
 PHI_ENGINE_COVERABLE: FrozenSet[str] = frozenset(
@@ -121,18 +109,17 @@ def _map_phi_engine_type(pattern_name: str) -> FrozenSet[str]:
 # (verified 2026-07-07), mirroring benchmarks/presidio_adapter.py's
 # PRESIDIO_GAP_ENTITY_TYPES convention.
 PHI_ENGINE_GAP_ENTITY_TYPES: FrozenSet[str] = frozenset({
-    "ABHA_ADDRESS", "ABHA_NUMBER", "ACCESSION_NUMBER", "ACCOUNT_NUMBER",
+    "ACCESSION_NUMBER", "ACCOUNT_NUMBER",
     "ADDRESS_CITY", "ADDRESS_ZIP", "AGE", "AU_PASSPORT", "BADGE_NUMBER",
     "BANK_ACCOUNT", "BIOMETRIC", "BIOMETRIC_DNA_SPECIMEN",
     "BIOMETRIC_ENROLLMENT_ID", "BIOMETRIC_FACE_TEMPLATE",
     "BIOMETRIC_FINGERPRINT_TEMPLATE", "BIOMETRIC_IRIS_TEMPLATE",
     "BIOMETRIC_RETINAL_TEMPLATE", "BIOMETRIC_VOICE_TEMPLATE", "BR_PASSPORT",
     "BSN_NL", "CASE_NUMBER", "CLINICAL_TRIAL_ID", "CNH_BR", "CNPJ_BR", "CNS_BR",
-    "CODICE_FISCALE_IT", "CPF", "CPR_DK", "CTRI_ID", "DEPARTMENT",
+    "CODICE_FISCALE_IT", "CPF", "CPR_DK", "DEPARTMENT",
     "DEVICE_LOT_NUMBER", "DEVICE_SAMD_VERSION", "DEVICE_SERIAL", "DEVICE_UDI",
     "DEVICE_UDI_GS1", "DEVICE_UDI_HIBCC", "DEVICE_UDI_ICCBBA", "DNI_ES",
-    "DPDPA_ACQUISITION_FORM", "DPDPA_APP_REF", "DPDPA_CUSTOMER_ID",
-    "DPDPA_ENROLMENT_ID", "DRIVERS_LICENSE", "DRIVERS_LICENSE_AU", "DVA_FILE",
+    "DRIVERS_LICENSE", "DRIVERS_LICENSE_AU", "DVA_FILE",
     "FAX", "FAX_BROADCAST_1", "FAX_BROADCAST_2", "FAX_BROADCAST_3",
     "FAX_EFAX_NUMBER", "FAX_HOSPITAL", "FAX_INTERNATIONAL", "FAX_LAB",
     "FAX_PAYER", "FAX_PCP", "FAX_PHARMACY", "FAX_PROVIDER", "FAX_RADIOLOGY",
@@ -144,7 +131,7 @@ PHI_ENGINE_GAP_ENTITY_TYPES: FrozenSet[str] = frozenset({
     "PHONE_UG", "PHOTO_FULL_FACE", "PIS_PASEP_BR", "POSTAL_CODE_EU",
     "QUASI_CITY", "QUASI_PROFESSION", "QUASI_RARE_DISEASE",
     "REID_CODE_FORBIDDEN", "REID_CODE_PERMITTED", "RG_BR", "SSN_TRUNCATED",
-    "STEUER_ID_DE", "TFN", "TIN_UG", "TITULO_ELEITOR_BR", "UAN", "VIN",
+    "STEUER_ID_DE", "TFN", "TIN_UG", "TITULO_ELEITOR_BR", "VIN",
     "ZIP",
 })
 

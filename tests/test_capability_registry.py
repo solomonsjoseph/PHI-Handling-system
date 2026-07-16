@@ -50,23 +50,23 @@ def test_require_status_accepts_met_and_rejects_below_minimum() -> None:
     require_status(capabilities, "us_hipaa", "tested")
     with pytest.raises(
         RuntimeError,
-        match="capability canada_pipeda is planned, below required implemented",
+        match="capability clinician_review is planned, below required implemented",
     ):
-        require_status(capabilities, "canada_pipeda", "implemented")
+        require_status(capabilities, "clinician_review", "implemented")
 
 
 def test_capability_rows_are_strings_and_sorted() -> None:
     capabilities = [
         Capability(id="z", kind="validator", status="planned", jurisdiction="", public_claim="Z"),
-        Capability(id="b", kind="jurisdiction", status="tested", jurisdiction="in", public_claim="B"),
-        Capability(id="a", kind="jurisdiction", status="tested", jurisdiction="au", public_claim="A"),
+        Capability(id="b", kind="jurisdiction", status="tested", jurisdiction="us", public_claim="B"),
+        Capability(id="a", kind="jurisdiction", status="tested", jurisdiction="us", public_claim="A"),
     ]
 
     rows = capability_rows(capabilities)
 
     assert [(row["kind"], row["jurisdiction"], row["id"]) for row in rows] == [
-        ("jurisdiction", "au", "a"),
-        ("jurisdiction", "in", "b"),
+        ("jurisdiction", "us", "a"),
+        ("jurisdiction", "us", "b"),
         ("validator", "", "z"),
     ]
     assert all(isinstance(value, str) for row in rows for value in row.values())
@@ -83,6 +83,6 @@ def test_module_cli_prints_markdown_registry_table() -> None:
     assert result.returncode == 0, result.stderr
     assert "| ID | Kind | Status | Jurisdiction | Claim | Output | Limitations |" in result.stdout
     assert "us_hipaa" in result.stdout
-    assert "canada_pipeda" in result.stdout
+    assert "clinician_review" in result.stdout
     assert "manifested" in result.stdout
     assert "planned" in result.stdout

@@ -4,46 +4,22 @@
 **Last updated:** 2026-07-06
 **Applies to:** Evidence-first PHI corpus, benchmark, and runtime safety harness
 
+> **Current scope (USA-only):** Active corpus, generators, and rulebooks are USA/HIPAA. Non-USA generators under `generators/in|eu|br|au|ug`, non-USA rulebooks, and `docs/JURISDICTION_EVIDENCE_REPORT_IN.md` are removed. Sections below that describe non-USA layers are historical design notes or deferred scope, not live claims.
+
 This document records limitations, gaps, and unresolved questions in the corpus and benchmark framework as of the version above. IRB reviewers should read this document before drawing conclusions from any benchmark results produced using this corpus. The authors have stress-tested this work adversarially; what follows is an honest account of what remains incomplete, unverified, or out of scope.
 
 ---
 
 ## Part 1 -- Regulatory Scope Limitations
 
-### 1. DPDPA enforcement timeline
+### 1. Non-USA jurisdictions deferred (formerly multi-jurisdiction design)
 
-Rules 3 through 16 of the DPDP Rules 2025 (the substantive data principal rights provisions, including security safeguards, breach notification, data fiduciary obligations, and the research exemption under the Second Schedule) do not commence until 2027-05-13 per the official notification G.S.R. 846(E). Rules 17 through 21 and Rules 1, 2 are in force immediately. Rule 4 commences 2026-11-13.
+~~DPDPA enforcement timeline, India corpus layer, GDPR member-state layers, China PIPL layer, and PIPEDA provincial coverage were designed for a multi-jurisdiction expansion.~~ **Those generators, corpus slices, and evidence reports are not in the active tree.** Current operational scope is USA/HIPAA only. Non-USA jurisdictions may return one at a time later; until then, no IRB claim should treat DPDPA/GDPR/LGPD/AU/UG layers as implemented.
 
-The corpus India-specific layer tests against the full eventual rule set, not the currently-enforced subset. Generators are designed to be enforcement-ready, not currently-enforced.
-
-Any IRB submission filed prior to 2027-05-13 must acknowledge this gap explicitly: the Indian PHI layer is validated against a legal framework that is partially not yet in force. This is not a corpus deficiency in itself, but an IRB reviewer who treats DPDPA compliance claims as currently operative is reading the corpus incorrectly.
-
-### 2. GDPR intra-EU fragmentation not covered
-
-GDPR Article 9(4) permits EU member states to impose additional conditions for processing health data. The corpus covers GDPR as a baseline framework only. It does not cover:
-
-- Germany's Landesdatenschutzgesetze (BDSG and state-level laws)
-- France's CNIL health data rules and Health Data Hub requirements
-- Netherlands UAVG health-specific provisions
-- Any other member-state derogation under Article 9(4)
-
-European IRB reviewers from member states with stricter requirements than baseline GDPR will find gaps in the GDPR layer. The corpus claims GDPR baseline coverage, not member-state completeness.
-
-### 3. China PIPL structural incompatibility
-
-The China PIPL layer results are not directly comparable to HIPAA, GDPR, or DPDPA results. China's Personal Information Protection Law uses a three-tier classification: important data, personal information, and sensitive personal information. This classification has no one-to-one mapping to the Safe Harbor 18-identifier scheme, GDPR special categories, or DPDPA Rule 14 identifiers.
-
-Benchmark tool F1 scores on the China PIPL layer cannot be interpreted using the same thresholds as other layers. A tool with 90% F1 on HIPAA identifiers may perform substantially differently on PIPL-specific identifiers that are not part of HIPAA's enumerated categories. Cross-layer comparisons that include PIPL results require separate interpretation.
-
-### 4. No PIPEDA provincial health coverage
-
-Canada's federal PIPEDA framework is covered in the corpus. Canada's provincial health privacy statutes are not covered:
-
-- PHIPA (Personal Health Information Protection Act, Ontario)
-- HIA (Health Information Act, Alberta)
-- PIPA (Personal Information Protection Act, British Columbia)
-
-All three provincial statutes are more restrictive than PIPEDA in health data contexts and apply to most Canadian clinical research. Any Canadian health IRB reviewer should treat the Canada layer as PIPEDA-only baseline coverage and not as provincial compliance validation.
+Historical notes retained for counsel context only (not live generators):
+- ~~DPDP Rules 2025 Rules 3–16 commence 2027-05-13 (G.S.R. 846(E)).~~ India generators removed.
+- ~~GDPR Article 9(4) member-state health-data conditions.~~ EU generators removed.
+- ~~China PIPL three-tier classification incompatibility.~~ PIPL layer not built / out of scope.
 
 ---
 
@@ -133,13 +109,13 @@ The reason is pending license confirmation for the model weights and evaluation 
 
 ### 12. No institutional legal counsel review completed
 
-Sections of the authority matrix marked `[COUNSEL REVIEW REQUIRED]` include citations to 45 CFR 164.514 sub-provisions, DPDPA Rule 13(3) algorithmic due diligence obligations, and ICMR Section 1.1.5 override conditions. As of v2.0.0, no institutional legal counsel has reviewed these authority citations or confirmed that the corpus's legal basis section correctly characterizes the applicable regulations.
+Sections of the authority matrix marked `[COUNSEL REVIEW REQUIRED]` include citations to 45 CFR 164.514 sub-provisions and (historically) non-USA authorities. As of v2.0.0, no institutional legal counsel has reviewed these authority citations or confirmed that the corpus's legal basis section correctly characterizes the applicable regulations. **Active claim surface is USA/HIPAA only.**
 
 Institutions using this corpus in an IRB submission must arrange independent counsel review of the legal basis section before filing. The authority matrix is a research document, not a legal opinion.
 
 ### 13. SYNTHETIC_DATA_LEGAL_BASIS.md does not constitute legal advice
 
-The legal basis document provides a structured analysis of why synthetic PHI corpus data does not constitute regulated PHI under HIPAA 164.514(b) and why no data use agreement is required for corpus distribution under GDPR Recital 26 and DPDPA Section 3(c). This analysis is provided for documentation and transparency purposes.
+The legal basis document provides a structured analysis of why synthetic PHI corpus data does not constitute regulated PHI under HIPAA 164.514(b) and why no data use agreement is required for corpus distribution under applicable de-identification authorities (document also discusses GDPR Recital 26 and DPDPA Section 3(c) for historical multi-jurisdiction context). This analysis is provided for documentation and transparency purposes.
 
 It does not constitute legal advice. It has not been reviewed by a licensed attorney. Institutions that require legal assurance of these positions must obtain independent legal review. The document should be treated as a starting point for counsel review, not as a substitute for it.
 
@@ -150,11 +126,11 @@ This corpus is a test and evaluation instrument. A system that achieves the benc
 This is not equivalent to:
 
 - HIPAA compliance for the system under 45 CFR Parts 160 and 164
-- DPDPA compliance for a data fiduciary under DPDP Act 2023
-- GDPR compliance for a controller or processor under Regulation (EU) 2016/679
+- ~~DPDPA compliance for a data fiduciary under DPDP Act 2023~~ (India layer removed / deferred)
+- ~~GDPR compliance for a controller or processor under Regulation (EU) 2016/679~~ (EU layer removed / deferred)
 - IRB approval for any specific study protocol
 
-Benchmark clearance is one input to an IRB submission. It is not the submission itself, and it does not substitute for a covered entity's own HIPAA risk assessment, a data fiduciary's own DPDPA audit, or a controller's own DPIA.
+Benchmark clearance is one input to an IRB submission. It is not the submission itself, and it does not substitute for a covered entity's own HIPAA risk assessment (or any future non-USA audit if those layers return).
 
 ---
 
@@ -186,7 +162,7 @@ The current public claim ladder is:
 |---|---|---|
 | L0 | Prototype PHI corpus and benchmark harness | Supported |
 | L1 | Reproducible US/HIPAA synthetic benchmark with span-level gold annotations | Strong |
-| L2 | Multi-jurisdiction synthetic PHI benchmark | Partial |
+| L2 | Multi-jurisdiction synthetic PHI benchmark | Deferred / out of scope (USA-only active) |
 | L3 | File-format and adversarial PHI benchmark | Partial |
 | L4 | IRB-audit-ready benchmark with clinician/counsel review | Not yet supported |
 | L5 | Market-leading PHI detector or safest AI-powered PHI system | Not yet supported |
@@ -213,38 +189,21 @@ These commands provide reproducible structural evidence and release hashes. They
 
 The original build plan in `CLAUDE.md` Phase 2/3 specified a larger generator and file-format set than currently exists. This section lists exactly what from that plan is NOT built, so the gap is documented rather than silently absent. None of this is scheduled; it is listed here so a reviewer comparing this repo against `CLAUDE.md` does not have to reverse-engineer the delta themselves.
 
-### 18. DPDPA provision-specific generators not built (CLAUDE.md Phase 2)
+### 18. Non-USA generators removed / deferred (CLAUDE.md Phase 2)
 
-Only `generators/in/in_dpdpa.py` exists, covering the four DPDP Rules 2025 Rule 14 identifier categories (customer ID file number, acquisition form number, application reference number, enrolment ID). The following generators named in `CLAUDE.md` Phase 2 do not exist:
-- `dpdpa_second_schedule.py` (8-condition research-exemption fixtures)
-- `dpdpa_pediatric_exemption.py` (Fourth Schedule Part A)
-- `dpdpa_algorithmic_dd.py` (Rule 13(3) algorithmic due diligence)
-- `dpdpa_breach_timing.py` (72-hour breach notification)
-- `dpdpa_consent_manager.py` (token-forwarding scenarios)
+~~Formerly: DPDPA provision-specific generators, ICMR generators, and partial Indian identifier generators under `generators/in/`.~~ **Removed from the active tree.** Do not claim `generators/in/in_dpdpa.py`, `generators/in/in_identifiers.py`, ICMR fixtures, or EU/BR/AU/UG generators currently exist. Non-USA jurisdiction build tasks are deferred and may return one jurisdiction at a time.
 
-### 19. ICMR-specific generators not built (CLAUDE.md Phase 2)
+### 19. Quasi-identifier layer is US-only
 
-No `icmr_*` generator files exist. The four ICMR generators named in the plan are not built:
-- `icmr_risk_categorization.py` (four-tier risk tags)
-- `icmr_vulnerability.py` (legal/clinical/situational vulnerability categories)
-- `icmr_emergency_disclosure.py` (suicidal ideation / HIV / court-order override cases)
-- `icmr_hmsc_international.py` (HMSC international-collaboration metadata)
+`generators/hipaa_safe_harbor.py` includes `HIPAAQuasiIdentifierGenerator` (profession, city, rare-disease combinations under Sweeney k-anonymity). The standalone cross-jurisdiction `quasi_identifier_combinations.py` module the plan specified does not exist. ~~India-side quasi-identifier coverage is absent and out of scope.~~
 
-### 20. Indian identifier generators partially built
-
-`generators/in/in_identifiers.py` covers Aadhaar, PAN, ABHA Number, ABHA Address, Voter ID, CTRI ID, UAN, driving license (single format), and mobile numbers. Not built: `in_ration_card.py` (29 state-variant formats), state-variant driving license beyond one format, and dedicated ESI/CGHS/BPL identifier generators.
-
-### 21. Quasi-identifier layer is US-only
-
-`generators/hipaa_safe_harbor.py` includes `HIPAAQuasiIdentifierGenerator` (profession, city, rare-disease combinations under Sweeney k-anonymity), but the standalone cross-jurisdiction `quasi_identifier_combinations.py` module the plan specified does not exist, so India-side quasi-identifier coverage is absent.
-
-### 22. File-format generators: 5 of 12 built
+### 20. File-format generators: 5 of 12 built
 
 Built: `xlsx_gen.py`, `dicom_header_gen.py`, `fhir_gen.py`, `eml_gen.py`, `hl7v2_gen.py` (all in `generators/file_formats/`).
 
 Not built: `csv_gen.py`, `pdf_gen.py`, `docx_gen.py`, `cda_gen.py` (HL7 CDA), `exif_gen.py`, `parquet_gen.py`, `sqlite_gen.py`. Any benchmark claim about PDF-, DOCX-, CSV-, CDA-, EXIF-, Parquet-, or SQLite-embedded PHI detection is out of scope until these exist.
 
-### 23. Legacy v1.0.1 corpus import (CLAUDE.md Phase 1) not done
+### 21. Legacy v1.0.1 corpus import (CLAUDE.md Phase 1) not done
 
 `corpus/legacy_v1.0.1/` does not exist in this repository. The prior 5,942-record / 1,990-gold-span corpus referenced in `CLAUDE.md` has not been imported or reconciled against the current taxonomy.
 

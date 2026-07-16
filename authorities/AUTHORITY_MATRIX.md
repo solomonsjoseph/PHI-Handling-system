@@ -1,77 +1,58 @@
 # Consolidated Authority Matrix
 
+> **Scope: USA/HIPAA ONLY.** Non-USA jurisdictions have been removed from this repository and will be reintroduced one at a time.
+
 **Document version:** 2.0
 **Build date:** 2026-06-11
 **Maintainer:** See LICENSE and CONTRIBUTING.md
 
-This matrix is the single source of truth for IRB review. Every identifier category, every generator, every edge case in this repository traces to a primary legal or research source. IRB reviewers reading this document should be able to verify corpus coverage at a glance and audit every claim against its citation.
+This matrix is the USA/HIPAA authority source of truth for IRB review. Other jurisdictions are deferred and intentionally out of scope for now.
 
 ## Table A — Identifier categories mapped to primary authorities
 
-### Direct identifiers (must remove under US Safe Harbor + DPDPA Second Schedule)
+### Direct identifiers (must remove under US Safe Harbor)
 
-| # | Identifier category | HIPAA 164.514(b)(2)(i) | GDPR | DPDPA Rule 14 | ICMR 2017 | SPDI Rule 3 | DICOM PS3.15 | FHIR R4 Patient | Presidio | AWS Comprehend |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | Patient name | (A) Names | Art. 4(1) personal data | implicit | 2.3.5 | - | (0010,0010), (0010,1001), (0010,1005) | Patient.name | PERSON | NAME |
-| 2 | Provider/physician name | (A) Names (scope: "workforce") | Art. 4(1) personal data | Rule 14 licence | 2.3.1 | - | (0008,0090), (0008,1048), (0008,1050), (0008,1060), (0008,1070) | Practitioner.name | PERSON | NAME |
-| 3 | Household/relative name | (A) Names (explicit household scope) | Art. 4(1) personal data | implicit | 2.3.1 | - | - | Patient.contact.name, RelatedPerson.name | PERSON | NAME |
-| 4 | Street address (full) | (B) Geographic subdivisions smaller than State | Art. 4(1) personal data | implicit | 2.3.1 | - | (0010,1040) | Patient.address.line | LOCATION | ADDRESS |
-| 5 | City | (B) ... except ZIP3 permitted | Art. 4(1) personal data | implicit | 2.3.1 | - | (0010,1040) | Patient.address.city | LOCATION | ADDRESS |
-| 6 | State (US) / State (IN) | Permitted under (B) | Art. 4(1) personal data | Rule 14 | - | - | - | Patient.address.state | LOCATION | ADDRESS |
-| 7 | ZIP code (full 5/9 digit) | (B) except ZIP3 | CONFLICT: ZIP | - | - | - | - | Patient.address.postalCode | LOCATION | ADDRESS |
-| 8 | ZIP3 (restricted 17) | (B) — must be "000" if ≤20,000 pop | CONFLICT: ZIP | - | - | - | - | - | - | - |
-| 9 | PIN code (India) | - | CONFLICT: ZIP | Rule 14 (via address) | - | - | - | Patient.address.postalCode | LOCATION | ADDRESS |
-| 10 | Birth date | (C) All elements of dates except year | CONFLICT: dates | Rule 14 (identifier if linking) | 2.3.1 | - | (0010,0030) | Patient.birthDate | DATE_TIME | DATE |
-| 11 | Admission date | (C) | CONFLICT: dates | - | - | - | (0008,0020) | Encounter.period.start | DATE_TIME | DATE |
-| 12 | Discharge date | (C) | CONFLICT: dates | - | - | - | (0008,0022) | Encounter.period.end | DATE_TIME | DATE |
-| 13 | Date of death | (C) | CONFLICT: dates | - | - | - | (0040,A023) | Patient.deceasedDateTime | DATE_TIME | DATE |
-| 14 | Age over 89 | (C) aggregate to "90+" | Art. 4(1) personal data | - | - | - | (0010,1010) | Patient.birthDate (computed) | - | AGE |
-| 15 | Telephone number | (D) | Art. 4(1) personal data | Rule 14 (mobile number) | - | - | (0008,0094), (0010,2154) | Patient.telecom (phone) | PHONE_NUMBER | PHONE_OR_FAX |
-| 16 | Fax number | (E) | Art. 4(1) personal data | - | - | - | (0008,0095) | Patient.telecom (fax) | (not distinct) | PHONE_OR_FAX |
-| 17 | Pager number | (R) "any other" | Art. 4(1) personal data | - | - | - | - | Patient.telecom (pager) | - | PHONE_OR_FAX |
-| 18 | Email address | (F) | Art. 4(1) personal data | Rule 14 (email address) | - | - | - | Patient.telecom (email) | EMAIL_ADDRESS | EMAIL |
-| 19 | Social Security Number (US) | (G) | Art. 4(1) personal data | - | - | - | (0010,0020) context | Patient.identifier [SSN] | US_SSN | ID |
-| 20 | Medical record number (MRN) | (H) | Art. 4(1) personal data | - | 2.3.5 | 5 (medical record) | (0010,0020) | Patient.identifier [MR] | (not covered) | ID |
-| 21 | Health plan beneficiary number | (I) | Art. 4(1) personal data | - | - | - | - | Patient.identifier [NIIP] | US_MBI | ID |
-| 22 | Account number | (J) | Art. 4(1) personal data | Rule 14 (customer ID) | - | 2 (financial) | (0010,2200) | Patient.identifier | US_BANK_NUMBER | ID |
-| 23 | Credit/debit card | (R) | Art. 4(1) personal data | - | - | 2 (financial) | - | - | CREDIT_CARD | - |
-| 24 | Bank account number | (R) | Art. 4(1) personal data | - | - | 2 (financial) | - | Patient.identifier | US_BANK_NUMBER, IBAN_CODE | - |
-| 25 | Certificate/license number | (K) | Art. 4(1) personal data | Rule 14 (licence number) | - | - | - | Patient.identifier [DL] | US_DRIVER_LICENSE | ID |
-| 26 | Medical license (provider) | (K) | Art. 4(1) personal data | Rule 14 | 4.5 | - | - | Practitioner.qualification | MEDICAL_LICENSE | ID |
-| 27 | Driver's license | (K) | Art. 4(1) personal data | Rule 14 | - | - | - | Patient.identifier [DL] | US_DRIVER_LICENSE | ID |
-| 28 | Passport number (US) | (K) | Art. 4(1) personal data | - | - | - | - | Patient.identifier [PPN] | US_PASSPORT | ID |
-| 29 | Passport number (IN) | (K) | Art. 4(1) personal data | - | - | - | - | Patient.identifier [PPN] | IN_PASSPORT | ID |
-| 30 | Vehicle identifier + plate | (L) | Art. 4(1) personal data | - | - | - | - | - | IN_VEHICLE_REGISTRATION, UK_VEHICLE_REGISTRATION, NG_VEHICLE_REGISTRATION | ID |
-| 31 | VIN (17 char) | (L) | Art. 4(1) personal data | - | - | - | - | - | (not covered) | ID |
-| 32 | Device identifier | (M) | Art. 4(1) personal data | - | - | - | (0018,1000), (0018,1002), (0018,1004) | Device.identifier | (not covered) | ID |
-| 33 | Web URL | (N) | Art. 4(1) personal data | - | - | - | - | meta.source | URL | URL |
-| 34 | IP address | (O) | Art. 4(1) personal data | - | - | - | - | - | IP_ADDRESS | (not covered) |
-| 35 | MAC address | (R) | Art. 4(1) personal data | - | - | - | - | - | MAC_ADDRESS | - |
-| 36 | Biometric identifier (fingerprint) | (P) | Art. 4(14) biometric data | - | - | 6 (biometric) | (0018,1148) | - | (not covered) | ID |
-| 37 | Biometric identifier (voice print) | (P) | Art. 4(14) biometric data | - | - | 6 (biometric) | - | - | (not covered) | ID |
-| 38 | Biometric identifier (retinal/iris) | (P) | Art. 4(14) biometric data | - | - | 6 (biometric) | - | - | (not covered) | ID |
-| 39 | Biometric identifier (DNA) | (P) | Art. 4(13) genetic data | - | - | 6 (biometric) | - | - | (not covered) | ID |
-| 40 | Full-face photograph | (Q) | Art. 9(1) special category | - | 2.3.3 | - | Burned-in pixel + (0008,1140) | Patient.photo, DocumentReference.content | (image-redactor) | (not covered) |
-| 41 | Comparable full-body image | (Q) | Art. 9(1) special category | - | 2.3.3 | - | Burned-in pixel | Patient.photo | (image-redactor) | - |
-| 42 | Any unique identifying code | (R) | Art. 9 conflict: pseudonymous | - | - | - | - | any id | (not covered) | ID |
-
-### India-specific identifiers (DPDPA + SPDI + ICMR)
-
-| # | Identifier category | Authority | Format | Coverage |
-|---|---|---|---|---|
-| 43 | Aadhaar number (12 digits) | UIDAI Act 2016 + DPDPA | 12 digit + Verhoeff checksum | IN_AADHAAR (Presidio), custom |
-| 44 | PAN (Permanent Account Number) | Income Tax Act 1961 | 5 letters + 4 digits + 1 letter | IN_PAN (Presidio), custom |
-| 45 | ABHA / ABHA Address | ABDM HDMP 2020 | 14 digit + checksum OR user@abdm | custom required |
-| 46 | CTRI registration ID | ICMR 3.7 | CTRI/YYYY/MM/NNNNNN | custom required |
-| 47 | Driver's license (state-specific) | Motor Vehicles Act 1988 | State code + DD + year + 7 digit | custom required per state |
-| 48 | Voter ID (EPIC) | Representation of the People Act 1950 | 3 letters + 7 digits | IN_VOTER (Presidio) |
-| 49 | Ration card (state-specific) | National Food Security Act 2013 | 29 state-specific formats | custom required per state |
-| 50 | UAN (Universal Account Number, EPF) | EPF Act 1952 | 12 digit | custom required |
-| 51 | ESI number (Employees' State Insurance) | ESI Act 1948 | 10 digit | custom required |
-| 52 | CGHS beneficiary number | CGHS Rules 2014 | 7 digit | custom required |
-| 53 | BPL card number | state-specific | varies | custom required |
-| 54 | GSTIN (India Goods and Services Tax) | CGST Act 2017 | 15 char, state 01-37 + PAN + entity | IN_GSTIN (Presidio) |
-| 55 | Vehicle registration (IN) | Motor Vehicles Act 1988 | State code + RTO + series + number | IN_VEHICLE_REGISTRATION (Presidio) |
+| # | Identifier category | HIPAA 164.514(b)(2)(i) | DICOM PS3.15 | FHIR R4 Patient | Presidio | AWS Comprehend |
+|---|---|---|---|---|---|---|
+| 1 | Patient name | (A) Names | (0010,0010), (0010,1001), (0010,1005) | Patient.name | PERSON | NAME |
+| 2 | Provider/physician name | (A) Names (scope: "workforce") | (0008,0090), (0008,1048), (0008,1050), (0008,1060), (0008,1070) | Practitioner.name | PERSON | NAME |
+| 3 | Household/relative name | (A) Names (explicit household scope) | - | Patient.contact.name, RelatedPerson.name | PERSON | NAME |
+| 4 | Street address (full) | (B) Geographic subdivisions smaller than State | (0010,1040) | Patient.address.line | LOCATION | ADDRESS |
+| 5 | City | (B) ... except ZIP3 permitted | (0010,1040) | Patient.address.city | LOCATION | ADDRESS |
+| 6 | State (US) | Permitted under (B) | - | Patient.address.state | LOCATION | ADDRESS |
+| 7 | ZIP code (full 5/9 digit) | (B) except ZIP3 | - | Patient.address.postalCode | LOCATION | ADDRESS |
+| 8 | ZIP3 (restricted 17) | (B) — must be "000" if ≤20,000 pop | - | - | - | - |
+| 10 | Birth date | (C) All elements of dates except year | (0010,0030) | Patient.birthDate | DATE_TIME | DATE |
+| 11 | Admission date | (C) | (0008,0020) | Encounter.period.start | DATE_TIME | DATE |
+| 12 | Discharge date | (C) | (0008,0022) | Encounter.period.end | DATE_TIME | DATE |
+| 13 | Date of death | (C) | (0040,A023) | Patient.deceasedDateTime | DATE_TIME | DATE |
+| 14 | Age over 89 | (C) aggregate to "90+" | (0010,1010) | Patient.birthDate (computed) | - | AGE |
+| 15 | Telephone number | (D) | (0008,0094), (0010,2154) | Patient.telecom (phone) | PHONE_NUMBER | PHONE_OR_FAX |
+| 16 | Fax number | (E) | (0008,0095) | Patient.telecom (fax) | (not distinct) | PHONE_OR_FAX |
+| 17 | Pager number | (R) "any other" | - | Patient.telecom (pager) | - | PHONE_OR_FAX |
+| 18 | Email address | (F) | - | Patient.telecom (email) | EMAIL_ADDRESS | EMAIL |
+| 19 | Social Security Number (US) | (G) | (0010,0020) context | Patient.identifier [SSN] | US_SSN | ID |
+| 20 | Medical record number (MRN) | (H) | (0010,0020) | Patient.identifier [MR] | (not covered) | ID |
+| 21 | Health plan beneficiary number | (I) | - | Patient.identifier [NIIP] | US_MBI | ID |
+| 22 | Account number | (J) | (0010,2200) | Patient.identifier | US_BANK_NUMBER | ID |
+| 23 | Credit/debit card | (R) | - | - | CREDIT_CARD | - |
+| 24 | Bank account number | (R) | - | Patient.identifier | US_BANK_NUMBER, IBAN_CODE | - |
+| 25 | Certificate/license number | (K) | - | Patient.identifier [DL] | US_DRIVER_LICENSE | ID |
+| 26 | Medical license (provider) | (K) | - | Practitioner.qualification | MEDICAL_LICENSE | ID |
+| 27 | Driver's license | (K) | - | Patient.identifier [DL] | US_DRIVER_LICENSE | ID |
+| 28 | Passport number (US) | (K) | - | Patient.identifier [PPN] | US_PASSPORT | ID |
+| 31 | VIN (17 char) | (L) | - | - | (not covered) | ID |
+| 32 | Device identifier | (M) | (0018,1000), (0018,1002), (0018,1004) | Device.identifier | (not covered) | ID |
+| 33 | Web URL | (N) | - | meta.source | URL | URL |
+| 34 | IP address | (O) | - | - | IP_ADDRESS | (not covered) |
+| 35 | MAC address | (R) | - | - | MAC_ADDRESS | - |
+| 36 | Biometric identifier (fingerprint) | (P) | (0018,1148) | - | (not covered) | ID |
+| 37 | Biometric identifier (voice print) | (P) | - | - | (not covered) | ID |
+| 38 | Biometric identifier (retinal/iris) | (P) | - | - | (not covered) | ID |
+| 39 | Biometric identifier (DNA) | (P) | - | - | (not covered) | ID |
+| 40 | Full-face photograph | (Q) | Burned-in pixel + (0008,1140) | Patient.photo, DocumentReference.content | (image-redactor) | (not covered) |
+| 41 | Comparable full-body image | (Q) | Burned-in pixel | Patient.photo | (image-redactor) | - |
+| 42 | Any unique identifying code | (R) | - | any id | (not covered) | ID |
 
 ### Quasi-identifiers and combination attacks (HIPAA 164.514(b)(2)(ii) "no actual knowledge")
 
@@ -112,24 +93,6 @@ Forbidden: hash of SSN, hash of DOB+name, published algorithm
 
 ### Additional jurisdiction coverage
 
-This table extends the corpus beyond the US + India + EU core to national health and identity identifiers in additional jurisdictions. Each country-specific identifier is structurally separated in the corpus layer it belongs to, never mixed across jurisdictions. The China Resident Identity Card row is marked STRUCTURALLY SEPARATE: it is held in an isolated corpus partition and never co-mingled with other jurisdictions' records, consistent with PIPL cross-border transfer restrictions.
-
-| # | Identifier | HIPAA | GDPR | DPDPA | Canada (PIPEDA/PHIPA) | UK (NHS) | Australia | Singapore | Japan | Brazil | China (PIPL) |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | NHS Number (10-digit, UK) | (R) any unique code | Art. 4(1) personal data | - | - | NHS Number (Data Security and Protection Toolkit; modulus-11 checksum) | - | - | - | - | - |
-| 2 | Social Insurance Number (SIN, Canada) | (R) | Art. 4(1) personal data | - | PIPEDA personal info; Luhn checksum | - | - | - | - | - | - |
-| 3 | Ontario OHIP card number | (R) | Art. 4(1) personal data | - | PHIPA personal health info (10-digit + 2-letter version) | - | - | - | - | - | - |
-| 4 | Alberta AHCIP number | (R) | Art. 4(1) personal data | - | PHIPA-equivalent (Alberta HIA); 9-digit | - | - | - | - | - | - |
-| 5 | BC CareCard / Personal Health Number | (R) | Art. 4(1) personal data | - | BC E-Health/FIPPA; 10-digit PHN | - | - | - | - | - | - |
-| 6 | AU Medicare number | (R) | Art. 4(1) personal data | - | - | - | Privacy Act 1988 + My Health Records Act; 10-digit + IRN | - | - | - | - |
-| 7 | AU DVA (Dept Veterans' Affairs) file number | (R) | Art. 4(1) personal data | - | - | - | Privacy Act 1988; alpha-prefix + digits | - | - | - | - |
-| 8 | AU My Health Record ID (IHI) | (R) | Art. 4(1) personal data | - | - | - | Healthcare Identifiers Act 2010; 16-digit IHI | - | - | - | - |
-| 9 | Singapore NRIC / FIN | (R) | Art. 4(1) personal data | - | - | - | - | PDPA 2012; S/T/F/G/M prefix + 7 digits + checksum letter | - | - | - |
-| 10 | Japan My Number (Individual Number) | (R) | Art. 4(1) personal data | - | - | - | - | - | APPI + My Number Act; 12-digit with check digit | - | - |
-| 11 | Brazil CPF | (R) | Art. 4(1) personal data | - | - | - | - | - | - | LGPD; 11-digit (NNN.NNN.NNN-NN) with 2 check digits | - |
-| 12 | Brazil RG (Registro Geral) | (R) | Art. 4(1) personal data | - | - | - | - | - | - | LGPD; state-issued, format varies | - |
-| 13 | Brazil CNH (driver license) | (R) | Art. 4(1) personal data | - | - | - | - | - | - | LGPD; 11-digit registration number | - |
-| 14 | China Resident Identity Card (18-digit) | (R) | Art. 4(1) personal data | - | - | - | - | - | - | - | PIPL sensitive personal information; 18-digit (GB 11643-1999) with check digit. STRUCTURALLY SEPARATE |
 
 ## Table B — Legal authority citation list
 
@@ -147,41 +110,10 @@ This table extends the corpus beyond the US + India + EU core to national health
 | 2013 Omnibus Final Rule | 78 FR 5700 | GINA + HITECH implementation |
 | Common Rule | 45 CFR 46 (2018 revision) | Human subjects research |
 
-### India
-
-| Authority | Citation | Scope |
-|---|---|---|
-| DPDPA 2023 | Act 22 of 2023 | Digital Personal Data Protection |
-| DPDP Rules 2025 | G.S.R. 846(E), Gazette 2025-11-13 | Implementation rules |
-| DPDP Rules Second Schedule | Rule 16 + Second Schedule | Research/archival/statistical exemption |
-| DPDP Rule 6 | Security safeguards | 1-year log retention minimum |
-| DPDP Rule 7 | Breach notification | 72-hour reporting |
-| DPDP Rule 13(3) | Algorithmic due diligence | SDF AI/ML audits |
-| DPDP Fourth Schedule Part A | Pediatric exemption | Clinical/educational |
-| IT Act 2000 | Act 21 of 2000 | Foundational IT law |
-| SPDI Rules 2011 | G.S.R. 313(E) 2011-04-11 | 8 categories of SPDI |
-| Section 43A IT Act | Civil liability | Damages for negligence |
-| Section 72A IT Act | Criminal liability | 3 years + ₹5L fine |
-| ICMR 2017 | ISBN 978-81-910091-94 | National ethics guidelines |
-| ICMR 1.1.5 | Privacy principle | Right to life supersedes privacy |
-| ICMR 2.1 Table 2.1 | 4-tier risk categorization | EC review type |
-| ICMR 2.3.5 | Coding/anonymization mandate | Research with stored samples |
-| ICMR 3.3.2 | Data ownership | Institutions are custodians |
-| ICMR 3.8.3 | HMSC approval | International collaboration |
-| ICMR 4.8 Table 4.2 | Review types | Exempt/expedited/full |
-| Puttaswamy v Union of India | (2017) 10 SCC 1 | Right to privacy as fundamental right |
-
 ### European Union (cross-reference)
 
 | Authority | Citation | Relevance |
 |---|---|---|
-| GDPR | EU 2016/679 | Data protection regulation |
-| GDPR Article 4(1) | Definition of personal data | Identifiability test |
-| GDPR Recital 26 | Anonymous data | "No longer identifiable" |
-| GDPR Recital 30 | Online identifiers | IP addresses as PII |
-| GDPR Recital 75 | Risks to rights | Pseudonymization guidance |
-| GDPR Article 9 | Special categories | Health data |
-| GDPR Article 89 | Research exemption | Scientific/historical research |
 
 ### Standards and frameworks
 
@@ -232,8 +164,6 @@ This table extends the corpus beyond the US + India + EU core to national health
 | Biometric | ✗ | ✓ (ID) | ✗ | ✗ | ✓ |
 | Full-face photo (image redactor) | partial | ✗ | ✗ | partial | ✓ |
 | Profession | ✗ | ✓ | partial | ✓ | ✓ |
-| Aadhaar (IN) | ✓ (IN_AADHAAR) | ✗ | ✗ | ✗ | ✓ |
-| PAN (IN) | ✓ (IN_PAN) | ✗ | ✗ | ✗ | ✓ |
 | ABHA (IN) | ✗ | ✗ | ✗ | ✗ | ✓ |
 | CTRI ID (IN) | ✗ | ✗ | ✗ | ✗ | ✓ |
 | UAN, ESI, CGHS, BPL (IN) | ✗ | ✗ | ✗ | ✗ | ✓ |
@@ -242,7 +172,6 @@ This table extends the corpus beyond the US + India + EU core to national health
 | Quasi-identifier combos | ✗ | ✗ | ✗ | partial | ✓ |
 | Limited Data Set tier | ✗ | ✗ | ✗ | ✗ | ✓ |
 | Re-ID code derivation check | ✗ | ✗ | ✗ | ✗ | ✓ |
-| DPDPA Second Schedule | ✗ | ✗ | ✗ | ✗ | ✓ |
 | Fundraising context | ✗ | ✗ | ✗ | ✗ | ✓ |
 
 ## Table D — File format coverage
@@ -326,9 +255,9 @@ This table categorizes each identifier by the detection regime required. Corpus 
 | 25 | STATE | contextual_ner_required | State names/abbreviations require context |
 | 26 | STREET | contextual_ner_required | Street addresses require NER to distinguish from context |
 | 27 | USERNAME | contextual_ner_required | Username context varies |
-| 28 | ZIP | contextual_ner_required + CONFLICT | ZIP is PHI under HIPAA; contextual NER required; CONFLICT with GDPR |
+| 28 | ZIP | contextual_ner_required + CONFLICT | ZIP is PHI under HIPAA; contextual NER required; cross-regime conflict (out of scope) |
 
-Conflict cases: ZIP codes (row 28) are PHI under HIPAA Safe Harbor (B) but are not enumerated as personal data under GDPR in isolation without additional linkage. Corpus records in layer 'conflict_cases' tag these records with detection_regime: conflict_case to distinguish them from pure rule_applicable or contextual_ner_required cases.
+ZIP codes (row 28) are PHI under HIPAA Safe Harbor (B).
 
 ## How this matrix is used
 

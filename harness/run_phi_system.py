@@ -9,8 +9,8 @@ system exclusively through its public entry points: ``intake_add`` +
 acceptance check for the corpus/system split).
 
 CLI:
-    python -m harness.run_phi_system --study PaperDemoIN --jurisdiction in \\
-        --seed 42 --n-subjects 60 --out-dir benchmarks/results/phi-system-in
+    python -m harness.run_phi_system --study PaperDemoUS --jurisdiction us \\
+        --seed 42 --n-subjects 60 --out-dir benchmarks/results/phi-system-us
 
 Steps:
     a. Generate the tabular study (Phase-2 generator), write it as JSONL into
@@ -111,7 +111,7 @@ _RID_RE = re.compile(r"^RID_[A-Z0-9]{1,16}_[a-p]{12}$")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--study", required=True, help="STUDY_NAME (plain folder name)")
-    parser.add_argument("--jurisdiction", required=True, choices=["in", "us"])
+    parser.add_argument("--jurisdiction", required=True, choices=["us"])
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n-subjects", type=int, default=60)
     parser.add_argument("--out-dir", required=True)
@@ -122,12 +122,12 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["STUDY_NAME"] = args.study
 
     import phi_engine.config.config as config
-    from generators.study_tabular import IndiaStudyTabularGenerator, USStudyTabularGenerator
+    from generators.study_tabular import USStudyTabularGenerator
     from phi_engine.pipeline.intake import intake_add
     from phi_engine.pipeline.run import run_pipeline
 
-    jurisdiction_label = "INDIA" if args.jurisdiction == "in" else "USA"
-    gen_cls = IndiaStudyTabularGenerator if args.jurisdiction == "in" else USStudyTabularGenerator
+    jurisdiction_label = "USA"
+    gen_cls = USStudyTabularGenerator
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

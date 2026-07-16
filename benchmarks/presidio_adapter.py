@@ -97,12 +97,6 @@ PRESIDIO_TO_CORPUS: Dict[str, FrozenSet[str]] = {
     "US_DRIVER_LICENSE":   frozenset({"DRIVERS_LICENSE"}),
     "MEDICAL_LICENSE":     frozenset({"NPI", "MEDICAL_LICENSE_NUMBER"}),
     "US_PASSPORT":         frozenset({"PASSPORT_US"}),
-    "IN_AADHAAR":          frozenset({"IN_AADHAAR"}),
-    "IN_PAN":              frozenset({"IN_PAN"}),
-    "IN_PASSPORT":         frozenset({"IN_PASSPORT"}),
-    "IN_VOTER":            frozenset({"IN_VOTER"}),
-    "IN_GSTIN":            frozenset({"IN_GSTIN"}),
-    "IN_VEHICLE_REGISTRATION": frozenset({"LICENSE_PLATE", "IN_VEHICLE_PLATE"}),
     "URL":                 frozenset({"URL"}),
     "IP_ADDRESS":          frozenset({"IP_V4", "IP_V6"}),
     "MAC_ADDRESS":         frozenset({"MAC_ADDRESS"}),
@@ -157,20 +151,6 @@ PRESIDIO_GAP_ENTITY_TYPES: FrozenSet[str] = frozenset({
     "LDS_DISCLOSURE_CODE",
     "AUDIT_REQUESTER",
     "SUBPOENA_REFERENCE",
-    # DPDPA / Indian identifiers (not in Presidio predefined set)
-    "ABHA_NUMBER",
-    "ABHA_ADDRESS",
-    "CTRI_ID",
-    "IN_DRIVING_LICENSE_STATE",
-    "IN_RATION_CARD",
-    "IN_UAN",
-    "IN_ESI",
-    "IN_CGHS",
-    "IN_BPL",
-    "DPDPA_CUSTOMER_ID",
-    "DPDPA_ACQUISITION_FORM",
-    "DPDPA_APP_REF",
-    "DPDPA_ENROLMENT_ID",
 })
 
 

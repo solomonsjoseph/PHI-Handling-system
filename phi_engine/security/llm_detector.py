@@ -26,9 +26,6 @@ HIPAA Safe Harbor categories (45 CFR 164.514(b)(2)(i)):
   H=MRN  I=HealthPlan  J=Account  K=Certificate/License  L=Vehicle
   M=Device  N=URL  O=IP  P=Biometric  Q=Photo  R=OtherUnique
 
-India identifiers: Aadhaar(12-digit), PAN(10-char), ABHA, Voter-ID,
-  UAN, ESI, CGHS, Driving-License, GSTIN, Ration-Card
-
 De-identification actions:
   drop | pseudonymize | jitter_date | generalize | cap | keep | flag_review"""
 
@@ -138,7 +135,7 @@ def classify_headers(
 
     Args:
         headers: Column header names (no data values).
-        jurisdiction: Governing regulation (e.g. "HIPAA", "DPDPA", "GDPR").
+        jurisdiction: Governing regulation (e.g. "HIPAA").
         review_queue_path: Path to append uncertain cases for human review.
             Defaults to ``config.STUDY_AUDIT_DIR/human_review/llm_uncertain.jsonl``.
 

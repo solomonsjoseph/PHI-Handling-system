@@ -2,7 +2,6 @@
 # Copy and customize per study; the study-setup wizard writes a completed file.
 jurisdictions:
   - USA
-  - INDIA
 data_as_of: "YYYY-MM-DD"
 # Default pinned_only: offline, deterministic, no network at run time.
 # Operators wanting live official-rule refresh set online_preferred here

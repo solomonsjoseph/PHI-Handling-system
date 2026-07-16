@@ -204,11 +204,6 @@ def _leaked_gold_values(ledger_path: Path, published_dir: Path) -> list[str]:
     return leaked
 
 
-def test_india_phi_system_smoke_scrubs_published_outputs(tmp_phi_system_study, tmp_path):
-    run = tmp_phi_system_study("in", tmp_path)
-
-    _assert_phi_system_contract(run)
-
 
 def test_us_phi_system_smoke_scrubs_published_outputs(tmp_phi_system_study, tmp_path):
     run = tmp_phi_system_study("us", tmp_path)

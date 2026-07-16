@@ -1,16 +1,17 @@
 # Standalone PHI Handling System — Audit Report (2026-07-07)
 
+> **Scope banner (current):** Multi-jurisdiction content in this audit is **historical / out of scope**. Active repo scope is **USA-only**. Generators under `generators/in|eu|br|au|ug`, non-USA rulebooks/corpus slices, and `docs/JURISDICTION_EVIDENCE_REPORT_IN.md` are removed. Cite `docs/JURISDICTION_EVIDENCE_REPORT_US.md` for live USA evidence; do not treat India/PaperDemoIN paths as present artifacts.
+
 Method: every claim below is read directly from the working tree this
 session (commit `b454b9a` plus uncommitted working-tree changes). Baseline:
 `.venv/bin/python -m pytest -q` → **331 passed, 0 failed** (27.71s), matching
 the `PAPER_EVIDENCE_PACK.md:71-73` baseline. Smoke commands
-(`harness.run_phi_system --study PaperDemoIN/US --jurisdiction in/us --seed 42
---n-subjects 60`) both exit 0: `redaction_recall` 0.9917 (IN) / 0.9958 (US),
-`residual ok=True`, `human_review_rate=0.0`. These two recall figures are
-NOT a defect — `docs/JURISDICTION_EVIDENCE_REPORT_IN.md`/`_US.md` §5.2
-explain the residual as date cells whose per-subject SANT jitter offset
-computed to exactly zero this seed (a disclosed ~1/61 probability event,
-confirmed identical at the held-out seed 1337 run), not an unredacted leak.
+(`harness.run_phi_system --study PaperDemoUS --jurisdiction us --seed 42
+--n-subjects 60`) exit 0: `redaction_recall` 0.9958 (US),
+`residual ok=True`, `human_review_rate=0.0`. ~~PaperDemoIN / India recall 0.9917
+and `docs/JURISDICTION_EVIDENCE_REPORT_IN.md` are removed from the active tree.~~
+The residual on USA is the disclosed ~1/61 zero-offset SANT date-jitter event
+(see `docs/JURISDICTION_EVIDENCE_REPORT_US.md` §4.2 / §5), not an unredacted leak.
 
 ## Implemented (live, working)
 
@@ -49,7 +50,7 @@ confirmed identical at the held-out seed 1337 run), not an unredacted leak.
 | Child skills the orchestrator invokes are archived | `dictionary-to-llm-source`, `dataset-deduplication`, `dataset-to-llm-source` (publish supervisor) exist only under `archive/plugin-setup-and-dictionary/` — deliberately archived by the previous plan (`docs/IMPLEMENTATION_PLAN.md` Part 3.1). |
 | Duplicated engine copies exist and can silently drift | `phi_engine/skills/phi-classification/scripts/phi_review.py` is byte-identical to `phi_engine/security/phi_review.py` TODAY, but nothing imports it (`phi-classification/scripts/run.py` imports `scripts.skills.extract_to_llm_source`, not the local copy) — verified via `grep -n "^import phi_review\|^import phi_scrub\|^import phi_gate\|from phi_review import\|from phi_scrub import\|from phi_gate import" phi_engine tests harness` → no matches anywhere. `phi_engine/skills/phi-scrubbing/scripts/phi_scrub.py` has ALREADY drifted from `phi_engine/security/phi_scrub.py` (one-line `datetime` import diff at line 129-130) despite also being dead code (`phi-scrubbing/scripts/run.py:39` imports the real `phi_engine.security.phi_scrub`, not the local file) — proof the duplication is a live drift hazard even while unused. `phi_engine/skills/phi-scrubbing/scripts/phi_gate.py` is a third unreferenced copy. |
 | `phi_alignment.py` imports an absent module | `phi_engine/security/phi_alignment.py:276-305` references `scripts.ai_assistant.llm_adapter`, which does not exist in this repo — the opt-in AI header-alignment path (`review_form_headers(..., aligner=...)`) cannot construct a working aligner without it. Not exercised by any live call site (aligner defaults to `None`), so it is dormant rather than crashing, but it is unusable as shipped. |
-| `run_phi_system.py` is corpus-coupled | Line 196: `from generators.study_tabular import IndiaStudyTabularGenerator, USStudyTabularGenerator` inside the PHI system's own execution path. Its measurement section is hardcoded against that generator's exact form names (`1A_Screening.jsonl`, `2_Demographics.jsonl`, `3_Labs.jsonl` at lines 455–463) and column set (`id_columns_by_form`/`date_columns_by_form`, 456-463). Real (non-synthetic) study data cannot be substituted without editing this file. Jurisdiction is hardcoded to `choices=["in", "us"]` (line 185) even though rulebooks/generators for `eu/br/au/ug` exist on the corpus side. |
+| `run_phi_system.py` is corpus-coupled | Line 196: `from generators.study_tabular import ... USStudyTabularGenerator` inside the PHI system's own execution path. Its measurement section is hardcoded against that generator's exact form names (`1A_Screening.jsonl`, `2_Demographics.jsonl`, `3_Labs.jsonl` at lines 455–463) and column set (`id_columns_by_form`/`date_columns_by_form`, 456-463). Real (non-synthetic) study data cannot be substituted without editing this file. ~~Historical note: IndiaStudyTabularGenerator / `in` jurisdiction and eu/br/au/ug generators were present at audit time; they are removed under current USA-only scope.~~ |
 | `header-extraction` skill is standalone-safe internally but unreachable | Its `run.py` does not depend on `scripts.skills.*` (self-contained row-1 header reader), but the same `_REPO_ROOT = parents[5]` break above still makes it unrunnable through the normal invocation path, and `invoke_skill()` can never find it (`skills_root()` break). |
 
 ## Carried prior-audit issues (`docs/AUDIT_REPORT_2026-07-06.md`)
@@ -99,38 +100,17 @@ Per `grep -rn "phi_engine.skills\|skills/report-ai\|skill_protocol" phi_engine t
 
 ## Addendum — Phase 7 (value-profiler over-escalation bugfix)
 
-During the Phase 7 evidence re-run, `PaperDemoIN`'s measured `redaction_recall`
-came back as `0.9944` instead of the documented `0.9917` baseline (same seed,
-same key, byte-identical pre-scrub data and scrub-config hash across repeat
-runs) — a real BEHAVIOR CHANGE, not noise. Root cause: `3_Labs.jsonl`'s
-`TBTXDT` column (a genuine specimen-collection date) has no INDIA-jurisdiction
-pinned rule matching it by name, so `phi_review` classifies it `action: keep`
-with `matched_rules: []`. The Phase 5 value profiler's ESCALATION rule
-(`phi_engine/pipeline/run.py`) treated EVERY `keep`-classified header as
-"published raw," so `TBTXDT`'s genuine ISO-date values (100% match on the
-`DATE_ISO` blocking pattern) tripped the value-profile-conflict check and
-force-dropped the column — even though the packaged
-`phi_engine/config/_defaults/phi_scrub.yaml` `date_fields` catch-all pattern
-(`(?:_?DAT\d*$|_DT$|DATE\d*$|_date$)`) already matches `TBTXDT` and would have
-SANT-jittered it correctly. Net effect: no PHI ever leaked (a force-dropped
-column cannot leak), but real clinical data was discarded unnecessarily —
-a utility regression, not a security one, and it inflated `redaction_recall`
-by shrinking the denominator of publishable cells.
-
-Fix: `run_pipeline` now loads the CURRENT effective scrub config
-(`phi_scrub.load_scrub_config(study=study)`) once per run and computes
-`published_raw_headers` per form — a header only counts as "published raw"
-(profiler-escalation-eligible) if NONE of `field_is_keep` / `field_is_date` /
-`field_is_birthdate` / `field_is_id` / `field_is_drop` / `cap_rule_for` /
-`generalize_rule_for` / `band_rule_for` / `field_is_suppress_small_cell`
-already protect it. This is passed into `review_form_headers(...,
-published_raw_headers=...)` and used to gate the ESCALATION rule. Verified:
-`TBTXDT` is now correctly SANT-jittered (same per-subject offset as
-`COLLDAT` in the same row, confirming correct linkage), and
-`redaction_recall` for `PaperDemoIN` is back to `0.9916550764951322` —
-matching the documented `0.9917` pre-refactor baseline exactly (the
-residual is the same disclosed ~1/61 zero-offset date-jitter event, per
-`docs/JURISDICTION_EVIDENCE_REPORT_IN.md` §5.2, NOT a new leak).
+During the Phase 7 evidence re-run, ~~`PaperDemoIN`'s measured `redaction_recall`
+came back as `0.9944` instead of the documented `0.9917` baseline~~
+(historical India path; **artifact and report removed**). Root cause of the
+utility regression on that path: a genuine specimen-collection date column
+with no name-rule match was force-dropped by the value profiler's ESCALATION
+rule even though packaged `date_fields` would have SANT-jittered it. Fix remains
+in the USA pipeline: `run_pipeline` loads the CURRENT effective scrub config
+and computes `published_raw_headers` so only truly unprotected headers are
+profiler-escalation-eligible. Verified on the live USA path via
+`docs/JURISDICTION_EVIDENCE_REPORT_US.md` (`redaction_recall` 0.9958).
+~~India `docs/JURISDICTION_EVIDENCE_REPORT_IN.md` §5.2 citations are no longer live.~~
 
 Regression check: `tests/test_value_profiler.py`'s escalation end-to-end
 test used `SITE_CODE` as its "unexpectedly-named column" fixture header —

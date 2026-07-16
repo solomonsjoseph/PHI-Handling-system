@@ -10,14 +10,12 @@ of information collected in a clinical study" the phi_engine scrub pipeline
 is built to run against (Case Report Form exports), as opposed to narrative
 free text.
 
-Two generator classes, one per pinned rulebook jurisdiction:
-  - :class:`IndiaStudyTabularGenerator` -- DPDPA 2023, DPDP Rules 2025 Rule 14,
-    SPDI Rules 2011 Rule 3, ICMR 2017 s2.3.5.
+USA/HIPAA tabular generator for the pinned rulebook jurisdiction:
   - :class:`USStudyTabularGenerator` -- 45 CFR 164.514(b)(2).
 
 Column contract (binds to ``phi_engine/config/_defaults/phi_scrub.yaml``
 default rules -- verified interactively 2026-07-07, see
-``docs/JURISDICTION_EVIDENCE_REPORT_IN.md`` / ``_US.md`` "Column binding"):
+``docs/JURISDICTION_EVIDENCE_REPORT_US.md`` "Column binding"):
   SUBJID        -> id_fields  (pattern ``^SUBJID$``, label SUBJ) -> pseudonymize
   IC_SCRNNUM    -> id_fields  (pattern ``^I[CS]_SCRNNUM$``, label SCRN) -> pseudonymize
   VISITDAT      -> date_fields (generic ``_?DAT\\d*$`` catch-all) -> jitter_date
@@ -28,9 +26,6 @@ default rules -- verified interactively 2026-07-07, see
   SEX           -> no rule match -> published unchanged (kept clinical variable)
   WEIGHT        -> no rule match -> published unchanged (kept clinical variable)
   CBC_HGB       -> keep_fields (``^CBC_(?!INIT|SIGN)``) -> keep
-  India: AADHAAR_NUM, PAN_NUM, MOBILE_NUM -> drop_fields (packaged defaults).
-         ABHA_NUM -> NOT covered by packaged defaults; requires the per-study
-         addition documented in Step 3.1 (ABDM HDMP 2020 identifier).
   USA:   SSN, MRN, PHONE_NUM, EMAIL -> drop_fields (packaged defaults; no
          per-study addition needed).
 
@@ -51,16 +46,12 @@ from typing import Dict, List
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from generators.common import (
-    AUTH_DPDPA_ACT,
-    AUTH_DPDPA_RULES_14,
     AUTH_HIPAA_SAFE_HARBOR,
-    AUTH_ICMR_CODING,
-    AUTH_SPDI_RULE_3,
     DeterministicGenerator,
 )
 
 # ---------------------------------------------------------------------------
-# CRF form filenames (fixed across both jurisdictions)
+# CRF form filenames (fixed across the USA jurisdiction)
 # ---------------------------------------------------------------------------
 
 FORM_SCREENING = "1A_Screening.jsonl"
@@ -113,13 +104,13 @@ def _rand_upper(rng: random.Random, n: int) -> str:
 
 
 class _StudyTabularGeneratorBase(DeterministicGenerator):
-    """Shared CRF-generation logic for both jurisdictions.
+    """Shared CRF-generation logic for the USA jurisdiction.
 
     Subclasses supply the jurisdiction-specific identifier columns (added to
     the Screening form) and authority citations; the common-column layout
     (SUBJID / IC_SCRNNUM / VISITDAT / IS_BIRTHDAT / AGE / dates / clinical
     kept-columns) and the three deliberate fail-closed edge cases (Step 2.3)
-    are identical across jurisdictions.
+    are fixed for the USA corpus.
     """
 
     jurisdiction: str = ""
@@ -353,40 +344,6 @@ class _StudyTabularGeneratorBase(DeterministicGenerator):
         return lines
 
 
-class IndiaStudyTabularGenerator(_StudyTabularGeneratorBase):
-    """Synthetic India clinical-study CRF tabular generator.
-
-    Authority: DPDPA 2023 (identifier categories), DPDP Rules 2025 Rule 14
-    (identifier categories + data principal rights), SPDI Rules 2011 Rule 3
-    (sensitive personal data), ICMR 2017 Section 2.3.5 (coding of research
-    identifiers).
-    """
-
-    jurisdiction = "INDIA"
-    subj_prefix = "IN"
-
-    AUTHORITY_CITATIONS = [
-        AUTH_DPDPA_ACT,
-        AUTH_DPDPA_RULES_14,
-        AUTH_SPDI_RULE_3,
-        AUTH_ICMR_CODING,
-    ]
-
-    def identifier_column_names(self) -> List[str]:
-        return ["AADHAAR_NUM", "ABHA_NUM", "PAN_NUM", "MOBILE_NUM"]
-
-    def _identifier_columns(self, rng: random.Random) -> Dict[str, str]:
-        aadhaar = _rand_digits(rng, 12)
-        abha = _rand_digits(rng, 14)
-        pan = f"{_rand_upper(rng, 5)}{_rand_digits(rng, 4)}{_rand_upper(rng, 1)}"
-        mobile = str(rng.randint(6, 9)) + _rand_digits(rng, 9)
-        return {
-            "AADHAAR_NUM": aadhaar,
-            "ABHA_NUM": abha,
-            "PAN_NUM": pan,
-            "MOBILE_NUM": mobile,
-        }
-
 
 class USStudyTabularGenerator(_StudyTabularGeneratorBase):
     """Synthetic USA clinical-study CRF tabular generator.
@@ -420,13 +377,12 @@ __all__ = [
     "FORM_SCREENING",
     "FORM_DEMOGRAPHICS",
     "FORM_LABS",
-    "IndiaStudyTabularGenerator",
-    "USStudyTabularGenerator",
+        "USStudyTabularGenerator",
 ]
 
 
 def _write_evidence_corpus(out_dir: Path, seed: int = 42, n_subjects: int = 60) -> None:
-    """CLI helper: write both jurisdictions' output as registry evidence artifacts
+    """CLI helper: write the USA jurisdiction' output as registry evidence artifacts
     (Step 2.6). Deliberately OUTSIDE corpus/: validators.common.corpus_files()
     recursively globs every corpus/**/*.jsonl with no manifest scoping, so any
     file placed under corpus/ is swept into the narrative-record schema
@@ -435,7 +391,7 @@ def _write_evidence_corpus(out_dir: Path, seed: int = 42, n_subjects: int = 60) 
     seeded_generator_specs() -- see module docstring."""
     import json
 
-    for jurisdiction, cls in (("in", IndiaStudyTabularGenerator), ("us", USStudyTabularGenerator)):
+    for jurisdiction, cls in (("us", USStudyTabularGenerator),):
         gen = cls(seed)
         forms = gen.generate_study(n_subjects)
         jdir = out_dir / jurisdiction

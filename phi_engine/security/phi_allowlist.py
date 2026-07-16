@@ -147,26 +147,6 @@ COMMON_FIRST_NAMES: frozenset[str] = frozenset(
         "michael",
         "linda",
         "barbara",
-        # Indian (small seed)
-        "rajesh",
-        "suresh",
-        "ramesh",
-        "mahesh",
-        "sanjay",
-        "anil",
-        "sunil",
-        "vijay",
-        "priya",
-        "pooja",
-        "ananya",
-        "aishwarya",
-        "lakshmi",
-        "saraswati",
-        "gita",
-        "geetha",
-        "babu",
-        "kumar",
-        "raju",
     }
 )
 """Small seed — extend by adding entries to this frozenset."""
@@ -174,20 +154,6 @@ COMMON_FIRST_NAMES: frozenset[str] = frozenset(
 
 COMMON_LAST_NAMES: frozenset[str] = frozenset(
     {
-        # Indian (small seed)
-        "sharma",
-        "verma",
-        "gupta",
-        "kumar",
-        "singh",
-        "patel",
-        "reddy",
-        "naidu",
-        "rao",
-        "iyer",
-        "nair",
-        "menon",
-        "pillai",
         # English (small seed)
         "smith",
         "johnson",

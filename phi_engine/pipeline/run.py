@@ -1,6 +1,6 @@
 """Standalone PHI pipeline driver: organize -> classify -> scrub -> publish.
 
-``python -m phi_engine run --study S --jurisdiction in|us [--workspace W]``
+``python -m phi_engine run --study S --jurisdiction us [--workspace W]``
 
 Steps (mirrors the evidence plan's Phase 2 step 10 a-i):
     a. Re-organize if the intake manifest changed since the last organize.
@@ -106,7 +106,7 @@ from phi_engine.utils.pipeline_lock import (
 
 __all__ = ["PipelineResult", "run_pipeline"]
 
-_JURISDICTION_LABELS = {"in": "INDIA", "us": "USA"}
+_JURISDICTION_LABELS = {"us": "USA"}
 _PENDING_DEPENDENCY_RECOMMENDATIONS_FILENAME = (
     "pending_dependency_recommendations.jsonl"
 )
@@ -997,7 +997,7 @@ def run_pipeline(study: str, jurisdiction: str) -> PipelineResult:
             jurisdiction=jurisdiction,
             run_id=None,
             exit_code=2,
-            message=f"unsupported jurisdiction {jurisdiction!r}; choose 'in' or 'us'",
+            message=f"unsupported jurisdiction {jurisdiction!r}; choose 'us'",
         )
     try:
         # Validate before creating the lock parent or touching mutable study
@@ -1175,7 +1175,7 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
     # per-study overrides already exist from a prior run) so a header's
     # "published raw" status is judged against what the scrub engine will
     # ACTUALLY do, not just its phi_review classification action. Bug found
-    # during Phase 7 evidence re-runs: TBTXDT has no INDIA-specific pinned
+    # during Phase 7 evidence re-runs: TBTXDT has no jurisdiction-specific pinned
     # rule (classifies KEEP), but IS already protected by the packaged
     # defaults' date_fields catch-all pattern -- treating every KEEP header
     # as "published raw" (the old default) force-dropped it as a false

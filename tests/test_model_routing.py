@@ -1566,7 +1566,7 @@ def test_unregistered_official_pair_never_reaches_transport(routing, monkeypatch
     )
     with pytest.raises(routing.ModelResponseError) as exc_info:
         routing.ModelTaskRouter().extract_official_rules(
-            "usa_hipaa_164_514", "INDIA"
+            "usa_hipaa_164_514", "MARS"
         )
     assert exc_info.value.code is routing.ModelFailureCode.BINDING_MISMATCH
 

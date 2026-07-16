@@ -8,13 +8,14 @@ from generators.study_tabular import (
     FORM_DEMOGRAPHICS,
     FORM_LABS,
     FORM_SCREENING,
-    IndiaStudyTabularGenerator,
     USStudyTabularGenerator,
 )
 from phi_engine.security.phi_scrub import load_scrub_config
 
 
-GENERATOR_CLASSES = (IndiaStudyTabularGenerator, USStudyTabularGenerator)
+GENERATOR_CLASSES = (USStudyTabularGenerator,)
+
+
 
 
 @pytest.fixture
@@ -150,24 +151,13 @@ def test_default_scrub_config_leaves_clinical_passthrough_columns_unmatched(pack
 def test_default_scrub_config_binds_jurisdiction_identifier_columns(packaged_scrub_config):
     cfg = packaged_scrub_config
 
-    for name in ("AADHAAR_NUM", "PAN_NUM", "MOBILE_NUM"):
-        assert cfg.field_is_drop(name)
-
-    assert not cfg.field_is_drop("ABHA_NUM")
-
     for name in ("SSN", "MRN", "PHONE_NUM", "EMAIL"):
         assert cfg.field_is_drop(name)
 
 
-@pytest.mark.parametrize(
-    ("generator_cls", "expected_names"),
-    [
-        (IndiaStudyTabularGenerator, ["AADHAAR_NUM", "ABHA_NUM", "PAN_NUM", "MOBILE_NUM"]),
-        (USStudyTabularGenerator, ["SSN", "MRN", "PHONE_NUM", "EMAIL"]),
-    ],
-)
-def test_identifier_column_names_are_present_in_every_screening_row(generator_cls, expected_names):
-    generator = generator_cls(seed=42)
+def test_identifier_column_names_are_present_in_every_screening_row():
+    generator = USStudyTabularGenerator(seed=42)
+    expected_names = ["SSN", "MRN", "PHONE_NUM", "EMAIL"]
     forms = generator.generate_study(n_subjects=8)
 
     assert generator.identifier_column_names() == expected_names

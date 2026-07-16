@@ -378,7 +378,7 @@ def test_preliminary_inputs_use_opaque_header_ids_and_explicit_transforms_withou
                 header=first.headers[0].raw_name,
                 action=Action.CAP,
                 matched_rules=("cap-rule",),
-                jurisdictions=("INDIA",),
+                jurisdictions=("USA",),
                 reasons=("cap",),
             ),
         ),
@@ -387,7 +387,7 @@ def test_preliminary_inputs_use_opaque_header_ids_and_explicit_transforms_withou
                 header=second.headers[0].raw_name,
                 action=Action.GENERALIZE,
                 matched_rules=("generalize-rule",),
-                jurisdictions=("INDIA",),
+                jurisdictions=("USA",),
                 reasons=("generalize",),
             ),
         ),
@@ -475,7 +475,7 @@ def test_effective_config_transforms_are_explicit_even_when_rules_classify_keep(
                 header=header.raw_name,
                 action=Action.KEEP,
                 matched_rules=(),
-                jurisdictions=("INDIA",),
+                jurisdictions=("USA",),
                 reasons=("keep",),
             )
             for header in dataset.headers

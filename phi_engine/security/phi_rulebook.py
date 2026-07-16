@@ -298,7 +298,7 @@ _PROTECTION_PROBES: tuple[str, ...] = (
     "participant_id",
     "visit_date",
     "email",
-    "aadhaar",
+    "ssn",
     "full_name",
     "address",
     "dob",

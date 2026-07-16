@@ -94,7 +94,7 @@ def test_missing_authority_is_detected(tmp_path):
 
 
 def test_bad_jurisdiction_folder_is_detected(tmp_path):
-    path = tmp_path / "in" / "bad.jsonl"
+    path = tmp_path / "xx" / "bad.jsonl"
     _write_jsonl(path, [_record(jurisdiction="us")])
 
     result = validate_jurisdictions(tmp_path)
@@ -103,8 +103,8 @@ def test_bad_jurisdiction_folder_is_detected(tmp_path):
     assert result.issues[0].code == "JURISDICTION_MISMATCH"
 
 
-def test_valid_generated_india_corpus_passes_all_validators(tmp_path):
-    summaries = build_seeded_corpus(seed=42, out_dir=tmp_path, jurisdiction="in")
+def test_valid_generated_us_corpus_passes_all_validators(tmp_path):
+    summaries = build_seeded_corpus(seed=42, out_dir=tmp_path, jurisdiction="us")
     build_manifest(seed=42, summaries=summaries, out_dir=tmp_path)
 
     report = run_validations(tmp_path, tmp_path / "MANIFEST.json")
@@ -114,7 +114,7 @@ def test_valid_generated_india_corpus_passes_all_validators(tmp_path):
 
 
 def test_run_all_validations_cli_fails_bad_corpus_and_writes_output(tmp_path):
-    path = tmp_path / "in" / "bad.jsonl"
+    path = tmp_path / "us" / "bad.jsonl"
     raw_secret = "gmail.com"
     record = _record(
         text=f"Patient Alpha uses {raw_secret} and is marked actual patient.",

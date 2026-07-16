@@ -15,10 +15,9 @@ human-readable ``authorities/*.md`` corpus. It does **not** feed
 ``phi_engine.pipeline.run.run_pipeline``: the runtime rulebook resolves its rules
 and official-source list from ``phi_engine.security.phi_review._PINNED_SOURCES``
 and the closed ``phi_engine.security.official_sources._REGISTRY`` (the single
-source of truth for live extraction). ``OFFICIAL_SOURCES`` below is intentionally
-a SUPERSET (it also covers GDPR/LGPD/AU/UG jurisdictions this authoring corpus
-documents but the runtime engine does not classify), so the two lists serve
-different purposes and are deliberately separate.
+source of truth for live extraction). ``OFFICIAL_SOURCES`` here is scoped to USA
+only (2026-07-16 scope change removed every non-USA jurisdiction from this repo),
+so the two lists are aligned rather than deliberately separate as before.
 """
 
 from __future__ import annotations
@@ -32,22 +31,11 @@ from pathlib import Path
 # Hardcoded official government sources only. Never user-supplied URLs.
 OFFICIAL_SOURCES: dict[str, str] = {
     "HIPAA": "https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164",
-    "GDPR": "https://gdpr-info.eu/art-9-gdpr/",
-    "DPDPA": "https://www.indiacode.nic.in/bitstream/123456789/20440/1/A2023-22.pdf",
-    "ICMR": "https://main.icmr.nic.in/sites/default/files/guidelines/ICMR_Ethical_Guidelines_2017.pdf",
-    "SPDI": "https://www.meity.gov.in/sites/upload_files/dit/files/GSR313E_10511(1).pdf",
-    "LGPD": "https://www.planalto.gov.br/ccivil_03/_ato2019-2022/2018/lei/L13709.htm",
-    "AUSTRALIAN_PA": "https://www.legislation.gov.au/Series/C2004A03712",
-    "UGANDA_DPPA": "https://www.parliament.go.ug/documents/1840/The_Data_Protection_and_Privacy_Act_2019.pdf",
 }
 
 # Map jurisdiction to existing authority file in authorities/
 AUTHORITY_FILES: dict[str, str] = {
     "HIPAA": "01_hipaa_164_514_full.md",
-    "GDPR": "05_gdpr_article9_health_data.md",
-    "DPDPA": "02_dpdp_rules_2025.md",
-    "ICMR": "03_icmr_2017.md",
-    "SPDI": "04_spdi_rules_2011.md",
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent

@@ -48,15 +48,35 @@ def _planned_limitations() -> list[str]:
     return sorted(limitations)
 
 
-def _claim_level(manifest: dict[str, Any], validation_report: dict[str, Any]) -> str:
+# MANIFEST.json's "jurisdictions" list carries "file_formats" alongside real
+# regulatory jurisdictions (it is the top-level corpus/ directory name for the
+# file-format generators, not a jurisdiction). It must never count toward the
+# multi-jurisdiction claim boundary below, or a single-jurisdiction (USA-only)
+# corpus that merely also generated file-format output would be misreported
+# as having broader regulatory-jurisdiction evidence than it actually has.
+_NON_JURISDICTION_MANIFEST_CATEGORIES = frozenset({"file_formats"})
+
+
+def _claim_level(manifest: dict[str, Any], validation_report: dict[str, Any]) -> tuple[str, str]:
+    """Return (claim_level, basis) -- basis is a self-documenting explanation of
+    the level so a reviewer never has to cross-reference README's Claim Level
+    table just to know what triggered it."""
     validation_passes = validation_report.get("validation_status") == "PASS"
+    if not validation_passes:
+        return "L1", "validation_status is not PASS"
     jurisdictions = manifest.get("jurisdictions", [])
     if isinstance(jurisdictions, list):
         manifested_jurisdictions = {str(jurisdiction) for jurisdiction in jurisdictions}
     else:
         manifested_jurisdictions = set()
-    has_more_than_us = bool(manifested_jurisdictions - {"us"})
-    return "L2-partial" if validation_passes and has_more_than_us else "L1"
+    real_jurisdictions = manifested_jurisdictions - _NON_JURISDICTION_MANIFEST_CATEGORIES
+    extra_jurisdictions = sorted(real_jurisdictions - {"us"})
+    if extra_jurisdictions:
+        return (
+            "L2-partial",
+            f"manifest declares jurisdiction(s) beyond us: {extra_jurisdictions}",
+        )
+    return "L1", "us-only manifested jurisdiction evidence"
 
 
 def build_release_evidence(
@@ -74,11 +94,13 @@ def build_release_evidence(
 
     from datetime import datetime, timezone
 
+    claim_level, claim_level_basis = _claim_level(manifest, validation_report)
     return {
         "manifest_sha256": _sha256(manifest_path),
         "validation_report_sha256": _sha256(validation_report_path),
         "mia_report_sha256": _sha256(mia_report_path) if mia_report_path is not None else None,
-        "claim_level": _claim_level(manifest, validation_report),
+        "claim_level": claim_level,
+        "claim_level_basis": claim_level_basis,
         "limitations": _planned_limitations(),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "git_sha": _git_sha(),

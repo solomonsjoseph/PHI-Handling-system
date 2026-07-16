@@ -52,7 +52,7 @@ def bootstrap_study_privacy(study: str, jurisdiction: str) -> dict[str, object]:
     if not privacy_path.is_file():
         default_privacy = (defaults_dir / "_study_privacy.yaml").read_text(encoding="utf-8")
         content = default_privacy.replace(
-            "jurisdictions:\n  - USA\n  - INDIA\n",
+            "jurisdictions:\n  - USA\n",
             f"jurisdictions:\n  - {jurisdiction}\n",
         )
         # The packaged template's data_as_of is a literal "YYYY-MM-DD"
@@ -153,7 +153,7 @@ def synthesize_study_config(
             # classified header would instead ACTIVELY OVERRIDE any more
             # specific packaged pattern that correctly protects that exact
             # header today (discovered via the standalone-refactor stress
-            # test: IC_SCRNNUM is classified 'keep' by the pinned INDIA
+            # test: IC_SCRNNUM is classified 'keep' by the pinned USA
             # regulation rules -- phi_review has no scrn-num-specific rule --
             # but the packaged defaults' id_fields pattern
             # ``^I[CS]_SCRNNUM$`` already pseudonymizes it; forcing it into

@@ -2,7 +2,9 @@
 
 > **Historical status (2026-07-06):** This plan is historical and superseded for current execution by the registry/evidence plan tracked through `harness/capability_registry.json`, generated manifests, validation reports, benchmark artifacts, MIA smoke reports, and release evidence. Preserve the content below as historical context; do not treat it as current claim status.
 
-**Phase scope:** 6 representative jurisdictions (one per populated continent) + plugin merge
+> **Current scope (USA-only):** Non-USA jurisdiction generators (`generators/in|eu|br|au|ug`), non-USA rulebooks/corpus slices, and `docs/JURISDICTION_EVIDENCE_REPORT_IN.md` are removed from the active tree. Part 2 multi-jurisdiction design and Part 4 generator build tasks for India/Uganda/Australia/EU/Brazil are **deferred / out of scope** until re-enabled one jurisdiction at a time. USA/HIPAA remains the only live build target.
+
+**Phase scope (historical):** 6 representative jurisdictions (one per populated continent) + plugin merge — **now deferred except USA**
 **Priority:** PHI leakage prevention > regulatory compliance > accuracy/precision > organization
 **Truth Protocol:** Cited claims have URLs. [UNVERIFIED] = confirm before IRB submission.
 
@@ -63,7 +65,7 @@ Based on verified peer-reviewed findings:
 
 ## Part 2 -- Six-Jurisdiction Corpus Design
 
-Antarctica has no sovereign data protection law; operating nations' laws apply (USA station to HIPAA, Australian station to Privacy Act 1988). Antarctica is therefore not a separate generator.
+> **DEFERRED / OUT OF SCOPE (except USA).** The design below is historical planning context. Only United States / HIPAA generators and corpus paths are active. Do not treat India/Uganda/Australia/EU/Brazil sections as current implementation tasks or as evidence that `generators/in|eu|br|au|ug` exist.
 
 ### 2.1 Jurisdiction Selection Rationale
 
@@ -308,22 +310,23 @@ Structural gap types (phi_engine cannot detect by design):
 
 Address in this order (highest IRB/publication impact first):
 
-| # | Gap | Fix | Files |
-|---|-----|-----|-------|
-| 1 | MBI (HIPAA I) F1=0.000 | Add 11-char CMS MBI regex to presidio_gate.py + update PRESIDIO_TO_CORPUS | `phi_engine/security/presidio_gate.py`, `benchmarks/presidio_adapter.py` |
-| 2 | VIN (HIPAA L) F1=0.125 | Add ISO 3779 17-char VIN pattern (excludes I/O/Q per NHTSA) | `phi_engine/security/phi_patterns.py` |
-| 3 | India generators (0 records) | Build `generators/in/in_dpdpa.py` + `generators/in/in_identifiers.py` | New files |
-| 4 | Uganda generators (0 records) | Build `generators/ug/ug_dppa.py` | New files |
-| 5 | Australia generators (0 records) | Build `generators/au/au_privacy.py` | New files |
-| 6 | EU generators (0 records) | Build `generators/eu/eu_gdpr.py` (DE/FR/NL sub-generators) | New files |
-| 7 | Brazil generators (0 records) | Build `generators/br/br_lgpd.py` | New files |
-| 8 | k-anonymity gate integration | Wire kanon_gate.py into benchmark path; add combo records to corpus | `benchmarks/reportal_phi_adapter.py`, `generators/universal_common.py` |
-| 9 | File format generators | DICOM, FHIR, HL7v2, EML first (highest PHI density per format) | `generators/file_formats/` |
-| 10 | MIA framework | Shadow-model per Nature Sci Rep 2024; requires GPU | `harness/mia_framework.py` |
+| # | Gap | Fix | Files | Status |
+|---|-----|-----|-------|--------|
+| 1 | MBI (HIPAA I) F1=0.000 | Add 11-char CMS MBI regex to presidio_gate.py + update PRESIDIO_TO_CORPUS | `phi_engine/security/presidio_gate.py`, `benchmarks/presidio_adapter.py` | USA — open |
+| 2 | VIN (HIPAA L) F1=0.125 | Add ISO 3779 17-char VIN pattern (excludes I/O/Q per NHTSA) | `phi_engine/security/phi_patterns.py` | USA — open |
+| 3 | India generators | ~~Build `generators/in/in_dpdpa.py` + `generators/in/in_identifiers.py`~~ | ~~New files~~ | **DEFERRED / OUT OF SCOPE** (generators removed) |
+| 4 | Uganda generators | ~~Build `generators/ug/ug_dppa.py`~~ | ~~New files~~ | **DEFERRED / OUT OF SCOPE** |
+| 5 | Australia generators | ~~Build `generators/au/au_privacy.py`~~ | ~~New files~~ | **DEFERRED / OUT OF SCOPE** |
+| 6 | EU generators | ~~Build `generators/eu/eu_gdpr.py` (DE/FR/NL sub-generators)~~ | ~~New files~~ | **DEFERRED / OUT OF SCOPE** |
+| 7 | Brazil generators | ~~Build `generators/br/br_lgpd.py`~~ | ~~New files~~ | **DEFERRED / OUT OF SCOPE** |
+| 8 | k-anonymity gate integration | Wire kanon_gate.py into benchmark path; add combo records to corpus | `benchmarks/reportal_phi_adapter.py`, `generators/universal_common.py` | open |
+| 9 | File format generators | DICOM, FHIR, HL7v2, EML first (highest PHI density per format) | `generators/file_formats/` | partial |
+| 10 | MIA framework | Shadow-model per Nature Sci Rep 2024; requires GPU | `harness/mia_framework.py` | smoke only |
 
----
 
 ## Part 5 -- Directory Structure
+
+> **Note:** Non-USA `generators/{in,ug,au,eu,br}/` and non-USA corpus folders below are **historical plan targets only** — deferred / not present under current USA-only scope.
 
 ```
 PHI-Handling-system/
@@ -473,16 +476,16 @@ python -m harness.phi_leakage_scan benchmarks/results/
 | M1: Plugin integration | `phi_engine/` scaffolded, imports fixed, archive created, deps merged | Day 1 |
 | M2: Existing tests pass | `pytest tests/ -v`: 73/73 green after phi_engine integration | Day 1 |
 | M3: MBI + VIN gap closure | presidio_adapter updated; F1 (I) > 0 and F1 (L) > 0.50 | Day 2 |
-| M4: India generators | `generators/in/` complete; 40+ records; tests pass | Day 2-3 |
-| M5: Uganda + Australia generators | `generators/ug/` + `generators/au/`; tests pass | Day 3-4 |
-| M6: EU + Brazil generators | `generators/eu/` + `generators/br/`; tests pass | Day 4-5 |
-| M7: Universal harness | `harness/generate_universal_corpus.py` builds all 6 jurisdictions | Day 5 |
+| M4: India generators | ~~`generators/in/` complete~~ | **DEFERRED / OUT OF SCOPE** |
+| M5: Uganda + Australia generators | ~~`generators/ug/` + `generators/au/`~~ | **DEFERRED / OUT OF SCOPE** |
+| M6: EU + Brazil generators | ~~`generators/eu/` + `generators/br/`~~ | **DEFERRED / OUT OF SCOPE** |
+| M7: Universal harness | ~~`harness/generate_universal_corpus.py` builds all 6 jurisdictions~~ | **DEFERRED / OUT OF SCOPE** (USA-only active) |
 | M8: phi_engine adapter | `benchmarks/reportal_phi_adapter.py`; scores vs. corpus; results JSON written | Day 6-7 |
 | M9: Stress tests pass | All 10 ST scenarios verified; leakage scan clean | Day 7-8 |
 | M10: Report + manifest | `BENCHMARK_MANIFEST.json` + `docs/BENCHMARK_REPORT.md` | Day 8-9 |
 | M11: Phase update | `.phi-build-status` updated; Sir commits + pushes | Day 9 |
 
-**Total: 9 working days.** M4-M6 (country generators) can run concurrently with M8 (adapter).
+**Total: historical 9 working days estimate.** M4–M7 non-USA generator/harness work is deferred under current USA-only scope.
 
 ---
 

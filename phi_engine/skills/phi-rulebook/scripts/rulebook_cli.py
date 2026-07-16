@@ -3,7 +3,7 @@
 Metadata-only operator surface over :mod:`scripts.security.phi_rulebook`:
 
     python -m plugins...phi-rulebook.scripts.rulebook_cli resolve --study Indo-VAP
-    python -m ...rulebook_cli show --jurisdictions INDIA,USA
+    python -m ...rulebook_cli show --jurisdictions USA
 
 ``resolve`` loads the study privacy config, resolves the active rulebook
 (comparing to the versioned cache / committed seed, detecting drift) and prints
@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     p_resolve.set_defaults(func=_cmd_resolve)
 
     p_show = sub.add_parser("show", help="dump a committed seed rulebook for a jurisdiction set")
-    p_show.add_argument("--jurisdictions", required=True, help="comma list, e.g. INDIA,USA")
+    p_show.add_argument("--jurisdictions", required=True, help="comma list, e.g. USA")
     p_show.set_defaults(func=_cmd_show)
 
     p_refresh = sub.add_parser(
