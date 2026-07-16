@@ -1,6 +1,5 @@
 {
-  "capability_registry_sha256": "7bcf7674a928d2e5b09c95fcfc7874b86f4adb9a59feb583a1b7b5a45f3b6119",
-  "claim_level": "L1",
+  "capability_registry_sha256": "c26af09397fad8eff7c6d5ed424d6eb1b59f38742a7a2aa2e2dc25a761edfc32",
   "files": {
     "file_formats/dicom_headers": {
       "path": "corpus/file_formats/dicom_headers.jsonl",
@@ -11,7 +10,7 @@
     "file_formats/eml_messages": {
       "path": "corpus/file_formats/eml_messages.jsonl",
       "records": 20,
-      "sha256": "5233150e015f9b636e5bb59d9313c99e01202f5f0b40489235a156e49fdc452a",
+      "sha256": "099d8e1575ef147de367491427985e4bfd737e23c23e1b1093e46a54eb8ed811",
       "spans": 140
     },
     "file_formats/fhir_bundles": {
@@ -23,7 +22,7 @@
     "file_formats/hl7v2_messages": {
       "path": "corpus/file_formats/hl7v2_messages.jsonl",
       "records": 20,
-      "sha256": "ccf93bac1fa42e06033562ab737d10e541321f16eeb37d0ff29fb59bc9a41377",
+      "sha256": "783d5dd00ff2eb7b882dfc8246388f2c0c77317443d5888b97bb8bdec2b8ab99",
       "spans": 160
     },
     "file_formats/xlsx_phi_corpus": {
@@ -93,7 +92,7 @@
       "spans": 195
     }
   },
-  "generated_at_utc": "2026-07-07T14:08:55.454593Z",
+  "generated_at_utc": "2026-07-16T10:44:50.776830Z",
   "jurisdictions": [
     "file_formats",
     "us"

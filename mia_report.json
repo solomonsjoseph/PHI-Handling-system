@@ -1,5 +1,5 @@
 {
-  "attack_auc": 0.41621165256912007,
+  "attack_auc": 0.395648033126294,
   "features": [
     "text_length",
     "gold_span_count",
@@ -11,6 +11,6 @@
   ],
   "note": "deterministic MIA smoke test; not external validation",
   "ok": true,
-  "records": 886,
+  "records": 698,
   "threshold": 0.6
 }
