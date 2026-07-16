@@ -56,7 +56,9 @@ def test_main_all_creates_v2_manifest_with_registry_jurisdictions(tmp_path):
     assert set(manifest["jurisdictions"]) == {"us", "file_formats"}
     assert manifest["jurisdictions"] == sorted(manifest["jurisdictions"])
     assert manifest["validation_status"] == "PASS"
-    assert manifest["claim_level"] == "L2-partial"
+    # No "claim_level" here by design -- release_evidence.py is the single
+    # source of truth for that, computed after validation actually runs.
+    assert "claim_level" not in manifest
     assert len(manifest["capability_registry_sha256"]) == 64
     assert manifest["generated_at_utc"].endswith("Z")
     assert "in" not in manifest["jurisdictions"]

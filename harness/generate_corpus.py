@@ -468,7 +468,15 @@ def build_manifest(seed: int, summaries: dict, out_dir: Path) -> list:
         "totals": all_totals,
         "span_errors": all_errors,
         "validation_status": "PASS" if not all_errors else "FAIL",
-        "claim_level": "L2-partial",
+        # No "claim_level" field here by design: an honest claim level can only
+        # be computed AFTER harness.run_all_validations produces a real
+        # validation_report.json (this function runs before that step exists),
+        # and harness.release_evidence.build_release_evidence(...) is the
+        # single source of truth for it (see _claim_level there). A hardcoded
+        # placeholder here previously read "L2-partial" unconditionally,
+        # regardless of actual corpus/validation content -- dead, unread by
+        # any code, and actively misleading once it diverged from the real
+        # (correctly computed) release_evidence.json claim_level.
         "capability_registry_sha256": hashlib.sha256(REGISTRY_PATH.read_bytes()).hexdigest(),
         "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
