@@ -26,7 +26,7 @@ Authority: HL7 v2.x PID/NK1/IN1 segments
 from __future__ import annotations
 
 import random
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List
 
@@ -104,8 +104,20 @@ def _random_plan_id(rng: random.Random) -> str:
     return f"{prefix}{num}"
 
 
-def _message_timestamp() -> str:
-    return datetime.utcnow().strftime("%Y%m%d%H%M%S")
+def _message_timestamp(rng: random.Random) -> str:
+    """Synthetic HL7 MSH-7 message timestamp, seeded from *rng* (NOT
+    wall-clock time) -- see eml_gen._format_date_header for the same
+    determinism rationale (DeterministicGenerator's bitwise-identical-output
+    contract).
+    """
+    base = datetime(2024, 7, 1, tzinfo=timezone.utc)
+    offset = timedelta(
+        days=rng.randint(0, 729),
+        hours=rng.randint(0, 23),
+        minutes=rng.randint(0, 59),
+        seconds=rng.randint(0, 59),
+    )
+    return (base + offset).strftime("%Y%m%d%H%M%S")
 
 
 def _build_hl7v2_message(rng: random.Random, record_index: int) -> tuple[str, dict]:
@@ -130,7 +142,7 @@ def _build_hl7v2_message(rng: random.Random, record_index: int) -> tuple[str, di
     ins_first = rng.choice(_FIRST_NAMES)
     ins_last = rng.choice(_LAST_NAMES)
 
-    ts = _message_timestamp()
+    ts = _message_timestamp(rng)
     msg_ctrl = f"MSG{record_index:07d}"
 
     # Build segments. Fields separated by |. Components separated by ^.

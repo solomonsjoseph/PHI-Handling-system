@@ -15,7 +15,7 @@ Authority: 45 CFR 164.514(b)(2)(i) HIPAA Safe Harbor
 from __future__ import annotations
 
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List
 
@@ -88,8 +88,23 @@ def _email_address(first: str, last: str, domain: str, rng: random.Random) -> st
     return f"{first.lower()}.{last.lower()}{num}@{domain}"
 
 
-def _format_date_header() -> str:
-    return datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+def _format_date_header(rng: random.Random) -> str:
+    """Synthetic RFC 5322 Date header, seeded from *rng* (NOT wall-clock time).
+
+    DeterministicGenerator's contract requires bitwise-identical output for a
+    given seed; datetime.now() would violate that guarantee on every rebuild
+    (see docs/REPRODUCIBILITY.md and the class docstring above). The date is
+    drawn from a plausible 2-year window ending 2026-06-30, matching the rest
+    of this corpus's synthetic clinical-record time range.
+    """
+    base = datetime(2024, 7, 1, tzinfo=timezone.utc)
+    offset = timedelta(
+        days=rng.randint(0, 729),
+        hours=rng.randint(0, 23),
+        minutes=rng.randint(0, 59),
+        seconds=rng.randint(0, 59),
+    )
+    return (base + offset).strftime("%a, %d %b %Y %H:%M:%S +0000")
 
 
 def _build_eml_message(rng: random.Random, record_index: int) -> tuple[str, dict]:
@@ -145,7 +160,7 @@ def _build_eml_message(rng: random.Random, record_index: int) -> tuple[str, dict
         f"To: {p_first} {p_last} <{p_email}>\r\n"
         f"CC: Dr. {cc_first} {cc_last} <{cc_email}>\r\n"
         f"Subject: {subject}\r\n"
-        f"Date: {_format_date_header()}\r\n"
+        f"Date: {_format_date_header(rng)}\r\n"
         f"Message-ID: <MSG{record_index:07d}@{prov_domain}>\r\n"
         f"X-Patient-ID: {p_mrn}\r\n"
         f"MIME-Version: 1.0\r\n"
