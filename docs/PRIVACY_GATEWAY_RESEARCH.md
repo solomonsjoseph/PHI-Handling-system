@@ -1,14 +1,14 @@
 # Privacy Gateway Research — Current State, Method Taxonomy, Landscape, and Evidence
 
-Date: 2026-07-20/21. This document is evidence-first: every factual sentence with a bracketed `claim_id` resolves to a row in `research/privacy_gateway/evidence_ledger.jsonl` (319 rows), checkable by `python -m harness.validate_privacy_research`. Machine artifacts: `research/privacy_gateway/{search_log,evidence_ledger,candidate_registry}.jsonl`, `research/privacy_gateway/dispositions.json`, `benchmarks/results/privacy-gateway/`. This document does **not** certify HIPAA, PCI, or any other compliance status — see `docs/PRIVACY_GATEWAY_RECOMMENDATION.md` §"What this does not claim."
+Date: 2026-07-20/21. This document is evidence-first: every factual sentence with a bracketed `claim_id` resolves to a row in `research/privacy_gateway/evidence_ledger.jsonl`, checkable by `python -m harness.validate_privacy_research`. Machine artifacts: `research/privacy_gateway/{search_log,evidence_ledger,candidate_registry}.jsonl`, `research/privacy_gateway/dispositions.json`. This document does **not** certify HIPAA, PCI, or any other compliance status — see `docs/PRIVACY_GATEWAY_RECOMMENDATION.md` §"What this does not claim."
 
 ## Executive findings
 
-1. This repository's runtime pipeline (`phi_engine`) is a fail-closed, code-enforced USA/HIPAA scrub-and-publish system with a real, measured redaction recall of 99.58% on its own synthetic evidence study — but it has **zero** secrets-detection capability, **zero** proprietary/IP-marker detection, and **two confirmed weak points**: a residual-guard exception path that silently drops to a single, weaker regex scanner, and a local-model prompt path that carries raw support-cell values with no `phi_gate` check.
+1. This repository's runtime pipeline (`phi_engine`) is a fail-closed, code-enforced USA/HIPAA scrub-and-publish system — but it has **zero** secrets-detection capability, **zero** proprietary/IP-marker detection, and **two confirmed weak points**: a residual-guard exception path that silently drops to a single, weaker regex scanner (`docs/PRIVACY_GATEWAY_STRESS_TEST.md` §5), and a local-model prompt path that carries raw support-cell values with no `phi_gate` check (§1.3 below).
 2. Encryption at rest, RBAC, and log encryption are **disabled/unimplemented by default**, as shipped (`config.yaml:16-28`). Pseudonymization is not encryption.
 3. A systematic search across 56 candidate products/methods (7 categories) plus 12 academic/technical method classes found **no single vendor or tool that should replace the whole pipeline**. The correct architecture is a control plane that retains this repo's real, measured, fail-closed controls where they already work, adds a small number of narrowly-scoped new controls where a gap is precisely located and code-confirmed, and integrates external candidates only where they pass every hard gate.
-4. Every managed/commercial candidate researched (Bedrock Guardrails, Azure Health de-identification, AWS Comprehend Medical, Google SDP, Purview, Netskope, Datavant, etc.) remains `pending_poc` in this pass — no credentials or contracts were available, and none was independently benchmarked. None is selected as a production component; each is recorded as a fallback/future-reevaluation candidate only, per the plan's own contingency rule.
-5. On this repository's own corpus and seeded adversarial fixtures, this repo's regex/checksum detection catalog (`phi_engine`) **outperforms** both Presidio profiles (strict F1 0.5316 vs 0.1296 on the adversarial set; 0.3762 vs 0.3178/0.3442 on `corpus/us`) — a repository control, not a vendor claim, and not a claim about beating literature SOTA on real clinical free text (see `docs/SOTA_COMPARISON.md` for that boundary).
+4. Every managed/commercial candidate researched (Bedrock Guardrails, Azure Health de-identification, AWS Comprehend Medical, Google SDP, Purview, Netskope, Datavant, etc.) remains `pending_poc` in this pass — no credentials or contracts were available, and none was independently benchmarked. None is selected as a production component; each is recorded as a fallback/future-reevaluation candidate only: a managed candidate with inaccessible POC may remain in the landscape as `pending_poc` but cannot be the selected production component.
+5. On this repository's own seeded adversarial fixtures (`harness/make_privacy_gateway_fixtures.py`), this repository's regex/checksum detection catalog (`phi_engine`) is a repository control, not a vendor claim, and not a claim about beating literature SOTA on real clinical free text.
 
 ## 1. Current data flow (traced 2026-07-20, all anchors `file:line`)
 
@@ -31,7 +31,7 @@ flowchart TD
     J --> M[exit 0 clean / exit 8 partial if held forms or review queue]
 ```
 
-Full narrative, per-action reversibility/linkability/HIPAA-tier table, key-custody model, and a 25-row control table are in `local://current-system-trace.md` (produced this session by direct code reading, every claim `file:line`-anchored) and are incorporated below.
+The per-action reversibility/linkability/HIPAA-tier table, key-custody model, and control-table detail below were produced by direct code reading, every claim `file:line`-anchored.
 
 ### 1.1 Action contract (`phi_engine/security/phi_review.py`, `phi_scrub.py`)
 
@@ -43,9 +43,9 @@ First-match-wins precedence in `_scrub_row`: force-drop → keep → secondary-i
 | cap (age>89) | no | no | Yes §164.514(b)(2)(i)(C) | Yes | Yes |
 | generalize / band | no | reduced | Aids, not itself sufficient | Yes | Yes |
 | jitter_date (SANT) | **yes, with key** | yes (interval-preserving) | **No** — full date still more granular than year | Yes | **Yes** — LDS permits dates |
-| pseudonymize (HMAC) | **yes, with key** | yes (deterministic) | **No** — re-linkable §(R) identifier | Yes | **Yes** — LDS permits coded IDs |
+| pseudonymize (HMAC) | **no (one-way)** | yes (deterministic recomputation with key + candidate input) | **No** — re-linkable §(R) identifier | Yes | **Yes** — LDS permits coded IDs |
 
-`jitter_date` and `pseudonymize` structurally **cannot** satisfy Safe Harbor — both are keyed and re-linkable. This is an inference from the statutory text (45 CFR 164.514), not an independently validated legal determination; the repository makes no validated de-identification claim (`docs/KNOWN_LIMITATIONS.md:170`).
+`jitter_date` and `pseudonymize` structurally **cannot** satisfy Safe Harbor — both are keyed and re-linkable. This is an inference from the statutory text (45 CFR 164.514), not an independently validated legal determination; the repository makes no validated de-identification claim.
 
 ### 1.2 Storage, trust zones, defaults
 
@@ -55,7 +55,7 @@ Four-zone model (`secure_env.py`): RED (raw, never read)/AMBER (staging)/GREEN (
 - Encryption at rest: **disabled**.
 - RBAC: **disabled** (only the `llm-agent` key-access denial is an enforced role gate).
 - Log encryption: **not implemented**.
-- Audit: **enabled**, value-free (category tags only, e.g. `SSN`/`EMAIL`, never raw values or offsets) — but unencrypted, and no automated retention/encrypted-backup mechanism exists.
+- Audit: **enabled**, but NOT uniformly value-free. `phi_gate`/log-hygiene blocking-path logging is category-tags-only (`SSN`/`EMAIL`, never raw values or offsets). The organizer review-bucket record and `phi_scrub_report.json` additionally retain filenames, link names, field/header names, reasons, and diagnostic counts — sensitive metadata, not row values, access-controlled (written 0600) but not category-tags-only. Unencrypted at rest; no automated retention/encrypted-backup mechanism exists.
 
 ### 1.3 Egress payload inventory
 
@@ -74,17 +74,6 @@ Four-zone model (`secure_env.py`): RED (raw, never read)/AMBER (staging)/GREEN (
 ### 1.4 Local-model boundary (`OfflineLocalLLMClient`, `model_routing.py:711-874`)
 
 Loopback-only (`127.0.0.1`/`::1`), digest-pinned models (`name@sha256:<64hex>`), plain HTTP (acceptable only because loopback), size/schema/confidence bounds (64 KiB task / 256 KiB response / confidence ≥ 0.75), redirects rejected. `offline_approved` is **operator attestation, not proof of OS/container isolation** — verbatim in the source docstring, default `false`.
-
-### 1.5 Contradictions resolved this session
-
-| Claim | Finding |
-|---|---|
-| Stale six-jurisdiction rows in `comparison_table.md` | **Confirmed.** `.md` still renders `us,in,eu,br,au,ug`; `.json` is USA-only. The `.md` was not regenerated after the USA-only scope cut. |
-| Manifest-hash drift | **Unverifiable** — no `validation_report.json` exists; `MANIFEST.json` is self-validating and internally consistent with `docs/SOTA_COMPARISON.md`'s cited hash. |
-| MIA record-count mismatch | **Confirmed cross-artifact inconsistency.** `mia_report.json`=698, `PHI_SYSTEM_TRUST_REPORT.md`=606, manifest=550-us+148-formats. Three artifacts disagree on population; MIA remains a smoke test, not external validation, regardless. |
-| Vendor F1s cited then "DO NOT CITE" | **Confirmed tension**, not a contradiction in effect: `SOTA_COMPARISON.md` tabulates vendor/paper F1s as "directional context" with an explicit non-SOTA-claim caveat; `KNOWN_LIMITATIONS.md` separately proscribes the same class of numbers as compliance evidence. Both statements are compatible; a careless reader could still misuse the numbers, which is why this report never cites them as measured. |
-| "Every tool/LLM read is zone-guarded" | **Not substantiated.** `validate_llm_read_path` has zero callers. |
-| Residual-gate exception falls back to a weaker scanner | **Confirmed.** `run.py:1562-1566`: on `run_phi_guard_gate` raising, publish proceeds on the legacy regex scanner alone, dropping the Presidio half of the OR-guard. |
 
 ## 2. Method taxonomy (from primary regulatory/standards sources and peer-reviewed/preprint literature)
 
@@ -111,11 +100,11 @@ Sources consulted, all logged in `research/privacy_gateway/search_log.jsonl` (13
 | Input/output/tool/log DLP for LLM/agentic systems | Detection+governance | No | n/a | `acad-0050` |
 | Access/encryption/key/retention/audit/human-review governance | Governance | n/a | n/a | `acad-0051` |
 
-Fourteen independently-verified academic sources ground the paper-finding claims (`acad-0001`..`acad-0033`), including Stubbs & Uzuner 2015 (i2b2/UTHealth corpus, JBI), Norgeot et al. 2020 (Philter, npj Digital Medicine), Rocher et al. 2019 (re-identification of incomplete datasets, Nature Communications — 99.98% of Americans re-identifiable with 15 demographic attributes), Stadler et al. 2022 (synthetic-data anonymization "Groundhog Day", USENIX Security), Shokri et al. 2017 (membership inference), Carlini et al. 2021 (training-data extraction), Greshake et al. 2023 / Liu et al. 2023 (indirect/HouYi prompt injection), Kim et al. 2023 (ProPILE), Meli et al. 2019 (GitHub secret leakage, NDSS), Schleimer et al. 2003 (winnowing/document fingerprinting, SIGMOD), Feng et al. 2022 (PassFinder, ICSE). F1 numbers from different corpora/taxonomies/languages are never compared directly in this document without the explicit non-comparability caveat already established in `docs/SOTA_COMPARISON.md`.
+Fourteen independently-verified academic sources ground the paper-finding claims (`acad-0001`..`acad-0033`), including Stubbs & Uzuner 2015 (i2b2/UTHealth de-identification dataset, JBI), Norgeot et al. 2020 (Philter, npj Digital Medicine), Rocher et al. 2019 (re-identification of incomplete datasets, Nature Communications — 99.98% of Americans re-identifiable with 15 demographic attributes), Stadler et al. 2022 (synthetic-data anonymization "Groundhog Day", USENIX Security), Shokri et al. 2017 (membership inference), Carlini et al. 2021 (training-data extraction), Greshake et al. 2023 / Liu et al. 2023 (indirect/HouYi prompt injection), Kim et al. 2023 (ProPILE), Meli et al. 2019 (GitHub secret leakage, NDSS), Schleimer et al. 2003 (winnowing/document fingerprinting, SIGMOD), Feng et al. 2022 (PassFinder, ICSE). F1 numbers from different datasets/taxonomies/languages are never compared directly in this document.
 
 ## 3. Paid and no-cost solution landscape (56 candidates, 7 categories)
 
-Full rows in `research/privacy_gateway/candidate_registry.jsonl`. Category boundaries are kept strict per the plan's own warning: a storage-discovery tool, endpoint/browser DLP, AI API gateway, PHI de-identifier, token vault, statistical risk tool, and model-provider guardrail are complementary, never interchangeable.
+Full rows in `research/privacy_gateway/candidate_registry.jsonl`. Category boundaries are kept strict: a storage-discovery tool, endpoint/browser DLP, AI API gateway, PHI de-identifier, token vault, statistical risk tool, and model-provider guardrail are complementary, never interchangeable.
 
 | Category | Candidates | Active/EOL/acquired |
 |---|---|---|
@@ -130,37 +119,26 @@ Full rows in `research/privacy_gateway/candidate_registry.jsonl`. Category bound
 - Bedrock Guardrails' sensitive-info filter (`gw-0004`, `gw-0005`): text-only, does not inspect `tool_use` parameters, leaves original prompts in CloudWatch invocation logs and original PII in trace output "by design."
 - Azure de-identification service: hard limits (50 KB/request, 10,000 docs/job, 2 MB/doc) and an explicit "not guaranteed to satisfy any specific legal/regulatory/compliance requirement" disclaimer on the equivalent Google Cloud Healthcare API de-identification operation.
 - AWS Comprehend Medical `DetectPHI`: confidence-scored, documented human-review recommendation.
-- detect-secrets: default CLI live-verifies AWS/Stripe-shaped keys against the real provider API and **silently drops verified-false (i.e. fake/rotated) matches from the report** — measured directly this session (`sectok-m001`, `sectok-m002`).
+- detect-secrets: default CLI live-verifies AWS/Stripe-shaped keys against the real provider API and **silently drops verified-false (i.e. fake/rotated) matches from the report** (`sectok-e011`).
 
 ## 4. Evidence-quality summary
 
 | Status | Count |
 |---|---|
-| confirmed | 300 |
-| qualified | ~12 |
-| unverified | ~7 (PCI DSS PDF paywall, some secondary-only vendor pages) |
+| confirmed | 241 |
+| qualified | 48 |
+| unverified | 30 (PCI DSS PDF paywall, some secondary-only vendor pages) |
 | refuted | 0 |
 
-Every `confirmed` law/standard/vendor-capability claim carries `primary_source=true` and a real `accessed_at`. Vendor performance numbers stay tagged `vendor_claim` and cannot reach `confirmed` status without independent corroboration (enforced by `harness/validate_privacy_research.validate_evidence`). A 16-row manual spot-check across all 7 research workers (direct fetch of the cited URL/DOI and comparison against the claim text) confirmed 16/18 sampled rows byte-for-byte accurate against the live source; the remaining 2 were access-blocked (documented) or abstract-only-verified, not disproven.
+Every `confirmed` law/standard/vendor-capability claim carries `primary_source=true` and a real `accessed_at`. Vendor performance numbers stay tagged `vendor_claim` and cannot reach `confirmed` status without independent corroboration (enforced by `harness/validate_privacy_research.validate_evidence`).
 
-## 5. Normalized capability matrix and benchmark results
+## 5. Normalized capability matrix
 
-See `research/privacy_gateway/dispositions.json` for the full 15-capability disposition table (§ mirrored in `docs/PRIVACY_GATEWAY_RECOMMENDATION.md`). Measured (not vendor-claimed) benchmark numbers:
-
-| Tool | Corpus | Strict P | Strict R | Strict F1 |
-|---|---|---|---|---|
-| phi_engine (repository) | `corpus/us` (1314 gold spans) | 0.4478 | 0.3196 | 0.3730 |
-| Presidio stock | `corpus/us` | 0.2774 | 0.3721 | 0.3178 |
-| Presidio tuned | `corpus/us` | 0.2969 | 0.4094 | 0.3442 |
-| phi_engine (repository) | adversarial fixtures (44 gold spans) | 0.6000 | 0.4773 | 0.5316 |
-| Presidio stock | adversarial fixtures | 0.1094 | 0.1591 | 0.1296 |
-| detect-secrets | adversarial fixtures (API_KEY only) | 1.0000 | 1.0000 | 1.0000 |
-
-Full artifacts: `benchmarks/results/{phi-engine-us,presidio-stock-us,presidio-tuned-us,privacy-gateway/*}`. `benchmarks/results/privacy-gateway/comparison.json` also carries the stress-test findings (§6).
+See `research/privacy_gateway/dispositions.json` for the full 15-capability disposition table (§ mirrored in `docs/PRIVACY_GATEWAY_RECOMMENDATION.md`).
 
 ## 6. Attack results
 
-See `docs/PRIVACY_GATEWAY_STRESS_TEST.md` for the full write-up: canonical fail-closed path (exit 0, redaction_recall 99.58%), adversarial 66-file stress regression (exit 8, zero planted identifiers published), adversarial-channel benchmark (base64 encoding and split-across-chunk secrets confirmed as structural gaps for every candidate tested), and three linkage/re-identification attacks bounded per NIST SP 800-188 §4.3.12 (known-plaintext pseudonym linkage, date-shift interval-inference, free-text quasi-identifier combination — the last confirmed as a genuine, currently-uncovered gap).
+See `docs/PRIVACY_GATEWAY_STRESS_TEST.md` for the full write-up: a fail-closed regression against a deliberately malformed source tree (normal combined-guard path published six scrubbed files with zero planted SSN-shaped matches; detector-outage fail-closed behavior is NOT intact or exercised, since the guard-exception legacy-only fallback remains open), a code-level structural gap for base64-encoded and split-across-chunk secrets (no decode-then-rescan or session-level reassembly stage exists), and three linkage/re-identification attacks bounded per NIST SP 800-188 §4.3.12 (known-plaintext pseudonym linkage via deterministic HMAC recomputation, date-shift interval-inference, free-text quasi-identifier combination — the last confirmed as a genuine, currently-uncovered gap).
 
 ## 7. Refuted / unverified claims
 
@@ -174,5 +152,4 @@ Excluded/inaccessible systems recorded rather than fabricated: the real GEMINI-M
 
 - Not a validated HIPAA de-identification, PCI compliance, or general-anonymization certification. See `docs/PRIVACY_GATEWAY_RECOMMENDATION.md` for the explicit non-claims list.
 - Every managed/commercial candidate's contractual posture (BAA/DPA, region/subprocessor, training-use policy) is sourced from public documentation only — never independently verified via a signed contract or POC in this pass.
-- The MIA smoke test's own population figures disagree across three artifacts in this repository (§1.5) and must be reconciled before any external validation claim is made from it.
-- Clinician and counsel review remain `planned`, unchanged from the pre-existing capability registry.
+- Clinician and counsel review remain `planned`.

@@ -1,12 +1,11 @@
 # Consolidated Authority Matrix
 
-> **Scope: USA/HIPAA ONLY.** Non-USA jurisdictions have been removed from this repository and will be reintroduced one at a time.
+> **Scope: USA/HIPAA ONLY.**
 
-**Document version:** 2.0
-**Build date:** 2026-06-11
-**Maintainer:** See LICENSE and CONTRIBUTING.md
+**Document version:** 3.0
+**Maintainer:** See LICENSE
 
-This matrix is the USA/HIPAA authority source of truth for IRB review. Other jurisdictions are deferred and intentionally out of scope for now.
+This matrix is the USA/HIPAA authority source of truth for `phi_engine`.
 
 ## Table A — Identifier categories mapped to primary authorities
 
@@ -15,7 +14,7 @@ This matrix is the USA/HIPAA authority source of truth for IRB review. Other jur
 | # | Identifier category | HIPAA 164.514(b)(2)(i) | DICOM PS3.15 | FHIR R4 Patient | Presidio | AWS Comprehend |
 |---|---|---|---|---|---|---|
 | 1 | Patient name | (A) Names | (0010,0010), (0010,1001), (0010,1005) | Patient.name | PERSON | NAME |
-| 2 | Provider/physician name | (A) Names (scope: "workforce") | (0008,0090), (0008,1048), (0008,1050), (0008,1060), (0008,1070) | Practitioner.name | PERSON | NAME |
+| 2 | Provider/physician name | Outside strict Safe Harbor (A) scope -- (b)(2)(i)'s scope note (line below Table A) limits (A) to "the individual or of relatives, employers, or household members of the individual"; provider names are a separate re-identification-risk concern, not a cited Safe Harbor category | (0008,0090), (0008,1048), (0008,1050), (0008,1060), (0008,1070) | Practitioner.name | PERSON | NAME |
 | 3 | Household/relative name | (A) Names (explicit household scope) | - | Patient.contact.name, RelatedPerson.name | PERSON | NAME |
 | 4 | Street address (full) | (B) Geographic subdivisions smaller than State | (0010,1040) | Patient.address.line | LOCATION | ADDRESS |
 | 5 | City | (B) ... except ZIP3 permitted | (0010,1040) | Patient.address.city | LOCATION | ADDRESS |
@@ -60,7 +59,7 @@ This matrix is the USA/HIPAA authority source of truth for IRB review. Other jur
 |---|---|---|---|
 | 56 | Rare disease (ICD-10 code) | Sweeney 2002; 164.514(b)(2)(ii) | Re-identification via disease prevalence |
 | 57 | Race/ethnicity | (not directly removed by Safe Harbor) | Combination with ZIP+DOB (Sweeney 2002) |
-| 58 | Profession | (R) in HIPAA spirit; explicitly in AWS Comprehend PROFESSION | Sweeney found unique profession+ZIP |
+| 58 | Profession | Not a Safe Harbor category; quasi-identifier per Sweeney 2002; AWS Comprehend has an explicit PROFESSION entity type | Sweeney found unique profession+ZIP |
 | 59 | Marital status | quasi | combination |
 | 60 | Institution name | - (not 18) | de facto quasi (DICOM E.3.11 optional retain) |
 | 61 | Combination (DOB + gender + ZIP) | Sweeney 2002 | k-anonymity threshold |
@@ -76,10 +75,11 @@ This matrix is the USA/HIPAA authority source of truth for IRB review. Other jur
 | Outcome information | Permitted |
 | Health insurance status | Permitted |
 
-### Limited Data Set (HIPAA 164.514(e)) — 16 direct identifiers excluded
+### Limited Data Set (HIPAA 164.514(e)) — 16 direct identifiers excluded, still PHI
 
-Retained in LDS: all dates, town/city, state, ZIP, age including >89.
-Excluded from LDS: name, street address, phone, fax, email, SSN, MRN, health plan #, account #, cert/license, vehicle, device, URL, IP, biometric, full-face photo.
+May be retained in LDS (not excluded): all dates, town/city, state, ZIP, age including >89.
+Excluded from LDS (must be removed): name, street address, phone, fax, email, SSN, MRN, health plan #, account #, cert/license, vehicle, device, URL, IP, biometric, full-face photo.
+LDS remains PHI subject to the Privacy Rule; it is not de-identified information (reg-0006). Not currently available in this checkout -- see Table C.
 
 ### Permitted contexts for re-identification codes (HIPAA 164.514(c))
 
@@ -88,11 +88,14 @@ Code must:
 - Not be translatable back to identity
 - CE must not disclose mechanism
 
-Permitted: hash-with-secret-salt, sequential numbering, randomly assigned IDs
-Forbidden: hash of SSN, hash of DOB+name, published algorithm
-
-### Additional jurisdiction coverage
-
+Permitted under (c): a code that is truly independent of the individual
+(sequential numbering, randomly assigned IDs unrelated to the patient).
+Properly salted cryptographic hashes are permitted for pseudonymization
+only as part of Expert Determination (b)(1), per NIST IR 8053 -- not
+automatically under (c) merely by using a secret key.
+Forbidden: hash of the individual's own identifier presented as a (c) code
+without Expert Determination (e.g. `phi_engine`'s current HMAC-pseudonymize
+action, which hashes `label:raw_id` -- see Table C), published algorithm.
 
 ## Table B — Legal authority citation list
 
@@ -109,11 +112,6 @@ Forbidden: hash of SSN, hash of DOB+name, published algorithm
 | HITECH Act | 42 USC 17921 et seq. | Breach notification |
 | 2013 Omnibus Final Rule | 78 FR 5700 | GINA + HITECH implementation |
 | Common Rule | 45 CFR 46 (2018 revision) | Human subjects research |
-
-### European Union (cross-reference)
-
-| Authority | Citation | Relevance |
-|---|---|---|
 
 ### Standards and frameworks
 
@@ -142,89 +140,78 @@ Forbidden: hash of SSN, hash of DOB+name, published algorithm
 | Meystre 2010 | Automatic de-identification of textual EHR | BMC Medical Research Methodology |
 | i2b2 2014 | Stubbs et al. 2015 | Annotation guidelines |
 
-## Table C — Benchmark tool coverage matrix
+## Table C — phi_engine classification/detector/action map
 
-| Identifier (from Table A) | Presidio | AWS CM | Azure Health | John Snow Labs | Our corpus |
-|---|---|---|---|---|---|
-| Names | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Addresses | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Dates | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Age > 89 rule | ✗ | ✗ | partial | partial | ✓ |
-| Phone | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Fax (distinct) | ✗ | ✗ | ✗ | partial | ✓ |
-| Email | ✓ | ✓ | ✓ | ✓ | ✓ |
-| SSN | ✓ (US_SSN) | ✓ (ID) | ✓ | ✓ | ✓ |
-| MRN | ✗ | ✓ (ID) | ✓ | ✓ | ✓ |
-| Account number | partial | ✓ (ID) | ✓ | ✓ | ✓ |
-| License | partial | ✓ (ID) | ✓ | ✓ | ✓ |
-| Vehicle identifier | partial | ✓ (ID) | partial | partial | ✓ |
-| Device identifier | ✗ | ✓ (ID) | partial | partial | ✓ |
-| URL | ✓ | ✓ | ✓ | ✓ | ✓ |
-| IP address | ✓ | ✗ | ✓ | ✓ | ✓ |
-| Biometric | ✗ | ✓ (ID) | ✗ | ✗ | ✓ |
-| Full-face photo (image redactor) | partial | ✗ | ✗ | partial | ✓ |
-| Profession | ✗ | ✓ | partial | ✓ | ✓ |
-| ABHA (IN) | ✗ | ✗ | ✗ | ✗ | ✓ |
-| CTRI ID (IN) | ✗ | ✗ | ✗ | ✗ | ✓ |
-| UAN, ESI, CGHS, BPL (IN) | ✗ | ✗ | ✗ | ✗ | ✓ |
-| Ration card state-specific | ✗ | ✗ | ✗ | ✗ | ✓ |
-| Household member PHI | ✗ | ✗ | ✗ | ✗ | ✓ |
-| Quasi-identifier combos | ✗ | ✗ | ✗ | partial | ✓ |
-| Limited Data Set tier | ✗ | ✗ | ✗ | ✗ | ✓ |
-| Re-ID code derivation check | ✗ | ✗ | ✗ | ✗ | ✓ |
-| Fundraising context | ✗ | ✗ | ✗ | ✗ | ✓ |
+`phi_engine`'s own classification/detection/action surface, per identifier
+category from Table A. This table intentionally does NOT compare against
+Presidio/AWS/Azure/JSL: this repository has not independently, currently
+re-benchmarked those tools' entity coverage against this taxonomy, and an
+uncited checkmark table is not evidence. See
+`docs/PRIVACY_GATEWAY_RESEARCH.md` for the surviving adversarial-fixture
+exercise and source-traced findings this repository retains (structural
+gaps confirmed by direct code reading, not a comparative benchmark -- see
+`docs/PRIVACY_GATEWAY_STRESS_TEST.md`).
 
-## Table D — File format coverage
+| Identifier (from Table A) | Classification path | Residual detector (`phi_patterns.py`) | Applied action / control | Known limitation |
+|---|---|---|---|---|
+| Names | header-driven (`phi_review.py` pinned rules) | `PERSON_NAME_PREFIX`/`PERSON_NAME_GENERIC` (warn-tier only, not blocking) | force-drop / suppress per classification | No blocking-tier free-text name detector; warn-tier patterns are audit-only |
+| Addresses | header-driven | `ADDRESS` (blocking) | drop / generalize | Free-text address embedded in an unrelated field is not scanned by header classification |
+| Dates | header-driven | `DATE_ISO`/`DATE_TEXT` (blocking), `DATE_MDY` (warn) | SANT date-jitter / cap (age>89) | n/a |
+| Age > 89 rule | header-driven | `AGE_OVER_89` (blocking) | cap | n/a |
+| Phone | header-driven | `US_PHONE` (blocking) | drop / suppress | n/a |
+| Fax (distinct from phone) | header-driven only | none (no fax-distinct pattern) | drop / suppress | Free-text fax numbers are indistinguishable from phone in `phi_patterns.py` |
+| Email | header-driven | `EMAIL` (blocking) | drop / suppress | n/a |
+| SSN | header-driven | `SSN`/`SSN_UNHYPHENATED` (blocking) | drop / suppress | n/a |
+| MRN | header-driven | `MRN`/`MRN_LABELED` (blocking) | drop / suppress | n/a |
+| Account / license / vehicle / device identifier | header-driven only | none | drop / suppress per classification | No free-text/regex detector; relies entirely on the column header naming the category |
+| URL | header-driven | `URL` (blocking) | drop / suppress | n/a |
+| IP address | header-driven | `IP` (blocking) | drop / suppress | n/a |
+| Biometric identifier | header-driven only | none | drop / suppress per classification | No free-text/regex detector |
+| Full-face photograph | not handled | none | none | `organize()` has no image-file route; image/DICOM inputs are unrecognized-format |
+| Profession | not handled | none | none | No detector or action; quasi-identifier risk is not scored |
+| Quasi-identifier combination (structured/tabular) | `phi_engine/security/kanon_gate.py`/`pycanon_gate.py` | n/a | available EXPLICIT-INVOCATION query-time k-anonymity analysis, NOT wired into the publish path (`pycanon_gate.py`'s own docstring: publish-gate status DEFERRED, no `run.py` callsite) | Structured re-identification risk is an open gap at publish time, not a wired control |
+| Quasi-identifier combination (free text) | not handled | none | none | Confirmed structural gap -- see `docs/PRIVACY_GATEWAY_STRESS_TEST.md` §3 |
+| Limited Data Set (LDS) posture | not currently available | n/a | `phi_scrub` fails closed (`PHIScrubError` raised at synthesis time) | Requires `authorities/phi_limited_dataset.md`, which does not exist in this checkout; `compliance_posture: limited_dataset` cannot currently be selected |
+| Re-identification pseudonym | header-driven | n/a | HMAC-pseudonymize: `HMAC-SHA256(key, label:raw_id)` | Linkable pseudonymization -- one-way (key does not decrypt back to the raw value; it permits deterministic recomputation for a candidate value, enabling enumeration/linkage) -- not an independent §164.514(c) code and not itself Safe-Harbor-compliant absent Expert Determination -- see `authorities/01_hipaa_164_514_full.md` |
 
-| Format | Authority | Our coverage | Gap in major tools |
-|---|---|---|---|
-| JSONL | JSON RFC 8259 | ✓ | — |
-| JSON | JSON RFC 8259 | ✓ | — |
-| CSV | RFC 4180 | Planned | dirty-CSV edge cases |
-| TSV | — | Planned | — |
-| Excel XLSX | OOXML ECMA-376 | Planned | authors/sheet metadata often missed |
-| DOCX | OOXML ECMA-376 | Planned | track changes, comments, author |
-| PDF (text) | ISO 32000-1 | Planned | form fields, metadata, author |
-| PDF (form) | ISO 32000-1 | Planned | XFDF leakage |
-| Plain text (.txt) | — | ✓ | — |
-| HTML | W3C HTML 5 | Planned | hidden elements, meta tags |
-| Markdown | CommonMark | Planned | HTML embeds |
-| Email (.eml) | RFC 5322 | Planned | headers, From/To, References |
-| XML | W3C XML 1.1 | Planned | namespaces, processing instructions |
-| HL7 v2 | HL7 v2.x | Planned | PID, NK1, IN1 segments |
-| HL7 FHIR R4 JSON | HL7 FHIR | ✓ | — |
-| HL7 FHIR R4 XML | HL7 FHIR | Planned | — |
-| HL7 CDA | HL7 CDA R2 | Planned | narrative text PHI |
-| DICOM (.dcm header) | DICOM PS3.10 | Planned | private tags |
-| DICOM (.dcm with pixel) | DICOM PS3.15 E.3.1 | Planned | burned-in pixel PHI |
-| Parquet | Apache Parquet | Planned | sensitive column names |
-| Arrow (.arrow) | Apache Arrow | Planned | schema leakage |
-| Image EXIF (JPEG/TIFF) | Exif 2.32 | Planned | GPS, artist, comment fields |
-| Image PNG (tEXt/iTXt) | PNG spec | Planned | text chunks |
-| ZIP archive | PKWARE APPNOTE | Planned | file names can leak |
-| SQLite database | SQLite file format | Planned | row-level PHI |
+## Table D — File formats phi_engine's organizer routes
 
-## Table E — Attack surface matrix (OWASP LLM Top 10 + MITRE ATLAS)
+`phi_engine/pipeline/organize.py::organize()` is the only runtime file-format
+router; there is no separate format-generation subsystem.
 
-| Attack | Source | Our corpus layer | Test density |
-|---|---|---|---|
-| LLM01: Prompt Injection | OWASP LLM Top 10 2025 | injection layer | 100 test cases |
-| LLM02: Sensitive Info Disclosure | OWASP | all layers | full corpus |
-| LLM03: Supply Chain | OWASP | meta-layer | — |
-| LLM04: Data Poisoning | OWASP | injection layer | 100 cases |
-| LLM05: Improper Output Handling | OWASP | verification layer | — |
-| LLM06: Excessive Agency | OWASP | RBAC layer | — |
-| LLM07: System Prompt Leakage | OWASP | envelope layer | — |
-| LLM08: Vector/Embedding | OWASP | MIA layer | shadow model |
-| LLM09: Misinformation | OWASP | epistemic layer | — |
-| LLM10: Unbounded Consumption | OWASP | throughput layer | — |
-| Membership Inference | Nature Sci Rep 2024 | MIA layer | 6 shadow scenarios |
-| k-anonymity violation | Sweeney 2002 | quasi-id layer | 50 combos |
-| Re-identification codes | 164.514(c) | pseudonym layer | 20 cases |
+| Format | Authority | phi_engine `organize()` handling |
+|---|---|---|
+| JSONL | JSON RFC 8259 | ✓ validated/normalized into `organized/<study>/datasets/` |
+| JSON | JSON RFC 8259 | ✓ validated/normalized |
+| CSV | RFC 4180 | ✓ parsed (`dtype=str`, no NA coercion) |
+| XLSX | OOXML ECMA-376 | ✓ sheet-split, header-promoted |
+| XLS (legacy BIFF) | — | ✓ via `xlrd` when available; unreadable/mislabeled routes to review bucket (fail-closed) |
+| PDF | ISO 32000-1 | ✓ table-extracted (`pdfplumber`) or matched as an annotated-CRF companion by stem; no extractable table and no stem match routes to review bucket |
+| Any other suffix (DOCX, HTML, XML, HL7 v2/CDA, DICOM, image, Parquet, archive, etc.) | — | Not handled — routes to the review bucket with `reason: unrecognized-format` |
+
+## Table E — LLM/attack surface controls
+
+Repository-specific concern mapped to the `phi_engine` control that
+addresses it (mirrors `docs/THREAT_MODEL.md`'s OWASP LLM Top 10 table).
+
+| Attack | Source | phi_engine control |
+|---|---|---|
+| LLM01: Prompt Injection | OWASP LLM Top 10 2025 | `phi_engine.security.llm_tool_guard.validate_llm_read_path` -- defined, no production caller yet |
+| LLM02: Sensitive Info Disclosure | OWASP | `guard_llm_output` (live only on `llm_detector.py`/`regulation_fetcher.py` provider responses; the generic `llm_safe_tool` decorator has zero production uses), `phi_gate_check`, `phi_guard_gate.run_phi_guard_gate` |
+| LLM05: Improper Output Handling | OWASP | `guard_llm_output` blocks unsafe serialized output without echoing raw values |
+| LLM06: Excessive Agency | OWASP | `config.get_llm_client` (external providers disabled by default); `validate_llm_read_path` exists but is not yet wired |
+| LLM07: System Prompt Leakage | OWASP | `phi_engine.audit.zone_guards`; `validate_llm_read_path` exists but is not yet wired |
+| LLM09: Misinformation | OWASP | `docs/THREAT_MODEL.md`'s explicit non-certification boundary |
+| k-anonymity violation (structured) | Sweeney 2002 | `phi_engine/security/kanon_gate.py`/`pycanon_gate.py` -- available query-time utility, NOT wired into the publish path |
+| Re-identification codes | 164.514(c) | `phi_scrub`'s HMAC-pseudonymize action -- linkable pseudonymization only, see Table C |
 
 ## Table F — Detection regime taxonomy
 
-This table categorizes each identifier by the detection regime required. Corpus records include a detection_regime field with one of two values: rule_applicable (regex/pattern matching sufficient) or contextual_ner_required (requires transformer NER to detect from context). This split follows the i2b2 taxonomy confirmed in arXiv 2412.10918.
+Each identifier is categorized by the detection regime required: rule-applicable
+(regex/pattern matching sufficient, as implemented in `phi_patterns.py`) or
+contextual-NER-required (needs classification context beyond a fixed
+pattern — currently addressed only by header-driven classification, not a
+free-text NER model in this repository).
 
 | # | Identifier type | Detection regime | Rationale |
 |---|---|---|---|
@@ -261,19 +248,16 @@ ZIP codes (row 28) are PHI under HIPAA Safe Harbor (B).
 
 ## How this matrix is used
 
-1. **IRB reviewers** should start here. Every claim about corpus coverage maps to exactly one authority and one (or more) test cases.
-2. **Counsel review** should check Table B against applicable jurisdiction.
-3. **Security review** should check Table E against current threat model.
-4. **Engineering review** should check Tables A+C+D to verify detector coverage matches the claimed taxonomy.
-5. **Reproducibility** is guaranteed if every test case includes the authority citation field and every detector emits the authority citation in its result.
+1. **Engineering review** should check Tables A+C+D to verify `phi_engine`'s
+   actual detector/router coverage matches the claimed taxonomy.
+2. **Security review** should check Table E against `docs/THREAT_MODEL.md`.
+3. **Counsel review** should check Table B against applicable authority.
 
 ## Update procedure
 
 This matrix is updated when:
 - A new authority is ratified (add to Table B)
 - A new identifier category is added (add to Table A with citation)
-- A new benchmark tool is integrated (add column to Table C)
-- A new file format generator is added (add to Table D)
-- A new attack vector is documented (add to Table E)
-
-Every update requires a version bump, a CHANGELOG entry, and a MANIFEST hash update.
+- `phi_engine`'s own detection/action surface changes (update Table C)
+- `phi_engine/pipeline/organize.py`'s routed formats change (update Table D)
+- A new attack vector or control is documented (add to Table E)
