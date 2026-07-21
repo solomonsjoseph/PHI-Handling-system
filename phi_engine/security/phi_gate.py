@@ -6,20 +6,33 @@ allowlist suppresses obvious-false-positive warnings on clinical
 verbatim like "Treatment Completed" that would otherwise match the
 generic name-like heuristic.
 
-Presidio NER is intentionally not wired in — comparative benchmarks
-showed precision around 22.7 % on mixed data where the rule catalog +
-clinical allowlist reach materially higher precision on the calibrated
-Indo-VAP field shapes.
+Presidio NER is not wired in at this query-time boundary — the rule
+catalog + clinical allowlist combination is tuned for the calibrated
+Indo-VAP field shapes this gate covers; Presidio-backed detection runs
+separately in :mod:`phi_engine.security.presidio_gate` for LLM-visible-
+artifact residual scanning.
 
-The gate is the **defence-in-depth** layer at the LLM tool boundary:
-:func:`phi_engine.security.llm_tool_guard.guard_llm_output` calls
-:func:`phi_gate_check` on every payload before it reaches an LLM, so even
-if an upstream scrub missed a token the live call cannot surface it.
+The gate primitive (:func:`phi_gate_check`) is invoked at explicit
+callsites, not as a universal interceptor. Live production callsites
+that gate an LLM-bound payload:
+  * :func:`phi_engine.security.llm_tool_guard.guard_llm_output` calls
+    :func:`phi_gate_check` on the return value of
+    ``llm_detector.classify_headers`` and
+    ``phi_engine.tools.regulation_fetcher``'s fetch responses -- the
+    only two production callers.
+  * :func:`LLMClient.complete` calls :func:`phi_gate_check` on the
+    outbound prompt before provider dispatch.
+The generic ``llm_safe_tool`` decorator (meant to wrap arbitrary tool
+returns) and :func:`phi_engine.security.llm_tool_guard.validate_llm_read_path`
+(meant to gate LLM-visible file reads) are defined and exported but have
+ZERO production call sites -- general tool returns and LLM-mediated reads
+are NOT routed through a PHI gate today.
 
-IRB-grade benchmark anchors:
-    * Pillar 2.4 — every tool return passes through a PHI gate
-    * Pillar 1.5 — narrative-content leak detection
-    * Pillar 5.3 — breach-alert emission on blocked responses
+Authority-grounded controls:
+    * `phi_gate_check` is called at the two response-gating sites above
+      and on the outbound-prompt path -- not a universal tool-return gate
+    * Narrative-content leak detection
+    * Breach-alert emission on blocked responses
 """
 
 from __future__ import annotations

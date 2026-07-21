@@ -11,7 +11,7 @@ Flow:
 The LLM never fetches arbitrary URLs -- only the hardcoded official sources.
 
 Scope: this is an OFFLINE AUTHORING CLI (``phi-authority``) that maintains the
-human-readable ``authorities/*.md`` corpus. It does **not** feed
+human-readable ``authorities/*.md`` authority document set. It does **not** feed
 ``phi_engine.pipeline.run.run_pipeline``: the runtime rulebook resolves its rules
 and official-source list from ``phi_engine.security.phi_review._PINNED_SOURCES``
 and the closed ``phi_engine.security.official_sources._REGISTRY`` (the single

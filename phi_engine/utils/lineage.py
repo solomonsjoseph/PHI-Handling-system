@@ -22,7 +22,7 @@ Caller must ensure :func:`emit_lineage_manifest` runs AFTER
 ``_publish_staging`` so the llm_source bundle exists and AFTER all audit
 reports are on disk.
 
-IRB-grade benchmark anchors:
+Authority-grounded controls:
     * NIST SP 800-188 §7 governance + audit
     * FDA 21 CFR Part 11 §11.10(e) audit record requirements
     * ICMR 2017 §11.5 audit + confidentiality

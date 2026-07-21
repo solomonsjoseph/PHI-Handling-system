@@ -28,7 +28,7 @@ Design constraints:
   replaces the message with a fixed redaction-failure notice. Logs remain
   useful for operations without passing raw PHI through.
 
-IRB-grade benchmark anchors:
+Authority-grounded controls:
     * ICMR 2017 §11.5 audit + confidentiality
     * HIPAA §164.312(b) audit controls
     * NIST SP 800-188 §6.4 on side-channel closure

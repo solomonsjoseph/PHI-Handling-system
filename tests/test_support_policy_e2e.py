@@ -10,9 +10,10 @@ link is inferred, ``build_transform_maps_from_support`` fills the synth map,
 output carries the broad LABELS (``Low``/``Mid``/``High``) instead of the raw
 codes — with a provenance record written to the protected run zone.
 
-Uses the same hermetic env pattern as tests/test_run_phi_system.py (per-study
-STUDY_NAME + PHI key, module sweep so STUDY_NAME-derived config paths resolve
-fresh, full per-study cleanup).
+Uses a hermetic env pattern (per-study STUDY_NAME + PHI key, module sweep so
+STUDY_NAME-derived config paths resolve fresh, full per-study cleanup) to
+avoid stale import-time configuration and class identity leaking across
+studies.
 """
 
 from __future__ import annotations

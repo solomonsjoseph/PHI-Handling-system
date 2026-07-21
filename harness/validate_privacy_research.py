@@ -1,10 +1,8 @@
 """Validator for the privacy-gateway research contracts.
 
-No existing validator checks semantic research claims --
-`validators/citation_validator.py` only rejects malformed corpus citation
-strings against the JSONL corpus schema. This module validates the three
-privacy-gateway research artifacts produced by the plan in
-`docs/PRIVACY_GATEWAY_RESEARCH.md`'s supporting evidence pipeline:
+This module validates the three privacy-gateway research artifacts
+produced by the plan in `docs/PRIVACY_GATEWAY_RESEARCH.md`'s supporting
+evidence pipeline:
 
 - `research/privacy_gateway/evidence_ledger.jsonl` -- one row per sourced claim.
 - `research/privacy_gateway/candidate_registry.jsonl` -- one row per product/method.

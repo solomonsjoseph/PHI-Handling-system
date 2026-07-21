@@ -4,7 +4,6 @@ Verifies that:
 - phi_engine package imports without error
 - phi_engine.security subpackage imports without error
 - archive/ is not importable from any active phi_engine module
-- benchmark_config.yaml exists and has benchmark_mode=true
 """
 
 import importlib
@@ -12,7 +11,6 @@ import os
 import sys
 import pathlib
 import pytest
-import yaml
 
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
@@ -63,31 +61,3 @@ class TestArchiveNotImportable:
             assert "import archive" not in content, (
                 f"{py_file.relative_to(REPO_ROOT)} imports archive"
             )
-
-
-class TestBenchmarkConfig:
-    def test_benchmark_config_exists(self):
-        """phi_engine/config/benchmark_config.yaml must exist."""
-        cfg = REPO_ROOT / "phi_engine" / "config" / "benchmark_config.yaml"
-        assert cfg.exists(), f"benchmark_config.yaml not found at {cfg}"
-
-    def test_benchmark_mode_true(self):
-        """benchmark_config.yaml must have benchmark_mode: true."""
-        cfg = REPO_ROOT / "phi_engine" / "config" / "benchmark_config.yaml"
-        with cfg.open() as f:
-            data = yaml.safe_load(f)
-        assert data.get("benchmark_mode") is True, (
-            f"benchmark_mode must be true, got: {data.get('benchmark_mode')}"
-        )
-
-    def test_benchmark_config_bypasses_llm(self):
-        """benchmark_config.yaml must set provider and model to none."""
-        cfg = REPO_ROOT / "phi_engine" / "config" / "benchmark_config.yaml"
-        with cfg.open() as f:
-            data = yaml.safe_load(f)
-        assert data.get("provider") == "none", (
-            f"provider must be none, got: {data.get('provider')}"
-        )
-        assert data.get("model") == "none", (
-            f"model must be none, got: {data.get('model')}"
-        )

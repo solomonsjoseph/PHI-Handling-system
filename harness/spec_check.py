@@ -44,6 +44,20 @@ REPORT_PATH = REPO_ROOT / "tmp" / "spec_check_report.json"
 _LLM_CLIENT_EXEMPT_STEMS = frozenset({"llm_detector", "phi_alignment"})
 
 
+def _resolve_report_path(workspace: Path | None) -> Path:
+    """Resolve where the spec-check report should be written.
+
+    A supplied ``workspace`` keeps the report workspace-local
+    (``workspace/tmp/spec_check_report.json``) so a workspace-scoped run
+    never recreates the repository-root ``tmp/`` tree. With no workspace,
+    fall back to the legacy ``REPO_ROOT/tmp/spec_check_report.json``
+    location for backward compatibility.
+    """
+    if workspace is not None:
+        return Path(workspace) / "tmp" / "spec_check_report.json"
+    return REPORT_PATH
+
+
 def _check_pytest(*, extra_args: tuple[str, ...] = ()) -> dict[str, Any]:
     cmd = [
         sys.executable,
@@ -197,8 +211,9 @@ def run_spec_check(
         "checks": checks,
         "all_pass": all(c["ok"] for c in checks),
     }
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    report_path = _resolve_report_path(workspace)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     return report
 
 
@@ -232,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
         for v in c.get("violations", []):
             print(f"    - {v}")
 
-    print(f"\nReport written to {REPORT_PATH}")
+    print(f"\nReport written to {_resolve_report_path(workspace)}")
     print("ALL PASS" if report["all_pass"] else "FAILURES PRESENT")
     return 0 if report["all_pass"] else 1
 

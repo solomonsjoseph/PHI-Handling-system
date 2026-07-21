@@ -54,7 +54,7 @@ ai_assistant:
 
 
 # ============================================================
-# LLM CLIENT (PHI corpus generation and detection)
+# LLM CLIENT (PHI detection)
 # Provider options:
 #   anthropic    -- Claude; set ANTHROPIC_API_KEY
 #   openai       -- GPT; set OPENAI_API_KEY

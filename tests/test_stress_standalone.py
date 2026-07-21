@@ -7,6 +7,7 @@ import uuid
 from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
+from types import ModuleType
 from typing import Iterator
 
 import pytest
@@ -17,20 +18,74 @@ from harness.make_stress_fixtures import build_stress_fixtures
 TEST_PHI_KEY_HEX = "0" * 64
 
 
+_UNSET = object()  # sentinel: parent had no such attribute before the hermetic context
+
+
+def _phi_runtime_module_names() -> set[str]:
+    """Names in sys.modules that _drop_phi_runtime_modules() would delete.
+
+    Excludes the identity-preserving keep-set (phi_engine, phi_engine.utils,
+    phi_engine.utils.pipeline_lock) so callers can snapshot or evict the same
+    hermetic phi_engine.* module set consistently.
+    """
+    keep = {"phi_engine", "phi_engine.utils", "phi_engine.utils.pipeline_lock"}
+    return {name for name in sys.modules if name.startswith("phi_engine.") and name not in keep}
+
+
 def _drop_phi_runtime_modules() -> None:
     """Force workspace/study-derived phi_engine paths to resolve fresh per test.
 
     phi_engine.config.config binds PHI_WORKSPACE, STUDY_NAME, and PHI_KEY_PATH at
-    import time, and most pipeline modules hold that config module. A prefix sweep
-    before and after each hermetic workspace prevents cross-test module identity
-    and path churn, matching tests/test_run_phi_system.py's pattern.
+    import time, and most pipeline modules hold that config module. Evicting
+    phi_engine.* modules before a hermetic workspace forces fresh imports bound to
+    the new env; _hermetic_phi_workspace restores the pre-test module objects on
+    teardown so downstream collected tests retain their original class identity.
     """
-    keep = {"phi_engine", "phi_engine.utils", "phi_engine.utils.pipeline_lock"}
-    for name in list(sys.modules):
-        if name in keep:
+    for name in _phi_runtime_module_names():
+        del sys.modules[name]
+
+
+def _snapshot_parent_attr(name: str) -> tuple[str, str, object]:
+    """Return (parent_name, leaf, previous_value) for a dotted module name.
+
+    previous_value is _UNSET when the parent currently has no such attribute
+    (or the parent module itself is not loaded).
+    """
+    parent_name, _, leaf = name.rpartition(".")
+    parent = sys.modules.get(parent_name)
+    previous = getattr(parent, leaf, _UNSET) if parent is not None else _UNSET
+    return parent_name, leaf, previous
+
+
+def _restore_phi_runtime_modules(
+    saved_modules: dict[str, ModuleType],
+    saved_parent_attrs: dict[str, tuple[str, str, object]],
+    current_names: set[str],
+) -> None:
+    """Restore sys.modules entries and exact pre-context parent-package bindings.
+
+    Kept ancestors (phi_engine, phi_engine.utils) are never evicted, so their
+    in-memory attributes for children still reference whatever was imported
+    last. `import phi_engine.x.y as z`-style imports (used throughout
+    phi_engine, e.g. `import phi_engine.config.config as config`) resolve via
+    those parent attributes first, so exact restoration must both rebind
+    attributes that existed before the context (`saved_parent_attrs`) and
+    delete attributes for children first imported inside it (any name in
+    `current_names` absent from `saved_parent_attrs`).
+    """
+    sys.modules.update(saved_modules)
+    for name in current_names | saved_modules.keys():
+        parent_name, leaf, previous = saved_parent_attrs.get(name, (None, None, _UNSET))
+        if parent_name is None:
+            parent_name, _, leaf = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is None:
             continue
-        if name.startswith("phi_engine."):
-            del sys.modules[name]
+        if previous is _UNSET:
+            if hasattr(parent, leaf):
+                delattr(parent, leaf)
+        else:
+            setattr(parent, leaf, previous)
 
 
 @contextmanager
@@ -45,11 +100,29 @@ def _hermetic_phi_workspace(tmp_path: Path, study_prefix: str) -> Iterator[tuple
     key_path.write_text(TEST_PHI_KEY_HEX, encoding="utf-8")
     key_path.chmod(0o600)
 
+    pre_existing_names = _phi_runtime_module_names()
+    saved_modules = {name: sys.modules[name] for name in pre_existing_names}
+    saved_parent_attrs = {name: _snapshot_parent_attr(name) for name in pre_existing_names}
+
+    # phi_engine.utils.pipeline_lock is kept (never evicted), so its own
+    # `import phi_engine.config.config as config` binding is frozen to
+    # whichever config module existed when pipeline_lock was first imported.
+    # Rebind it to this workspace's fresh config for the context, then put
+    # its original binding back on teardown.
+    pipeline_lock_module = sys.modules.get("phi_engine.utils.pipeline_lock")
+    original_pipeline_lock_config = (
+        pipeline_lock_module.config if pipeline_lock_module is not None else None
+    )
+
     try:
         os.environ["PHI_WORKSPACE"] = str(workspace)
         os.environ["STUDY_NAME"] = study
         os.environ["PHI_KEY_PATH"] = str(key_path)
         _drop_phi_runtime_modules()
+        import phi_engine.config.config as fresh_config
+
+        if pipeline_lock_module is not None:
+            pipeline_lock_module.config = fresh_config
         yield workspace, study
     finally:
         if original_workspace is None:
@@ -64,7 +137,11 @@ def _hermetic_phi_workspace(tmp_path: Path, study_prefix: str) -> Iterator[tuple
             os.environ.pop("PHI_KEY_PATH", None)
         else:
             os.environ["PHI_KEY_PATH"] = original_phi_key_path
+        if pipeline_lock_module is not None:
+            pipeline_lock_module.config = original_pipeline_lock_config
+        current_names = _phi_runtime_module_names()
         _drop_phi_runtime_modules()
+        _restore_phi_runtime_modules(saved_modules, saved_parent_attrs, current_names)
 
 
 def _sha256_file(path: Path) -> str:
@@ -214,9 +291,8 @@ def test_run_completes_partial_and_escalates_phi_in_unexpected_columns(tmp_path:
     SSN-shaped values, 'COMMENT' holding phone-shaped values) must never
     publish raw, however the pipeline arrives at that outcome (name-rule
     suppression, force_drop_headers, or the value-profiler's escalation
-    rule -- profile_escalations elsewhere in the same run, e.g. the corpus
-    generator's own annotated-PHI sidecar columns, is a separate concern and
-    intentionally NOT asserted here as an exact count)."""
+    rule elsewhere in the same run is a separate concern and intentionally
+    NOT asserted here as an exact count)."""
     ctx, workspace, study, _source, manifest, _intake_manifest, _organize_manifest, result = _intake_organize_run(
         tmp_path, "StressRun"
     )
@@ -323,6 +399,10 @@ def test_spec_check_passes_against_the_full_stress_run(tmp_path: Path):
             source_manifest=source_manifest_path,
         )
         assert report["all_pass"] is True, report["checks"]
+
+        report_path = workspace / "tmp" / "spec_check_report.json"
+        assert report_path.exists(), "spec_check must write a workspace-local report"
+        assert json.loads(report_path.read_text(encoding="utf-8")) == report
     finally:
         ctx.__exit__(None, None, None)
 
@@ -365,3 +445,85 @@ def test_stale_staged_file_never_publishes_without_current_approval(tmp_path: Pa
         assert published == ["current.jsonl"]
         assert "stale.jsonl" not in published
         assert not (staging_dir / "stale.jsonl").exists()  # staging cleared, not just unpublished
+
+
+def test_hermetic_workspace_removes_child_first_imported_inside_failed_context(tmp_path: Path):
+    """A phi_engine.* child absent before the context and created only
+    inside a body that raises must leave no trace afterward: neither its
+    sys.modules entry nor its parent-package attribute may survive
+    teardown -- restoring sys.modules alone is not enough, since the kept
+    `phi_engine` package's attribute for the child would otherwise still
+    point at the now-orphaned hermetic module object.
+
+    Uses a synthetic child name (not a real phi_engine submodule) so this
+    test cannot disturb the real phi_engine.pipeline.* module tree that
+    other tests in this session depend on for stable class identity.
+    """
+    import types
+
+    import phi_engine
+
+    module_name = "phi_engine._hermetic_absence_probe"
+    assert module_name not in sys.modules
+    assert not hasattr(phi_engine, "_hermetic_absence_probe")
+
+    class _Boom(Exception):
+        pass
+
+    with pytest.raises(_Boom):
+        with _hermetic_phi_workspace(tmp_path, "AbsentChild") as (_workspace, _study):
+            probe = types.ModuleType(module_name)
+            sys.modules[module_name] = probe
+            phi_engine._hermetic_absence_probe = probe  # mirrors real import-system binding
+
+            assert module_name in sys.modules
+            assert hasattr(phi_engine, "_hermetic_absence_probe")
+            raise _Boom
+
+    assert module_name not in sys.modules
+    assert not hasattr(phi_engine, "_hermetic_absence_probe")
+
+
+def test_hermetic_workspace_restores_preexisting_child_identity(tmp_path: Path):
+    """A phi_engine.* module already imported before the context must be the
+    exact original object -- both in sys.modules and via its parent's
+    attribute -- once the context exits, so downstream collected code keeps
+    the same class identity (e.g. Sensitivity, DependencyKind) it started
+    with rather than a hermetic workspace's fresh replacement."""
+    import phi_engine.pipeline.dependencies as original_dependencies
+
+    module_name = "phi_engine.pipeline.dependencies"
+    parent_name, _, leaf = module_name.rpartition(".")
+    original_module = sys.modules[module_name]
+
+    with _hermetic_phi_workspace(tmp_path, "PreexistingChild") as (_workspace, _study):
+        import phi_engine.pipeline.dependencies as fresh_dependencies
+
+        assert fresh_dependencies is not original_module
+
+    assert sys.modules[module_name] is original_module
+    assert getattr(sys.modules[parent_name], leaf) is original_module
+
+    import phi_engine.pipeline.dependencies as restored_dependencies
+
+    assert restored_dependencies is original_module
+    assert restored_dependencies.Sensitivity is original_dependencies.Sensitivity
+
+
+def test_hermetic_workspace_rebinds_kept_pipeline_lock_config(tmp_path: Path):
+    """phi_engine.utils.pipeline_lock is kept (never evicted), so its own
+    `import phi_engine.config.config as config` binding is frozen to
+    whichever config module existed the first time it was imported. It must
+    be rebound to each workspace's fresh config for the duration of the
+    context -- otherwise lock paths resolve outside the hermetic workspace
+    and can collide across studies -- and restored to its original binding
+    afterward."""
+    import phi_engine.utils.pipeline_lock as pipeline_lock
+
+    original_config = pipeline_lock.config
+
+    with _hermetic_phi_workspace(tmp_path, "LockCfg") as (workspace, study):
+        assert pipeline_lock.config is not original_config
+        assert pipeline_lock.lock_path_for(study).parent == workspace.resolve() / "tmp"
+
+    assert pipeline_lock.config is original_config

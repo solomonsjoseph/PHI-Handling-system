@@ -1,24 +1,40 @@
-"""k-anonymity / small-cell suppression gate for agent-tool responses.
+"""k-anonymity / small-cell suppression utilities (explicit invocation only).
 
 At the trio-bundle -> agent boundary, row-level queries can surface
 equivalence classes (age-band x sex x district x outcome) with very
 small sample sizes. A response returning one matched row with all
 sensitive attributes visible defeats the whole scrub — the scrub
-guarantees de-identification at rest, but k-anon defends against
-re-identification at query time.
+guarantees de-identification at rest, but k-anonymity analysis defends
+against re-identification at query time, IF invoked.
 
-This module provides two utilities:
+This module provides explicit-invocation analysis utilities, not a live
+gate. A repository-wide callsite search found no caller of
+:func:`kanon_check`, :func:`l_diversity_check`, or
+:func:`suppress_small_cells` anywhere in the live pipeline or at an
+agent/tool boundary (the sibling :mod:`phi_engine.security.pycanon_gate`
+module's own docstring separately documents its
+:func:`check_publish_anonymity` as publish-gate status DEFERRED, not
+invoked at promotion). Neither k-anonymity nor l-diversity is currently
+enforced in the live publish or agent-response path; wiring either into a
+real chokepoint is open integration work, not something already covered
+by these utilities existing.
+
+This module provides three utilities:
 
 * :func:`kanon_check` — given a list of equivalence-class records and
   a *k* threshold, returns a :class:`KAnonResult` with ``blocked`` set
   when any class has fewer than *k* members.
+* :func:`l_diversity_check` — given equivalence-class records and a
+  sensitive-attribute field, returns a result with ``blocked`` set when
+  any class has fewer than *l* distinct sensitive-attribute values.
+  Implemented, but -- like :func:`kanon_check` -- not called anywhere in
+  the live pipeline; the gap is integration/enforcement, not the
+  function's existence.
 * :func:`suppress_small_cells` — given aggregate counts, replaces any
   count < *k* with the string ``"<5"`` (or equivalent) so the agent
-  surface never reveals an exact small-cell value.
+  surface never reveals an exact small-cell value, IF this function is
+  actually called on the output path.
 
-IRB-grade benchmark anchor: Pillar 1.7 — k-anonymity ≥ 5 enforced on
-quasi-identifier combos surfaced to the agent; l-diversity ≥ 2 is a
-tracked design gap (see references.rst).
 Reference: ICMR 2017 §11.7; NIST SP 800-188 §5.
 """
 

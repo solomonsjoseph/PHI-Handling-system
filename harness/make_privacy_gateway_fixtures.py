@@ -27,13 +27,11 @@ Output layout under `--out DIR`:
                             `entity_type`, `detection_regime`), `data_class`,
                             `channel`, `format`, `attack_tags`,
                             `synthetic_provenance`. `text` is always a
-                            flattened/extracted textual surface so the
-                            existing text-based adapters
-                            (`benchmarks/presidio_adapter.py`,
-                            `benchmarks/phi_engine_adapter.py`) can score it
-                            unmodified; binary artifacts (xlsx/pdf/docx/dicom/
-                            image/zip) additionally get a real file under
-                            DIR/artifacts/ referenced by `artifact_path`.
+                            flattened/extracted textual surface suitable for
+                            text-based PHI/PII scoring; binary artifacts
+                            (xlsx/pdf/docx/dicom/image/zip) additionally get
+                            a real file under DIR/artifacts/ referenced by
+                            `artifact_path`.
 
 CLI:
     python -m harness.make_privacy_gateway_fixtures --out tmp/privacy-gateway-fixtures --seed 42

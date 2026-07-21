@@ -9,12 +9,13 @@ established: extraction routes through the official-source registry + router
 floor, unchanged sources reuse the cache without a model call, offline/optional
 degrades to pinned, REQUIRE_LIVE fails closed, and a tampered cache is rejected.
 
-NOTE: other hermetic tests in this suite sweep ``phi_engine.*`` out of
-``sys.modules`` (see ``tests/test_run_phi_system.py``'s
-``_drop_phi_runtime_modules``). Capturing modules/classes at COLLECTION time
-would leave stale objects that no longer match the freshly re-imported modules
-``resolve_live_rulebook`` uses internally — so every module and class is
-imported FRESH inside the ``env`` fixture and monkeypatched there.
+NOTE: other hermetic tests in this suite evict ``phi_engine.*`` modules
+from ``sys.modules`` between hermetic workspaces to avoid stale import-time
+configuration and class identity leaking across studies. Capturing
+modules/classes at COLLECTION time would leave stale objects that no longer
+match the freshly re-imported modules ``resolve_live_rulebook`` uses
+internally — so every module and class is imported FRESH inside the
+``env`` fixture and monkeypatched there.
 """
 
 from __future__ import annotations

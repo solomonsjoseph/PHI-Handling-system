@@ -9,12 +9,12 @@
 
 Every subcommand accepts ``--workspace`` (sets ``PHI_WORKSPACE``) and
 ``--study`` (sets ``STUDY_NAME``), and sets BOTH env vars BEFORE importing
-``phi_engine.config.config`` -- the same import-time-resolution pattern
-``harness/run_phi_system.py`` used for ``STUDY_NAME``. ``--jurisdiction``
-choices stay ``us``: pinned rule specs currently exist only for USA
-(``phi_engine/security/phi_review.py`` ``_PINNED_RULE_SPECS``). Extending to
-another jurisdiction needs its own pinned rule-spec entries with authority
-remain generator-only.
+``phi_engine.config.config``, since that module resolves workspace/study
+paths at import time. ``--jurisdiction`` choices stay ``us``: pinned rule
+specs currently exist only for USA (``phi_engine/security/phi_review.py``
+``_PINNED_RULE_SPECS``). Extending to another jurisdiction needs its own
+pinned rule-spec entries grounded in that jurisdiction's authority document
+set under ``authorities/*.md``.
 """
 
 from __future__ import annotations

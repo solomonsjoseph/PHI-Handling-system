@@ -35,11 +35,9 @@ def bootstrap_study_privacy(study: str, jurisdiction: str) -> dict[str, object]:
     """Idempotent: populate ``<study config root>/<study>/_study_privacy.yaml``
     plus the sidecar PHI HMAC key.
 
-    Moved here from ``harness/run_phi_system.py::_ensure_study_config`` (the
-    harness now imports this function instead of owning the logic). Unlike
-    the original helper, ``phi_scrub.yaml`` itself is NOT bootstrapped here
-    -- it is fully owned by :func:`synthesize_study_config`, which
-    regenerates it every run from the current classification set.
+    ``phi_scrub.yaml`` itself is NOT bootstrapped here -- it is fully owned
+    by :func:`synthesize_study_config`, which regenerates it every run from
+    the current classification set.
     """
     from phi_engine.security import phi_scrub
 

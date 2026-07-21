@@ -317,12 +317,11 @@ _PINNED_RULE_SPECS: tuple[dict[str, object], ...] = (
             r"\b(url|uri|ip[_ -]?address|photo|image|biometric|finger|voice)\b",
             r"\b(account|license|certificate|vehicle|plate|device[_ -]?serial)\b",
             r"\b(mrn|medical[_ -]?record|health[_ -]?plan|beneficiary)\b",
-            # Synthetic-benchmark-driven coverage (2026-06-26, Note 34): direct
-            # identifiers the token-boundary rules above missed — person-name
-            # suffixes (FNAME/LNAME/MNAME/EMERGNAME/SURNAME), US financial / govt
-            # IDs, device/biometric tokens, and contact-info columns. Every pattern
-            # below was verified collision-free against all 1,702 Indo-VAP columns
-            # (TC_CARD/TC_CARDLOC, ST_LACCNUM excluded by anchoring).
+            # Additional direct-identifier coverage beyond the token-boundary
+            # rules above: person-name suffixes (FNAME/LNAME/MNAME/EMERGNAME/
+            # SURNAME), US financial / govt IDs, device/biometric tokens, and
+            # contact-info columns (TC_CARD/TC_CARDLOC, ST_LACCNUM excluded by
+            # anchoring).
             r"(^|[_ -])[a-z]{0,12}names?\d*$",
             r"\bpassport\b",
             r"\b(medicare|medicaid)\b",

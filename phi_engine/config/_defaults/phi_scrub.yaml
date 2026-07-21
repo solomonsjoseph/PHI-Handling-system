@@ -33,7 +33,7 @@
 # uses re.search (not fullmatch) — anchor with ^…$ for exact-column-name
 # intent; leave unanchored for substring-in-column-name intent.
 #
-# IRB-grade benchmark anchors (see docs/sphinx/irb_auditor/):
+# Authority-grounded controls:
 #   HIPAA §164.514(b)(2), NIST SP 800-188.
 #
 # Provenance: rule catalog ported from scripts/archive/phi_rules.py field-rule

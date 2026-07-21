@@ -23,7 +23,7 @@ is wrapped by :func:`scripts.security.secure_env.assert_write_zone` so a
 misconfigured staging root fails fast with a zone violation rather than
 silently writing outside the allowed area.
 
-IRB-grade benchmark anchors (see docs/sphinx/irb_auditor/):
+Authority-grounded controls:
     * HIPAA §164.310(c) device + media controls
     * NIST SP 800-188 §6.3-§6.5 on transient de-identification workspaces
     * ICMR 2017 §11.5 audit + confidentiality

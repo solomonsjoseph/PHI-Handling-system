@@ -1,6 +1,5 @@
 """Build an intentionally messy source tree for the standalone-pipeline stress
-test (Phase 6). Corpus-side tooling -- freely imports ``generators/`` and
-writes synthetic PHI values only (never real data).
+test. Writes synthetic PHI values only (never real data).
 
     python -m harness.make_stress_fixtures --out tmp/stress-source [--seed 42]
 
@@ -38,8 +37,12 @@ def _fake(seed: int) -> Faker:
 
 def _write_clean_crf_xlsx(path: Path, fk: Faker, n: int = 8) -> None:
     """A realistic CRF-shaped workbook: real column headers, multiple rows --
-    exercises sheet_split.split_sheet_into_tables + promote_header properly
-    (unlike a single free-text-column dump)."""
+    shaped to exercise sheet_split.split_sheet_into_tables + promote_header
+    if routed through the dataset path. The current stress fixture places
+    this workbook under a nested subdirectory, so organize.py's _role_for
+    (any relative path with more than one segment) intentionally routes it
+    to the review bucket instead -- it exercises review routing, not
+    dataset routing, in this fixture tree."""
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -50,18 +53,6 @@ def _write_clean_crf_xlsx(path: Path, fk: Faker, n: int = 8) -> None:
         ws.append([f"CRF-{i:03d}", fk.random_int(18, 85), fk.random_element(["M", "F"]), f"SITE-{i % 3}"])
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(path))
-
-
-def _write_xlsxgenerator_sidecar(out_dir: Path, seed: int) -> Path | None:
-    """Also exercise generators.file_formats.xlsx_gen.generate's own sidecar
-    xlsx-writing path (corpus-generator API named in the stress-fixture plan).
-    Returns one of the produced xlsx files, or None if openpyxl unavailable."""
-    from generators.file_formats.xlsx_gen import generate as xlsx_generate
-
-    sidecar_dir = out_dir / "_xlsxgen_sidecar"
-    xlsx_generate(seed=seed, output_dir=sidecar_dir, n_per_tier_a=2)
-    xlsx_files = sorted((sidecar_dir / "xlsx_files").glob("*.xlsx"))
-    return xlsx_files[0] if xlsx_files else None
 
 
 def _write_csv(path: Path, fk: Faker, n: int = 6) -> None:
@@ -132,9 +123,8 @@ def _write_pdf_with_table(path: Path, fk: Faker) -> None:
 def _write_annotated_crf_pdf(path: Path, dataset_stem: str) -> None:
     """A PDF whose stem matches an organized dataset's stem -- routes to the
     annotated_pdfs/ companion leg rather than table extraction. Content is a
-    simple printed form (no bespoke annotation alignment is exercised here;
-    see docs/AUDIT_REPORT note on the SoT producer's Indo-VAP-specific
-    annotation tables)."""
+    simple printed form; no bespoke annotation-alignment logic is exercised
+    by this fixture."""
     path.parent.mkdir(parents=True, exist_ok=True)
     c = canvas.Canvas(str(path), pagesize=letter)
     c.drawString(72, 720, f"Annotated CRF for {dataset_stem}")
@@ -191,7 +181,6 @@ def build_stress_fixtures(out_dir: Path, *, seed: int = 42) -> dict[str, Any]:
     _write_csv(out_dir / "3_Labs.csv", fk)
     _write_jsonl(nested / "2_Demographics.jsonl", fk)
     _write_json_list(out_dir / "extra_group.json", fk)
-    sidecar_xlsx = _write_xlsxgenerator_sidecar(out_dir, seed)
 
     # -- .xls: genuine if xlwt is installable, else a mislabeled fallback ----
     xls_path = out_dir / "legacy_site.xls"
@@ -252,7 +241,6 @@ def build_stress_fixtures(out_dir: Path, *, seed: int = 42) -> dict[str, Any]:
         "files": files,
         "planted_unexpected_phi_rows": planted_unexpected_phi_rows,
         "planted_unexpected_phi_file": "site_notes.jsonl",
-        "sidecar_xlsx": str(sidecar_xlsx.relative_to(out_dir)) if sidecar_xlsx else None,
     }
     return manifest
 

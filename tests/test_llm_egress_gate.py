@@ -12,8 +12,9 @@ import phi_engine.config.config as config
 # phi_engine.config.config.LLMClient.complete() imports it LOCALLY on every
 # call (to avoid a circular import with phi_engine.security.phi_gate). Other
 # hermetic tests in this suite sweep `phi_engine.*` out of sys.modules
-# between studies (see tests/test_run_phi_system.py's
-# `_drop_phi_runtime_modules`); if this file captured the exception class at
+# between hermetic workspaces (see `_drop_phi_runtime_modules` in
+# tests/test_stress_standalone.py) to avoid stale import-time configuration
+# and class identity; if this file captured the exception class at
 # COLLECTION time, a sweep by an earlier-running test would leave a stale
 # class object here that no longer matches the freshly re-imported class
 # raised at call time. Catch the STABLE base (PermissionError) and verify by

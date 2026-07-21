@@ -177,8 +177,8 @@ AGENT_MODEL_ID: str = os.environ.get("REPORTAL_AGENT_MODEL", "claude-opus-4-7")
 # project and pointed at that project's own workspace with zero code
 # changes. Unset (the default) preserves the original repo-root-relative
 # behavior exactly. CLI subcommands (phi_engine/cli/main.py) set this env
-# var BEFORE importing this module -- the same import-time-resolution
-# pattern harness/run_phi_system.py already used for STUDY_NAME.
+# var BEFORE importing this module, since module-level import resolves
+# workspace-relative paths immediately.
 _WORKSPACE_ENV = _get_env("PHI_WORKSPACE")
 BASE_DIR = (
     Path(_WORKSPACE_ENV).resolve()
@@ -762,7 +762,7 @@ LLM_MODEL = _get_env("LLM_MODEL", yaml_get("ai_assistant", "llm_model", default=
 # LLM_PROVIDER: explicit env var wins; otherwise infer from model name.
 LLM_PROVIDER: str = _get_env("LLM_PROVIDER") or _infer_provider(LLM_MODEL)
 
-# PHI corpus LLM config -- read from llm: block in config.yaml, overridable by env vars.
+# PHI detection LLM config -- read from llm: block in config.yaml, overridable by env vars.
 PHI_LLM_PROVIDER: str = _get_env("PHI_LLM_PROVIDER", yaml_get("llm", "provider", default=LLM_PROVIDER))
 PHI_LLM_MODEL: str = _get_env("PHI_LLM_MODEL", yaml_get("llm", "model", default=LLM_MODEL))
 PHI_LLM_API_KEY_ENV: str = _get_env("PHI_LLM_API_KEY_ENV", yaml_get("llm", "api_key_env", default=""))
