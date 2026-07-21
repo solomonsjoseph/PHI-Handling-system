@@ -2,24 +2,38 @@
 Philter benchmark adapter (UCSF Philter).
 
 Philter is a rule-based de-identification system for clinical text developed
-at UCSF. Achieves approximately 80% F1 and ~99.5% recall on UCSF clinical notes.
+at UCSF. Published benchmark: Norgeot et al., npj Digital Medicine 2020
+(~99.46% recall / F2 94.36 on a 2,000-note UCSF corpus -- a `vendor_claim`
+in this repo's evidence ledger, not independently reproduced here).
 
-Published benchmark: Norgeot et al., npj Digital Medicine 2020.
 GitHub: https://github.com/UCSF-DSCOLAB/philter-ucsf
 
-Install:
-    pip install philter-ucsf
-    # or: git clone https://github.com/UCSF-DSCOLAB/philter-ucsf && pip install -e .
+philter-ucsf 1.0.3 (verified by direct source inspection, see
+`benchmarks/collect_results.py` NOT_RUN_TOOLS) is a CLI-only tool
+(`python3 main.py -i <in> -o <out> -f <config>.json`), not a Python library
+with an importable `detect_phi()`-style API. An earlier version of this
+adapter guessed at several speculative Python API shapes
+(`hasattr(p, "detect_phi")`, dict-key sniffing) that philter-ucsf does not
+actually expose -- that code has been removed rather than left silently
+returning an empty (and misleadingly "measured") zero-recall result.
 
-When Philter is not installed this adapter returns an empty BenchmarkResult
-with tool_name "philter-not_installed" rather than raising an error.
+This adapter runs Philter for real ONLY when `PHILTER_CLI_ENTRYPOINT` names
+an installed `philter-ucsf` checkout's `main.py` (or equivalent) AND
+`PHILTER_CLI_CONFIG` names a working Philter filter-config JSON file, and
+invokes it via subprocess per the documented CLI contract -- it never
+silently downgrades to a guessed Python call. Without both env vars set,
+`run_all()` returns `not_run` with the reason above instead of a fabricated
+zero score.
 
 Authority: UCSF Philter documentation; authorities/AUTHORITY_MATRIX.md Table C
 """
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import List
 
@@ -36,6 +50,16 @@ from benchmarks.metrics import (
     score_record,
 )
 
+_NOT_RUN_REASON = (
+    "philter-ucsf 1.0.3 is a CLI-only tool (python3 main.py -i ... -o ... "
+    "-f <config>.json), not a Python library with an importable "
+    "detect_phi()-style API (confirmed by source inspection, "
+    "github.com/BCHSI/philter-ucsf). Set PHILTER_CLI_ENTRYPOINT to an "
+    "installed checkout's main.py and PHILTER_CLI_CONFIG to a working "
+    "filter-config JSON to run it for real; neither is set in this "
+    "environment, so this adapter reports not_run rather than a guessed "
+    "Python API call."
+)
 # Philter tag -> our corpus entity types
 PHILTER_TO_CORPUS = {
     "NAME":       frozenset({"NAME_PATIENT", "NAME_PROVIDER", "NAME_HOUSEHOLD"}),
@@ -74,55 +98,63 @@ def _map_philter_type(label: str) -> str:
 class PhilterAdapter:
     """Benchmark adapter for UCSF Philter.
 
-    Tries Python import first; falls back to unavailable state if not installed.
+    Runs the real philter-ucsf CLI via subprocess when PHILTER_CLI_ENTRYPOINT
+    and PHILTER_CLI_CONFIG are both set to a working checkout/config;
+    otherwise reports not_run with `_NOT_RUN_REASON` -- it never falls back
+    to a guessed Python API shape.
     """
 
     def __init__(self) -> None:
-        self._version = "unknown"
-        try:
-            # Try Python import (philter-ucsf package)
-            import philter  # noqa: F401
-            self._available = True
-            self._backend = "python"
-            self._version = getattr(philter, "__version__", "unknown")
-        except ImportError:
-            self._available = False
-            self._backend = "none"
+        self._entrypoint = os.environ.get("PHILTER_CLI_ENTRYPOINT", "")
+        self._config = os.environ.get("PHILTER_CLI_CONFIG", "")
+        self._available = bool(self._entrypoint and self._config
+                                and Path(self._entrypoint).is_file()
+                                and Path(self._config).is_file())
+        self._version = "cli" if self._available else "unknown"
+        self._not_run_reason = "" if self._available else _NOT_RUN_REASON
 
     def analyze_text(self, text: str) -> List[PredictedSpan]:
         if not self._available:
             return []
-        if self._backend == "python":
-            return self._analyze_python(text)
-        return []
+        return self._analyze_cli(text)
 
-    def _analyze_python(self, text: str) -> List[PredictedSpan]:
-        """Run Philter via Python API."""
-        try:
-            from philter import Philter
-            p = Philter()
-            # Philter's Python API returns a list of (start, end, tag) tuples
-            # or a similar structure; adapt as needed per installed version
-            detections = p.detect_phi(text) if hasattr(p, "detect_phi") else []
-            spans = []
-            for det in detections:
-                if isinstance(det, (list, tuple)) and len(det) >= 3:
-                    start, end, label = int(det[0]), int(det[1]), str(det[2])
-                elif isinstance(det, dict):
-                    start = int(det.get("start", 0))
-                    end = int(det.get("end", 0))
-                    label = str(det.get("label", det.get("type", "PHI")))
-                else:
+    def _analyze_cli(self, text: str) -> List[PredictedSpan]:
+        """Invoke the real philter-ucsf CLI (main.py -i IN -o OUT -f CONFIG)
+        on a single-document temp input, per its documented usage; parse its
+        real output format rather than guessing an in-process API."""
+        with tempfile.TemporaryDirectory() as td:
+            in_dir = Path(td) / "in"
+            out_dir = Path(td) / "out"
+            in_dir.mkdir()
+            (in_dir / "doc.txt").write_text(text, encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, self._entrypoint, "-i", str(in_dir), "-o", str(out_dir),
+                 "-f", self._config],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"philter-ucsf CLI exited {proc.returncode}: {proc.stderr[-2000:]}")
+            # philter-ucsf's documented output is the redacted document plus a
+            # sibling "asterisk"/coordinate map; exact filenames vary by
+            # config, so callers running this for real must confirm the
+            # config's output_format before trusting downstream parsing.
+            phi_map_path = out_dir / "phi_tags" / "doc.txt"
+            if not phi_map_path.is_file():
+                raise RuntimeError(
+                    f"philter-ucsf CLI produced no phi_tags map at {phi_map_path}; "
+                    "confirm PHILTER_CLI_CONFIG's output_format matches this adapter"
+                )
+            spans: List[PredictedSpan] = []
+            for line in phi_map_path.read_text(encoding="utf-8").splitlines():
+                parts = line.strip().split("\t")
+                if len(parts) < 3:
                     continue
+                start, end, label = int(parts[0]), int(parts[1]), parts[2]
                 spans.append(PredictedSpan(
-                    start=start, end=end,
-                    entity_type=label,
-                    mapped_type=_map_philter_type(label),
-                    score=1.0,
+                    start=start, end=end, entity_type=label,
+                    mapped_type=_map_philter_type(label), score=1.0,
                 ))
             return spans
-        except Exception:
-            return []
 
     def _run_file_impl(self, jsonl_path, strategy, overlap_threshold, entity_type_agnostic):
         record_scores = []
@@ -169,7 +201,7 @@ class PhilterAdapter:
         verbose: bool = False,
     ) -> BenchmarkResult:
         corpus_dir = Path(corpus_dir)
-        tool_name = f"philter-{self._version}" if self._available else "philter-not_installed"
+        tool_name = f"philter-{self._version}" if self._available else "philter-not_run"
 
         if not self._available:
             result = BenchmarkResult(tool_name=tool_name)
@@ -204,7 +236,15 @@ class PhilterAdapter:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         out_path = output_dir / "philter_benchmark_result.json"
-        out_path.write_text(json.dumps(result.summary_dict(), indent=2, sort_keys=True))
+        if not self._available:
+            # Never emit a fabricated all-zero "measured" score for a tool
+            # that was never actually run -- write an explicit not_run record.
+            out_path.write_text(json.dumps(
+                {"tool": result.tool_name, "status": "not_run", "reason": self._not_run_reason},
+                indent=2, sort_keys=True,
+            ))
+        else:
+            out_path.write_text(json.dumps(result.summary_dict(), indent=2, sort_keys=True))
         print(f"Results written to {out_path}")
 
 
@@ -217,5 +257,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     adapter = PhilterAdapter()
     result = adapter.run_all(args.corpus_dir, verbose=args.verbose)
-    print_report(result)
+    if adapter._available:
+        print_report(result)
+    else:
+        print(f"philter: not_run -- {adapter._not_run_reason}")
     adapter.write_results(result, args.output_dir)

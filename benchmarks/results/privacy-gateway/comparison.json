@@ -1,0 +1,380 @@
+{
+  "privacy_gateway": [
+    {
+      "gap_detection_rate": 0.0,
+      "gap_span_count": 0,
+      "legacy_f1": 0.087,
+      "legacy_precision": 1.0,
+      "legacy_recall": 0.0455,
+      "macro_f1": 0.0714,
+      "note": null,
+      "result_file": "benchmarks/results/privacy-gateway/detect-secrets/detect_secrets_benchmark_result.json",
+      "scoring_profile": "legacy_overlap_coverable",
+      "status": "ok",
+      "strict_f1": 0.0,
+      "strict_precision": 0.0,
+      "strict_recall": 0.0,
+      "tool": "detect-secrets-unknown",
+      "total_gold_spans": 44,
+      "total_records": 31
+    },
+    {
+      "reason": "No credentials/benchmark harness for AWS Bedrock Guardrails was exercised in this landscape-research task; capability rows are sourced entirely from official documentation, not from adapter execution.",
+      "status": "not_run",
+      "tool": "gw-0001"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Google Cloud Model Armor was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0002"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Microsoft Purview was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0003"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Nightfall AI was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0004"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Lakera was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0005"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Prompt Security was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0006"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Lasso Security was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0007"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Protecto was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0008"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Strac was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0009"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Skyflow was exercised in this landscape-research task; note per assignment this candidate is intentionally cross-listable under a future tokenization_privacy_engineering category row by another worker/orchestrator step.",
+      "status": "not_run",
+      "tool": "gw-0010"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Microsoft Purview DLP was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0011"
+    },
+    {
+      "reason": "Full product-page content requires a JavaScript-rendering fetch not available/completed in this research session; capability rows are therefore limited to confirmed navigation/metadata only and this candidate should be re-verified before being scored or selected.",
+      "status": "not_run",
+      "tool": "gw-0012"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Forcepoint DLP was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0013"
+    },
+    {
+      "reason": "Official product page requires JavaScript rendering not completed in this session; a follow-up browser-based fetch (or Broadcom TechDocs deep link, e.g. under symantec-security-software) is required before this candidate can be meaningfully scored or selected as a production component.",
+      "status": "not_run",
+      "tool": "gw-0014"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Proofpoint Enterprise DLP was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0015"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Zscaler DLP was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0016"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Palo Alto Networks Enterprise DLP was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0017"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Cyberhaven was exercised in this landscape-research task.",
+      "status": "not_run",
+      "tool": "gw-0018"
+    },
+    {
+      "reason": "No credentials/benchmark harness for BigID was exercised in this landscape-research task; BigID is primarily a storage-discovery/DSPM tool rather than an inline prompt/output gate, so it is scoped to storage_discovery/structured_reidentification_risk capability rows rather than prompt_input_gate.",
+      "status": "not_run",
+      "tool": "gw-0019"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Varonis was exercised in this landscape-research task; Varonis is primarily a storage/identity-centric data security platform rather than an inline prompt/output gate.",
+      "status": "not_run",
+      "tool": "gw-0020"
+    },
+    {
+      "reason": "No credentials/benchmark harness for Securiti was exercised in this landscape-research task; note Securiti spans both ai_native_gateway (Context-aware LLM Firewalls / Security for AI Agents) and enterprise_dlp/DSPM capability areas \u2014 filed under enterprise_dlp per this worker's category split, cross-reference with any AI-gateway candidate row the orchestrator may add.",
+      "status": "not_run",
+      "tool": "gw-0021"
+    },
+    {
+      "reason": "Landscape research task; benchmarking is a separate plan step (Step 6) not performed here.",
+      "status": "not_run",
+      "tool": "mhe-0001"
+    },
+    {
+      "reason": "Landscape research task; benchmarking is a separate plan step.",
+      "status": "not_run",
+      "tool": "mhe-0004"
+    },
+    {
+      "reason": "Landscape research task; benchmarking is a separate plan step.",
+      "status": "not_run",
+      "tool": "mhe-0005"
+    },
+    {
+      "reason": "Landscape research task; benchmarking is a separate plan step (Step 6); no license was obtained to test Healthcare NLP in this pass.",
+      "status": "not_run",
+      "tool": "mhe-0006"
+    },
+    {
+      "reason": "Landscape research task; benchmarking is a separate plan step.",
+      "status": "not_run",
+      "tool": "mhe-0007"
+    },
+    {
+      "reason": "Landscape research task; benchmarking is a separate plan step.",
+      "status": "not_run",
+      "tool": "mhe-0008"
+    },
+    {
+      "reason": "Landscape research task; benchmarking is a separate plan step.",
+      "status": "not_run",
+      "tool": "mhe-0009"
+    },
+    {
+      "reason": "Expert Determination is a professional statistical-review service, not a software detector with a benchmarkable API; not amenable to the automated benchmark protocol in Plan Step 6, and vendor pages needed for even a qualitative capability review were inaccessible in this pass.",
+      "status": "not_run",
+      "tool": "mhe-0011"
+    },
+    {
+      "reason": "philter-ucsf 1.0.3 is CLI-only (no detect_phi()-style importable API) and needs undeclared transitive dependencies beyond pip install; excluded from this repo's benchmark pass per benchmarks/collect_results.py NOT_RUN_TOOLS (deeper CLI/subprocess integration out of scope).",
+      "status": "not_run",
+      "tool": "oss-0002"
+    },
+    {
+      "reason": "Not benchmarked in this research pass; landscape/verification task only, per assignment scope.",
+      "status": "not_run",
+      "tool": "oss-0003"
+    },
+    {
+      "reason": "This repository's own git-installable build of pyDeid did not produce an importable module in the benchmark environment (2026-07-07 investigation); the unrelated PyPI 'pydeid' 0.0.1 placeholder was correctly excluded rather than benchmarked (see oss-1016).",
+      "status": "not_run",
+      "tool": "oss-0004"
+    },
+    {
+      "reason": "Requires the CLINIDEID_JAR environment variable pointing to a built, license-gated Java artifact and 28GB heap; not available in this environment, per benchmarks/collect_results.py NOT_RUN_TOOLS.",
+      "status": "not_run",
+      "tool": "oss-0005"
+    },
+    {
+      "reason": "Requires the license-gated i2b2/n2c2 2014 dataset (separate DUA via Harvard DBMI portal) and an outdated Python 3.7.9 environment; not available/reproducible in this environment.",
+      "status": "not_run",
+      "tool": "oss-0006"
+    },
+    {
+      "reason": "Not benchmarked in this research pass; ARX operates on structured microdata rather than the free-text corpus used by this repository's existing benchmark harness.",
+      "status": "not_run",
+      "tool": "oss-0007"
+    },
+    {
+      "reason": "Not benchmarked in this research pass; sdcMicro targets structured statistical microdata release workflows, not the free-text PHI corpus in this repository's existing benchmark harness.",
+      "status": "not_run",
+      "tool": "oss-0008"
+    },
+    {
+      "reason": "Not benchmarked in this research pass; OpenDP is a differential-privacy algorithm library, not a PHI/PII entity detector, so it is out of scope for this repository's existing free-text benchmark harness.",
+      "status": "not_run",
+      "tool": "oss-0009"
+    },
+    {
+      "reason": "Not benchmarked in this research pass; SmartNoise operates on structured/tabular data via SQL or synthesis, not the free-text PHI corpus in this repository's existing benchmark harness.",
+      "status": "not_run",
+      "tool": "oss-0010"
+    },
+    {
+      "reason": "Not benchmarked in this research pass; project is archived/EOL and is a general LLM-interaction firewall (not clinical-PHI-specific), out of scope for the existing free-text PHI benchmark harness.",
+      "status": "not_run",
+      "tool": "oss-0011"
+    },
+    {
+      "reason": "Requires the PHYSIONET_DEID_DIR environment variable pointing to a local install of the Perl tool; not set in this environment, per benchmarks/collect_results.py NOT_RUN_TOOLS.",
+      "status": "not_run",
+      "tool": "oss-0012"
+    },
+    {
+      "gap_detection_rate": 0.0227,
+      "gap_span_count": 1,
+      "legacy_f1": 0.5316,
+      "legacy_precision": 0.6,
+      "legacy_recall": 0.4773,
+      "macro_f1": 0.2955,
+      "note": null,
+      "result_file": "benchmarks/results/privacy-gateway/phi-engine/phi_engine_benchmark_result.json",
+      "scoring_profile": "strict_all_span",
+      "status": "ok",
+      "strict_f1": 0.5316,
+      "strict_precision": 0.6,
+      "strict_recall": 0.4773,
+      "tool": "phi_engine-adapter-v1",
+      "total_gold_spans": 44,
+      "total_records": 31
+    },
+    {
+      "gap_detection_rate": 0.0909,
+      "gap_span_count": 4,
+      "legacy_f1": 0.1296,
+      "legacy_precision": 0.1094,
+      "legacy_recall": 0.1591,
+      "macro_f1": 0.083,
+      "note": null,
+      "result_file": "benchmarks/results/privacy-gateway/presidio-stock/presidio_stock_benchmark_result.json",
+      "scoring_profile": "strict_all_span",
+      "status": "ok",
+      "strict_f1": 0.1296,
+      "strict_precision": 0.1094,
+      "strict_recall": 0.1591,
+      "tool": "presidio-stock-2.2.363",
+      "total_gold_spans": 44,
+      "total_records": 31
+    },
+    {
+      "reason": "Out of scope for this landscape-research task; no benchmark run performed.",
+      "status": "not_run",
+      "tool": "sectok-0001"
+    },
+    {
+      "reason": "Out of scope for this landscape-research task; no benchmark run performed.",
+      "status": "not_run",
+      "tool": "sectok-0002"
+    },
+    {
+      "reason": "Out of scope for this landscape-research task; no benchmark run performed.",
+      "status": "not_run",
+      "tool": "sectok-0004"
+    },
+    {
+      "reason": "Out of scope for this landscape-research task; no benchmark run performed.",
+      "status": "not_run",
+      "tool": "sectok-0005"
+    },
+    {
+      "reason": "Out of scope for this landscape-research task; no benchmark run performed; commercial trial/credentials not available.",
+      "status": "not_run",
+      "tool": "sectok-0006"
+    },
+    {
+      "reason": "Out of scope for this landscape-research task; no benchmark run performed; commercial trial/credentials not available.",
+      "status": "not_run",
+      "tool": "sectok-0007"
+    },
+    {
+      "reason": "Out of scope for this landscape-research task; no benchmark run performed; commercial trial/credentials not available.",
+      "status": "not_run",
+      "tool": "sectok-0008"
+    },
+    {
+      "reason": "Out of scope for this landscape-research task; no benchmark run performed.",
+      "status": "not_run",
+      "tool": "sectok-0009"
+    },
+    {
+      "reason": "Out of scope for this landscape-research task; no benchmark run performed.",
+      "status": "not_run",
+      "tool": "sectok-0010"
+    },
+    {
+      "reason": "Out of scope for this landscape-research task; no benchmark run performed.",
+      "status": "not_run",
+      "tool": "sectok-0011"
+    },
+    {
+      "reason": "Repository archived/unmaintained; not eligible for benchmarking or production selection.",
+      "status": "not_run",
+      "tool": "sectok-0012"
+    }
+  ],
+  "stress_test": {
+    "adversarial_channel_benchmark": {
+      "note": "Selected/benchmarked candidates (phi_engine=repository control, Presidio stock=oss-0001, detect-secrets=sectok-0003) were also run against the seeded adversarial privacy-gateway fixtures (tmp/privacy-gateway-fixtures-a, attack_tags: homoglyph_evasion, zero_width_injection, prompt_injection, base64_encoding, split_secret_across_chunks, mislabeled_column, contextual_false_positive, quasi_identifier_combination, org_dictionary_fingerprint, nested_overlapping_entities, ocr_error_simulation, network_test_pan, reserved_ip_range, long_input_boundary). See the 'privacy_gateway' suite rows above (phi_engine-adapter-v1, presidio-stock-2.2.363, detect-secrets-unknown) for measured aggregate P/R/F1 on this adversarial set; phi_engine strict_f1=0.5316 vs presidio-stock strict_f1=0.1296 vs detect-secrets aggregate_f1=0.087 (secrets-only scope).",
+      "structural_gaps_confirmed": [
+        "base64-encoded PHI (text-base64-008): not detected as a plain span by any candidate -- structural gap for all text-span detectors, requires a dedicated decode-then-scan stage",
+        "split secrets across streamed chunks (secret-split-013a/b): not detected by design in either half -- requires session/stream-level reassembly before scanning, not covered by any candidate here"
+      ]
+    },
+    "canonical_current_path": {
+      "artifact_sha256": "3b6488fb26b2d079b68177268daa30f0b3f7e607b5909d1648f003890d46d610",
+      "command": "python -m harness.run_phi_system --study PrivacyGatewayUS --jurisdiction us --seed 42 --n-subjects 60 --out-dir benchmarks/results/current-system/privacy-gateway-us",
+      "exit_code": 0,
+      "human_review_rate": 0.0,
+      "redaction_recall": 0.9958275382475661,
+      "residual_ok": true,
+      "result_artifact": "benchmarks/results/current-system/privacy-gateway-us/phi_system_result.json"
+    },
+    "encryption_key_rbac_audit_enforcement": {
+      "audit": "ENABLED. output/<study>/audit/ (phi_scrub_report.json, human_review/, telemetry/) is value-free (category tags only). No automated retention policy or encrypted-backup mechanism found in config -- a real, disclosed gap.",
+      "encryption_at_rest": "DISABLED by default (config.yaml:16-19, code-traced). Pseudonymization is not encryption -- data at rest is plaintext with re-linkable-with-key pseudonyms, not ciphertext.",
+      "key_custody": "HMAC key is a 0600-mode sidecar file; PHIKeyStore holds it in a zeroizable bytearray singleton; llm-agent role is denied access at two enforcement layers (phi_scrub.py + phi_keystore.py). Missing key forfeits re-derivation of prior pseudonyms (documented irreversibility lever).",
+      "log_encryption": "NOT IMPLEMENTED (config.yaml:17-22, explicit comment in source). Logs/telemetry record category tags only (never raw values), but those tags are stored unencrypted.",
+      "rbac": "DISABLED by default (config.yaml:25-26). The only enforced role gate in code is the llm-agent key-access denial (phi_scrub.py:335-343), not a general RBAC system."
+    },
+    "fail_closed_regression": {
+      "commands": [
+        "python -m harness.make_stress_fixtures --out tmp/privacy-gateway-stress-source --seed 42",
+        "python -m phi_engine intake --study PrivacyGatewayStress --source tmp/privacy-gateway-stress-source --workspace tmp/privacy-gateway-stress-ws",
+        "python -m phi_engine organize --study PrivacyGatewayStress --workspace tmp/privacy-gateway-stress-ws",
+        "python -m phi_engine run --study PrivacyGatewayStress --jurisdiction us --workspace tmp/privacy-gateway-stress-ws",
+        "python -m harness.spec_check --skip-pytest --workspace tmp/privacy-gateway-stress-ws --study PrivacyGatewayStress --source-manifest tmp/privacy-gateway-stress-source.manifest/stress_manifest.json"
+      ],
+      "intake_error_detail": "vanished_file.jsonl: broken-symlink-in-source (correctly rejected, not silently skipped)",
+      "intake_errors": 1,
+      "intake_files_linked": 66,
+      "organize_datasets_recognized": 6,
+      "organize_review_bucket": 60,
+      "planted_ssn_check_method": "grep -rlE '[0-9]{3}-[0-9]{2}-[0-9]{4}' on output/PrivacyGatewayStress/llm_source/ -- exit code 1 (no matches)",
+      "planted_ssn_shaped_values_in_published_tree": 0,
+      "run_exit_code": 8,
+      "run_guard_failed": false,
+      "run_guard_ok": true,
+      "run_published_count": 6,
+      "run_review_queue_size": 60,
+      "spec_check_result": "ALL PASS (intake_symlink_invariant, llm_boundary_canary, source_immutability)",
+      "stress_fixture_manifest": "tmp/privacy-gateway-stress-source.manifest/stress_manifest.json",
+      "stress_fixture_manifest_sha256": "462cb5cef849cda637116a64bcf33d05e064ff2cab163cd86c4d50e9b16cf34f"
+    },
+    "linkage_reidentification_attacks": {
+      "date_shift_inference": {
+        "attack": "interval-preservation frequency attack",
+        "bounded_outcome": "This is the same disclosed re-identification vector documented for interval-preserving date-shift methods generally (NIST SP 800-188 Section 4.3.12 candidate failure modes); it is why Safe Harbor requires generalization to year, not shift-preserving transforms.",
+        "finding": "SANT date-shift preserves inter-visit intervals per subject (code-traced, measured 56/56 interval-preserved in docs/JURISDICTION_EVIDENCE_REPORT_US.md). An attacker who knows the true date of ANY single event for a subject (e.g. a public admission date) can recover the per-subject offset and therefore every other shifted date for that subject, since the offset is constant across all of that subject's dates."
+      },
+      "hmac_pseudonymization": {
+        "attack": "known-plaintext linkage",
+        "bounded_outcome": "Re-identification requires either (a) key compromise (full reversal) or (b) a known-plaintext/frequency attack correlating deterministic tokens across releases -- both are documented, expected properties of keyed pseudonymization, not surprises.",
+        "finding": "pseudo_id() is deterministic per (label, raw_id, key): the SAME raw identifier under the SAME label always produces the SAME RID_<LABEL>_<alpha12> token (phi_scrub.py:1345-1374, code-traced this session). An attacker holding a known (raw_id, pseudonym) pair and the ability to query the pipeline with chosen raw_ids can confirm linkage for other records without needing the key. This is inherent to deterministic keyed pseudonymization (not a bug) and is exactly why the current system does not and cannot claim HIPAA Safe Harbor for jitter_date/pseudonymize (see repository trace section 2.7)."
+      },
+      "methodology": "NIST SP 800-188 Section 4.3.12 potential-failure-mode framework (see reg-0033); this repo's own deterministic MIA smoke test retained only as a smoke test per KNOWN_LIMITATIONS.md, not external validation.",
+      "quasi_identifier_linkage": {
+        "attack": "DOB+ZIP+rare-diagnosis combination (Sweeney-style)",
+        "bounded_outcome": "Confirmed structural gap for free-text quasi-identifier combinations; structured/tabular quasi-identifier risk is covered by the existing k-anon gate (not independently re-benchmarked this session).",
+        "finding": "harness/make_privacy_gateway_fixtures.py 'text-quasi-identifier-006' plants exactly this combination as a single free-text record. Neither phi_engine's header-level scrub config nor its regex/checksum detection catalog performs cross-field quasi-identifier risk scoring on free text; the k-anonymity gate (kanon_gate.py/pycanon_gate.py) operates on STRUCTURED/tabular data, not narrative text, so this specific free-text combination is NOT covered by any current control."
+      }
+    }
+  }
+}

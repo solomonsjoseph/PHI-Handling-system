@@ -1,18 +1,26 @@
 """
 PyDeID benchmark adapter.
 
-PyDeID is a Python-based PHI de-identification library with balanced
-precision and recall. Achieves approximately F1 ~87.9% on clinical text.
+PyDeID is referenced in de-identification literature as a Python-based PHI
+de-identification library. This repo's own prior investigation
+(`benchmarks/collect_results.py` NOT_RUN_TOOLS) established: the PyPI
+package literally named `pydeid` (0.0.1) is an empty placeholder with no
+importable submodules -- not the real academic tool. The real pyDeid
+(GEMINI-Medicine/pyDeid on GitHub, a refactor of the PhysioNet Perl
+de-identifier) has no PyPI release, and a git-installable build did not
+produce an importable `pydeid` module in this environment.
 
-Published benchmark: PyDeID GitHub / PyPI documentation.
-PyPI: https://pypi.org/project/pydeid/
-GitHub: https://github.com/NLP4Science/PyDeID
+GitHub: https://github.com/GEMINI-Medicine/pyDeid
 
-Install:
-    pip install pydeid
-
-When PyDeID is not installed this adapter returns an empty BenchmarkResult
-with tool_name "pydeid-not_installed" rather than raising an error.
+An earlier version of this adapter guessed at several speculative Python
+API shapes (`pydeid.annotators.Annotator().annotate()`,
+`pydeid.deidentify()`, multiple dict-key fallbacks) that were never
+confirmed against a real installation -- that code has been removed rather
+than left silently returning an empty (and misleadingly "measured")
+zero-recall result. This adapter always reports `not_run` with the reason
+above until a future session confirms pyDeid's actual installed API
+surface from a real, working install and can implement a non-speculative
+call against it (or an official CLI, if one exists).
 
 Authority: HIPAA 45 CFR 164.514(b)(2)(i);
            authorities/AUTHORITY_MATRIX.md Table C
@@ -35,6 +43,17 @@ from benchmarks.metrics import (
     aggregate_record_scores,
     print_report,
     score_record,
+)
+
+_NOT_RUN_REASON = (
+    "The PyPI package literally named 'pydeid' (0.0.1) is an empty "
+    "placeholder with no importable submodules -- not the real academic "
+    "tool. The real pyDeid (GEMINI-Medicine/pyDeid on GitHub) has no PyPI "
+    "release and a git-installable build did not produce an importable "
+    "'pydeid' module in this environment, and this repo has no confirmed "
+    "API/CLI contract for it to call against without guessing. Excluded "
+    "rather than reporting a misleading 0%-recall row for a tool that was "
+    "never actually exercised."
 )
 
 # PyDeID annotation tag -> our corpus entity types
@@ -72,76 +91,21 @@ def _map_pydeid_type(label: str) -> str:
 
 
 class PyDeIDAdapter:
-    """Benchmark adapter for PyDeID Python library.
+    """Benchmark adapter for PyDeID.
 
-    Tries 'from pydeid.annotators import Annotator' on init.
-    Falls back gracefully if PyDeID is not installed.
+    Always reports not_run (`_NOT_RUN_REASON`) in this repository -- there is
+    no confirmed working install or documented API/CLI contract to call
+    against without guessing (see module docstring). Never falls back to a
+    speculative Python API shape.
     """
 
     def __init__(self) -> None:
+        self._available = False
         self._version = "unknown"
-        try:
-            import pydeid
-            self._pydeid = pydeid
-            self._available = True
-            self._version = getattr(pydeid, "__version__", "unknown")
-            # Pre-load the annotator if the API supports it
-            if hasattr(pydeid, "annotators"):
-                self._annotator = pydeid.annotators.Annotator()
-            else:
-                self._annotator = None
-        except ImportError:
-            self._pydeid = None
-            self._annotator = None
-            self._available = False
-
-    def _run_pydeid(self, text: str) -> List[PredictedSpan]:
-        """Call PyDeID on text; handles different API versions."""
-        try:
-            # Try annotator-based API (pydeid >= 1.0)
-            if self._annotator is not None:
-                result = self._annotator.annotate(text)
-                spans = []
-                annotations = (
-                    result.get("annotations", []) if isinstance(result, dict) else []
-                )
-                for ann in annotations:
-                    label = str(ann.get("type", ann.get("label", "PHI")))
-                    start = int(ann.get("start", ann.get("begin", 0)))
-                    end = int(ann.get("end", 0))
-                    if end > start:
-                        spans.append(PredictedSpan(
-                            start=start, end=end,
-                            entity_type=label,
-                            mapped_type=_map_pydeid_type(label),
-                            score=float(ann.get("score", 1.0)),
-                        ))
-                return spans
-            # Try module-level function API
-            if hasattr(self._pydeid, "deidentify"):
-                anns = self._pydeid.deidentify(text)
-                spans = []
-                for ann in (anns if isinstance(anns, list) else []):
-                    if isinstance(ann, dict):
-                        label = str(ann.get("type", "PHI"))
-                        start = int(ann.get("start", 0))
-                        end = int(ann.get("end", 0))
-                        if end > start:
-                            spans.append(PredictedSpan(
-                                start=start, end=end,
-                                entity_type=label,
-                                mapped_type=_map_pydeid_type(label),
-                                score=1.0,
-                            ))
-                return spans
-        except Exception:
-            pass
-        return []
+        self._not_run_reason = _NOT_RUN_REASON
 
     def analyze_text(self, text: str) -> List[PredictedSpan]:
-        if not self._available:
-            return []
-        return self._run_pydeid(text)
+        return []
 
     def _run_file_impl(self, jsonl_path, strategy, overlap_threshold, entity_type_agnostic):
         record_scores = []
@@ -187,43 +151,20 @@ class PyDeIDAdapter:
         entity_type_agnostic: bool = True,
         verbose: bool = False,
     ) -> BenchmarkResult:
-        corpus_dir = Path(corpus_dir)
-        tool_name = f"pydeid-{self._version}" if self._available else "pydeid-not_installed"
-
-        if not self._available:
-            result = BenchmarkResult(tool_name=tool_name)
-            result.corpus_files = []
-            return result
-
-        all_scores: List[dict] = []
-        total_predicted = 0
-        files_processed = []
-
-        for jsonl_path in sorted(corpus_dir.glob(pattern)):
-            if verbose:
-                print(f"  Processing {jsonl_path.name} ...", end=" ", flush=True)
-            file_scores = self._run_file_impl(
-                jsonl_path, strategy, overlap_threshold, entity_type_agnostic)
-            all_scores.extend(file_scores)
-            total_predicted += sum(rs["predicted_count"] for rs in file_scores)
-            files_processed.append(str(jsonl_path.name))
-            if verbose:
-                tp = sum(rs["tp"] for rs in file_scores)
-                print(f"{len(file_scores):3d} records  TP={tp}")
-
-        result = aggregate_record_scores(
-            all_scores, tool_name=tool_name,
-            gap_entity_types=PYDEID_GAP_ENTITY_TYPES,
-        )
-        result.total_predicted_spans = total_predicted
-        result.corpus_files = files_processed
+        result = BenchmarkResult(tool_name="pydeid-not_run")
+        result.corpus_files = []
         return result
 
     def write_results(self, result: BenchmarkResult, output_dir: Path) -> None:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         out_path = output_dir / "pydeid_benchmark_result.json"
-        out_path.write_text(json.dumps(result.summary_dict(), indent=2, sort_keys=True))
+        # Never emit a fabricated all-zero "measured" score for a tool that
+        # was never actually run -- write an explicit not_run record.
+        out_path.write_text(json.dumps(
+            {"tool": result.tool_name, "status": "not_run", "reason": self._not_run_reason},
+            indent=2, sort_keys=True,
+        ))
         print(f"Results written to {out_path}")
 
 
@@ -237,5 +178,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     adapter = PyDeIDAdapter()
     result = adapter.run_all(args.corpus_dir, verbose=args.verbose)
-    print_report(result)
+    print(f"pydeid: not_run -- {adapter._not_run_reason}")
     adapter.write_results(result, args.output_dir)
