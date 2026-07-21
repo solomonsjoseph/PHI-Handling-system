@@ -1,8 +1,11 @@
 from __future__ import annotations
+import csv
+import hashlib
 
 import json
 
 import pytest
+from openpyxl import load_workbook
 
 from generators.hipaa_18_tabular import (
     HIPAA18_IDENTIFIER_SPECS,
@@ -93,3 +96,67 @@ def test_audit_events_have_what_why_how_and_hmac_evidence():
             "output_hmac_sha256",
         }
         assert "original_value" not in json.dumps(event, sort_keys=True)
+
+
+def _read_csv(path):
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _read_xlsx(path):
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    worksheet = workbook.active
+    values = list(worksheet.iter_rows(values_only=True))
+    workbook.close()
+    headers = [str(value) for value in values[0]]
+    return [
+        {
+            header: "" if value is None else str(value)
+            for header, value in zip(headers, row)
+        }
+        for row in values[1:]
+    ]
+
+
+def _tree_hashes(root):
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_write_emits_equivalent_csv_and_xlsx_with_valid_manifest(tmp_path):
+    report = USHIPAA18TabularCorpusGenerator(seed=42).write(
+        tmp_path, n_subjects=18, include_edge_cases=False
+    )
+
+    baseline = tmp_path / "baseline"
+    assert report["validation_status"] == "PASS"
+    assert _read_csv(baseline / "input/datasets/hipaa18.csv") == _read_xlsx(
+        baseline / "input/datasets/hipaa18.xlsx"
+    )
+    assert _read_csv(
+        baseline / "input/data_dictionary/hipaa18_dictionary.csv"
+    ) == _read_xlsx(
+        baseline / "input/data_dictionary/hipaa18_dictionary.xlsx"
+    )
+
+    manifest = json.loads((baseline / "MANIFEST.json").read_text(encoding="utf-8"))
+    for relative_path, evidence in manifest["files"].items():
+        payload = (baseline / relative_path).read_bytes()
+        assert evidence == {
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+
+
+def test_write_is_byte_deterministic(tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    generator = USHIPAA18TabularCorpusGenerator(seed=42)
+
+    generator.write(first, n_subjects=18, include_edge_cases=False)
+    generator.write(second, n_subjects=18, include_edge_cases=False)
+
+    assert _tree_hashes(first) == _tree_hashes(second)

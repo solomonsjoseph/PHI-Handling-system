@@ -1,13 +1,20 @@
 """Deterministic USA HIPAA Safe Harbor A-R tabular corpus."""
 from __future__ import annotations
 
+import csv
 import datetime as dt
 import hashlib
 import hmac
+import io
+import json
 import string
+import zipfile
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Tuple
+
+from openpyxl import Workbook
 
 from .common import DeterministicGenerator, HIPAA_CATEGORIES
 from .hipaa_safe_harbor import (
@@ -239,6 +246,152 @@ class USHIPAA18TabularCorpusGenerator(DeterministicGenerator):
             audit_events=audit_events,
             gold_entries=gold_entries,
         )
+
+    @staticmethod
+    def _write_csv(path: Path, rows: List[Dict[str, str]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(rows)
+
+    @staticmethod
+    def _write_json(path: Path, payload: object) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _write_jsonl(path: Path, rows: List[dict]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _write_xlsx(path: Path, rows: List[Dict[str, str]], sheet_name: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = sheet_name
+        headers = list(rows[0])
+        worksheet.append(headers)
+        for row in rows:
+            worksheet.append([row[header] for header in headers])
+
+        fixed_time = dt.datetime(2000, 1, 1, 0, 0, 0)
+        workbook.properties.created = fixed_time
+        workbook.properties.modified = fixed_time
+        raw = io.BytesIO()
+        workbook.save(raw)
+        workbook.close()
+
+        source = zipfile.ZipFile(io.BytesIO(raw.getvalue()), "r")
+        normalized = io.BytesIO()
+        with source, zipfile.ZipFile(
+            normalized,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+        ) as target:
+            for name in sorted(source.namelist()):
+                info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.create_system = 3
+                info.external_attr = 0o600 << 16
+                target.writestr(info, source.read(name))
+        path.write_bytes(normalized.getvalue())
+
+    def write(
+        self,
+        out_dir: Path,
+        n_subjects: int = 18,
+        include_edge_cases: bool = True,
+    ) -> dict:
+        out_dir = Path(out_dir)
+        corpus = self.generate(n_subjects=n_subjects)
+        issues = validate_corpus(corpus)
+        if issues:
+            details = "; ".join(f"{issue.code}:{issue.column}" for issue in issues)
+            raise ValueError(f"baseline corpus validation failed: {details}")
+
+        baseline = out_dir / "baseline"
+        dataset_dir = baseline / "input" / "datasets"
+        dictionary_dir = baseline / "input" / "data_dictionary"
+        self._write_csv(dataset_dir / "hipaa18.csv", corpus.dataset_rows)
+        self._write_xlsx(dataset_dir / "hipaa18.xlsx", corpus.dataset_rows, "HIPAA18")
+        self._write_csv(
+            dictionary_dir / "hipaa18_dictionary.csv",
+            corpus.dictionary_rows,
+        )
+        self._write_xlsx(
+            dictionary_dir / "hipaa18_dictionary.xlsx",
+            corpus.dictionary_rows,
+            "Dictionary",
+        )
+        self._write_csv(
+            baseline / "expected" / "user_output.csv",
+            corpus.expected_user_rows,
+        )
+        self._write_jsonl(
+            baseline / "expected" / "audit_output.jsonl",
+            corpus.audit_events,
+        )
+        self._write_jsonl(
+            baseline / "gold" / "cell_actions.jsonl",
+            corpus.gold_entries,
+        )
+
+        coverage = {
+            "authority": _AUTHORITY_PREFIX,
+            "categories": [
+                {
+                    "description": spec.hipaa_identifier,
+                    "hipaa_category": spec.hipaa_category,
+                    "source_column": spec.source_column,
+                }
+                for spec in HIPAA18_IDENTIFIER_SPECS
+            ],
+            "duplicate_categories": [],
+            "identifier_cells": n_subjects * len(HIPAA18_IDENTIFIER_SPECS),
+            "jurisdiction": "us",
+            "missing_categories": [],
+            "subjects": n_subjects,
+            "validation_status": "PASS",
+        }
+        self._write_json(baseline / "coverage_report.json", coverage)
+
+        manifest_files = {}
+        for path in sorted(baseline.rglob("*")):
+            if path.is_file() and path.name != "MANIFEST.json":
+                payload = path.read_bytes()
+                manifest_files[path.relative_to(baseline).as_posix()] = {
+                    "bytes": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+        self._write_json(
+            baseline / "MANIFEST.json",
+            {
+                "files": manifest_files,
+                "jurisdiction": "us",
+                "seed": self.seed,
+                "subjects": n_subjects,
+                "validation_status": "PASS",
+            },
+        )
+
+        edge_case_count = 0
+        if include_edge_cases:
+            edge_case_count = self._write_edge_cases(out_dir / "edge_cases")
+        return {
+            "categories": len(HIPAA18_IDENTIFIER_SPECS),
+            "edge_cases": edge_case_count,
+            "subjects": n_subjects,
+            "validation_status": "PASS",
+        }
 
 
 @dataclass(frozen=True, order=True)
