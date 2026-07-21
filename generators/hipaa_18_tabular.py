@@ -10,6 +10,7 @@ import json
 import string
 import zipfile
 from collections import Counter
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -393,6 +394,51 @@ class USHIPAA18TabularCorpusGenerator(DeterministicGenerator):
             "validation_status": "PASS",
         }
 
+    def _write_edge_cases(self, out_dir: Path) -> int:
+        cases = generate_edge_cases(seed=self.seed)
+        for case_name, corpus in cases.items():
+            case_dir = out_dir / case_name
+            self._write_csv(
+                case_dir / "input" / "datasets" / "hipaa18.csv",
+                corpus.dataset_rows,
+            )
+            self._write_csv(
+                case_dir
+                / "input"
+                / "data_dictionary"
+                / "hipaa18_dictionary.csv",
+                corpus.dictionary_rows,
+            )
+            self._write_csv(
+                case_dir / "expected" / "user_output.csv",
+                corpus.expected_user_rows,
+            )
+            self._write_jsonl(
+                case_dir / "expected" / "audit_output.jsonl",
+                corpus.audit_events,
+            )
+            self._write_jsonl(
+                case_dir / "gold" / "cell_actions.jsonl",
+                corpus.gold_entries,
+            )
+            issues = validate_corpus(corpus)
+            self._write_json(
+                case_dir / "expected_validation.json",
+                {
+                    "case": case_name,
+                    "issues": [
+                        {
+                            "code": issue.code,
+                            "column": issue.column,
+                            "detail": issue.detail,
+                        }
+                        for issue in issues
+                    ],
+                    "validation_status": "PASS" if not issues else "EXPECTED_FAIL",
+                },
+            )
+        return len(cases)
+
 
 @dataclass(frozen=True, order=True)
 class HIPAA18ValidationIssue:
@@ -511,11 +557,82 @@ def validate_corpus(corpus: HIPAA18Corpus) -> List[HIPAA18ValidationIssue]:
                 add("PLAINTEXT_AUDIT_VALUE", column, "audit output contains plaintext input")
 
     return sorted(issues)
+
+
+def generate_edge_cases(seed: int = 42) -> Dict[str, HIPAA18Corpus]:
+    """Return the five deterministic dictionary/mapping edge-case fixtures."""
+    baseline = USHIPAA18TabularCorpusGenerator(seed=seed).generate(n_subjects=1)
+    cases: Dict[str, HIPAA18Corpus] = {}
+
+    missing = deepcopy(baseline)
+    missing.dictionary_rows = [
+        row
+        for row in missing.dictionary_rows
+        if row["hipaa_category"] != "R"
+    ]
+    cases["missing_dictionary_entry"] = missing
+
+    orphan = deepcopy(baseline)
+    orphan_row = dict(orphan.dictionary_rows[-1])
+    orphan_row["source_column"] = "UNUSED_IDENTIFIER"
+    orphan.dictionary_rows.append(orphan_row)
+    cases["orphan_dictionary_entry"] = orphan
+
+    duplicate = deepcopy(baseline)
+    duplicate.dictionary_rows.append(
+        dict(
+            next(
+                row
+                for row in duplicate.dictionary_rows
+                if row["hipaa_category"] == "G"
+            )
+        )
+    )
+    cases["duplicate_mapping"] = duplicate
+
+    conflicting = deepcopy(baseline)
+    ssn_mapping = next(
+        row
+        for row in conflicting.dictionary_rows
+        if row["canonical_variable"] == "SOCIAL_SECURITY_NUMBER"
+    )
+    ssn_mapping["hipaa_category"] = "H"
+    ssn_mapping["hipaa_identifier"] = HIPAA_CATEGORIES["H"]
+    cases["conflicting_category"] = conflicting
+
+    alias = deepcopy(baseline)
+    old_column = "EMAIL_ADDRESS"
+    new_column = "PATIENT_EMAIL"
+
+    def rename_key(row: Dict[str, str]) -> Dict[str, str]:
+        return {
+            new_column if key == old_column else key: value
+            for key, value in row.items()
+        }
+
+    alias.dataset_rows = [rename_key(row) for row in alias.dataset_rows]
+    alias.expected_user_rows = [
+        rename_key(row) for row in alias.expected_user_rows
+    ]
+    for row in alias.dictionary_rows:
+        if row["canonical_variable"] == old_column:
+            row["source_column"] = new_column
+    for entry in alias.gold_entries:
+        if entry["column"] == old_column:
+            entry["column"] = new_column
+    for event in alias.audit_events:
+        if event["source_column"] == old_column:
+            event["source_column"] = new_column
+    cases["explicit_alias_mapping"] = alias
+
+    return cases
+
 __all__ = [
     "HIPAA18_IDENTIFIER_SPECS",
     "HIPAA18Corpus",
     "HIPAA18ValidationIssue",
     "IdentifierSpec",
     "USHIPAA18TabularCorpusGenerator",
+    "generate_edge_cases",
     "validate_corpus",
 ]

@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import csv
 import hashlib
 
@@ -10,6 +11,7 @@ from openpyxl import load_workbook
 from generators.hipaa_18_tabular import (
     HIPAA18_IDENTIFIER_SPECS,
     USHIPAA18TabularCorpusGenerator,
+    generate_edge_cases,
     validate_corpus,
 )
 
@@ -160,3 +162,57 @@ def test_write_is_byte_deterministic(tmp_path):
     generator.write(second, n_subjects=18, include_edge_cases=False)
 
     assert _tree_hashes(first) == _tree_hashes(second)
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_codes"),
+    [
+        (
+            "missing_dictionary_entry",
+            {"MISSING_HIPAA_CATEGORY", "UNMAPPED_DATASET_COLUMN"},
+        ),
+        ("orphan_dictionary_entry", {"ORPHAN_DICTIONARY_VARIABLE"}),
+        (
+            "duplicate_mapping",
+            {"DUPLICATE_HIPAA_CATEGORY", "DUPLICATE_MAPPING"},
+        ),
+        (
+            "conflicting_category",
+            {
+                "CONFLICTING_HIPAA_CATEGORY",
+                "DUPLICATE_HIPAA_CATEGORY",
+                "MISSING_HIPAA_CATEGORY",
+            },
+        ),
+        ("explicit_alias_mapping", set()),
+    ],
+)
+def test_edge_case_declares_observed_validation(case_name, expected_codes):
+    case = generate_edge_cases(seed=42)[case_name]
+
+    assert {issue.code for issue in validate_corpus(case)} == expected_codes
+
+
+def test_write_emits_all_edge_cases_with_exact_expected_validation(tmp_path):
+    report = USHIPAA18TabularCorpusGenerator(seed=42).write(
+        tmp_path, n_subjects=3, include_edge_cases=True
+    )
+
+    assert report["edge_cases"] == 5
+    for case_name, case in generate_edge_cases(seed=42).items():
+        case_dir = tmp_path / "edge_cases" / case_name
+        expected = json.loads(
+            (case_dir / "expected_validation.json").read_text(encoding="utf-8")
+        )
+        assert expected["issues"] == [
+            {
+                "code": issue.code,
+                "column": issue.column,
+                "detail": issue.detail,
+            }
+            for issue in validate_corpus(case)
+        ]
+        assert (case_dir / "input/datasets/hipaa18.csv").is_file()
+        assert (
+            case_dir / "input/data_dictionary/hipaa18_dictionary.csv"
+        ).is_file()
