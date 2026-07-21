@@ -4,6 +4,8 @@ import csv
 import hashlib
 
 import json
+import subprocess
+import sys
 
 import pytest
 from openpyxl import load_workbook
@@ -14,6 +16,7 @@ from generators.hipaa_18_tabular import (
     generate_edge_cases,
     validate_corpus,
 )
+from harness.capability_registry import load_capabilities
 
 
 def test_baseline_has_every_hipaa_category_once():
@@ -216,3 +219,48 @@ def test_write_emits_all_edge_cases_with_exact_expected_validation(tmp_path):
         assert (
             case_dir / "input/data_dictionary/hipaa18_dictionary.csv"
         ).is_file()
+
+
+def test_cli_writes_passing_baseline_and_edges(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "harness.generate_hipaa18_tabular",
+            "--seed",
+            "42",
+            "--n-subjects",
+            "18",
+            "--out-dir",
+            str(tmp_path),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "HIPAA categories: 18/18" in result.stdout
+    assert "Baseline validation: PASS" in result.stdout
+    assert "Edge cases: 5" in result.stdout
+    coverage = json.loads(
+        (tmp_path / "baseline" / "coverage_report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert coverage["validation_status"] == "PASS"
+
+
+def test_capability_registry_tracks_hipaa18_tabular_corpus():
+    capability = next(
+        item
+        for item in load_capabilities()
+        if item.id == "format_hipaa18_tabular"
+    )
+
+    assert capability.status == "tested"
+    assert (
+        capability.generator
+        == "generators.hipaa_18_tabular:USHIPAA18TabularCorpusGenerator.write"
+    )
+    assert capability.tests == ("tests/test_hipaa_18_tabular.py",)

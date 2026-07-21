@@ -236,6 +236,25 @@
     ]
   },
   {
+    "id": "format_hipaa18_tabular",
+    "kind": "file_format",
+    "status": "tested",
+    "public_claim": "USA HIPAA tabular corpus generator has deterministic dataset and dictionary mappings for all 18 Safe Harbor identifier categories, expected user/audit outputs, and five tested mapping edge cases",
+    "authority": [
+      "45 CFR 164.514(b)(2)(i)(A)-(R)"
+    ],
+    "jurisdiction": "us",
+    "generator": "generators.hipaa_18_tabular:USHIPAA18TabularCorpusGenerator.write",
+    "output": "generated per run by harness.generate_hipaa18_tabular",
+    "tests": [
+      "tests/test_hipaa_18_tabular.py"
+    ],
+    "limitations": [
+      "not part of the span-annotated seeded_generator_specs manifest because it emits linked CSV/XLSX/dictionary/audit artifacts rather than Record JSONL",
+      "biometric and full-face-photo fields contain synthetic references; image-content analysis is out of scope"
+    ]
+  },
+  {
     "id": "benchmark_phi_engine",
     "kind": "benchmark",
     "status": "tested",

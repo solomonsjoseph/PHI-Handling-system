@@ -60,6 +60,7 @@ These entries have tests or validator support, but they are not claimed as manif
 | `format_fhir_r4` | file_format | tested |  | FHIR R4 generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/fhir_bundles.jsonl` |  |
 | `format_hl7v2` | file_format | tested |  | HL7v2 generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/hl7v2_messages.jsonl` |  |
 | `format_xlsx` | file_format | tested |  | XLSX generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/xlsx_phi_corpus.jsonl` |  |
+| `format_hipaa18_tabular` | file_format | tested | us | USA HIPAA tabular corpus generator has deterministic dataset and dictionary mappings for all 18 Safe Harbor identifier categories, expected user/audit outputs, and five tested mapping edge cases | generated per run by `python -m harness.generate_hipaa18_tabular` | Not part of the span-annotated seeded-generator manifest because it emits linked CSV/XLSX/dictionary/audit artifacts; biometric and full-face-photo fields contain synthetic references |
 | `format_study_tabular` | file_format | tested | us | Clinical-study CRF tabular corpus generator (USA) is tested but not part of the span-annotated canonical manifest by design (staged per-run, not corpus-generator output; kept OUTSIDE corpus/ to avoid the manifest-agnostic validator sweep) | `benchmarks/results/study_tabular_corpus/` |  |
 | `benchmark_phi_engine` | benchmark | tested |  | phi_engine's own detection surface has a tested benchmarks/ adapter, run against the US corpus | `benchmarks/results/phi-engine-*/` |  |
 | `validator_suite` | validator | tested |  | Standalone validation suite is implemented and covered by corpus validator tests |  |  |
@@ -92,6 +93,9 @@ python -m harness.run_all_validations --corpus-dir corpus --manifest corpus/MANI
 python -m benchmarks.presidio_adapter --corpus-dir corpus/us --output-dir benchmarks/results/presidio-stock --profile stock --scoring-profile strict_all_span --verbose
 python -m harness.mia_framework --corpus-dir corpus --output mia_report.json
 python -m harness.release_evidence --corpus-dir corpus --manifest corpus/MANIFEST.json --validation-report validation_report.json --mia-report mia_report.json --output release_evidence.json
+
+# Linked USA HIPAA A-R tabular dataset + dictionary corpus (separate non-Record manifest).
+python -m harness.generate_hipaa18_tabular --seed 42 --n-subjects 18 --out-dir tmp/hipaa18-corpus
 
 # End-to-end fail-closed scrub system run (USA) -- docs/JURISDICTION_EVIDENCE_REPORT_US.md.
 # Demoted to a benchmark wrapper (standalone refactor): generates the synthetic
@@ -185,6 +189,7 @@ PHI-Handling-system/
 |   |-- capability_registry.py       # Registry loader, status checks, Markdown CLI
 |   |-- capability_registry.json     # Machine-checkable claim/status source of truth
 |   |-- generate_corpus.py           # Seeded corpus generation
+|   |-- generate_hipaa18_tabular.py  # Linked USA HIPAA A-R dataset/dictionary corpus
 |   |-- run_all_validations.py       # Validation runner
 |   |-- mia_framework.py             # Deterministic MIA smoke test
 |   |-- release_evidence.py          # Release evidence hashing and claim-level summary
