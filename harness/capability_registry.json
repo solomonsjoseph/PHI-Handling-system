@@ -2,14 +2,14 @@
   {
     "id": "us_hipaa",
     "kind": "jurisdiction",
-    "status": "manifested",
-    "public_claim": "US/HIPAA synthetic corpus with span-level gold annotations",
+    "status": "tested",
+    "public_claim": "US/HIPAA synthetic JSONL corpus generation with span-level gold annotations is tested; no current corpus is manifested",
     "authority": [
       "45 CFR 164.514"
     ],
     "jurisdiction": "us",
     "generator": "harness.generate_corpus:build_us_corpus",
-    "output": "corpus/us/*.jsonl"
+    "output": "generated per run by python -m harness.generate_corpus --jurisdiction us"
   },
   {
     "id": "format_dicom_header",
@@ -54,9 +54,9 @@
   {
     "id": "format_jsonl",
     "kind": "file_format",
-    "status": "manifested",
-    "public_claim": "JSONL is the canonical manifested corpus file format",
-    "output": "corpus/**/*.jsonl"
+    "status": "tested",
+    "public_claim": "JSONL corpus generation is tested; no current corpus is manifested",
+    "output": "generated per run by python -m harness.generate_corpus"
   },
   {
     "id": "format_json",

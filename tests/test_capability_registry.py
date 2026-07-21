@@ -84,5 +84,5 @@ def test_module_cli_prints_markdown_registry_table() -> None:
     assert "| ID | Kind | Status | Jurisdiction | Claim | Output | Limitations |" in result.stdout
     assert "us_hipaa" in result.stdout
     assert "clinician_review" in result.stdout
-    assert "manifested" in result.stdout
+    assert "| manifested |" not in result.stdout
     assert "planned" in result.stdout

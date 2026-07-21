@@ -1,11 +1,11 @@
 # PHI Handling - Evidence-First Corpus, Benchmark, and Runtime Safety Harness
 
 **Repository status:** v2.0.0-dev evidence-alignment in progress  
-**Claim level:** Current public claim level: L1 strong, L2 partial, L3 partial, L4/L5 not yet supported  
+**Claim level:** No current release claim; corpus rebuild in progress  
 **License:** MIT (see `LICENSE`)  
 **Maintainer:** Private maintainer contact must be configured by the project owner before public security or PHI-leak reports are accepted.
 
-This repository contains a synthetic PHI corpus, benchmark, and runtime safety harness whose public claims are bounded by machine-checkable evidence in `harness/capability_registry.json`, `corpus/MANIFEST.json`, validation reports, tests, benchmark artifacts, MIA smoke reports, and release evidence. If a capability is not listed in the capability registry at the required status, it is not claimed here as release coverage.
+This repository contains synthetic PHI corpus generators, benchmark tooling, and a runtime safety harness whose public claims are bounded by machine-checkable evidence in `harness/capability_registry.json`, generated corpus manifests, validation reports, tests, benchmark artifacts, MIA smoke reports, and release evidence. No corpus is currently manifested. If a capability is not listed in the capability registry at the required status, it is not claimed here as release coverage.
 
 This repository is IRB-oriented: it provides IRB-review support artifacts for corpus provenance, validation, benchmark protocol, security controls, and review checklists. It is not a standalone review submission by itself.
 
@@ -14,7 +14,7 @@ This repository does not certify HIPAA or other compliance.
 ## For reviewers -- current evidence status
 
 1. Start with `harness/capability_registry.json` to see which jurisdictions, formats, benchmarks, controls, and review steps are manifested, tested, implemented, or planned.
-2. Use `corpus/MANIFEST.json` for the current canonical corpus release evidence.
+2. No canonical corpus or `corpus/MANIFEST.json` is currently checked in; the next release-candidate build must generate and validate them from scratch.
 3. Use `validation_report.json`, `mia_report.json`, `release_evidence.json`, and `benchmarks/results/*` when those artifacts are generated for a release candidate.
 4. Treat planned registry entries as roadmap items, not implemented coverage.
 
@@ -24,8 +24,8 @@ A reviewer should be able to distinguish manifested evidence from tested generat
 
 | Level | Current status | Evidence boundary |
 |---|---|---|
-| L1 | Strong | Registry-backed project scope, no-real-PHI statement, canonical US/HIPAA JSONL corpus entries, validation commands, and security disclosure policy. |
-| L2 | Partial (dormant under current scope) | `harness/release_evidence.py::_claim_level` elevates to L2-partial only when `corpus/MANIFEST.json` declares manifested evidence for a regulatory jurisdiction beyond `us` (the `file_formats` corpus/ category is explicitly excluded from this check -- it is a format category, not a jurisdiction). Under the current USA-only scope no second jurisdiction exists, so this level is mechanically supported but not reached; the live `release_evidence.json` reports L1. Tested-but-not-manifested file-format generator coverage is tracked separately in [Tested but not yet release-manifested coverage](#tested-but-not-yet-release-manifested-coverage), not via claim level. |
+| L1 | Not currently claimed | No corpus is currently manifested; the corpus and its release evidence are being rebuilt from scratch. |
+| L2 | Not currently claimed | A higher claim level cannot be evaluated until a new validated release manifest exists. |
 | L3 | Partial | Benchmark code, deterministic MIA smoke testing, PHI/LLM boundary guards, and threat-model documentation are implemented, but benchmark result artifacts and external reviews are not claimed as complete release evidence here. |
 | L4 | Not yet supported | Clinician review, counsel review, commercial benchmark validation, and strict benchmark artifact review are not complete. |
 | L5 | Not yet supported | No external certification, regulatory approval, or independent audit is claimed. |
@@ -42,12 +42,7 @@ Supporting implemented controls that are not manifested coverage claims:
 
 ## Manifested coverage
 
-Only these registry entries are claimed as manifested release coverage.
-
-| ID | Kind | Status | Jurisdiction | Claim | Output | Limitations |
-|---|---|---|---|---|---|---|
-| `format_jsonl` | file_format | manifested |  | JSONL is the canonical manifested corpus file format | `corpus/**/*.jsonl` |  |
-| `us_hipaa` | jurisdiction | manifested | us | US/HIPAA synthetic corpus with span-level gold annotations | `corpus/us/*.jsonl` |  |
+No registry entry is currently claimed as manifested release coverage. The old generated corpus and its derived release evidence were removed before rebuilding from scratch.
 
 ## Tested but not yet release-manifested coverage
 
@@ -60,8 +55,10 @@ These entries have tests or validator support, but they are not claimed as manif
 | `format_fhir_r4` | file_format | tested |  | FHIR R4 generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/fhir_bundles.jsonl` |  |
 | `format_hl7v2` | file_format | tested |  | HL7v2 generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/hl7v2_messages.jsonl` |  |
 | `format_xlsx` | file_format | tested |  | XLSX generator is tested but not yet included in the canonical release manifest | `corpus/file_formats/xlsx_phi_corpus.jsonl` |  |
+| `format_jsonl` | file_format | tested |  | JSONL corpus generation is tested; no current corpus is manifested | generated per run by `python -m harness.generate_corpus` |  |
 | `format_hipaa18_tabular` | file_format | tested | us | USA HIPAA tabular corpus generator has deterministic dataset and dictionary mappings for all 18 Safe Harbor identifier categories, expected user/audit outputs, and five tested mapping edge cases | generated per run by `python -m harness.generate_hipaa18_tabular` | Not part of the span-annotated seeded-generator manifest because it emits linked CSV/XLSX/dictionary/audit artifacts; biometric and full-face-photo fields contain synthetic references |
 | `format_study_tabular` | file_format | tested | us | Clinical-study CRF tabular corpus generator (USA) is tested but not part of the span-annotated canonical manifest by design (staged per-run, not corpus-generator output; kept OUTSIDE corpus/ to avoid the manifest-agnostic validator sweep) | `benchmarks/results/study_tabular_corpus/` |  |
+| `us_hipaa` | jurisdiction | tested | us | US/HIPAA synthetic JSONL corpus generation with span-level gold annotations is tested; no current corpus is manifested | generated per run by `python -m harness.generate_corpus --jurisdiction us` |  |
 | `benchmark_phi_engine` | benchmark | tested |  | phi_engine's own detection surface has a tested benchmarks/ adapter, run against the US corpus | `benchmarks/results/phi-engine-*/` |  |
 | `validator_suite` | validator | tested |  | Standalone validation suite is implemented and covered by corpus validator tests |  |  |
 
@@ -229,7 +226,7 @@ Five properties, each tied to registry-backed evidence:
 
 1. **Registry-backed claim boundaries** -- `harness/capability_registry.json` records whether each jurisdiction, format, benchmark, validator, security control, review control, and privacy attack capability is planned, implemented, tested, manifested, or externally reviewed.
 2. **Provenance** -- Generated records carry authority citation fields, and public claims should map back to primary sources or registry entries rather than summaries of summaries.
-3. **Reproducibility** -- The canonical corpus is generated from seeded generators. `corpus/MANIFEST.json` records release hash and span-count evidence when the corpus is generated.
+3. **Reproducibility** -- Corpus generators are seeded and deterministic. A new `corpus/MANIFEST.json` will record release hashes and span-count evidence when the replacement corpus is generated.
 4. **Benchmark-readiness** -- Baseline benchmark code exists for Presidio, while commercial-tool artifacts remain registry-tracked work before they can support release claims.
 5. **Reviewer-friendly structure** -- The README points reviewers at machine-checkable registry and manifest evidence first. The goal is that a reviewer can distinguish implemented evidence from planned work without relying on trust.
 
