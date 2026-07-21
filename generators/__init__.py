@@ -22,6 +22,7 @@ from .hipaa_biometric import HIPAABiometricGenerator
 from .hipaa_device import HIPAADeviceGenerator
 from .hipaa_fax import HIPAAFaxGenerator
 from .hipaa_vehicle import HIPAAVehicleGenerator
+from .hipaa_18_tabular import USHIPAA18TabularCorpusGenerator
 from .file_formats.dicom_header_gen import DICOMHeaderGenerator
 from .file_formats.fhir_gen import FHIRGenerator
 from .file_formats.hl7v2_gen import HL7v2Generator
@@ -39,6 +40,7 @@ __all__ = [
     "HIPAADeviceGenerator",
     "HIPAAFaxGenerator",
     "HIPAAVehicleGenerator",
+    "USHIPAA18TabularCorpusGenerator",
     "DICOMHeaderGenerator",
     "FHIRGenerator",
     "HL7v2Generator",
