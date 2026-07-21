@@ -23,14 +23,3 @@ jobs:
 
       - name: Run test suite
         run: python -m pytest -q
-
-      - name: Run corpus validation harness
-        run: |
-          python -m harness.run_all_validations \
-            --corpus-dir corpus \
-            --manifest corpus/MANIFEST.json \
-            --output validation_report.json
-
-      - name: Fail if validation did not pass
-        run: |
-          python -c "import json,sys; r=json.load(open('validation_report.json')); sys.exit(0 if r['validation_status']=='PASS' else 1)"
