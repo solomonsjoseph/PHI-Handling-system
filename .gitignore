@@ -61,6 +61,7 @@ logs/
 tmp/
 *.tmp
 .phi-local-*
+/.worktrees/
 
 # phi_engine's default (PHI_WORKSPACE-unset) repo-root workspace -- this is
 # where harness/run_phi_system.py's documented evidence commands (see
