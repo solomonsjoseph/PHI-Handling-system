@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import re
-import platform
 import shutil
 import stat
 from dataclasses import asdict
@@ -20,6 +19,7 @@ from phi_engine.audit.review_paths import organizer_review_path
 from phi_engine.pipeline.dependencies import DependencyKind, OrganizedHeader, SupportParseStatus
 from phi_engine.pipeline.intake import load_intake_manifest
 from phi_engine.pipeline.support_files import parse_support_artifact
+from phi_engine.pipeline.verified_source import FileIdentity, VerifiedSourceError, open_verified_source
 from phi_engine.security.phi_review import normalize_header
 from phi_engine.utils._extraction_io.sheet_split import promote_header, split_sheet_into_tables
 
@@ -133,33 +133,52 @@ def _dataframe_to_normalized_rows(df: pd.DataFrame, artifact_id: str, source_sha
 
 
 def _copy_descriptor_to_verified(fd: int, dest: Path) -> str:
+    verified_dir = dest.parent
+    verified_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(verified_dir, 0o700)
+
+    os.lseek(fd, 0, os.SEEK_SET)
     digest = hashlib.sha256()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-    os.lseek(fd, 0, os.SEEK_SET)
-    with os.fdopen(os.dup(fd), "rb") as src, tmp.open("wb") as out:
-        for chunk in iter(lambda: src.read(1 << 20), b""):
-            digest.update(chunk)
-            out.write(chunk)
-    tmp.chmod(0o600)
-    tmp.replace(dest)
-    dest.chmod(0o600)
-    os.lseek(fd, 0, os.SEEK_SET)
-    return digest.hexdigest()
+    tmp_path: Path | None = None
+    tmp_fd: int | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        for _attempt in range(8):
+            candidate_path = verified_dir / f".{dest.name}.{os.urandom(8).hex()}.tmp"
+            try:
+                tmp_fd = os.open(candidate_path, flags, 0o600)
+            except FileExistsError:
+                continue
+            tmp_path = candidate_path
+            break
+        if tmp_fd is None or tmp_path is None:
+            raise OSError("unable to create a private temporary snapshot file")
+        os.fchmod(tmp_fd, 0o600)
 
+        with os.fdopen(os.dup(fd), "rb") as src, os.fdopen(tmp_fd, "wb") as out:
+            tmp_fd = None  # ownership transferred to the fdopen wrapper
+            for chunk in iter(lambda: src.read(1 << 20), b""):
+                digest.update(chunk)
+                out.write(chunk)
+            out.flush()
+            os.fsync(out.fileno())
 
-def _descriptor_target(fd: int) -> Path:
-    system = platform.system()
-    if system == "Linux":
-        return Path(os.readlink(f"/proc/self/fd/{fd}")).resolve(strict=True)
-    if system == "Darwin":
-        import fcntl
+        os.replace(tmp_path, dest)
+        tmp_path = None  # renamed; nothing left to clean up
 
-        buf = bytearray(1024)
-        path = fcntl.fcntl(fd, 50, buf)  # F_GETPATH
-        raw = bytes(path if isinstance(path, (bytes, bytearray)) else buf).split(b"\0", 1)[0]
-        return Path(raw.decode()).resolve(strict=True)
-    raise RuntimeError("verified source descriptors unsupported on this platform")
+        dir_fd = os.open(verified_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        return digest.hexdigest()
+    finally:
+        if tmp_fd is not None:
+            os.close(tmp_fd)
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 def _same_stat(left: os.stat_result, right: os.stat_result) -> bool:
@@ -173,44 +192,64 @@ def _same_stat(left: os.stat_result, right: os.stat_result) -> bool:
 
 
 def _verified_snapshot(entry: dict[str, Any], source_root: Path, verified_dir: Path) -> tuple[Path | None, str | None, str | None]:
-    rel = Path(str(entry["relative_path"]))
-    if rel.is_absolute() or ".." in rel.parts:
-        return None, None, "unsafe-relative-path"
+    relative_path = str(entry["relative_path"])
     try:
-        resolved = (source_root / rel).resolve(strict=True)
-        resolved.relative_to(source_root)
-    except (OSError, ValueError):
-        return None, None, "source-outside-root"
+        expected_identity = FileIdentity(
+            device=int(entry["device"]),
+            inode=int(entry["inode"]),
+            size=int(entry["size"]),
+            mtime_ns=int(entry["mtime_ns"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None, None, "source-unreadable"
+
+    # open_verified_source's own pre/post identity check (against
+    # expected_identity, and again on exit) can override a pending `return`
+    # from inside the `with` block with its own generic source-unreadable
+    # VerifiedSourceError. detected_reason/detected_sha survive that
+    # override (they are set before the return, in this enclosing scope) so
+    # the more specific organizer-detected reason is what actually gets
+    # reported, while a genuine identity mismatch this function never
+    # noticed itself still fails closed via the except branch below.
+    detected_reason: str | None = None
+    detected_sha: str | None = None
+    dest = verified_dir / str(entry["artifact_id"])
     try:
-        pre = os.stat(resolved, follow_symlinks=False)
-        if not stat.S_ISREG(pre.st_mode):
-            return None, None, "source-not-regular"
-        fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with open_verified_source(source_root, relative_path, expected_identity=expected_identity) as fd:
+            pre = os.fstat(fd)
+            copied_sha = _copy_descriptor_to_verified(fd, dest)
+            post = os.fstat(fd)
+            if not _same_stat(pre, post):
+                dest.unlink(missing_ok=True)
+                detected_reason = "source-mutated-during-copy"
+                return None, None, detected_reason
+            if copied_sha != entry.get("sha256"):
+                dest.unlink(missing_ok=True)
+                detected_sha = copied_sha
+                detected_reason = "source-hash-mismatch"
+                return None, detected_sha, detected_reason
+            return dest, copied_sha, None
+    except VerifiedSourceError as exc:
+        # open_verified_source's own post-yield identity re-check (fired
+        # after the `with` block already returned normally, i.e. a race
+        # this function's own pre/post fstat comparison never caught) can
+        # land here even though _copy_descriptor_to_verified already wrote
+        # `dest`. Never leave that write behind: a source-mutation race
+        # detected only after copy completion still means what got copied
+        # cannot be trusted.
+        dest.unlink(missing_ok=True)
+        if detected_reason is not None:
+            return None, detected_sha, detected_reason
+        return None, None, exc.reason
     except OSError:
-        return None, None, "source-open-failed"
-    try:
-        try:
-            opened_target = _descriptor_target(fd)
-        except RuntimeError:
-            return None, None, "verified-source-unsupported-platform"
-        if opened_target != resolved:
-            return None, None, "descriptor-target-mismatch"
-        opened_target.relative_to(source_root)
-        opened = os.fstat(fd)
-        if not _same_stat(pre, opened):
-            return None, None, "source-mutated-before-copy"
-        dest = verified_dir / str(entry["artifact_id"])
-        copied_sha = _copy_descriptor_to_verified(fd, dest)
-        post = os.fstat(fd)
-        if not _same_stat(pre, post):
-            dest.unlink(missing_ok=True)
-            return None, None, "source-mutated-during-copy"
-        if copied_sha != entry.get("sha256"):
-            dest.unlink(missing_ok=True)
-            return None, copied_sha, "source-hash-mismatch"
-        return dest, copied_sha, None
-    finally:
-        os.close(fd)
+        # fstat/dup/lseek/read/write/fsync/rename failures during the
+        # snapshot copy itself -- distinct from anything open_verified_source
+        # already normalizes. Never leak the raw OSError text; clean up any
+        # artifact the copy may have partially produced before this point.
+        dest.unlink(missing_ok=True)
+        if detected_reason is not None:
+            return None, detected_sha, detected_reason
+        return None, None, "source-unreadable"
 
 
 class _Router:

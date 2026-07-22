@@ -14,7 +14,7 @@ from typing import Any
 
 import phi_engine.config.config as config
 from phi_engine.pipeline.dependencies import is_artifact_id, is_sha256
-from phi_engine.utils._extraction_io.file_discovery import DEFAULT_JUNK_FILENAMES
+from phi_engine.pipeline.intake_preflight import _iter_source_files
 
 __all__ = ["intake_add", "load_intake_manifest"]
 
@@ -66,16 +66,6 @@ def _safe_rel(path: Path) -> str:
     if rel.startswith("/") or rel == ".." or rel.startswith("../") or "/../" in rel:
         raise ValueError(f"unsafe relative path: {rel!r}")
     return rel
-
-
-def _iter_source_files(source: Path):
-    for root, dirnames, filenames in os.walk(source, followlinks=False):
-        root_path = Path(root)
-        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in DEFAULT_JUNK_FILENAMES]
-        for name in filenames:
-            if name.startswith(".") or name in DEFAULT_JUNK_FILENAMES:
-                continue
-            yield root_path / name
 
 
 def _validate_manifest(study: str, manifest: dict[str, Any], manifest_path: Path, *, check_links: bool = True) -> dict[str, Any]:

@@ -382,9 +382,7 @@ def test_manifest_confirmed_role_overrides_nested_root_anchored_fallback(tmp_pat
         assert manifest["review_bucket"] == []
 
 
-def test_organize_rejects_source_hash_mismatch_descriptor_target_swap_and_unsupported_platform(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_organize_rejects_source_hash_mismatch_and_in_root_symlink_swap(tmp_path: Path) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     data_file = source / "datasets" / "labs.csv"
@@ -405,17 +403,154 @@ def test_organize_rejects_source_hash_mismatch_descriptor_target_swap_and_unsupp
         assert manifest["review_bucket"][0]["reason"] == "source-hash-mismatch"
 
         intake_add(source, "Phase2Study")
-        real_descriptor_target = organize_module._descriptor_target
-        monkeypatch.setattr(organize_module, "_descriptor_target", lambda _fd: tmp_path / "outside.csv")
+        decoy = source / "datasets" / "decoy.csv"
+        decoy.write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
+        data_file.unlink()
+        data_file.symlink_to(decoy)
         manifest = organize_module.organize("Phase2Study")
         assert manifest["datasets"] == []
-        assert manifest["review_bucket"][0]["reason"] == "descriptor-target-mismatch"
+        assert manifest["review_bucket"][0]["reason"] == "source-symlink-not-allowed"
 
-        monkeypatch.setattr(organize_module, "_descriptor_target", real_descriptor_target)
-        monkeypatch.setattr(organize_module.platform, "system", lambda: "FreeBSD")
+
+def test_organize_snapshot_temp_file_is_created_private_before_any_bytes_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Reproduces the exact prior vulnerability: under a permissive umask, the
+    # snapshot's private-content temp file must never be observably 0644 at
+    # any point, including at the moment of creation before content is
+    # written -- not merely "eventually chmod'd to 0600 after the fact".
+    import phi_engine.pipeline.organize as organize_module
+
+    old_umask = os.umask(0o022)
+    try:
+        src = tmp_path / "source.csv"
+        src.write_bytes(b"PHI-bearing raw content" * 200)
+        fd = os.open(src, os.O_RDONLY)
+
+        observed_modes: list[int] = []
+        real_open = os.open
+
+        def recording_open(path, flags, mode=0o777, *args, **kwargs):
+            result = real_open(path, flags, mode, *args, **kwargs)
+            if (flags & os.O_CREAT) and (flags & os.O_EXCL):
+                observed_modes.append(stat.S_IMODE(os.fstat(result).st_mode))
+            return result
+
+        monkeypatch.setattr(organize_module.os, "open", recording_open)
+        dest = tmp_path / "verified" / "artifact123"
+        try:
+            organize_module._copy_descriptor_to_verified(fd, dest)
+        finally:
+            os.close(fd)
+
+        assert observed_modes, "private temp file creation was never observed by the recording hook"
+        assert all(mode == 0o600 for mode in observed_modes), observed_modes
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+        assert stat.S_IMODE(dest.parent.stat().st_mode) == 0o700
+        leftover = [p.name for p in dest.parent.iterdir() if p != dest]
+        assert leftover == []
+    finally:
+        os.umask(old_umask)
+
+
+def test_organize_normalizes_injected_snapshot_copy_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A filesystem-level failure during the snapshot copy itself (distinct
+    # from anything open_verified_source already normalizes) must never
+    # leak as a raw OSError -- it must become the fixed source-unreadable
+    # review reason, with no destination artifact left behind.
+    source = tmp_path / "src"
+    (source / "datasets").mkdir(parents=True)
+    (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+
+    with _workspace(tmp_path):
+        from phi_engine.pipeline.intake import intake_add
+        import phi_engine.pipeline.organize as organize_module
+
+        intake_add(source, "Phase2Study")
+
+        def broken_copy(fd: int, dest: Path) -> str:
+            raise OSError(5, "SENTINEL_COPY_EIO")
+
+        monkeypatch.setattr(organize_module, "_copy_descriptor_to_verified", broken_copy)
+        manifest = organize_module.organize("Phase2Study")
+
+        assert manifest["datasets"] == []
+        assert manifest["review_bucket"][0]["reason"] == "source-unreadable"
+        serialized = json.dumps(manifest)
+        assert "SENTINEL_COPY_EIO" not in serialized
+        verified_dir = Path(os.environ["PHI_WORKSPACE"]) / "organized" / "Phase2Study" / ".verified_sources"
+        leftover = list(verified_dir.iterdir()) if verified_dir.exists() else []
+        assert leftover == []
+
+
+def test_verified_snapshot_removes_leftover_artifact_on_race_between_own_postcheck_and_context_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: a source mutation landing in the narrow window AFTER
+    # _verified_snapshot's own pre/post fstat comparison already passed
+    # (so its explicit "source-mutated-during-copy" unlink branch never
+    # fires) but BEFORE open_verified_source's own context-exit identity
+    # re-check fires (which then raises VerifiedSourceError from a point
+    # this function never explicitly checks) must still remove whatever
+    # _copy_descriptor_to_verified already wrote -- not just the two
+    # explicit unlink() branches this function had before this fix.
+    source = tmp_path / "src"
+    (source / "datasets").mkdir(parents=True)
+    target = source / "datasets" / "labs.csv"
+    target.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+
+    with _workspace(tmp_path):
+        from phi_engine.pipeline.intake import intake_add
+        import phi_engine.pipeline.organize as organize_module
+
+        intake_add(source, "Phase2Study")
+
+        real_same_stat = organize_module._same_stat
+
+        def racing_same_stat(left: object, right: object) -> bool:
+            # The organizer's own pre/post comparison reflects the
+            # pre-mutation state (both stats were already captured before
+            # this call) and legitimately passes; mutate the source right
+            # after, landing squarely in the window before
+            # open_verified_source's own context-exit re-check fires.
+            result = real_same_stat(left, right)
+            target.write_text("SUBJID,AGE\n1,40\nRACE,ROW\n", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(organize_module, "_same_stat", racing_same_stat)
+        manifest = organize_module.organize("Phase2Study")
+
+        assert manifest["datasets"] == []
+        assert manifest["review_bucket"][0]["reason"] == "source-unreadable"
+        verified_dir = Path(os.environ["PHI_WORKSPACE"]) / "organized" / "Phase2Study" / ".verified_sources"
+        leftover = list(verified_dir.iterdir()) if verified_dir.exists() else []
+        assert leftover == []
+
+
+def test_organize_rejects_same_byte_different_inode_source_replacement(tmp_path: Path) -> None:
+    # Organizer snapshots must be bound to the exact manifest-recorded
+    # identity (device/inode/size/mtime_ns), not merely to a matching
+    # content hash: swapping the source path to a DIFFERENT inode with the
+    # SAME bytes is a provenance/hardlink-policy violation, not a benign
+    # no-op, and must fail closed even though the eventual copied hash would
+    # still match.
+    source = tmp_path / "src"
+    (source / "datasets").mkdir(parents=True)
+    data_file = source / "datasets" / "labs.csv"
+    data_file.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+
+    with _workspace(tmp_path):
+        from phi_engine.pipeline.intake import intake_add
+        import phi_engine.pipeline.organize as organize_module
+
+        intake_add(source, "Phase2Study")
+        replacement = source / "datasets" / "replacement.csv"
+        replacement.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+        data_file.unlink()
+        replacement.rename(data_file)
         manifest = organize_module.organize("Phase2Study")
         assert manifest["datasets"] == []
-        assert manifest["review_bucket"][0]["reason"] == "verified-source-unsupported-platform"
+        assert manifest["review_bucket"][0]["reason"] == "source-unreadable"
 
 
 def test_organize_fails_closed_for_malformed_stale_forms_manifest(tmp_path: Path) -> None:
