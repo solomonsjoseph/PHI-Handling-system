@@ -20,14 +20,11 @@ object anywhere in the tree is ever looked up by path a second time.
 
 from __future__ import annotations
 
+import errno
 import hashlib
-import lzma
 import os
 import stat
-import struct
 import sys
-import zlib
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, Literal
@@ -69,23 +66,6 @@ _WORKBOOK_MEMBER = "xl/workbook.xml"
 _SHEET_QNAME = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet"
 _ROOT_PATH = ""  # fixed string path for whole-source-root review/error records
 _MAX_TRAVERSAL_DEPTH = 64  # generous bound; anything deeper fails closed, not a Python RecursionError
-
-# Hostile-input exceptions normalized to the fixed workbook-invalid code.
-# zipfile itself remains the authoritative ZIP/XML parser throughout (per
-# the approved plan) -- these are the concrete failure classes it and its
-# decompressors are documented to raise on malformed/hostile input, never
-# reinterpreted ZIP structure of our own.
-_HOSTILE_ZIP_EXCEPTIONS = (
-    zipfile.BadZipFile,
-    OSError,
-    EOFError,
-    RuntimeError,
-    NotImplementedError,
-    ValueError,
-    struct.error,
-    zlib.error,
-    lzma.LZMAError,
-)
 
 # Bucket: TOCTOU/escape/unreadable source access failures that mean "we could
 # not trust this read at all" are "errors". Structural/format issues a human
@@ -318,6 +298,135 @@ def _iter_source_files(root: Path) -> list[Path]:
     return found
 
 
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_COMPONENT_SCAN_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC
+
+
+def _open_component_dir_fresh(parent_fd: int, name: str) -> tuple[int | None, str | None]:
+    """NOFOLLOW-open ``name`` directly under ``parent_fd`` with no prior
+    known identity to verify against (a fresh discovery, not a TOCTOU
+    recheck of an already-seen entry). Returns ``(fd, None)`` or
+    ``(None, reason)`` with a fixed reason -- never raises, never leaks the
+    underlying ``OSError``."""
+    try:
+        return os.open(name, _COMPONENT_SCAN_DIR_FLAGS, dir_fd=parent_fd), None
+    except OSError as exc:
+        return None, "source-symlink-not-allowed" if exc.errno == errno.ELOOP else "source-unreadable"
+
+
+def _close_fd_quietly(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _scan_component_identities(
+    source: Path, component_name: str
+) -> tuple[frozenset[tuple[int, int]] | None, str | None]:
+    """Descriptor-relative, NOFOLLOW, depth-bounded scan of every regular
+    file's ``(device, inode)`` currently reachable under
+    ``<source>/<component_name>/``, built on the exact same shared
+    :func:`_walk_tree` traversal engine -- including its per-directory
+    identity recheck on exit -- that :func:`inspect_intake_source` itself
+    uses, never a second, divergent traversal convention. Intended for
+    :mod:`phi_engine.pipeline.intake_naming`'s independent hardlink-alias
+    check, run immediately before parsing a support candidate and again
+    immediately before every local-model dispatch.
+
+    Returns ``(identities, None)`` only for a fully trustworthy scan.
+    Returns ``(None, reason)`` with one fixed reason the instant the root,
+    the component directory itself, or any entry/subdirectory below it
+    cannot be verified NOFOLLOW-safe -- a symlink anywhere in the subtree,
+    any stat/open/scandir failure, exceeding the shared traversal depth
+    bound, or the directory changing shape mid-walk. An inconclusive scan
+    is exactly as dangerous as a confirmed alias and must never be treated
+    by a caller as "zero files present".
+    """
+    try:
+        root_fd = _open_pinned_root(source)
+    except VerifiedSourceError as exc:
+        return None, exc.reason
+
+    try:
+        component_fd, open_reason = _open_component_dir_fresh(root_fd, component_name)
+    finally:
+        _close_fd_quietly(root_fd)
+    if component_fd is None:
+        return None, open_reason
+
+    try:
+        component_identity = _identity(os.fstat(component_fd))
+        component_entries = sorted(os.scandir(component_fd), key=lambda e: e.name)
+    except OSError:
+        _close_fd_quietly(component_fd)
+        return None, "source-unreadable"
+
+    identities: set[tuple[int, int]] = set()
+    failures: list[str] = []
+
+    def classify(parent_fd: int, entry: "os.DirEntry[str]", prefix: tuple[str, ...], _parent_extra: Any, depth: int) -> Any:
+        try:
+            is_link = entry.is_symlink()
+        except OSError:
+            failures.append("source-unreadable")
+            return _SKIP
+        if is_link:
+            failures.append("source-symlink-not-allowed")
+            return _SKIP
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            failures.append("source-unreadable")
+            return _SKIP
+        if not is_dir:
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                failures.append("source-unreadable")
+                return _SKIP
+            return _AsFile((info.st_dev, info.st_ino))
+        if depth >= _MAX_TRAVERSAL_DEPTH:
+            failures.append("source-unreadable")
+            return _SKIP
+        child_fd, open_reason = _open_component_dir_fresh(parent_fd, entry.name)
+        if child_fd is None:
+            failures.append(open_reason or "source-unreadable")
+            return _SKIP
+        try:
+            child_identity = _identity(os.fstat(child_fd))
+            child_entries = sorted(os.scandir(child_fd), key=lambda e: e.name)
+        except OSError:
+            failures.append("source-unreadable")
+            _close_fd_quietly(child_fd)
+            return _SKIP
+        return _Descend(child_fd, child_entries, child_identity)
+
+    def on_file(_parent_fd: int, _entry: "os.DirEntry[str]", _prefix: tuple[str, ...], _parent_extra: Any, extra: Any) -> None:
+        identities.add(extra)
+
+    def on_dir_exit(fd: int, _prefix: tuple[str, ...], extra: Any) -> bool:
+        if not _recheck_dir_identity(fd, extra):
+            failures.append("source-unreadable")
+            return False
+        return True
+
+    tree_ok = _walk_tree(
+        component_fd,
+        component_identity,
+        classify=classify,
+        on_file=on_file,
+        close_handle=_close_fd_quietly,
+        on_dir_exit=on_dir_exit,
+    )
+    _close_fd_quietly(component_fd)
+
+    if failures or not tree_ok:
+        return None, failures[0] if failures else "source-unreadable"
+    return frozenset(identities), None
+
+
 def _stream_size(fileobj: BinaryIO) -> int:
     try:
         current = fileobj.tell()
@@ -328,51 +437,6 @@ def _stream_size(fileobj: BinaryIO) -> int:
     except (OSError, AttributeError, ValueError):
         raise _XlsxWorkbookError("xlsx-workbook-invalid") from None
 
-
-class _BoundedReader:
-    """Enforces an actual-bytes-read cap, independent of any declared/attacker-
-    controlled ZIP central-directory size metadata. Every delegated read is
-    itself clamped to at most the remaining budget (including negative
-    "read everything" requests), so no single call can pull an unbounded
-    amount from the underlying stream/decompressor before the cap is
-    checked. Also usable to wrap the raw archive stream itself (with
-    ``seek``/``tell`` passthrough) so zipfile's own central-directory parse
-    cannot allocate an unbounded amount before we ever see it; ``rearm``
-    lets the SAME wrapper instance -- and therefore the same ``ZipFile``
-    object built on it -- switch to a different budget for a later phase
-    (e.g. once central-directory parsing has finished) without ever
-    reconstructing or reparsing the archive.
-    """
-
-    def __init__(self, stream: BinaryIO, limit: int) -> None:
-        self._stream = stream
-        self._limit = limit
-        self._read = 0
-
-    def rearm(self, limit: int) -> None:
-        self._limit = limit
-        self._read = 0
-
-    def read(self, size: int = -1) -> bytes:
-        remaining = self._limit - self._read + 1  # +1 so overage is observable
-        if remaining <= 0:
-            raise _XlsxWorkbookError("xlsx-workbook-invalid")
-        request = remaining if (size is None or size < 0 or size > remaining) else size
-        chunk = self._stream.read(request)
-        self._read += len(chunk)
-        if self._read > self._limit:
-            raise _XlsxWorkbookError("xlsx-workbook-invalid")
-        return chunk
-
-    def seek(self, offset: int, whence: int = 0) -> int:
-        return self._stream.seek(offset, whence)
-
-    def tell(self) -> int:
-        return self._stream.tell()
-
-    def seekable(self) -> bool:
-        seek_check = getattr(self._stream, "seekable", None)
-        return True if seek_check is None else bool(seek_check())
 
 
 def _count_sheet_elements(stream: BinaryIO, max_sheets: int) -> int:
@@ -394,23 +458,20 @@ def count_xlsx_sheets(fileobj: BinaryIO) -> int:
     bounded streaming parse.
 
     zipfile remains the sole, authoritative ZIP parser throughout -- this
-    never reimplements EOCD/central-directory/ZIP64 parsing. Exactly one
-    ``zipfile.ZipFile`` instance is constructed, on a ``_BoundedReader``
-    wrapping the archive stream that initially caps actual bytes read at
-    ``max_zip_directory_bytes`` (bounding the allocation ``ZipFile.__init__``
-    performs while eagerly parsing the complete central directory). Once
-    construction succeeds and the declared member count/duplicate-workbook
-    check/per-member/aggregate/ratio bounds have all been validated from
-    that single parse, the SAME wrapper is rearmed to a much larger budget
-    before the workbook member is opened and streamed from that SAME
-    ``ZipFile`` instance -- never a second construction/reparse -- so a
-    valid compressed member larger than the small directory-parsing budget
-    is governed only by the already-approved source/member/expanded/ratio
-    limits, not by the directory cap. ``max_zip_members`` is still enforced
-    immediately after construction as an explicit defense-in-depth count
-    check. Raises :class:`_XlsxWorkbookError` with a fixed reason on any
-    malformed, encrypted, oversized, or pathological input; never raw
-    exception text.
+    never reimplements EOCD/central-directory/ZIP64 parsing. The directory-
+    bounded ``ZipFile`` construction and member-count/per-member/aggregate/
+    ratio validation are the single shared primitive in
+    :func:`phi_engine.pipeline.support_files.open_bounded_zipfile`, reused
+    verbatim by :mod:`phi_engine.pipeline.intake_naming`'s xlsx evidence
+    extraction so both callers enforce the exact same ``DEFAULT_LIMITS``
+    table through the exact same reader -- never two divergent copies.
+    This function layers only its own preflight-specific check (exactly one
+    ``xl/workbook.xml`` member) on top of that shared validation, then
+    streams the already-approved workbook member through the same
+    ``_BoundedReader`` wrapper class (also shared) capped at
+    ``max_zip_member_bytes``. Raises :class:`_XlsxWorkbookError` with a
+    fixed reason on any malformed, encrypted, oversized, or pathological
+    input; never raw exception text.
     """
 
     limits = support_files.DEFAULT_LIMITS
@@ -419,45 +480,19 @@ def count_xlsx_sheets(fileobj: BinaryIO) -> int:
         raise _XlsxWorkbookError("xlsx-workbook-invalid")
 
     try:
-        fileobj.seek(0, os.SEEK_SET)
-        guarded = _BoundedReader(fileobj, limits["max_zip_directory_bytes"])
-        with zipfile.ZipFile(guarded) as zf:
+        with support_files.open_bounded_zipfile(fileobj, limits) as (zf, _guarded):
             infolist = zf.infolist()
-            if len(infolist) > limits["max_zip_members"]:
-                raise _XlsxWorkbookError("xlsx-workbook-invalid")
-
-            expanded_total = 0
-            compressed_total = 0
-            workbook_member_count = 0
-            for info in infolist:
-                if int(info.file_size) > limits["max_zip_member_bytes"]:
-                    raise _XlsxWorkbookError("xlsx-workbook-invalid")
-                expanded_total += int(info.file_size)
-                compressed_total += int(info.compress_size)
-                if info.filename == _WORKBOOK_MEMBER:
-                    workbook_member_count += 1
+            workbook_member_count = sum(1 for info in infolist if info.filename == _WORKBOOK_MEMBER)
             if workbook_member_count != 1:
                 raise _XlsxWorkbookError("xlsx-workbook-invalid")
-            if expanded_total > limits["max_expanded_workbook_bytes"]:
-                raise _XlsxWorkbookError("xlsx-workbook-invalid")
-            compressed_total = compressed_total or 1
-            if (expanded_total / compressed_total) > limits["max_decompression_ratio"]:
-                raise _XlsxWorkbookError("xlsx-workbook-invalid")
-
-            # Central-directory parsing is done; the construction-only
-            # allocation risk is behind us. Rearm the SAME wrapper (still
-            # backing this SAME ZipFile instance) to a generous budget so a
-            # legitimately large compressed member read is governed by the
-            # limits already validated above, not by the tiny directory cap.
-            guarded.rearm(limits["max_source_bytes"])
 
             member_cap = limits["max_zip_member_bytes"]
             with zf.open(_WORKBOOK_MEMBER) as member_stream:
-                bounded_member_stream = _BoundedReader(member_stream, member_cap)
+                bounded_member_stream = support_files._BoundedReader(member_stream, member_cap)
                 return _count_sheet_elements(bounded_member_stream, limits["max_sheets"])
     except _XlsxWorkbookError:
         raise
-    except _HOSTILE_ZIP_EXCEPTIONS:
+    except support_files.BoundedZipMemberError:
         raise _XlsxWorkbookError("xlsx-workbook-invalid") from None
 
 

@@ -6,6 +6,7 @@ import json
 import math
 import re
 import socket
+import sys
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -738,6 +739,56 @@ class OfflineLocalLLMClient:
             raise LocalModelUnavailableError(ModelFailureCode.INVALID_SCHEMA)
         return response["response"]
 
+    def complete_bounded(
+        self, prompt: str, *, max_output_tokens: int, max_response_bytes: int
+    ) -> str:
+        """Bounded-output variant of :meth:`complete` for low-token, low-byte
+        callers (e.g. intake study-name inference). Reuses every endpoint
+        validation, attestation, digest-allowlist, and no-redirect transport
+        control ``complete`` enforces; only the requested output size and
+        the transport-level response-byte ceiling differ.
+        """
+        if (
+            not isinstance(max_output_tokens, int)
+            or isinstance(max_output_tokens, bool)
+            or max_output_tokens <= 0
+        ):
+            raise LocalModelUnavailableError(ModelFailureCode.INPUT_TOO_LARGE)
+        if (
+            not isinstance(max_response_bytes, int)
+            or isinstance(max_response_bytes, bool)
+            or max_response_bytes <= 0
+        ):
+            raise LocalModelUnavailableError(ModelFailureCode.INPUT_TOO_LARGE)
+        host, port = self._validated_endpoint()
+        if not isinstance(prompt, str) or len(prompt.encode("utf-8")) > _MAX_TASK_BYTES:
+            raise LocalModelUnavailableError(ModelFailureCode.INPUT_TOO_LARGE)
+        tags = self._request_json(host, port, "GET", "/api/tags", None)
+        model = self._select_model(tags)
+        body = json.dumps(
+            {
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"num_predict": max_output_tokens},
+            },
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        if len(body) > _MAX_TASK_BYTES:
+            raise LocalModelUnavailableError(ModelFailureCode.INPUT_TOO_LARGE)
+        response = self._request_json(
+            host,
+            port,
+            "POST",
+            "/api/generate",
+            body,
+            max_response_bytes=max_response_bytes,
+        )
+        if not isinstance(response, Mapping) or not isinstance(response.get("response"), str):
+            raise LocalModelUnavailableError(ModelFailureCode.INVALID_SCHEMA)
+        return response["response"]
+
     def _validated_endpoint(self) -> tuple[str, int]:
         cfg = self._config
         if cfg.provider == "none":
@@ -787,6 +838,8 @@ class OfflineLocalLLMClient:
         method: str,
         path: str,
         body: bytes | None,
+        *,
+        max_response_bytes: int = _MAX_RESPONSE_BYTES,
     ) -> Any:
         attempts = self._config.max_retries + 1
         for attempt in range(attempts):
@@ -805,8 +858,8 @@ class OfflineLocalLLMClient:
                     )
                 if response.status < 200 or response.status >= 300:
                     raise LocalModelUnavailableError(ModelFailureCode.HTTP_ERROR)
-                raw = response.read(_MAX_RESPONSE_BYTES + 1)
-                if len(raw) > _MAX_RESPONSE_BYTES:
+                raw = response.read(max_response_bytes + 1)
+                if len(raw) > max_response_bytes:
                     raise LocalModelUnavailableError(
                         ModelFailureCode.RESPONSE_TOO_LARGE
                     )
@@ -835,10 +888,27 @@ class OfflineLocalLLMClient:
             except Exception:
                 raise LocalModelUnavailableError(ModelFailureCode.CONNECTION_FAILED) from None
             finally:
+                # Always attempt BOTH closes even if one raises. A close
+                # failure while a primary exception/timeout/etc. is
+                # already propagating out of this iteration must never
+                # override that primary outcome with a raw close error;
+                # sys.exc_info() reflects exactly that (None on a clean
+                # `return` too, in which case a close failure legitimately
+                # becomes the fixed CONNECTION_FAILED outcome).
+                primary_active = sys.exc_info()[0] is not None
+                cleanup_error: BaseException | None = None
                 if response is not None:
-                    response.close()
+                    try:
+                        response.close()
+                    except Exception as exc:  # noqa: BLE001 -- deliberately broad, normalized below
+                        cleanup_error = exc
                 if connection is not None:
-                    connection.close()
+                    try:
+                        connection.close()
+                    except Exception as exc:  # noqa: BLE001 -- deliberately broad, normalized below
+                        cleanup_error = cleanup_error or exc
+                if cleanup_error is not None and not primary_active:
+                    raise LocalModelUnavailableError(ModelFailureCode.CONNECTION_FAILED) from None
         raise LocalModelUnavailableError(ModelFailureCode.CONNECTION_FAILED)
 
     def _select_model(self, tags: object) -> str:
@@ -886,6 +956,19 @@ class _VerifiedSupportBinding:
 
 def _new_local_client() -> OfflineLocalLLMClient:
     return OfflineLocalLLMClient(config.get_local_llm_config())
+
+
+def new_offline_local_client() -> OfflineLocalLLMClient:
+    """Public factory for a loopback-only, digest-pinned local LLM client.
+
+    The sole sanctioned construction path for callers outside this module
+    (e.g. ``phi_engine.pipeline.intake_naming``) that need a local-only
+    model client without going through ``config.get_llm_client()`` -- which
+    may resolve to an external provider. Every endpoint/attestation/digest
+    control lives on :class:`OfflineLocalLLMClient` itself; this function
+    only supplies the validated local configuration.
+    """
+    return _new_local_client()
 
 
 def _new_ordinary_client() -> config.LLMClient:

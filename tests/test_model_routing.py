@@ -1584,3 +1584,237 @@ def test_safe_errors_never_embed_prompt_response_or_underlying_exception(
     assert secret not in str(exc_info.value)
     assert secret not in repr(exc_info.value)
     assert exc_info.value.code is routing.ModelFailureCode.CONNECTION_FAILED
+
+
+# --- complete_bounded: real transport, real request body, real bounds ---------------------
+
+
+def test_complete_bounded_request_body_carries_num_predict(routing, monkeypatch):
+    name, digest = MODEL_SPEC.split("@", 1)
+    FakeHTTPConnection.requests = []
+    FakeHTTPConnection.responses = [
+        FakeHTTPResponse(200, _tags({"name": name, "digest": digest})),
+        FakeHTTPResponse(200, json.dumps({"response": '{"study_name":"X","confidence":0.9}'}).encode()),
+    ]
+    monkeypatch.setattr(routing.http.client, "HTTPConnection", FakeHTTPConnection)
+    client = routing.OfflineLocalLLMClient(_local_config())
+    result = client.complete_bounded("safe prompt", max_output_tokens=128, max_response_bytes=4096)
+    assert result == '{"study_name":"X","confidence":0.9}'
+    assert [(method, path) for method, path, *_ in FakeHTTPConnection.requests] == [
+        ("GET", "/api/tags"),
+        ("POST", "/api/generate"),
+    ]
+    generate_body = json.loads(FakeHTTPConnection.requests[1][2])
+    assert generate_body == {
+        "model": name,
+        "prompt": "safe prompt",
+        "stream": False,
+        "options": {"num_predict": 128},
+    }
+
+
+@pytest.mark.parametrize(
+    "max_output_tokens, max_response_bytes",
+    [
+        (0, 4096),
+        (-1, 4096),
+        (True, 4096),
+        (128, 0),
+        (128, -1),
+        (128, True),
+    ],
+)
+def test_complete_bounded_rejects_invalid_bounds_before_transport(routing, monkeypatch, max_output_tokens, max_response_bytes):
+    FakeHTTPConnection.requests = []
+    FakeHTTPConnection.responses = []
+    monkeypatch.setattr(routing.http.client, "HTTPConnection", FakeHTTPConnection)
+    client = routing.OfflineLocalLLMClient(_local_config())
+    with pytest.raises(routing.LocalModelUnavailableError) as exc_info:
+        client.complete_bounded("safe prompt", max_output_tokens=max_output_tokens, max_response_bytes=max_response_bytes)
+    assert exc_info.value.code is routing.ModelFailureCode.INPUT_TOO_LARGE
+    assert FakeHTTPConnection.requests == []  # rejected before any transport call
+
+
+
+
+def test_complete_bounded_enforces_its_own_response_byte_ceiling(routing, monkeypatch):
+    name, digest = MODEL_SPEC.split("@", 1)
+    oversized = json.dumps({"response": "x" * 5000}).encode()
+    assert len(oversized) > 4096
+    FakeHTTPConnection.requests = []
+    FakeHTTPConnection.responses = [
+        FakeHTTPResponse(200, _tags({"name": name, "digest": digest})),
+        FakeHTTPResponse(200, oversized),
+    ]
+    monkeypatch.setattr(routing.http.client, "HTTPConnection", FakeHTTPConnection)
+    client = routing.OfflineLocalLLMClient(_local_config())
+    with pytest.raises(routing.LocalModelUnavailableError) as exc_info:
+        client.complete_bounded("safe prompt", max_output_tokens=128, max_response_bytes=4096)
+    assert exc_info.value.code is routing.ModelFailureCode.RESPONSE_TOO_LARGE
+
+
+def test_complete_bounded_response_ceiling_is_independent_of_complete(routing, monkeypatch):
+    # A response between 4096 and the ordinary complete() ceiling (256KiB)
+    # must still be rejected by complete_bounded's own tighter cap, proving
+    # the two methods enforce independent ceilings rather than sharing one
+    # global default.
+    name, digest = MODEL_SPEC.split("@", 1)
+    mid_sized = json.dumps({"response": "y" * 6000}).encode()
+    assert 4096 < len(mid_sized) < 256 * 1024
+    FakeHTTPConnection.requests = []
+    FakeHTTPConnection.responses = [
+        FakeHTTPResponse(200, _tags({"name": name, "digest": digest})),
+        FakeHTTPResponse(200, mid_sized),
+    ]
+    monkeypatch.setattr(routing.http.client, "HTTPConnection", FakeHTTPConnection)
+    client = routing.OfflineLocalLLMClient(_local_config())
+    with pytest.raises(routing.LocalModelUnavailableError) as exc_info:
+        client.complete_bounded("safe prompt", max_output_tokens=128, max_response_bytes=4096)
+    assert exc_info.value.code is routing.ModelFailureCode.RESPONSE_TOO_LARGE
+
+
+def test_complete_bounded_still_enforces_endpoint_attestation_and_digest_controls(routing):
+    client = routing.OfflineLocalLLMClient(_local_config(offline_approved=False))
+    with pytest.raises(routing.LocalModelUnavailableError) as exc_info:
+        client.complete_bounded("safe prompt", max_output_tokens=128, max_response_bytes=4096)
+    assert exc_info.value.code is routing.ModelFailureCode.OFFLINE_ATTESTATION_MISSING
+
+
+def test_new_offline_local_client_returns_attested_client_type(routing, monkeypatch):
+    monkeypatch.setattr(routing.config, "get_local_llm_config", lambda: _local_config())
+    client = routing.new_offline_local_client()
+    assert isinstance(client, routing.OfflineLocalLLMClient)
+
+
+class _CloseFailingResponse:
+    def __init__(self, status: int, payload: bytes, close_error: Exception):
+        self.status = status
+        self._payload = payload
+        self._close_error = close_error
+
+    def read(self, amount: int | None = None) -> bytes:
+        return self._payload if amount is None else self._payload[:amount]
+
+    def close(self) -> None:
+        raise self._close_error
+
+
+class _CloseFailingConnection:
+    instances: list["_CloseFailingConnection"] = []
+
+    def __init__(self, host: str, port: int, timeout: float, *, response: object, close_error: Exception):
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self._response = response
+        self._close_error = close_error
+        self.close_called = False
+        _CloseFailingConnection.instances.append(self)
+
+    def request(self, method, path, body=None, headers=None):
+        pass
+
+    def getresponse(self):
+        return self._response
+
+    def close(self) -> None:
+        self.close_called = True
+        raise self._close_error
+
+
+def test_response_close_failure_is_normalized_and_connection_close_still_attempted(routing, monkeypatch):
+    """response.close() raising must not (a) leak the raw exception past
+    complete_bounded, or (b) skip the subsequent connection.close() call."""
+    name, digest = MODEL_SPEC.split("@", 1)
+    good_tags = FakeHTTPResponse(200, _tags({"name": name, "digest": digest}))
+    failing_response = _CloseFailingResponse(200, json.dumps({"response": "ok"}).encode(), RuntimeError("RESPONSE-CLOSE-SENTINEL"))
+
+    made_connections: list[_CloseFailingConnection] = []
+
+    def factory(host, port, timeout):
+        if made_connections:
+            conn = _CloseFailingConnection(host, port, timeout, response=failing_response, close_error=RuntimeError("RESPONSE-CLOSE-SENTINEL"))
+        else:
+            conn = _CloseFailingConnection(host, port, timeout, response=good_tags, close_error=RuntimeError("dummy-not-hit"))
+            conn.close = lambda: None  # first (tags) round-trip closes cleanly
+        made_connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(routing.http.client, "HTTPConnection", factory)
+    client = routing.OfflineLocalLLMClient(_local_config())
+    with pytest.raises(routing.LocalModelUnavailableError) as exc_info:
+        client.complete_bounded("safe prompt", max_output_tokens=128, max_response_bytes=4096)
+    assert exc_info.value.code is routing.ModelFailureCode.CONNECTION_FAILED
+    assert "RESPONSE-CLOSE-SENTINEL" not in str(exc_info.value)
+    assert made_connections[-1].close_called  # connection.close() was still attempted
+
+
+
+
+def test_both_response_and_connection_close_failures_are_normalized(routing, monkeypatch):
+    """Both response.close() and connection.close() raising distinct
+    sentinels must still collapse to one fixed, value-free outcome."""
+    name, digest = MODEL_SPEC.split("@", 1)
+
+    class _BothFailConnection:
+        request_number = 0
+
+        def __init__(self, host, port, timeout):
+            pass
+
+        def request(self, method, path, body=None, headers=None):
+            pass
+
+        def getresponse(self):
+            _BothFailConnection.request_number += 1
+            if _BothFailConnection.request_number == 1:
+                return FakeHTTPResponse(200, _tags({"name": name, "digest": digest}))
+            return _CloseFailingResponse(200, json.dumps({"response": "ok"}).encode(), RuntimeError("RESP-SENTINEL"))
+
+        def close(self):
+            if _BothFailConnection.request_number >= 2:
+                raise RuntimeError("CONN-SENTINEL")
+
+    monkeypatch.setattr(routing.http.client, "HTTPConnection", _BothFailConnection)
+    client = routing.OfflineLocalLLMClient(_local_config())
+    with pytest.raises(routing.LocalModelUnavailableError) as exc_info:
+        client.complete_bounded("safe prompt", max_output_tokens=128, max_response_bytes=4096)
+    assert exc_info.value.code is routing.ModelFailureCode.CONNECTION_FAILED
+    message = str(exc_info.value)
+    assert "RESP-SENTINEL" not in message
+    assert "CONN-SENTINEL" not in message
+
+
+def test_close_failure_never_masks_a_primary_fixed_failure(routing, monkeypatch):
+    """When a primary fixed failure is already in flight (e.g. an HTTP
+    error status), a subsequent close() failure must not override it with
+    a different/raw outcome -- the primary fixed code wins."""
+
+    class _PrimaryFailureResponse:
+        status = 500
+
+        def read(self, amount=None):
+            return b""
+
+        def close(self):
+            raise RuntimeError("CLOSE-SENTINEL-DURING-PRIMARY-FAILURE")
+
+    class _Connection:
+        def __init__(self, host, port, timeout):
+            pass
+
+        def request(self, method, path, body=None, headers=None):
+            pass
+
+        def getresponse(self):
+            return _PrimaryFailureResponse()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(routing.http.client, "HTTPConnection", _Connection)
+    client = routing.OfflineLocalLLMClient(_local_config(max_retries=0))
+    with pytest.raises(routing.LocalModelUnavailableError) as exc_info:
+        client.complete_bounded("safe prompt", max_output_tokens=128, max_response_bytes=4096)
+    assert exc_info.value.code is routing.ModelFailureCode.HTTP_ERROR
+    assert "CLOSE-SENTINEL-DURING-PRIMARY-FAILURE" not in str(exc_info.value)

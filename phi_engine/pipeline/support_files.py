@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import json
+import lzma
+import struct
 import zipfile
+import zlib
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, BinaryIO, Iterable, Iterator, Mapping
 
 import pandas as pd
 
@@ -294,3 +298,122 @@ def parse_support_artifact(
         normalized_rows_sha256=normalized_sha,
         failure_code=None,
     )
+
+
+# --- shared bounded-ZipFile primitive -----------------------------------------------------
+#
+# One directory-bounded ``zipfile.ZipFile`` construction path, reused by both
+# intake_preflight.py's workbook-metadata sheet count and intake_naming.py's
+# xlsx evidence extraction, so a ZIP-backed document's central-directory
+# parse -- and, from the caller's own member/aggregate/ratio checks against
+# ``DEFAULT_LIMITS``, its member reads -- are governed by exactly one
+# fail-closed reader rather than two divergent copies. ``zipfile`` remains
+# the sole, authoritative ZIP parser throughout; this never reimplements
+# EOCD/central-directory/ZIP64 structure of its own.
+
+# Hostile-input exceptions normalized to the fixed reason code below.
+_HOSTILE_ZIP_EXCEPTIONS = (
+    zipfile.BadZipFile,
+    OSError,
+    EOFError,
+    RuntimeError,
+    NotImplementedError,
+    ValueError,
+    struct.error,
+    zlib.error,
+    lzma.LZMAError,
+)
+
+
+class BoundedZipMemberError(Exception):
+    """Fixed, value-free signal: a ZIP-backed document could not be safely
+    bounded under ``DEFAULT_LIMITS`` (central directory, member count,
+    per-member size, aggregate expansion, or decompression ratio), or the
+    archive itself is malformed. Carries no raw exception text or path."""
+
+
+class _BoundedReader:
+    """Enforces an actual-bytes-read cap, independent of any declared/attacker-
+    controlled ZIP central-directory size metadata. Every delegated read is
+    itself clamped to at most the remaining budget (including negative
+    "read everything" requests), so no single call can pull an unbounded
+    amount from the underlying stream/decompressor before the cap is
+    checked. Also usable to wrap the raw archive stream itself (with
+    ``seek``/``tell`` passthrough) so ``zipfile``'s own central-directory
+    parse cannot allocate an unbounded amount before we ever see it;
+    ``rearm`` lets the SAME wrapper instance -- and therefore the same
+    ``ZipFile`` object built on it -- switch to a different budget for a
+    later phase (e.g. once central-directory parsing has finished) without
+    ever reconstructing or reparsing the archive.
+    """
+
+    def __init__(self, stream: BinaryIO, limit: int) -> None:
+        self._stream = stream
+        self._limit = limit
+        self._read = 0
+
+    def rearm(self, limit: int) -> None:
+        self._limit = limit
+        self._read = 0
+
+    def read(self, size: int = -1) -> bytes:
+        remaining = self._limit - self._read + 1  # +1 so overage is observable
+        if remaining <= 0:
+            raise BoundedZipMemberError()
+        request = remaining if (size is None or size < 0 or size > remaining) else size
+        chunk = self._stream.read(request)
+        self._read += len(chunk)
+        if self._read > self._limit:
+            raise BoundedZipMemberError()
+        return chunk
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return self._stream.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._stream.tell()
+
+    def seekable(self) -> bool:
+        seek_check = getattr(self._stream, "seekable", None)
+        return True if seek_check is None else bool(seek_check())
+
+
+@contextlib.contextmanager
+def open_bounded_zipfile(fileobj: BinaryIO, limits: Mapping[str, int]) -> Iterator[tuple[zipfile.ZipFile, _BoundedReader]]:
+    """Construct exactly one ``zipfile.ZipFile`` on a directory-bounded
+    reader, then validate member count, per-member size, aggregate expanded
+    size, and decompression ratio from that single central-directory parse
+    against ``limits`` (the caller's own ``DEFAULT_LIMITS``-derived table).
+    Once validated, the SAME wrapper is rearmed to ``limits["max_source_bytes"]``
+    before being yielded alongside the open ``ZipFile``, so any subsequent
+    member read the caller (or a library it hands the wrapper to) performs
+    is governed by the already-approved bounds, not the tiny directory cap.
+    Raises :class:`BoundedZipMemberError` with no raw exception text on any
+    malformed, encrypted, oversized, or pathological input.
+    """
+
+    guarded = _BoundedReader(fileobj, limits["max_zip_directory_bytes"])
+    try:
+        fileobj.seek(0, 0)
+        with zipfile.ZipFile(guarded) as zf:
+            infolist = zf.infolist()
+            if len(infolist) > limits["max_zip_members"]:
+                raise BoundedZipMemberError()
+            expanded_total = 0
+            compressed_total = 0
+            for info in infolist:
+                if int(info.file_size) > limits["max_zip_member_bytes"]:
+                    raise BoundedZipMemberError()
+                expanded_total += int(info.file_size)
+                compressed_total += int(info.compress_size)
+            if expanded_total > limits["max_expanded_workbook_bytes"]:
+                raise BoundedZipMemberError()
+            compressed_total = compressed_total or 1
+            if (expanded_total / compressed_total) > limits["max_decompression_ratio"]:
+                raise BoundedZipMemberError()
+            guarded.rearm(limits["max_source_bytes"])
+            yield zf, guarded
+    except BoundedZipMemberError:
+        raise
+    except _HOSTILE_ZIP_EXCEPTIONS:
+        raise BoundedZipMemberError() from None
