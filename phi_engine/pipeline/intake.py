@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import uuid
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,17 @@ from phi_engine.pipeline.dependencies import is_artifact_id, is_sha256
 from phi_engine.utils._extraction_io.file_discovery import DEFAULT_JUNK_FILENAMES
 
 __all__ = ["intake_add", "load_intake_manifest"]
+
+# Centralized legacy schema identifier and deprecation message. intake-manifest/v2
+# is a temporary lifecycle marker ahead of a clean v3 cutover; keep this the single
+# source of truth for both the schema string and the warning text so the two never
+# drift out of sync.
+_LEGACY_MANIFEST_SCHEMA = "intake-manifest/v2"
+_LEGACY_MANIFEST_DEPRECATION_MESSAGE = (
+    f"phi_engine.pipeline.intake.intake_add: {_LEGACY_MANIFEST_SCHEMA} is deprecated "
+    "and will be replaced by a future manifest schema; this call path is scheduled "
+    "for removal."
+)
 
 _HASH_CHUNK_SIZE = 1 << 20
 _ALLOWED_MANIFEST_KEYS = {"study", "source_root", "entries", "duplicates", "errors", "removals", "schema"}
@@ -34,7 +46,7 @@ _REQUIRED_ENTRY_KEYS = {
 
 
 def _empty_manifest(study: str) -> dict[str, Any]:
-    return {"schema": "intake-manifest/v2", "study": study, "source_root": None, "entries": {}, "duplicates": [], "errors": [], "removals": []}
+    return {"schema": _LEGACY_MANIFEST_SCHEMA, "study": study, "source_root": None, "entries": {}, "duplicates": [], "errors": [], "removals": []}
 
 
 def _sha256_stream(path: Path) -> str:
@@ -142,6 +154,7 @@ def _load_existing_for_reconcile(study: str) -> dict[str, Any]:
 
 
 def intake_add(source: Path, study: str) -> dict[str, Any]:
+    warnings.warn(_LEGACY_MANIFEST_DEPRECATION_MESSAGE, DeprecationWarning, stacklevel=2)
     source = Path(source).resolve(strict=True)
     if not source.is_dir():
         raise ValueError(f"source root must be a directory: {source}")
@@ -230,7 +243,7 @@ def intake_add(source: Path, study: str) -> dict[str, Any]:
             link_path.unlink(missing_ok=True)
 
     manifest = {
-        "schema": "intake-manifest/v2",
+        "schema": _LEGACY_MANIFEST_SCHEMA,
         "study": study,
         "source_root": str(source),
         "entries": entries,
