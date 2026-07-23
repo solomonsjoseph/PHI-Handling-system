@@ -1,20 +1,48 @@
 """Standalone PHI pipeline CLI.
 
-    python -m phi_engine intake   --study S --source PATH [--workspace W]
+    python -m phi_engine intake   --source PATH [--study S] [--support-confirmed-no-phi] [--workspace W]
     python -m phi_engine organize --study S [--workspace W]
     python -m phi_engine run      --study S --jurisdiction us [--workspace W]
     python -m phi_engine review   --study S list [--workspace W]
     python -m phi_engine review   --study S decide --header H --decision keep|drop|override [--action ACTION] [--workspace W]
     python -m phi_engine status   --study S [--workspace W]
 
-Every subcommand accepts ``--workspace`` (sets ``PHI_WORKSPACE``) and
-``--study`` (sets ``STUDY_NAME``), and sets BOTH env vars BEFORE importing
+``--study`` is REQUIRED for every subcommand except ``intake``, where it is
+the only optional one: without it, intake resolves the study name itself (a
+local-only, support-content-only AI boundary, or a random ``study-<hex>``
+fallback when no name is inferred) and reports the resolved name in its
+receipt. ``--support-confirmed-no-phi`` is intake's positive-consent flag --
+it is the only way to permit that local AI naming step when ``--study`` is
+omitted; there is no negative "may contain PHI" flag, and the default
+(flag absent, ``--study`` absent) performs zero naming-content extraction
+and zero model calls.
+
+Every subcommand accepts ``--workspace`` (sets ``PHI_WORKSPACE``). ``--study``,
+when supplied, sets ``STUDY_NAME``; both env vars are set BEFORE importing
 ``phi_engine.config.config``, since that module resolves workspace/study
-paths at import time. ``--jurisdiction`` choices stay ``us``: pinned rule
-specs currently exist only for USA (``phi_engine/security/phi_review.py``
-``_PINNED_RULE_SPECS``). Extending to another jurisdiction needs its own
-pinned rule-spec entries grounded in that jurisdiction's authority document
-set under ``authorities/*.md``.
+paths at import time. When ``--study`` is omitted (``intake`` only),
+``STUDY_NAME`` is left unset for this invocation -- ``config.INTAKE_DIR`` and
+``config.OUTPUT_DIR`` are workspace-relative, not study-relative, so no
+import-time study-name fallback can select intake's own directory.
+``--jurisdiction`` choices stay ``us``: pinned rule specs currently exist
+only for USA (``phi_engine/security/phi_review.py`` ``_PINNED_RULE_SPECS``).
+Extending to another jurisdiction needs its own pinned rule-spec entries
+grounded in that jurisdiction's authority document set under
+``authorities/*.md``.
+
+``intake`` prints ONLY a redacted receipt to stdout --
+``{"study": <name>, "status": <status>, "linked": <count>, "review": <count>,
+"errors": <count>, "manifest": <protected-manifest-path>}`` -- never entry
+paths, review/error detail, or raw exception text; the matching stderr line
+is exactly ``intake: study=<study> status=<status> linked=<N> review=<N>
+errors=<N>``. Intake status maps directly to the process exit code:
+``ready`` -> 0, ``review_required`` -> 8, ``failed`` -> 2. ``organize``
+enforces the same boundary for an intake that is not yet ``ready``: it
+prints exactly ``intake_review_required`` (exit 8) or ``intake_failed``
+(exit 2) and performs no organize work. Any other typed intake/naming/
+source/lock failure that reaches the CLI boundary prints only its fixed
+public code to stderr -- never a raw exception, path, or traceback -- and
+exits 2.
 """
 
 from __future__ import annotations
@@ -28,39 +56,90 @@ from typing import Any
 
 
 def _set_workspace_env(args: argparse.Namespace) -> None:
-    """Set PHI_WORKSPACE/STUDY_NAME BEFORE any phi_engine.config import."""
+    """Set PHI_WORKSPACE/STUDY_NAME BEFORE any phi_engine.config import.
+
+    ``STUDY_NAME`` is set only when ``--study`` was actually supplied: for
+    every subcommand but ``intake`` that is always (``--study`` is
+    required), but intake's own study resolution is explicit-argument-driven
+    and workspace-relative (never study-relative), so a study-less intake
+    invocation must not let config's import-time env fallback claim any
+    study identity for this process.
+    """
     if getattr(args, "workspace", None):
         os.environ["PHI_WORKSPACE"] = str(Path(args.workspace).resolve())
-    os.environ["STUDY_NAME"] = args.study
+    if getattr(args, "study", None):
+        os.environ["STUDY_NAME"] = args.study
+    else:
+        # An intake invocation that omits --study must be study-neutral
+        # even under an inherited STUDY_NAME (e.g. a stale parent-shell
+        # export) -- otherwise config's import-time fallback resolution
+        # would still pick it up despite never being supplied on this
+        # command line.
+        os.environ.pop("STUDY_NAME", None)
     from phi_engine.config import config
 
     config.get_local_llm_config()
 
 
-def _add_common_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--study", required=True, help="Study name (plain folder name)")
+def _add_common_args(parser: argparse.ArgumentParser, *, study_required: bool = True) -> None:
+    parser.add_argument(
+        "--study", required=study_required, default=None, help="Study name (plain folder name)"
+    )
     parser.add_argument("--workspace", default=None, help="Workspace root (sets PHI_WORKSPACE)")
+
+
+_INTAKE_STATUS_EXIT_CODES = {"ready": 0, "review_required": 8, "failed": 2}
 
 
 def _cmd_intake(args: argparse.Namespace) -> int:
     _set_workspace_env(args)
+    from phi_engine.config import config
     from phi_engine.pipeline.intake import intake_add
 
-    manifest = intake_add(Path(args.source), args.study)
-    print(json.dumps(manifest, indent=2, sort_keys=True))
+    manifest = intake_add(
+        Path(args.source), args.study, support_confirmed_no_phi=args.support_confirmed_no_phi
+    )
+    study = manifest["study"]
+    status = manifest["status"]
+    linked = len(manifest["entries"])
+    review = len(manifest["review_items"])
+    errors = len(manifest["errors"])
+    manifest_path = Path(config.INTAKE_DIR) / study / "intake_manifest.json"
+
     print(
-        f"intake: {len(manifest['entries'])} linked, {len(manifest['duplicates'])} duplicates, "
-        f"{len(manifest['errors'])} errors",
+        json.dumps(
+            {
+                "study": study,
+                "status": status,
+                "linked": linked,
+                "review": review,
+                "errors": errors,
+                "manifest": str(manifest_path),
+            },
+            separators=(",", ":"),
+        )
+    )
+    print(
+        f"intake: study={study} status={status} linked={linked} review={review} errors={errors}",
         file=sys.stderr,
     )
-    return 0
+    return _INTAKE_STATUS_EXIT_CODES[status]
 
 
 def _cmd_organize(args: argparse.Namespace) -> int:
     _set_workspace_env(args)
+    from phi_engine.pipeline.intake import IntakeNotReadyError
     from phi_engine.pipeline.organize import organize
 
-    manifest = organize(args.study)
+    try:
+        manifest = organize(args.study)
+    except IntakeNotReadyError as exc:
+        if exc.status == "review_required":
+            print("intake_review_required", file=sys.stderr)
+            return 8
+        print("intake_failed", file=sys.stderr)
+        return 2
+
     print(json.dumps(manifest, indent=2, sort_keys=True))
     print(
         f"organize: {len(manifest['datasets'])} datasets, "
@@ -156,8 +235,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_intake = sub.add_parser("intake", help="Symlink-intake a source tree for a study")
-    _add_common_args(p_intake)
+    _add_common_args(p_intake, study_required=False)
     p_intake.add_argument("--source", required=True, help="Source directory to intake (never modified)")
+    p_intake.add_argument(
+        "--support-confirmed-no-phi",
+        action="store_true",
+        default=False,
+        help=(
+            "Positive attestation that support files (forms/data_dictionary/mappings) "
+            "contain no PHI, permitting local-only AI study-name inference when --study "
+            "is omitted. Absent by default: no naming-content extraction, no model calls."
+        ),
+    )
     p_intake.set_defaults(func=_cmd_intake)
 
     p_organize = sub.add_parser("organize", help="Route intake files into normalized dataset JSONL")
@@ -217,14 +306,66 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Typed, value-free exceptions that may surface at the CLI boundary. Every
+# class is imported LAZILY, only inside main()'s except block below -- never
+# at module scope -- because each one lives under phi_engine.config/
+# pipeline/utils, and those packages must not be imported before
+# _set_workspace_env has had a chance to set PHI_WORKSPACE/STUDY_NAME (by
+# the time this except block runs, args.func(args) has already called
+# _set_workspace_env, so the import is always safe here). Dispatch is by
+# isinstance against the REAL imported class, never by exception class
+# NAME -- an unrelated exception that merely happens to share a class name
+# (and even a same-named ``.code``/``.reason`` attribute) must re-raise,
+# not be swallowed and have its attribute value printed. ``.code``/
+# ``.reason`` are each fixed, value-free strings by the raising module's
+# own contract, but are still checked against an explicit allowlist here
+# before ever reaching stderr, with a safe generic fallback code if a
+# future/malformed value isn't recognized -- defense in depth against ever
+# printing anything other than a known fixed code. ``PipelineBusyError``
+# deliberately carries a real lock path in its own message, so its code
+# here is always a literal constant, never ``str(exc)``.
+_INTAKE_MANIFEST_ERROR_CODES = frozenset(
+    {
+        "intake-tree-unsafe",
+        "intake_manifest_invalid",
+        "intake_manifest_missing",
+        "source-unreadable",
+        "study-name-collision",
+    }
+)
+_VERIFIED_SOURCE_ERROR_REASONS = frozenset(
+    {
+        "source-unreadable",
+        "source-target-outside-root",
+        "source-symlink-not-allowed",
+    }
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
     except Exception as exc:
-        if exc.__class__.__name__ == "LocalLLMConfigurationError":
+        from phi_engine.config.config import LocalLLMConfigurationError
+        from phi_engine.pipeline.intake import IntakeManifestError
+        from phi_engine.pipeline.verified_source import VerifiedSourceError
+        from phi_engine.utils.pipeline_lock import PipelineBusyError
+
+        if isinstance(exc, LocalLLMConfigurationError):
             print("invalid local LLM configuration", file=sys.stderr)
+            return 2
+        if isinstance(exc, PipelineBusyError):
+            print("pipeline_busy", file=sys.stderr)
+            return 2
+        if isinstance(exc, IntakeManifestError):
+            code = exc.code if exc.code in _INTAKE_MANIFEST_ERROR_CODES else "intake_manifest_error"
+            print(code, file=sys.stderr)
+            return 2
+        if isinstance(exc, VerifiedSourceError):
+            reason = exc.reason if exc.reason in _VERIFIED_SOURCE_ERROR_REASONS else "source_verification_error"
+            print(reason, file=sys.stderr)
             return 2
         raise
 
