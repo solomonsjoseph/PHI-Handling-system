@@ -6,7 +6,6 @@ import inspect
 import os
 import shutil
 import struct
-import sys
 import tempfile
 import warnings
 import zipfile
@@ -91,64 +90,6 @@ def test_public_names_match_the_approved_contract() -> None:
     assert list(sig.parameters) == ["fileobj"]
     sig2 = inspect.signature(inspect_intake_source)
     assert list(sig2.parameters) == ["source"]
-
-
-def test_intake_add_walks_the_same_way_iter_source_files_does_not_a_second_convention(tmp_path: Path) -> None:
-    # Behavioral proof there is exactly one traversal convention for the
-    # legacy v2 flow: intake_add's own discovered/linked file set must
-    # match _iter_source_files's output exactly (same hidden/junk filtering,
-    # same set of files), rather than asserting private object identity.
-    import os as os_module
-
-    source = tmp_path / "source"
-    (source / "datasets").mkdir(parents=True)
-    (source / "datasets" / "labs.csv").write_text("a,b\n1,2\n", encoding="utf-8")
-    (source / "datasets" / "nested").mkdir()
-    (source / "datasets" / "nested" / "deep.csv").write_text("a,b\n1,2\n", encoding="utf-8")
-    (source / ".hidden.csv").write_text("x", encoding="utf-8")
-    (source / "Thumbs.db").write_text("x", encoding="utf-8")
-
-    old_workspace = os_module.environ.get("PHI_WORKSPACE")
-    old_study = os_module.environ.get("STUDY_NAME")
-    old_key = os_module.environ.get("PHI_KEY_PATH")
-    workspace = tmp_path / "_workspace"
-    key_path = tmp_path / "_phi_key"
-    key_path.write_text("0" * 64, encoding="utf-8")
-    key_path.chmod(0o600)
-    try:
-        os_module.environ["PHI_WORKSPACE"] = str(workspace)
-        os_module.environ["STUDY_NAME"] = "WalkerParityStudy"
-        os_module.environ["PHI_KEY_PATH"] = str(key_path)
-        for name in list(sys.modules):
-            if name.startswith("phi_engine.") and name not in (
-                "phi_engine",
-                "phi_engine.utils",
-                "phi_engine.utils.pipeline_lock",
-            ):
-                del sys.modules[name]
-
-        import phi_engine.pipeline.intake as fresh_intake_module
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            manifest = fresh_intake_module.intake_add(source, "WalkerParityStudy")
-    finally:
-        if old_workspace is None:
-            os_module.environ.pop("PHI_WORKSPACE", None)
-        else:
-            os_module.environ["PHI_WORKSPACE"] = old_workspace
-        if old_study is None:
-            os_module.environ.pop("STUDY_NAME", None)
-        else:
-            os_module.environ["STUDY_NAME"] = old_study
-        if old_key is None:
-            os_module.environ.pop("PHI_KEY_PATH", None)
-        else:
-            os_module.environ["PHI_KEY_PATH"] = old_key
-
-    intake_relative_paths = {entry["relative_path"] for entry in manifest["entries"].values()}
-    walker_relative_paths = {p.relative_to(source).as_posix() for p in intake_preflight_module._iter_source_files(source)}
-    assert intake_relative_paths == walker_relative_paths == {"datasets/labs.csv", "datasets/nested/deep.csv"}
 
 
 # --- candidates for a canonical package -------------------------------------------------

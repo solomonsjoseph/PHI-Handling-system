@@ -18,10 +18,14 @@ import phi_engine.utils.pipeline_lock as pipeline_lock
 from phi_engine.pipeline.run import PipelineResult
 from phi_engine.utils.pipeline_lock import (
     PipelineBusyError,
+    acquire_intake_registry_lock,
     acquire_pipeline_lock,
     held_lock_path,
+    intake_registry_lock,
+    intake_registry_lock_path,
     is_locally_held,
     lock_path_for,
+    release_intake_registry_lock,
     release_pipeline_lock,
 )
 
@@ -41,6 +45,18 @@ def _hold_lock_until_released(
     ready.set()
     release.wait(timeout=10)
     release_pipeline_lock(study)
+
+
+def _hold_intake_registry_lock_until_released(tmp_dir: str, ready: Any, release: Any) -> None:
+    import phi_engine.config.config as child_config
+
+    child_config.TMP_DIR = Path(tmp_dir)
+    from phi_engine.utils.pipeline_lock import acquire_intake_registry_lock, release_intake_registry_lock
+
+    acquire_intake_registry_lock()
+    ready.set()
+    release.wait(timeout=10)
+    release_intake_registry_lock()
 
 
 def _acquire_lock_and_crash(tmp_dir: str, study: str, ready: Any) -> None:
@@ -97,9 +113,11 @@ def _fork_child_survives_owner_exit(
 @pytest.fixture
 def lock_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     release_pipeline_lock()
+    release_intake_registry_lock()
     monkeypatch.setattr(config, "TMP_DIR", tmp_path)
     yield tmp_path
     release_pipeline_lock()
+    release_intake_registry_lock()
 
 
 def _spawn_lock_holder(tmp_dir: Path, study: str):
@@ -408,6 +426,27 @@ def test_lock_rejects_symlinked_parent(
     assert list(real_parent.iterdir()) == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink safety")
+def test_lock_rejects_symlinked_grandparent_ancestry(
+    lock_tmp: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A symlinked ANCESTOR above the immediate lock-parent directory
+    (not the immediate parent itself) must also fail closed -- proving
+    the shared descriptor-walk helper checks every segment, not merely
+    the leaf ``TMP_DIR`` node."""
+    real_root = lock_tmp / "real_root"
+    real_root.mkdir()
+    alias = lock_tmp / "alias_root"
+    alias.symlink_to(real_root, target_is_directory=True)
+    monkeypatch.setattr(config, "TMP_DIR", alias / "tmp")
+
+    with pytest.raises(OSError):
+        acquire_pipeline_lock("grandparent-symlink-study")
+
+    assert list(real_root.iterdir()) == []
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX canonical inode checks")
 def test_lock_checks_canonical_entry_identity_before_truncate(
     lock_tmp: Path,
@@ -708,3 +747,72 @@ def test_locked_body_creates_run_and_resolves_rulebook_before_mutable_intake(
     ]
     assert result.exit_code == 2
     assert result.run_id == "20260714T101112Z"
+
+
+def test_intake_registry_lock_path_is_fixed_and_never_collides_with_study_names(lock_tmp: Path) -> None:
+    registry_path = intake_registry_lock_path()
+    assert registry_path == lock_tmp / ".__intake_registry__.pipeline.lock"
+    # No valid study name can ever produce this exact path: any candidate
+    # containing an underscore is rejected outright by lock_path_for
+    # (_STUDY_NAME_PATTERN forbids "_"); any candidate that IS a valid
+    # study name necessarily produces a different path.
+    for candidate in ("intake_registry", "intake-registry", "__intake_registry__", "a", "Study.01"):
+        try:
+            candidate_path = lock_path_for(candidate)
+        except ValueError:
+            continue
+        assert candidate_path != registry_path
+
+
+def test_intake_registry_lock_contention_is_immediate(lock_tmp: Path) -> None:
+    acquire_intake_registry_lock()
+    try:
+        with pytest.raises(PipelineBusyError):
+            acquire_intake_registry_lock()
+    finally:
+        release_intake_registry_lock()
+
+
+def test_intake_registry_lock_then_study_lock_nest_in_required_order(lock_tmp: Path) -> None:
+    with intake_registry_lock():
+        assert is_locally_held()
+        acquire_pipeline_lock("registry-order-study")
+        try:
+            assert is_locally_held()
+        finally:
+            release_pipeline_lock("registry-order-study")
+    assert not is_locally_held()
+
+
+def test_intake_registry_lock_release_is_independent_of_study_lock_release(lock_tmp: Path) -> None:
+    acquire_intake_registry_lock()
+    acquire_pipeline_lock("independent-study")
+    try:
+        release_pipeline_lock("independent-study")
+        # registry lock must still be held after releasing only the study lock
+        with pytest.raises(PipelineBusyError):
+            acquire_intake_registry_lock()
+    finally:
+        release_intake_registry_lock()
+    # now fully released -- reacquire must succeed
+    acquire_intake_registry_lock()
+    release_intake_registry_lock()
+
+
+def test_intake_registry_lock_cross_process_contention_is_immediate(lock_tmp: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    process = context.Process(
+        target=_hold_intake_registry_lock_until_released,
+        args=(str(lock_tmp), ready, release),
+    )
+    process.start()
+    try:
+        assert ready.wait(timeout=10), "child did not acquire the intake registry lock"
+        with pytest.raises(PipelineBusyError):
+            acquire_intake_registry_lock()
+    finally:
+        release.set()
+        process.join(timeout=10)
+    assert process.exitcode == 0

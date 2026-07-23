@@ -214,6 +214,15 @@ def test_public_names_match_the_approved_contract():
     assert sig.parameters["explicit_study"].kind is inspect.Parameter.KEYWORD_ONLY
     assert sig.parameters["support_confirmed_no_phi"].kind is inspect.Parameter.KEYWORD_ONLY
     assert sig.parameters["intake_root"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    # private internal resolver: same public contract plus the injectable
+    # generated-name-allocation hook the registry-scan layer threads through
+    private_sig = inspect.signature(naming._resolve_intake_study)
+    assert list(private_sig.parameters) == [
+        "source", "preflight", "explicit_study", "support_confirmed_no_phi", "intake_root", "generate_study_name",
+    ]
+    assert private_sig.parameters["generate_study_name"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert callable(private_sig.parameters["generate_study_name"].default)
     resolution_fields = set(inspect.signature(naming.StudyResolution).parameters)
     assert resolution_fields == {"name", "source", "review_items", "errors"}
 
@@ -510,9 +519,7 @@ def test_dataset_scan_error_fails_closed_not_open(tmp_path, monkeypatch):
     _write_pdf(source / "forms" / "consent.pdf", "Alpha consent")
     preflight = inspect_intake_source(source)
 
-    from phi_engine.pipeline import intake_preflight as preflight_module
-
-    monkeypatch.setattr(preflight_module, "_scan_component_identities", lambda src, name: (None, "source-unreadable"))
+    monkeypatch.setattr(naming.intake_preflight, "_scan_component_identities", lambda src, name: (None, "source-unreadable"))
     _forbid_client(monkeypatch)
     resolution = naming.resolve_intake_study(
         source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"

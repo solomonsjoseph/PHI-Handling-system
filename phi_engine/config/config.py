@@ -181,7 +181,19 @@ AGENT_MODEL_ID: str = os.environ.get("REPORTAL_AGENT_MODEL", "claude-opus-4-7")
 # workspace-relative paths immediately.
 _WORKSPACE_ENV = _get_env("PHI_WORKSPACE")
 BASE_DIR = (
-    Path(_WORKSPACE_ENV).resolve()
+    # Lexically preserved, NOT symlink-resolved and NOT '..'/'.'-
+    # normalized: a workspace path with a symlinked component -- or a
+    # literal '..' segment that would otherwise silently erase one --
+    # must reach the descriptor-relative ancestry walkers in
+    # ``phi_engine.utils.pipeline_lock``/``phi_engine.pipeline.intake``
+    # with that evidence intact, or those NOFOLLOW walks (which reject
+    # symlinks AND '..'/'.' segments themselves) can never see it to
+    # reject it. ``Path.resolve()``/``os.path.abspath()`` would erase it
+    # here before any safety check ever runs; a bare ``Path.cwd() / p``
+    # join only fills in a relative path's leading directory, exactly
+    # like resolving a relative CLI argument against the shell's cwd --
+    # it does not touch ``p`` itself.
+    (lambda p: p if p.is_absolute() else Path.cwd() / p)(Path(_WORKSPACE_ENV).expanduser())
     if _WORKSPACE_ENV
     else (Path(__file__).resolve().parents[2] if "__file__" in globals() else Path.cwd())
 )

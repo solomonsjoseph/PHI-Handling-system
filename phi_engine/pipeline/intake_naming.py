@@ -214,13 +214,14 @@ def _hardlink_race_detected(source: Path, identities: frozenset[tuple[int, int]]
 # --- entry point -------------------------------------------------------------------------
 
 
-def resolve_intake_study(
+def _resolve_intake_study(
     source: Path,
     preflight: IntakePreflight,
     *,
     explicit_study: str | None,
     support_confirmed_no_phi: bool,
     intake_root: Path,
+    generate_study_name: Callable[[], str] = _generate_study_name,
 ) -> StudyResolution:
     del intake_root  # reserved for step 3's registry-scan/promotion wiring; unused here
 
@@ -236,7 +237,7 @@ def resolve_intake_study(
         # false/unknown consent state performs no reads beyond what
         # preflight already did.
         return StudyResolution(
-            name=_generate_study_name(),
+            name=generate_study_name(),
             source="generated",
             review_items=({"path": _ROOT_PATH, "reason": "support-phi-status-required", "blocking": True},),
             errors=(),
@@ -257,7 +258,7 @@ def resolve_intake_study(
 
     if hardlink_detected:
         return StudyResolution(
-            name=_generate_study_name(),
+            name=generate_study_name(),
             source="generated",
             review_items=({"path": _ROOT_PATH, "reason": "cross-component-hardlink", "blocking": True},),
             errors=(),
@@ -345,10 +346,27 @@ def resolve_intake_study(
         return StudyResolution(name=chosen, source="ai", review_items=tuple(review_items), errors=tuple(errors))
 
     return StudyResolution(
-        name=_generate_study_name(),
+        name=generate_study_name(),
         source="generated",
         review_items=tuple(review_items),
         errors=tuple(errors),
+    )
+
+
+def resolve_intake_study(
+    source: Path,
+    preflight: IntakePreflight,
+    *,
+    explicit_study: str | None,
+    support_confirmed_no_phi: bool,
+    intake_root: Path,
+) -> StudyResolution:
+    return _resolve_intake_study(
+        source,
+        preflight,
+        explicit_study=explicit_study,
+        support_confirmed_no_phi=support_confirmed_no_phi,
+        intake_root=intake_root,
     )
 
 
