@@ -718,9 +718,9 @@ def test_locked_body_creates_run_and_resolves_rulebook_before_mutable_intake(
         calls.append("resolve_rulebook")
         return SimpleNamespace(bundle=object(), protection_weakened=False)
 
-    def record_load_manifest(_study: str) -> object:
+    def record_load_manifest(_study: str) -> dict[str, object]:
         calls.append("load_intake_manifest")
-        return object()
+        return {"status": "ready"}
 
     def record_organize(_study: str) -> dict[str, object]:
         calls.append("organize")
@@ -739,10 +739,10 @@ def test_locked_body_creates_run_and_resolves_rulebook_before_mutable_intake(
 
     assert calls == [
         "create_run_id",
+        "load_intake_manifest",
         "bootstrap_privacy",
         "load_privacy",
         "resolve_rulebook",
-        "load_intake_manifest",
         "organize",
     ]
     assert result.exit_code == 2

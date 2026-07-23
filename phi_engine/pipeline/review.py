@@ -44,6 +44,7 @@ import yaml
 
 import phi_engine.config.config as config
 from phi_engine.audit import review_paths
+from phi_engine.pipeline.intake import IntakeManifestError, load_intake_manifest
 from phi_engine.security.phi_review import Action, HeaderClassification
 from phi_engine.security.phi_review import (
     load_study_privacy_config,
@@ -972,6 +973,31 @@ def apply_decisions_to_classifications(
     return tuple(updated)
 
 
+def _intake_review_items(study: str) -> list[dict[str, Any]]:
+    """Redacted intake-manifest/v3 review items for *study*: ``artifact_id``
+    (when present), ``reason``, ``blocking``, ``detail`` (when present), and
+    a fixed ``source: "intake"`` marker -- never the manifest's protected
+    ``path`` or, for ``study-name-conflict``, its ``candidates``. Missing or
+    invalid intake is tolerated here (empty list); unlike organize/run,
+    which fail closed on the same condition."""
+    try:
+        manifest = load_intake_manifest(study)
+    except IntakeManifestError:
+        return []
+    redacted: list[dict[str, Any]] = []
+    for item in manifest.get("review_items", []):
+        record: dict[str, Any] = {}
+        if "artifact_id" in item:
+            record["artifact_id"] = item["artifact_id"]
+        record["reason"] = item["reason"]
+        record["blocking"] = item["blocking"]
+        if "detail" in item:
+            record["detail"] = item["detail"]
+        record["source"] = "intake"
+        redacted.append(record)
+    return redacted
+
+
 def list_review_items(study: str) -> dict[str, Any]:
     """Everything currently awaiting human review for *study*:
 
@@ -1062,5 +1088,6 @@ def list_review_items(study: str) -> dict[str, Any]:
         "held_forms": held_forms,
         "llm_uncertain_queue": llm_uncertain,
         "dependency_recommendations": dependency_recommendations,
+        "intake_review_items": _intake_review_items(study),
         "decisions_on_file": load_review_decisions(study),
     }

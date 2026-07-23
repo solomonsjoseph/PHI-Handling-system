@@ -17,17 +17,13 @@ import pandas as pd
 import phi_engine.config.config as config
 from phi_engine.audit.review_paths import organizer_review_path
 from phi_engine.pipeline.dependencies import DependencyKind, OrganizedHeader, SupportParseStatus
-from phi_engine.pipeline.intake import load_intake_manifest
+from phi_engine.pipeline.intake import IntakeNotReadyError, load_intake_manifest
 from phi_engine.pipeline.support_files import parse_support_artifact
 from phi_engine.pipeline.verified_source import FileIdentity, VerifiedSourceError, open_verified_source
 from phi_engine.security.phi_review import normalize_header
 from phi_engine.utils._extraction_io.sheet_split import promote_header, split_sheet_into_tables
 
 __all__ = ["intake_manifest_sha", "organize", "_copy_descriptor_to_verified"]
-
-
-def _source_stem(original_name: str) -> str:
-    return Path(original_name).stem
 
 
 def _normalized_source_stem(relative_path: str) -> str:
@@ -252,6 +248,14 @@ def _verified_snapshot(entry: dict[str, Any], source_root: Path, verified_dir: P
         return None, None, "source-unreadable"
 
 
+_COMPONENT_ROLES: dict[str, str] = {
+    "datasets": "dataset",
+    "data_dictionary": "dictionary",
+    "mappings": "mapping",
+    "forms": "pdf",
+}
+
+
 class _Router:
     def __init__(
         self,
@@ -260,7 +264,6 @@ class _Router:
         datasets_dir: Path,
         organized_root: Path,
         manifest: dict[str, Any],
-        confirmed_dependencies: dict[str, tuple[Any, ...]],
     ) -> None:
         self.study = study
         self.intake_dir = intake_dir
@@ -274,40 +277,11 @@ class _Router:
         self.pdf_roles: dict[str, dict[str, Any]] = {}
         self.review_bucket: list[dict[str, Any]] = []
         self._used_stems: dict[str, str] = {}
-        self._dataset_stems_lower: set[str] = set()
         self.source_root = Path(str(manifest["source_root"])).resolve(strict=True)
-        self.roles = self._load_confirmed_roles(confirmed_dependencies)
-
-    def _load_confirmed_roles(
-        self,
-        confirmed_dependencies: dict[str, tuple[Any, ...]],
-    ) -> dict[str, str]:
-        roles: dict[str, str] = {}
-        for dataset_path, deps in confirmed_dependencies.items():
-            roles[dataset_path] = "dataset"
-            for dep in deps:
-                roles[dep.support] = "pdf_support" if dep.kind is DependencyKind.PDF else dep.kind.value
-        return roles
 
     def _role_for(self, entry: dict[str, Any]) -> str:
-        rel = str(entry.get("relative_path", ""))
-        if rel in self.roles:
-            return self.roles[rel]
-        parts = PurePosixPath(rel).parts
-        suffix = PurePosixPath(rel).suffix.lower()
-        if parts and parts[0] == "datasets":
-            return "dataset"
-        if parts and parts[0] in {"data_dictionary", "mappings"}:
-            return "dictionary" if parts[0] == "data_dictionary" else "mapping"
-        if parts and parts[0] in {"annotated_pdfs", "forms"}:
-            return "annotated_pdf"
-        if len(parts) != 1:
-            return "review"
-        if suffix in {".jsonl", ".csv", ".xlsx", ".xls", ".json"}:
-            return "dataset"
-        if suffix == ".pdf":
-            return "pdf"
-        return "review"
+        component = str(entry.get("component", "_unclassified"))
+        return _COMPONENT_ROLES.get(component, "_unclassified")
 
     def _review(self, link_name: str, entry: dict[str, Any], reason: str, **extra: Any) -> None:
         self.review_bucket.append({"file": Path(str(entry.get("relative_path", link_name))).name, "link_name": link_name, "reason": reason, **extra})
@@ -353,7 +327,6 @@ class _Router:
                 ],
             }
         )
-        self._dataset_stems_lower.add(_source_stem(str(entry.get("relative_path", link_name))).lower())
         _relink(Path(config.DATASETS_DIR) / output_name, out_path.resolve())
 
     def route_dataset(self, link_name: str, entry: dict[str, Any]) -> None:
@@ -363,16 +336,12 @@ class _Router:
         rel = str(entry.get("relative_path", link_name))
         suffix = Path(rel).suffix.lower()
         stem = self._unique(Path(rel).stem, link_name)
-        if suffix == ".jsonl":
-            self._route_jsonl(snapshot, stem, link_name, entry)
-        elif suffix == ".csv":
+        if suffix == ".csv":
             self._route_csv(snapshot, stem, link_name, entry)
         elif suffix == ".xlsx":
             self._route_excel(snapshot, stem, link_name, entry, engine="openpyxl")
         elif suffix == ".xls":
             self._route_excel(snapshot, stem, link_name, entry, engine="xlrd")
-        elif suffix == ".json":
-            self._route_json(snapshot, stem, link_name, entry)
         else:
             self._review(link_name, entry, "unrecognized-format", suffix=suffix)
 
@@ -406,23 +375,6 @@ class _Router:
         if parsed.parse_status is SupportParseStatus.FAILED:
             self._review(link_name, entry, "support-parse-failed", failure_code=parsed.failure_code.value if parsed.failure_code else None)
 
-    def _route_jsonl(self, path: Path, stem: str, link_name: str, entry: dict[str, Any]) -> None:
-        records: list[dict[str, Any]] = []
-        try:
-            for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                if not isinstance(row, dict):
-                    self._review(link_name, entry, "invalid-jsonl-row-shape", line_no=line_no)
-                    return
-                records.append(row)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            self._review(link_name, entry, "invalid-jsonl-line")
-            return
-        rows, headers = _records_to_normalized_rows(records, str(entry["artifact_id"]), str(entry["sha256"]))
-        self._record_dataset(f"{stem}.jsonl", rows, headers, link_name, entry)
-
     def _route_csv(self, path: Path, stem: str, link_name: str, entry: dict[str, Any]) -> None:
         try:
             df = pd.read_csv(path, dtype=str, keep_default_na=False)
@@ -430,22 +382,6 @@ class _Router:
             self._review(link_name, entry, "csv-parse-error", detail=type(exc).__name__)
             return
         rows, headers = _dataframe_to_normalized_rows(df, str(entry["artifact_id"]), str(entry["sha256"]))
-        self._record_dataset(f"{stem}.jsonl", rows, headers, link_name, entry)
-
-    def _route_json(self, path: Path, stem: str, link_name: str, entry: dict[str, Any]) -> None:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            self._review(link_name, entry, "invalid-json", detail=type(exc).__name__)
-            return
-        if isinstance(data, dict):
-            records = [data]
-        elif isinstance(data, list) and all(isinstance(item, dict) for item in data):
-            records = data
-        else:
-            self._review(link_name, entry, "unrecognized-json-shape")
-            return
-        rows, headers = _records_to_normalized_rows(records, str(entry["artifact_id"]), str(entry["sha256"]))
         self._record_dataset(f"{stem}.jsonl", rows, headers, link_name, entry)
 
     def _route_excel(self, path: Path, stem: str, link_name: str, entry: dict[str, Any], *, engine: str) -> None:
@@ -488,12 +424,6 @@ class _Router:
         if snapshot is None:
             return
         original_name = Path(str(entry.get("relative_path", link_name))).name
-        pdf_stem = Path(original_name).stem.lower()
-        if pdf_stem in self._dataset_stems_lower:
-            target = Path(config.ANNOTATED_PDFS_DIR) / original_name
-            _relink(target, snapshot.resolve())
-            self.pdf_roles[link_name] = {"role": "annotated_pdf_companion", "matched_dataset_stem": pdf_stem, "target": str(target), "artifact_id": entry["artifact_id"]}
-            return
         try:
             import pdfplumber
         except ImportError:
@@ -532,12 +462,16 @@ def intake_manifest_sha(manifest: dict[str, Any]) -> str:
 def organize(study: str) -> dict[str, Any]:
     intake_dir = Path(config.INTAKE_DIR) / study
     manifest = load_intake_manifest(study)
+    status = manifest.get("status")
+    if status != "ready":
+        raise IntakeNotReadyError(status)
+
     entries: dict[str, dict[str, Any]] = manifest.get("entries") or {}
 
     from scripts.extraction.forms_manifest import check_forms_manifest
 
     source_root = Path(str(manifest["source_root"])).resolve(strict=True)
-    forms_manifest = check_forms_manifest(source_root / "datasets")
+    check_forms_manifest(source_root / "datasets")
 
     organized_root = Path(config.ORGANIZED_DIR) / study
     datasets_dir = organized_root / "datasets"
@@ -551,7 +485,6 @@ def organize(study: str) -> dict[str, Any]:
         datasets_dir,
         organized_root,
         manifest,
-        forms_manifest.dataset_dependencies,
     )
 
     for link_name, entry in sorted(entries.items(), key=lambda item: item[1].get("relative_path", item[0])):
@@ -562,12 +495,8 @@ def organize(study: str) -> dict[str, Any]:
             router.route_support(link_name, entry, DependencyKind.DICTIONARY)
         elif role == "mapping":
             router.route_support(link_name, entry, DependencyKind.MAPPING)
-        elif role in {"annotated_pdf", "pdf_support"}:
-            router.route_support(link_name, entry, DependencyKind.PDF)
-        elif role == "pdf":
-            continue
-        else:
-            router._review(link_name, entry, "unrecognized-format", suffix=Path(str(entry.get("relative_path", link_name))).suffix.lower())
+        # role in {"pdf", "_unclassified"}: pdf routed in the second pass below;
+        # _unclassified is never parsed.
     for link_name, entry in sorted(entries.items(), key=lambda item: item[1].get("relative_path", item[0])):
         if router._role_for(entry) == "pdf":
             router.route_pdf(link_name, entry)

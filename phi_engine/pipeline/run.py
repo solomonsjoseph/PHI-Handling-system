@@ -37,7 +37,7 @@ from typing import Any, Mapping
 
 import phi_engine.config.config as config
 from phi_engine.audit import review_paths
-from phi_engine.pipeline.intake import load_intake_manifest
+from phi_engine.pipeline.intake import IntakeManifestError, load_intake_manifest
 from phi_engine.pipeline.organize import organize
 from phi_engine.pipeline.profile import profile_column
 from phi_engine.pipeline.dependencies import (
@@ -133,7 +133,6 @@ class PipelineResult:
     published_count: int = 0
     profile_escalations: int = 0
     profile_auto_clears: int = 0
-    sot_generation_error: str | None = None
     dependency_review_count: int = 0
     dependency_held_dataset_ids: list[str] = field(default_factory=list)
 
@@ -1068,6 +1067,33 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
     jurisdiction_label = _JURISDICTION_LABELS[jurisdiction]
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
+    try:
+        intake_manifest = load_intake_manifest(study)
+    except IntakeManifestError:
+        return PipelineResult(
+            study=study,
+            jurisdiction=jurisdiction,
+            run_id=run_id,
+            exit_code=2,
+            message="intake_failed",
+        )
+    if intake_manifest.get("status") == "review_required":
+        return PipelineResult(
+            study=study,
+            jurisdiction=jurisdiction,
+            run_id=run_id,
+            exit_code=8,
+            message="intake_review_required",
+        )
+    if intake_manifest.get("status") != "ready":
+        return PipelineResult(
+            study=study,
+            jurisdiction=jurisdiction,
+            run_id=run_id,
+            exit_code=2,
+            message="intake_failed",
+        )
+
     # Resolve the current rulebook seam before intake or organizer code can
     # open mutable study sources. Richer live-resolution behavior is defined
     # by later phases; this preserves the existing real pinned-rule contract.
@@ -1111,7 +1137,6 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
     # can never be skipped by a stale organizer cache.  Keep the intake manifest
     # hash inside organize_manifest as provenance only.
     organized_root = Path(config.ORGANIZED_DIR) / study
-    intake_manifest = load_intake_manifest(study)
     dependency_relations = _load_manifest_dependency_relations(
         study,
         intake_manifest,
@@ -1154,21 +1179,6 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
 
     organized_datasets_dir = organized_root / "datasets"
     sot_root = Path(config.LLM_SOURCE_SOT_DIR)
-
-    # SoT is enrichment-only. Generate joined views before classification so
-    # load_sot_variable_signals can use them, but never abort the PHI pipeline
-    # when the PDF-specific producer cannot resolve a form.
-    sot_generation_error: str | None = None
-    annotated_pdf_dir = Path(config.ANNOTATED_PDFS_DIR)
-    if annotated_pdf_dir.is_dir() and any(annotated_pdf_dir.glob("*.pdf")):
-        try:
-            from phi_engine.sot import generate_sot
-
-            rc = generate_sot(study)
-            if rc != 0:
-                sot_generation_error = "sot_generation_nonzero_exit"
-        except Exception:  # noqa: BLE001 -- SoT is fail-soft enrichment
-            sot_generation_error = "sot_generation_exception"
 
     # -- c. classify every form's headers (metadata only) -------------------
     # Load the CURRENT effective scrub config (packaged defaults + whatever
@@ -1511,7 +1521,6 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
             scrub_config_hash=scrub_config_hash, rulebook_sha256=bundle.rules_sha256,
             rulebook_cache_status=resolution.cache_status,
             rulebook_source_mode=bundle.source_mode,
-            sot_generation_error=sot_generation_error,
             dependency_review_count=dependency_review_count,
             dependency_held_dataset_ids=sorted(
                 dependency_disposition.held_dataset_ids
@@ -1542,7 +1551,7 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
             forms_processed=approved_forms, forms_held=held_forms,
             review_queue_size=review_queue_size, organizer_review_count=organizer_review_count,
             scrub_raised=scrub_raised, scrub_config_hash=scrub_config_hash,
-            rulebook_sha256=bundle.rules_sha256, sot_generation_error=sot_generation_error,
+            rulebook_sha256=bundle.rules_sha256,
             rulebook_cache_status=resolution.cache_status,
             rulebook_source_mode=bundle.source_mode,
             dependency_review_count=dependency_review_count,
@@ -1589,7 +1598,7 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
         review_queue_size=review_queue_size, organizer_review_count=organizer_review_count,
         guard_ok=guard_ok, guard_failed=not guard_ok,
         scrub_config_hash=scrub_config_hash, rulebook_sha256=bundle.rules_sha256,
-        published_count=published_count, sot_generation_error=sot_generation_error,
+        published_count=published_count,
         rulebook_cache_status=resolution.cache_status,
         rulebook_source_mode=bundle.source_mode,
         profile_escalations=profile_escalations, profile_auto_clears=profile_auto_clears,

@@ -326,7 +326,6 @@ def _run_two_dataset_scenario(
     relations: tuple[DependencyRelation, ...],
     organize_manifest: dict[str, object],
     scrub_exception: Exception | None = None,
-    sot_exception: Exception | None = None,
 ) -> tuple[pipeline_run.PipelineResult, Path, tuple[str, ...]]:
     study = "Study"
     output = tmp_path / "output" / study
@@ -366,7 +365,7 @@ def _run_two_dataset_scenario(
     monkeypatch.setattr(
         pipeline_run,
         "load_intake_manifest",
-        lambda *_: {"source_root": str(source_root)},
+        lambda *_: {"source_root": str(source_root), "status": "ready"},
     )
     monkeypatch.setattr(pipeline_run, "organize", lambda *_: organize_manifest)
     monkeypatch.setattr(
@@ -434,17 +433,6 @@ def _run_two_dataset_scenario(
         "run_phi_guard_gate",
         lambda *_: SimpleNamespace(ok=True),
     )
-
-    if sot_exception is not None:
-        annotated = Path(config.ANNOTATED_PDFS_DIR)
-        annotated.mkdir(parents=True)
-        annotated.joinpath("form.pdf").write_bytes(b"not-read")
-        import phi_engine.sot as sot_module
-
-        def fail_sot(_study: str) -> int:
-            raise sot_exception
-
-        monkeypatch.setattr(sot_module, "generate_sot", fail_sot)
 
     result = pipeline_run.run_pipeline(study, "us")
     run_dirs = sorted((output / "runs").iterdir())
@@ -880,7 +868,7 @@ def test_real_run_pipeline_suppresses_only_an_exact_current_ignored_decision(
     ) == ()
 
 
-def test_pipeline_result_uses_controlled_sot_and_scrub_error_codes_without_exception_text(
+def test_pipeline_result_uses_controlled_scrub_error_codes_without_exception_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -895,13 +883,12 @@ def test_pipeline_result_uses_controlled_sot_and_scrub_error_codes_without_excep
         decisions=(),
         relations=(),
         organize_manifest=manifest,
-        sot_exception=RuntimeError("PROTECTED-SOT-DETAIL"),
         scrub_exception=RuntimeError("PROTECTED-SCRUB-DETAIL"),
     )
 
     assert result.exit_code == 1
-    assert result.sot_generation_error == "sot_generation_exception"
     assert result.scrub_raised == "scrub_exception"
+    assert "sot_generation_error" not in result.to_json()
     serialized = (run_dir / "pipeline_result.json").read_text(encoding="utf-8")
-    assert "PROTECTED-SOT-DETAIL" not in serialized
     assert "PROTECTED-SCRUB-DETAIL" not in serialized
+    assert "sot_generation_error" not in json.loads(serialized)

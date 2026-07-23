@@ -33,10 +33,9 @@ DEFAULT_LIMITS: dict[str, int] = {
     "max_rows": 1_000_000,
     "max_columns": 4096,
     "max_cell_codepoints": 32768,
-    "max_json_depth": 32,
 }
 
-_SUPPORTED_SUFFIXES = {".pdf", ".xlsx", ".xls", ".csv", ".json", ".jsonl"}
+_SUPPORTED_SUFFIXES = {".pdf", ".xlsx", ".csv"}
 
 
 def _hash_file(path: Path) -> str:
@@ -71,14 +70,6 @@ def _fail(artifact_id: str, source_sha256: str, kind: DependencyKind, fmt: str, 
         normalized_rows_sha256=None,
         failure_code=code,
     )
-
-
-def _depth(value: Any, current: int = 0) -> int:
-    if isinstance(value, dict):
-        return max([current] + [_depth(v, current + 1) for v in value.values()])
-    if isinstance(value, list):
-        return max([current] + [_depth(v, current + 1) for v in value])
-    return current
 
 
 def _cell(value: Any, limit: int) -> str:
@@ -144,46 +135,6 @@ def _parse_csv(path: Path, artifact_id: str, source_sha256: str, limits: dict[st
             _check_count(row_index, limits["max_rows"], ValueError("row-limit"))
             _check_count(len(row_values), limits["max_columns"], ValueError("column-limit"))
             rows.append(_row(artifact_id, source_sha256, 0, 0, row_index - 1, row_values, limits["max_cell_codepoints"]))
-    return rows
-
-
-def _parse_jsonl(path: Path, artifact_id: str, source_sha256: str, limits: dict[str, int], suffix: str) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    _enforce_expanded_limits(path, limits, suffix)
-    with path.open(encoding="utf-8") as fh:
-        for row_index, line in enumerate(fh):
-            if not line.strip():
-                continue
-            value = json.loads(line)
-            if _depth(value) > limits["max_json_depth"]:
-                raise ValueError("json-depth")
-            if isinstance(value, dict):
-                cells = [f"{k}={v}" for k, v in value.items()]
-            elif isinstance(value, list):
-                cells = value
-            else:
-                cells = [value]
-            _check_count(row_index + 1, limits["max_rows"], ValueError("row-limit"))
-            _check_count(len(cells), limits["max_columns"], ValueError("column-limit"))
-            rows.append(_row(artifact_id, source_sha256, 0, 0, row_index, cells, limits["max_cell_codepoints"]))
-    return rows
-
-
-def _parse_json(path: Path, artifact_id: str, source_sha256: str, limits: dict[str, int], suffix: str) -> list[dict[str, Any]]:
-    _enforce_expanded_limits(path, limits, suffix)
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if _depth(value) > limits["max_json_depth"]:
-        raise ValueError("json-depth")
-    if isinstance(value, list):
-        items = value
-    else:
-        items = [value]
-    rows = []
-    for row_index, item in enumerate(items):
-        cells = [f"{k}={v}" for k, v in item.items()] if isinstance(item, dict) else [item]
-        _check_count(row_index + 1, limits["max_rows"], ValueError("row-limit"))
-        _check_count(len(cells), limits["max_columns"], ValueError("column-limit"))
-        rows.append(_row(artifact_id, source_sha256, 0, 0, row_index, cells, limits["max_cell_codepoints"]))
     return rows
 
 
@@ -258,14 +209,8 @@ def parse_support_artifact(
     try:
         if suffix == ".csv":
             rows = _parse_csv(source_path, artifact_id, source_sha256, active_limits, suffix)
-        elif suffix == ".jsonl":
-            rows = _parse_jsonl(source_path, artifact_id, source_sha256, active_limits, suffix)
-        elif suffix == ".json":
-            rows = _parse_json(source_path, artifact_id, source_sha256, active_limits, suffix)
         elif suffix == ".xlsx":
             rows = _parse_excel(source_path, artifact_id, source_sha256, active_limits, engine="openpyxl", suffix=suffix)
-        elif suffix == ".xls":
-            rows = _parse_excel(source_path, artifact_id, source_sha256, active_limits, engine="xlrd", suffix=suffix)
         elif suffix == ".pdf":
             rows = _parse_pdf(source_path, artifact_id, source_sha256, active_limits, suffix)
         else:
