@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+import csv
 import json
-import os
-import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,9 +9,9 @@ from typing import Any
 
 import pytest
 
+from tests._workspace_harness import hermetic_phi_workspace, write_pdf_table
 
 STUDY_PREFIX = "PytestReviewFeedback"
-TEST_PHI_KEY_HEX = "0" * 64
 
 
 @dataclass(frozen=True)
@@ -22,52 +21,33 @@ class ReviewStudy:
     source: Path
 
 
-def _drop_phi_runtime_modules() -> None:
-    """Force import-time phi_engine paths to resolve from the current test env."""
-    keep = {"phi_engine", "phi_engine.utils", "phi_engine.utils.pipeline_lock"}
-    for name in list(sys.modules):
-        if name in keep:
-            continue
-        if name.startswith("phi_engine."):
-            del sys.modules[name]
-
-
 @pytest.fixture
 def review_study(tmp_path: Path):
-    original_env = {
-        "PHI_WORKSPACE": os.environ.get("PHI_WORKSPACE"),
-        "STUDY_NAME": os.environ.get("STUDY_NAME"),
-        "PHI_KEY_PATH": os.environ.get("PHI_KEY_PATH"),
-    }
-
     study = f"{STUDY_PREFIX}{uuid.uuid4().hex[:8]}"
-    workspace = tmp_path / "workspace"
     source = tmp_path / "source"
-    key_path = tmp_path / "phi_key"
-    key_path.write_text(TEST_PHI_KEY_HEX, encoding="utf-8")
-    key_path.chmod(0o600)
-
-    os.environ["PHI_WORKSPACE"] = str(workspace)
-    os.environ["STUDY_NAME"] = study
-    os.environ["PHI_KEY_PATH"] = str(key_path)
-    _drop_phi_runtime_modules()
-
-    try:
+    with hermetic_phi_workspace(tmp_path, study) as workspace:
         yield ReviewStudy(study=study, workspace=workspace, source=source)
-    finally:
-        for key, value in original_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        _drop_phi_runtime_modules()
 
 
-def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+def _write_dataset_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
-        for row in rows:
-            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    fieldnames = list(rows[0].keys())
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _ensure_support_content(source: Path) -> None:
+    """The mandatory forms/ + dictionary-or-mapping content every v3
+    intake_add package requires -- written once and reused across every
+    intake_add call against the same source (idempotent, identical
+    bytes)."""
+    write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
+    _write_dataset_csv(
+        source / "data_dictionary" / "dict.csv",
+        [{"reference_code": "REF-01", "reference_label": "General study reference material"}],
+    )
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -104,13 +84,20 @@ def _approval_action(study: ReviewStudy, form_name: str, header: str) -> str:
 
 
 def _intake_organize_and_run(study: ReviewStudy, form_name: str, rows: list[dict[str, Any]]):
-    _write_jsonl(study.source / form_name, rows)
+    """*form_name* is the published output name (``<stem>.jsonl``); the
+    dataset is written as ``<stem>.csv`` under ``datasets/`` so the
+    organizer's stem-preserving CSV route reproduces the same published
+    name."""
+    dataset_stem = Path(form_name).stem
+    _write_dataset_csv(study.source / "datasets" / f"{dataset_stem}.csv", rows)
+    _ensure_support_content(study.source)
 
     from phi_engine.pipeline.intake import intake_add
     from phi_engine.pipeline.organize import organize
     from phi_engine.pipeline.run import run_pipeline
 
-    intake_add(study.source, study.study)
+    intake_manifest = intake_add(study.source, study.study)
+    assert intake_manifest["status"] == "ready", intake_manifest["review_items"]
     organize(study.study)
     result = run_pipeline(study.study, "us")
     assert result.scrub_raised is None
@@ -218,14 +205,22 @@ def test_override_cap_decision_caps_numeric_value_end_to_end(review_study: Revie
 
 
 def test_list_review_items_reports_organizer_bucket_and_decisions(review_study: ReviewStudy) -> None:
-    _write_jsonl(review_study.source / "valid_form.jsonl", [{"SUBJID": "SUBJ001", "ANALYSIS_GROUP": "A"}])
-    (review_study.source / "needs_review.dat").write_text("opaque bytes", encoding="utf-8")
+    _write_dataset_csv(review_study.source / "datasets" / "valid_form.csv", [{"SUBJID": "SUBJ001", "ANALYSIS_GROUP": "A"}])
+    # A mislabeled .xls: an intake-ACCEPTED suffix (datasets/ carries no
+    # .xls content check) that fails only at organizer parse time, landing
+    # in the organizer's own non-blocking review bucket -- unlike an
+    # unsupported suffix (e.g. .dat), which intake-preflight would reject
+    # as _unclassified and block the WHOLE study before organize() ever runs.
+    (review_study.source / "datasets" / "needs_review.xls").parent.mkdir(parents=True, exist_ok=True)
+    (review_study.source / "datasets" / "needs_review.xls").write_bytes(b"not a real xls workbook\n")
+    _ensure_support_content(review_study.source)
 
     from phi_engine.pipeline.intake import intake_add
     from phi_engine.pipeline.organize import organize
     from phi_engine.pipeline.review import decide, list_review_items
 
-    intake_add(review_study.source, review_study.study)
+    intake_manifest = intake_add(review_study.source, review_study.study)
+    assert intake_manifest["status"] == "ready", intake_manifest["review_items"]
     organize(review_study.study)
     decide(review_study.study, header="ANALYSIS_GROUP", decision="drop")
 
@@ -233,11 +228,14 @@ def test_list_review_items_reports_organizer_bucket_and_decisions(review_study: 
 
     assert review_items["study"] == review_study.study
     assert any(
-        item["file"] == "needs_review.dat" and item["reason"] == "unrecognized-format"
+        item["file"] == "needs_review.xls" and item["reason"] in {"xls-reader-unavailable", "excel-open-error"}
         for item in review_items["organizer_review_bucket"]
     )
     assert review_items["decisions_on_file"]["ANALYSIS_GROUP"]["decision"] == "drop"
     assert review_items["dependency_recommendations"] == []
+    # A ready, non-review-blocked intake has zero redacted intake review
+    # items; the key itself is a permanent addition to list_review_items.
+    assert review_items["intake_review_items"] == []
     assert set(review_items) == {
         "study",
         "organizer_review_bucket",
@@ -245,4 +243,5 @@ def test_list_review_items_reports_organizer_bucket_and_decisions(review_study: 
         "llm_uncertain_queue",
         "dependency_recommendations",
         "decisions_on_file",
+        "intake_review_items",
     }

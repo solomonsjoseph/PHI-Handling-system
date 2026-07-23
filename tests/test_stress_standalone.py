@@ -1,147 +1,15 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 import uuid
-from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
-from types import ModuleType
-from typing import Iterator
 
 import pytest
 
-from harness.make_stress_fixtures import build_stress_fixtures
-
-
-TEST_PHI_KEY_HEX = "0" * 64
-
-
-_UNSET = object()  # sentinel: parent had no such attribute before the hermetic context
-
-
-def _phi_runtime_module_names() -> set[str]:
-    """Names in sys.modules that _drop_phi_runtime_modules() would delete.
-
-    Excludes the identity-preserving keep-set (phi_engine, phi_engine.utils,
-    phi_engine.utils.pipeline_lock) so callers can snapshot or evict the same
-    hermetic phi_engine.* module set consistently.
-    """
-    keep = {"phi_engine", "phi_engine.utils", "phi_engine.utils.pipeline_lock"}
-    return {name for name in sys.modules if name.startswith("phi_engine.") and name not in keep}
-
-
-def _drop_phi_runtime_modules() -> None:
-    """Force workspace/study-derived phi_engine paths to resolve fresh per test.
-
-    phi_engine.config.config binds PHI_WORKSPACE, STUDY_NAME, and PHI_KEY_PATH at
-    import time, and most pipeline modules hold that config module. Evicting
-    phi_engine.* modules before a hermetic workspace forces fresh imports bound to
-    the new env; _hermetic_phi_workspace restores the pre-test module objects on
-    teardown so downstream collected tests retain their original class identity.
-    """
-    for name in _phi_runtime_module_names():
-        del sys.modules[name]
-
-
-def _snapshot_parent_attr(name: str) -> tuple[str, str, object]:
-    """Return (parent_name, leaf, previous_value) for a dotted module name.
-
-    previous_value is _UNSET when the parent currently has no such attribute
-    (or the parent module itself is not loaded).
-    """
-    parent_name, _, leaf = name.rpartition(".")
-    parent = sys.modules.get(parent_name)
-    previous = getattr(parent, leaf, _UNSET) if parent is not None else _UNSET
-    return parent_name, leaf, previous
-
-
-def _restore_phi_runtime_modules(
-    saved_modules: dict[str, ModuleType],
-    saved_parent_attrs: dict[str, tuple[str, str, object]],
-    current_names: set[str],
-) -> None:
-    """Restore sys.modules entries and exact pre-context parent-package bindings.
-
-    Kept ancestors (phi_engine, phi_engine.utils) are never evicted, so their
-    in-memory attributes for children still reference whatever was imported
-    last. `import phi_engine.x.y as z`-style imports (used throughout
-    phi_engine, e.g. `import phi_engine.config.config as config`) resolve via
-    those parent attributes first, so exact restoration must both rebind
-    attributes that existed before the context (`saved_parent_attrs`) and
-    delete attributes for children first imported inside it (any name in
-    `current_names` absent from `saved_parent_attrs`).
-    """
-    sys.modules.update(saved_modules)
-    for name in current_names | saved_modules.keys():
-        parent_name, leaf, previous = saved_parent_attrs.get(name, (None, None, _UNSET))
-        if parent_name is None:
-            parent_name, _, leaf = name.rpartition(".")
-        parent = sys.modules.get(parent_name)
-        if parent is None:
-            continue
-        if previous is _UNSET:
-            if hasattr(parent, leaf):
-                delattr(parent, leaf)
-        else:
-            setattr(parent, leaf, previous)
-
-
-@contextmanager
-def _hermetic_phi_workspace(tmp_path: Path, study_prefix: str) -> Iterator[tuple[Path, str]]:
-    original_workspace = os.environ.get("PHI_WORKSPACE")
-    original_study = os.environ.get("STUDY_NAME")
-    original_phi_key_path = os.environ.get("PHI_KEY_PATH")
-
-    workspace = tmp_path / "workspace"
-    study = f"{study_prefix}{uuid.uuid4().hex[:8]}"
-    key_path = tmp_path / "phi_key"
-    key_path.write_text(TEST_PHI_KEY_HEX, encoding="utf-8")
-    key_path.chmod(0o600)
-
-    pre_existing_names = _phi_runtime_module_names()
-    saved_modules = {name: sys.modules[name] for name in pre_existing_names}
-    saved_parent_attrs = {name: _snapshot_parent_attr(name) for name in pre_existing_names}
-
-    # phi_engine.utils.pipeline_lock is kept (never evicted), so its own
-    # `import phi_engine.config.config as config` binding is frozen to
-    # whichever config module existed when pipeline_lock was first imported.
-    # Rebind it to this workspace's fresh config for the context, then put
-    # its original binding back on teardown.
-    pipeline_lock_module = sys.modules.get("phi_engine.utils.pipeline_lock")
-    original_pipeline_lock_config = (
-        pipeline_lock_module.config if pipeline_lock_module is not None else None
-    )
-
-    try:
-        os.environ["PHI_WORKSPACE"] = str(workspace)
-        os.environ["STUDY_NAME"] = study
-        os.environ["PHI_KEY_PATH"] = str(key_path)
-        _drop_phi_runtime_modules()
-        import phi_engine.config.config as fresh_config
-
-        if pipeline_lock_module is not None:
-            pipeline_lock_module.config = fresh_config
-        yield workspace, study
-    finally:
-        if original_workspace is None:
-            os.environ.pop("PHI_WORKSPACE", None)
-        else:
-            os.environ["PHI_WORKSPACE"] = original_workspace
-        if original_study is None:
-            os.environ.pop("STUDY_NAME", None)
-        else:
-            os.environ["STUDY_NAME"] = original_study
-        if original_phi_key_path is None:
-            os.environ.pop("PHI_KEY_PATH", None)
-        else:
-            os.environ["PHI_KEY_PATH"] = original_phi_key_path
-        if pipeline_lock_module is not None:
-            pipeline_lock_module.config = original_pipeline_lock_config
-        current_names = _phi_runtime_module_names()
-        _drop_phi_runtime_modules()
-        _restore_phi_runtime_modules(saved_modules, saved_parent_attrs, current_names)
+from harness.make_stress_fixtures import build_review_required_fixtures, build_stress_fixtures
+from tests._workspace_harness import hermetic_phi_workspace
 
 
 def _sha256_file(path: Path) -> str:
@@ -152,12 +20,17 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _assert_source_hashes_unchanged(manifest: dict) -> None:
+def _assert_source_entries_unchanged(manifest: dict) -> None:
+    """Every regular-file entry the fixture manifest recorded at build time
+    still hashes the same -- the strongest, cheapest proxy for
+    ``harness.spec_check``'s own full source_immutability check (exercised
+    directly, against the real ``run_spec_check``, by
+    ``test_spec_check_passes_against_the_full_stress_run`` below)."""
     source_root = Path(manifest["source_root"])
-    assert {
-        rel_path: _sha256_file(source_root / rel_path)
-        for rel_path in manifest["files"]
-    } == manifest["files"]
+    for rel_path, expected in manifest["entries"].items():
+        actual_path = source_root / rel_path
+        if expected["type"] == "file":
+            assert _sha256_file(actual_path) == expected["sha256"], rel_path
 
 
 def _published_dataset_dir(workspace: Path, study: str) -> Path:
@@ -182,14 +55,16 @@ def _prepare_stress_source(tmp_path: Path) -> tuple[Path, dict]:
 
 def _intake_organize_run(tmp_path: Path, study_prefix: str = "Stress"):
     source, manifest = _prepare_stress_source(tmp_path)
-    ctx = _hermetic_phi_workspace(tmp_path, study_prefix)
-    workspace, study = ctx.__enter__()
+    study = f"{study_prefix}{uuid.uuid4().hex[:8]}"
+    ctx = hermetic_phi_workspace(tmp_path, study)
+    workspace = ctx.__enter__()
     try:
         from phi_engine.pipeline.intake import intake_add
         from phi_engine.pipeline.organize import organize
         from phi_engine.pipeline.run import run_pipeline
 
         intake_manifest = intake_add(source, study)
+        assert intake_manifest["status"] == "ready", intake_manifest["review_items"]
         organize_manifest = organize(study)
         result = run_pipeline(study, "us")
         return ctx, workspace, study, source, manifest, intake_manifest, organize_manifest, result
@@ -200,19 +75,21 @@ def _intake_organize_run(tmp_path: Path, study_prefix: str = "Stress"):
 
 def test_intake_links_everything_and_preserves_source_bytes(tmp_path: Path):
     source, fixture_manifest = _prepare_stress_source(tmp_path)
+    study = f"StressIntake{uuid.uuid4().hex[:8]}"
 
-    with _hermetic_phi_workspace(tmp_path, "StressIntake") as (workspace, study):
+    with hermetic_phi_workspace(tmp_path, study) as workspace:
         from phi_engine.pipeline.intake import intake_add
 
         intake_manifest = intake_add(source, study)
 
-        linked_or_duplicate_count = len(intake_manifest["entries"]) + len(intake_manifest["duplicates"])
-        assert linked_or_duplicate_count == len(fixture_manifest["files"])
-        assert any(
-            Path(error["path"]).name == "vanished_file.jsonl"
-            and error["reason"] == "broken-symlink-in-source"
-            for error in intake_manifest["errors"]
-        )
+        assert intake_manifest["status"] == "ready"
+        assert intake_manifest["errors"] == []
+        assert intake_manifest["review_items"] == []
+        # Every regular source file (duplicate bytes and nested/duplicate
+        # folders included) becomes its own independent v3 entry -- v3 has
+        # no separate "duplicates" bucket, unlike the pre-v3 manifest.
+        source_file_count = sum(1 for e in fixture_manifest["entries"].values() if e["type"] == "file")
+        assert len(intake_manifest["entries"]) == source_file_count
 
         intake_study_dir = workspace / "intake" / study
         assert (intake_study_dir / "intake_manifest.json").is_file()
@@ -225,65 +102,72 @@ def test_intake_links_everything_and_preserves_source_bytes(tmp_path: Path):
             else:
                 assert entry.is_symlink(), f"{entry} should be an intake symlink"
 
-        _assert_source_hashes_unchanged(fixture_manifest)
+        _assert_source_entries_unchanged(fixture_manifest)
 
 
 def test_organize_routes_every_format_correctly(tmp_path: Path):
     source, _fixture_manifest = _prepare_stress_source(tmp_path)
+    study = f"StressOrg{uuid.uuid4().hex[:8]}"
 
-    with _hermetic_phi_workspace(tmp_path, "StressOrg") as (_workspace, study):
-        from phi_engine.pipeline.intake import intake_add
+    with hermetic_phi_workspace(tmp_path, study) as workspace:
+        from phi_engine.pipeline.intake import intake_add, load_intake_manifest
         from phi_engine.pipeline.organize import organize
 
         intake_add(source, study)
         organize_manifest = organize(study)
 
-        # Root-level suffix fallback still routes standalone datasets; nested
-        # files outside recognized study directories are intentionally reviewed.
-        assert len(organize_manifest["datasets"]) >= 5
-        assert len(organize_manifest["review_bucket"]) >= 3
-
         dataset_outputs = {entry["output"]: entry for entry in organize_manifest["datasets"]}
-        assert "3_Labs.jsonl" in dataset_outputs
-        assert "extra_group.jsonl" in dataset_outputs
-        assert "site_notes.jsonl" in dataset_outputs
-        assert "2_Demographics.jsonl" not in dataset_outputs
-
         review_by_file = {entry["file"]: entry for entry in organize_manifest["review_bucket"]}
-        assert review_by_file["corrupted_workbook.xlsx"]["reason"] == "excel-open-error"
-        assert review_by_file["mystery_export.dat"]["reason"] == "unrecognized-format"
-        # Review-bucket entries carry file-level metadata only -- never a row
-        # value (the whole point of routing to review instead of publishing).
-        allowed_keys = {"file", "link_name", "reason", "detail", "suffix"}
+
+        # CSV, single-sheet XLSX, and the PHI-in-unexpected-columns CSV all
+        # route as datasets.
+        assert "labs.jsonl" in dataset_outputs
+        assert "labs_dup.jsonl" in dataset_outputs
+        assert "screening__Screening.jsonl" in dataset_outputs
+        assert "site_notes.jsonl" in dataset_outputs
+        # Duplicate bytes at a nested path stay a fully independent dataset
+        # entry: same row VALUES (header_ids are artifact-scoped, so the
+        # normalized_rows_sha256 legitimately differs), distinct identity.
+        labs_rows = _read_jsonl(workspace / "organized" / study / "datasets" / "labs.jsonl")
+        labs_dup_rows = _read_jsonl(workspace / "organized" / study / "datasets" / "labs_dup.jsonl")
+        assert [sorted(row.values()) for row in labs_rows] == [sorted(row.values()) for row in labs_dup_rows]
+        assert dataset_outputs["labs.jsonl"]["artifact_id"] != dataset_outputs["labs_dup.jsonl"]["artifact_id"]
+
+        # legacy_site.xls: a genuine workbook (xlwt installed) parses as a
+        # dataset; otherwise the mislabeled fallback lands in the
+        # organizer's own (non-blocking, per-file) review bucket -- .xls
+        # carries no intake-time content check, only organize() can tell.
+        legacy_outputs = [name for name in dataset_outputs if name.startswith("legacy_site")]
+        if legacy_outputs:
+            assert dataset_outputs[legacy_outputs[0]]["row_count"] >= 1
+        else:
+            assert review_by_file["legacy_site.xls"]["reason"] in {"xls-reader-unavailable", "excel-open-error"}
+
+        # forms/consent_table.pdf has an extractable table -> dataset output;
+        # forms/screening_form.pdf has none -> non-blocking organizer review,
+        # never a row value.
+        assert "consent_table__pdftable0.jsonl" in dataset_outputs
+        assert review_by_file["screening_form.pdf"]["reason"] == "pdf-no-extractable-table"
+
+        allowed_keys = {"file", "link_name", "reason", "detail", "suffix", "copied_sha", "sheet", "table_index", "failure_code"}
         for entry in organize_manifest["review_bucket"]:
             assert set(entry.keys()) <= allowed_keys
-        assert review_by_file["2_Demographics.jsonl"]["reason"] == "unrecognized-format"
-        assert review_by_file["1A_Screening.xlsx"]["reason"] == "unrecognized-format"
-        assert review_by_file["1A_Screening.pdf"]["reason"] == "unrecognized-format"
+            # Review-bucket entries carry file-level metadata only -- never
+            # a row value (the whole point of routing to review).
+            assert "SUBJID" not in json.dumps(entry)
 
-        from phi_engine.pipeline.intake import load_intake_manifest
+        support_kinds = sorted((s["kind"], s.get("format")) for s in organize_manifest["support_artifacts"])
+        assert support_kinds == [("dictionary", "csv"), ("dictionary", "csv"), ("mapping", "csv")]
 
         intake_entries = load_intake_manifest(study)["entries"]
-        root_pdf_roles_by_file = {
+        pdf_roles_by_file = {
             Path(intake_entries[link_name]["relative_path"]).name: role
             for link_name, role in organize_manifest["pdf_roles"].items()
         }
-        lab_pdf_role = root_pdf_roles_by_file["lab_results_table.pdf"]
-        assert lab_pdf_role["role"] in {"table_extracted", "review"}
-        if lab_pdf_role["role"] == "table_extracted":
-            assert lab_pdf_role["tables_extracted"] >= 1
-        else:
-            assert lab_pdf_role["reason"] == "pdf-reader-unavailable"
-        assert "1A_Screening.pdf" not in root_pdf_roles_by_file
-
-        legacy_outputs = [entry for name, entry in dataset_outputs.items() if name.startswith("legacy_site")]
-        if legacy_outputs:
-            assert legacy_outputs[0]["row_count"] >= 1
-        else:
-            assert review_by_file["legacy_site.xls"]["reason"] in {
-                "xls-reader-unavailable",
-                "excel-open-error",
-            }
+        assert pdf_roles_by_file["consent_table.pdf"]["role"] == "table_extracted"
+        assert pdf_roles_by_file["consent_table.pdf"]["tables_extracted"] >= 1
+        assert pdf_roles_by_file["screening_form.pdf"]["role"] == "review"
+        assert pdf_roles_by_file["screening_form.pdf"]["reason"] == "pdf-no-extractable-table"
 
 
 def test_run_completes_partial_and_escalates_phi_in_unexpected_columns(tmp_path: Path):
@@ -305,7 +189,7 @@ def test_run_completes_partial_and_escalates_phi_in_unexpected_columns(tmp_path:
             assert planted_row["COMMENT"] not in published_text
 
         site_notes_file = manifest["planted_unexpected_phi_file"]
-        for row in _read_jsonl(_published_dataset_dir(workspace, study) / site_notes_file):
+        for row in _read_jsonl(_published_dataset_dir(workspace, study) / (Path(site_notes_file).stem + ".jsonl")):
             assert "NOTES" not in row
             assert "COMMENT" not in row
     finally:
@@ -341,8 +225,9 @@ def test_llm_boundary_zero_prompts_in_default_run_and_egress_gate_blocks_contami
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     source, manifest = _prepare_stress_source(tmp_path)
+    study = f"StressLLM{uuid.uuid4().hex[:8]}"
 
-    with _hermetic_phi_workspace(tmp_path, "StressLLM") as (_workspace, study):
+    with hermetic_phi_workspace(tmp_path, study) as _workspace:
         from phi_engine.config import config
         from phi_engine.pipeline.intake import intake_add
         from phi_engine.pipeline.organize import organize
@@ -380,10 +265,7 @@ def test_spec_check_passes_against_the_full_stress_run(tmp_path: Path):
         source_manifest_path = tmp_path / "source_manifest.json"
         source_manifest_path.write_text(
             json.dumps(
-                {
-                    "source_root": manifest["source_root"],
-                    "files": manifest["files"],
-                },
+                {"source_root": manifest["source_root"], "entries": manifest["entries"]},
                 indent=2,
                 sort_keys=True,
             ),
@@ -399,12 +281,316 @@ def test_spec_check_passes_against_the_full_stress_run(tmp_path: Path):
             source_manifest=source_manifest_path,
         )
         assert report["all_pass"] is True, report["checks"]
+        immutability_check = next(c for c in report["checks"] if c["check"] == "source_immutability")
+        assert immutability_check["entries_checked"] == len(manifest["entries"])
+        canary_check = next(c for c in report["checks"] if c["check"] == "llm_boundary_canary")
+        assert canary_check["violations"] == []
 
         report_path = workspace / "tmp" / "spec_check_report.json"
         assert report_path.exists(), "spec_check must write a workspace-local report"
         assert json.loads(report_path.read_text(encoding="utf-8")) == report
     finally:
         ctx.__exit__(None, None, None)
+
+
+_IMMUTABILITY_DRIFT_CASES = [
+    ("type", "symlink"),
+    ("mode", 0o777),
+    ("size", 999999),
+    ("mtime_ns", 1),
+    ("uid", 999999),
+    ("gid", 999999),
+    ("sha256", "0" * 64),
+    ("symlink_target", "/nonexistent/elsewhere"),
+]
+
+
+@pytest.mark.parametrize("field,tampered_value", _IMMUTABILITY_DRIFT_CASES, ids=[c[0] for c in _IMMUTABILITY_DRIFT_CASES])
+def test_source_immutability_check_catches_each_field_drift(tmp_path: Path, field: str, tampered_value):
+    """Direct proof the hardened source_immutability check actually
+    compares every recorded field (type, mode, size, mtime_ns, uid, gid,
+    sha256, symlink_target) -- not merely sha256 -- by tampering the
+    RECORDED (manifest-side) value for one real, unmodified source file
+    and asserting the comparison surfaces exactly that field's drift.
+    Manifest-side tampering (rather than mutating the file itself) is what
+    makes uid/gid coverage possible without root/chown privileges, and
+    exercises the identical comparison branch a real drifted FILE would."""
+    source, manifest = _prepare_stress_source(tmp_path)
+    target_rel = "datasets/labs.csv"
+    tampered_entries = dict(manifest["entries"])
+    tampered_entries[target_rel] = {**tampered_entries[target_rel], field: tampered_value}
+    source_manifest_path = tmp_path / "source_manifest.json"
+    source_manifest_path.write_text(
+        json.dumps({"source_root": manifest["source_root"], "entries": tampered_entries}, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    from harness.spec_check import run_spec_check
+
+    report = run_spec_check(skip_pytest=True, source_manifest=source_manifest_path)
+    immutability = next(c for c in report["checks"] if c["check"] == "source_immutability")
+    assert immutability["ok"] is False
+    assert any(f"{target_rel}: {field} drift" in v for v in immutability["violations"])
+
+
+def test_source_immutability_check_catches_new_and_missing_entries(tmp_path: Path):
+    """A post-build unexpected new file and a vanished existing entry must
+    each surface as their own distinct violation."""
+    source, manifest = _prepare_stress_source(tmp_path)
+    source_manifest_path = tmp_path / "source_manifest.json"
+    source_manifest_path.write_text(
+        json.dumps({"source_root": manifest["source_root"], "entries": manifest["entries"]}, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    from harness.spec_check import run_spec_check
+
+    clean = run_spec_check(skip_pytest=True, source_manifest=source_manifest_path)
+    assert next(c for c in clean["checks"] if c["check"] == "source_immutability")["ok"] is True
+
+    (source / "datasets" / "new_uninvited_file.csv").write_text("SUBJID\nX\n", encoding="utf-8")
+    (source / "datasets" / "screening.xlsx").unlink()
+
+    drifted = run_spec_check(skip_pytest=True, source_manifest=source_manifest_path)
+    immutability = next(c for c in drifted["checks"] if c["check"] == "source_immutability")
+    assert immutability["ok"] is False
+    violations_text = "\n".join(immutability["violations"])
+    assert "datasets/new_uninvited_file.csv: unexpected entry" in violations_text
+    assert "datasets/screening.xlsx: source entry vanished" in violations_text
+
+
+def _symlink_intake_root(tmp_path: Path, workspace: Path) -> str:
+    real_root = tmp_path / "elsewhere_root"
+    real_root.mkdir()
+    (workspace / "intake").symlink_to(real_root)
+    return "intake root must not be a symlink"
+
+
+def _symlink_study_directory(tmp_path: Path, workspace: Path) -> str:
+    intake_root = workspace / "intake"
+    intake_root.mkdir(parents=True)
+    real_study = tmp_path / "elsewhere_study"
+    real_study.mkdir()
+    (intake_root / "Study").symlink_to(real_study)
+    return "study directory must not be a symlink"
+
+
+def _symlink_component_directory(tmp_path: Path, workspace: Path) -> str:
+    study_dir = workspace / "intake" / "Study"
+    study_dir.mkdir(parents=True)
+    real_component = tmp_path / "elsewhere_component"
+    real_component.mkdir()
+    (study_dir / "datasets").symlink_to(real_component)
+    return "intake component directory must not be a symlink"
+
+
+@pytest.mark.parametrize(
+    "make_symlinked_node",
+    [_symlink_intake_root, _symlink_study_directory, _symlink_component_directory],
+    ids=["root", "study", "component"],
+)
+def test_intake_invariant_rejects_symlinked_intake_tree_nodes(tmp_path: Path, make_symlinked_node) -> None:
+    """lstat-based regression coverage for the intake root, study
+    directory, and component directory: each must be rejected as a
+    violation when it is itself a symlink, never silently followed."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    expected_message = make_symlinked_node(tmp_path, workspace)
+
+    from harness.spec_check import run_spec_check
+
+    report = run_spec_check(workspace=workspace, study="Study", skip_pytest=True)
+    invariant = next(c for c in report["checks"] if c["check"] == "intake_symlink_invariant")
+    assert invariant["ok"] is False
+    assert any(expected_message in v for v in invariant["violations"])
+
+
+_CANARY_CASES = [
+    (
+        "sanctioned_bare_call",
+        "intake_naming.py",
+        "def resolve_intake_study():\n"
+        "    def get_client():\n"
+        "        return new_offline_local_client()\n"
+        "    return get_client()\n",
+        False,
+    ),
+    (
+        "sanctioned_attribute_call",
+        "intake_naming.py",
+        "from phi_engine.security import model_routing\n"
+        "\n"
+        "def _resolve_intake_study():\n"
+        "    return model_routing.new_offline_local_client()\n",
+        False,
+    ),
+    (
+        "sanctioned_with_legitimate_type_annotation",
+        "intake_naming.py",
+        "from phi_engine.security.model_routing import OfflineLocalLLMClient, new_offline_local_client\n"
+        "\n"
+        "def _resolve_intake_study():\n"
+        "    client: OfflineLocalLLMClient | None = None\n"
+        "    def get_client() -> OfflineLocalLLMClient:\n"
+        "        nonlocal client\n"
+        "        if client is None:\n"
+        "            client = new_offline_local_client()\n"
+        "        return client\n"
+        "    return get_client()\n",
+        False,
+    ),
+    (
+        "unauthorized_bare_call_outside_sanctioned_function",
+        "intake_naming.py",
+        "def other_function():\n    return new_offline_local_client()\n",
+        True,
+    ),
+    (
+        "unauthorized_callsite_other_module",
+        "organize.py",
+        "def route_dataset():\n    return new_offline_local_client()\n",
+        True,
+    ),
+    (
+        "aliased_import",
+        "intake_naming.py",
+        "from phi_engine.security.model_routing import new_offline_local_client as _factory\n"
+        "\n"
+        "def resolve_intake_study():\n    return _factory()\n",
+        True,
+    ),
+    (
+        "assigned_alias",
+        "intake_naming.py",
+        "from phi_engine.security.model_routing import new_offline_local_client\n"
+        "\n"
+        "def resolve_intake_study():\n"
+        "    factory = new_offline_local_client\n"
+        "    return factory()\n",
+        True,
+    ),
+    (
+        "list_alias",
+        "intake_naming.py",
+        "from phi_engine.security.model_routing import new_offline_local_client\n"
+        "\n"
+        "def resolve_intake_study():\n"
+        "    fns = [new_offline_local_client]\n"
+        "    return fns[0]()\n",
+        True,
+    ),
+    (
+        "argument_alias",
+        "intake_naming.py",
+        "from phi_engine.security.model_routing import new_offline_local_client\n"
+        "\n"
+        "def helper(fn):\n    return fn()\n"
+        "\n"
+        "def resolve_intake_study():\n    return helper(new_offline_local_client)\n",
+        True,
+    ),
+    (
+        "walrus_alias",
+        "intake_naming.py",
+        "from phi_engine.security.model_routing import new_offline_local_client\n"
+        "\n"
+        "def resolve_intake_study():\n    return (factory := new_offline_local_client)()\n",
+        True,
+    ),
+    (
+        "direct_constructor",
+        "intake_naming.py",
+        "from phi_engine.security.model_routing import OfflineLocalLLMClient\n"
+        "\n"
+        "def resolve_intake_study():\n    return OfflineLocalLLMClient(None)\n",
+        True,
+    ),
+]
+
+
+@pytest.mark.parametrize("filename,source,expect_violation", [c[1:] for c in _CANARY_CASES], ids=[c[0] for c in _CANARY_CASES])
+def test_llm_boundary_canary_table(filename: str, source: str, expect_violation: bool) -> None:
+    """Table-driven proof of the single unified alias rule: sanctioned
+    direct/attribute calls (plus a legitimate type annotation) are
+    permitted; aliased imports, assigned/list/argument/walrus aliases,
+    direct construction, and any unauthorized callsite are all rejected.
+    Pure AST-level probes (no real files written) via a synthetic,
+    non-existent path so a bad probe can never touch real source."""
+    import ast as ast_module
+
+    from harness.spec_check import REPO_ROOT, _scan_offline_client_canary
+
+    probe_path = REPO_ROOT / "phi_engine" / "pipeline" / filename
+    tree = ast_module.parse(source, filename=str(probe_path))
+    violations = _scan_offline_client_canary(probe_path, tree)
+    assert bool(violations) is expect_violation, violations
+
+
+def test_llm_boundary_canary_flags_an_unauthorized_offline_client_callsite(tmp_path: Path):
+    """End-to-end proof through the real full-repo scan (not just the pure
+    per-file unit above): the real repository tree reports clean, and a
+    synthetic unauthorized pipeline module is flagged when actually
+    scanned via ``_check_llm_boundary``'s ``phi_engine/pipeline/`` walk."""
+    from harness.spec_check import REPO_ROOT, _check_llm_boundary
+
+    clean = _check_llm_boundary()
+    assert clean["ok"] is True
+    assert clean["violations"] == []
+
+    rogue = REPO_ROOT / "phi_engine" / "pipeline" / "_spec_check_canary_probe.py"
+    rogue.write_text(
+        "from phi_engine.security.model_routing import new_offline_local_client\n"
+        "\n"
+        "def rogue_caller():\n"
+        "    return new_offline_local_client()\n",
+        encoding="utf-8",
+    )
+    try:
+        dirty = _check_llm_boundary()
+        assert dirty["ok"] is False
+        assert any("new_offline_local_client referenced outside" in v for v in dirty["violations"])
+    finally:
+        rogue.unlink()
+
+
+def test_intake_review_required_for_each_unsupported_case_never_organizes(tmp_path: Path):
+    """Under intake-manifest/v3 a review item anywhere blocks the WHOLE
+    study -- there is no per-file partial success. This proves each fixed
+    preflight reason still fires correctly (unsupported format including
+    the JSON/JSONL demotion cases, invalid xlsx workbook, multi-sheet
+    dataset xlsx, a source symlink) and that organize() refuses to run at
+    all against a review_required study."""
+    source = tmp_path / "src"
+    fixture = build_review_required_fixtures(source, seed=43)
+    study = f"StressReview{uuid.uuid4().hex[:8]}"
+
+    with hermetic_phi_workspace(tmp_path, study):
+        from phi_engine.pipeline.intake import IntakeNotReadyError, intake_add
+        from phi_engine.pipeline.organize import organize
+
+        manifest = intake_add(source, study)
+
+        assert manifest["status"] == "review_required"
+        assert manifest["errors"] == []
+        reasons_by_path = {item["path"]: item["reason"] for item in manifest["review_items"]}
+        for path, expected_reason in fixture["expected_review_reasons"].items():
+            assert reasons_by_path.get(path) == expected_reason, (path, reasons_by_path)
+        assert all(item["blocking"] is True for item in manifest["review_items"])
+
+        by_rel = {e["relative_path"]: e for e in manifest["entries"].values()}
+        # JSON/JSONL are explicitly demoted from an accepted dataset format
+        # to _unclassified under v3 -- kept only as this review case.
+        assert by_rel["datasets/extra_group.json"]["component"] == "_unclassified"
+        assert by_rel["datasets/demographics.jsonl"]["component"] == "_unclassified"
+
+        with pytest.raises(IntakeNotReadyError) as exc_info:
+            organize(study)
+        assert exc_info.value.status == "review_required"
+
+        # The good, fully-accepted files in the same tree are still
+        # unclassified-blocked along with everything else -- v3 has no
+        # partial "organize the good ones anyway" outcome.
+        assert by_rel["datasets/good.csv"]["component"] == "datasets"
 
 
 def test_stale_staged_file_never_publishes_without_current_approval(tmp_path: Path):
@@ -415,19 +601,28 @@ def test_stale_staged_file_never_publishes_without_current_approval(tmp_path: Pa
     published by a LATER run unless it is part of THAT run's own approved
     forms -- publishing it would bypass the current run's
     classification/scrub/approval pipeline entirely."""
-    with _hermetic_phi_workspace(tmp_path, "StaleStaging") as (workspace, study):
+    study = f"StaleStaging{uuid.uuid4().hex[:8]}"
+
+    with hermetic_phi_workspace(tmp_path, study) as workspace:
         from phi_engine.pipeline.intake import intake_add
         from phi_engine.pipeline.organize import organize
         from phi_engine.pipeline.run import run_pipeline
         import phi_engine.config.config as config
+        from tests._workspace_harness import write_csv, write_pdf_table
 
         source = tmp_path / "src"
-        source.mkdir()
-        rows = [{"SUBJID": f"S{i}", "AGE": 30 + i} for i in range(5)]
-        (source / "current.jsonl").write_text(
-            "\n".join(json.dumps(r) for r in rows), encoding="utf-8"
-        )
-        intake_add(source, study)
+        rows = [[f"S{i}", 30 + i] for i in range(5)]
+        write_csv(source / "datasets" / "current.csv", ["SUBJID", "AGE"], rows)
+        # An extractable table (not plain text) so this form never lands in
+        # the organizer's own non-blocking review bucket; a dictionary that
+        # names no dataset column so it never creates a dependency
+        # recommendation -- both would otherwise force exit_code 8 and
+        # obscure this test's actual subject (stale staging residue).
+        write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
+        write_csv(source / "data_dictionary" / "dict.csv", ["reference_code", "reference_label"], [["REF-01", "General study reference material"]])
+
+        intake_manifest = intake_add(source, study)
+        assert intake_manifest["status"] == "ready"
         organize(study)
 
         # Seed a stale file directly into staging -- simulates leftover
@@ -442,7 +637,12 @@ def test_stale_staged_file_never_publishes_without_current_approval(tmp_path: Pa
 
         assert result.exit_code == 0
         published = sorted(p.name for p in _published_dataset_dir(workspace, study).glob("*.jsonl"))
-        assert published == ["current.jsonl"]
+        # published now legitimately also includes the mandatory forms/
+        # PDF's own extracted-table output (forms/ is required content,
+        # not test scaffolding) -- the regression this test guards against
+        # is specifically the STALE file, not the exact published set.
+        assert "current.jsonl" in published
+        assert "consent__pdftable0.jsonl" in published
         assert "stale.jsonl" not in published
         assert not (staging_dir / "stale.jsonl").exists()  # staging cleared, not just unpublished
 
@@ -471,7 +671,7 @@ def test_hermetic_workspace_removes_child_first_imported_inside_failed_context(t
         pass
 
     with pytest.raises(_Boom):
-        with _hermetic_phi_workspace(tmp_path, "AbsentChild") as (_workspace, _study):
+        with hermetic_phi_workspace(tmp_path, "AbsentChild"):
             probe = types.ModuleType(module_name)
             sys.modules[module_name] = probe
             phi_engine._hermetic_absence_probe = probe  # mirrors real import-system binding
@@ -496,7 +696,7 @@ def test_hermetic_workspace_restores_preexisting_child_identity(tmp_path: Path):
     parent_name, _, leaf = module_name.rpartition(".")
     original_module = sys.modules[module_name]
 
-    with _hermetic_phi_workspace(tmp_path, "PreexistingChild") as (_workspace, _study):
+    with hermetic_phi_workspace(tmp_path, "PreexistingChild"):
         import phi_engine.pipeline.dependencies as fresh_dependencies
 
         assert fresh_dependencies is not original_module
@@ -522,8 +722,8 @@ def test_hermetic_workspace_rebinds_kept_pipeline_lock_config(tmp_path: Path):
 
     original_config = pipeline_lock.config
 
-    with _hermetic_phi_workspace(tmp_path, "LockCfg") as (workspace, study):
+    with hermetic_phi_workspace(tmp_path, "LockCfg") as workspace:
         assert pipeline_lock.config is not original_config
-        assert pipeline_lock.lock_path_for(study).parent == workspace.resolve() / "tmp"
+        assert pipeline_lock.lock_path_for("LockCfg").parent == workspace.resolve() / "tmp"
 
     assert pipeline_lock.config is original_config

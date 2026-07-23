@@ -5,23 +5,10 @@ rules it drives in phi_engine.pipeline.run.run_pipeline: ESCALATION
 (value-profile-conflict) and AUTO-CLEAR (value-profile-closed-categorical).
 """
 
-from __future__ import annotations
-
 from phi_engine.pipeline.profile import (
     AUTO_CLEAR_MAX_DISTINCT,
     profile_column,
 )
-
-
-def _drop_phi_runtime_modules() -> None:
-    import sys
-
-    keep = {"phi_engine", "phi_engine.utils", "phi_engine.utils.pipeline_lock"}
-    for name in list(sys.modules):
-        if name in keep:
-            continue
-        if name.startswith("phi_engine."):
-            del sys.modules[name]
 
 
 def test_closed_categorical_column_is_auto_clearable():
@@ -98,32 +85,28 @@ def test_escalation_catches_phi_in_an_unexpectedly_named_column_end_to_end(tmp_p
     Without the profiler this would publish raw; with it, the column is
     force-dropped even though its NAME looked safe."""
     import json
-    import os
-    import shutil
+    import uuid
 
-    study = "ProfilerEscalationTest"
-    workspace = tmp_path / "ws"
+    from tests._workspace_harness import hermetic_phi_workspace, write_csv, write_pdf_table
+
+    study = f"ProfilerEscalationTest{uuid.uuid4().hex[:8]}"
     source = tmp_path / "src"
-    source.mkdir()
-    rows = [
-        {"SUBJID": f"S{i}", "PROCESS_TAG": f"{100 + i:03d}-{i:02d}-{1000 + i:04d}"}
-        for i in range(10)
-    ]
-    (source / "study.jsonl").write_text(
-        "\n".join(json.dumps(r) for r in rows), encoding="utf-8"
-    )
+    rows = [[f"S{i}", f"{100 + i:03d}-{i:02d}-{1000 + i:04d}"] for i in range(10)]
+    write_csv(source / "datasets" / "study.csv", ["SUBJID", "PROCESS_TAG"], rows)
+    # An extractable table (never lands in the organizer's own non-blocking
+    # review bucket) and a dictionary naming no dataset column (never
+    # creates a dependency recommendation) -- both would otherwise force
+    # exit_code 8 and obscure this test's actual subject (the profiler).
+    write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
+    write_csv(source / "data_dictionary" / "dict.csv", ["reference_code", "reference_label"], [["REF-01", "General study reference material"]])
 
-    original_workspace = os.environ.get("PHI_WORKSPACE")
-    original_study = os.environ.get("STUDY_NAME")
-    try:
-        os.environ["PHI_WORKSPACE"] = str(workspace)
-        os.environ["STUDY_NAME"] = study
-        _drop_phi_runtime_modules()
+    with hermetic_phi_workspace(tmp_path, study) as workspace:
         from phi_engine.pipeline.intake import intake_add
         from phi_engine.pipeline.organize import organize
         from phi_engine.pipeline.run import run_pipeline
 
-        intake_add(source, study)
+        intake_manifest = intake_add(source, study)
+        assert intake_manifest["status"] == "ready", intake_manifest["review_items"]
         organize(study)
         result = run_pipeline(study, "us")
 
@@ -135,13 +118,3 @@ def test_escalation_catches_phi_in_an_unexpectedly_named_column_end_to_end(tmp_p
         for line in published.read_text(encoding="utf-8").splitlines():
             row = json.loads(line)
             assert "PROCESS_TAG" not in row
-    finally:
-        if original_workspace is None:
-            os.environ.pop("PHI_WORKSPACE", None)
-        else:
-            os.environ["PHI_WORKSPACE"] = original_workspace
-        if original_study is None:
-            os.environ.pop("STUDY_NAME", None)
-        else:
-            os.environ["STUDY_NAME"] = original_study
-        _drop_phi_runtime_modules()

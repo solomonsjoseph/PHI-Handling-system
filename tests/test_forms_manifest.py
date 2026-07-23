@@ -1,68 +1,28 @@
 from __future__ import annotations
 
-import json
-import os
-import sys
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
 import yaml
 
-
-TEST_PHI_KEY_HEX = "0" * 64
-
-
-def _drop_phi_runtime_modules() -> None:
-    keep = {"phi_engine", "phi_engine.utils", "phi_engine.utils.pipeline_lock"}
-    for name in list(sys.modules):
-        if name in keep:
-            continue
-        if name.startswith("phi_engine.") or name.startswith("scripts.extraction.forms_manifest"):
-            del sys.modules[name]
+from tests._workspace_harness import hermetic_phi_workspace, write_csv, write_pdf_table
 
 
-@contextmanager
-def _workspace(tmp_path: Path, study: str = "ManifestStudy") -> Iterator[Path]:
-    old_workspace = os.environ.get("PHI_WORKSPACE")
-    old_study = os.environ.get("STUDY_NAME")
-    old_key = os.environ.get("PHI_KEY_PATH")
-    key = tmp_path / "phi_key"
-    key.write_text(TEST_PHI_KEY_HEX, encoding="utf-8")
-    key.chmod(0o600)
-    try:
-        os.environ["PHI_WORKSPACE"] = str(tmp_path / "workspace")
-        os.environ["STUDY_NAME"] = study
-        os.environ["PHI_KEY_PATH"] = str(key)
-        _drop_phi_runtime_modules()
-        yield Path(os.environ["PHI_WORKSPACE"])
-    finally:
-        if old_workspace is None:
-            os.environ.pop("PHI_WORKSPACE", None)
-        else:
-            os.environ["PHI_WORKSPACE"] = old_workspace
-        if old_study is None:
-            os.environ.pop("STUDY_NAME", None)
-        else:
-            os.environ["STUDY_NAME"] = old_study
-        if old_key is None:
-            os.environ.pop("PHI_KEY_PATH", None)
-        else:
-            os.environ["PHI_KEY_PATH"] = old_key
-        _drop_phi_runtime_modules()
+def _workspace(tmp_path: Path, study: str = "ManifestStudy"):
+    return hermetic_phi_workspace(tmp_path, study)
 
 
 def _write_source(tmp_path: Path) -> tuple[Path, dict[str, dict[str, Any]]]:
     source = tmp_path / "src"
-    (source / "datasets").mkdir(parents=True)
-    (source / "data_dictionary").mkdir()
-    (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
-    (source / "datasets" / "extra.csv").write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
-    (source / "data_dictionary" / "labs.csv").write_text("variable,label\nSUBJID,Subject\n", encoding="utf-8")
+    write_csv(source / "datasets" / "labs.csv", ["SUBJID", "AGE"], [["1", "40"]])
+    write_csv(source / "datasets" / "extra.csv", ["SUBJID", "AGE"], [["2", "41"]])
+    write_csv(source / "data_dictionary" / "labs.csv", ["variable", "label"], [["SUBJID", "Subject"]])
+    write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
     from phi_engine.pipeline.intake import intake_add
 
     intake = intake_add(source, "ManifestStudy")
+    assert intake["status"] == "ready", intake["review_items"]
     by_rel = {entry["relative_path"]: entry for entry in intake["entries"].values()}
     return source, by_rel
 

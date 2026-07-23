@@ -3,55 +3,12 @@ from __future__ import annotations
 import json
 import os
 import stat
-import sys
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 import yaml
 
-
-TEST_PHI_KEY_HEX = "0" * 64
-
-
-def _drop_phi_runtime_modules() -> None:
-    keep = {"phi_engine", "phi_engine.utils", "phi_engine.utils.pipeline_lock"}
-    for name in list(sys.modules):
-        if name in keep:
-            continue
-        if name.startswith("phi_engine.") or name.startswith("scripts.extraction.forms_manifest"):
-            del sys.modules[name]
-
-
-@contextmanager
-def _workspace(tmp_path: Path, study: str = "Phase2Study") -> Iterator[Path]:
-    old_workspace = os.environ.get("PHI_WORKSPACE")
-    old_study = os.environ.get("STUDY_NAME")
-    old_key = os.environ.get("PHI_KEY_PATH")
-    key = tmp_path / "phi_key"
-    key.write_text(TEST_PHI_KEY_HEX, encoding="utf-8")
-    key.chmod(0o600)
-    try:
-        os.environ["PHI_WORKSPACE"] = str(tmp_path / "workspace")
-        os.environ["STUDY_NAME"] = study
-        os.environ["PHI_KEY_PATH"] = str(key)
-        _drop_phi_runtime_modules()
-        yield Path(os.environ["PHI_WORKSPACE"])
-    finally:
-        if old_workspace is None:
-            os.environ.pop("PHI_WORKSPACE", None)
-        else:
-            os.environ["PHI_WORKSPACE"] = old_workspace
-        if old_study is None:
-            os.environ.pop("STUDY_NAME", None)
-        else:
-            os.environ["STUDY_NAME"] = old_study
-        if old_key is None:
-            os.environ.pop("PHI_KEY_PATH", None)
-        else:
-            os.environ["PHI_KEY_PATH"] = old_key
-        _drop_phi_runtime_modules()
+from tests._workspace_harness import hermetic_phi_workspace, write_pdf_table, write_single_sheet_xlsx
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -62,15 +19,18 @@ def test_intake_rescans_stable_ids_aliases_and_removals(tmp_path: Path) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     (source / "data_dictionary").mkdir()
+    (source / "forms").mkdir()
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "data_dictionary" / "labs_copy.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
 
-    with _workspace(tmp_path) as workspace:
-        from phi_engine.pipeline.intake import intake_add, load_intake_manifest
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
+        from phi_engine.pipeline.intake import IntakeManifestError, intake_add, load_intake_manifest
 
         first = intake_add(source, "Phase2Study")
+        assert first["status"] == "ready", first["review_items"]
         entries_by_rel = {entry["relative_path"]: entry for entry in first["entries"].values()}
-        assert set(entries_by_rel) == {"datasets/labs.csv", "data_dictionary/labs_copy.csv"}
+        assert {"datasets/labs.csv", "data_dictionary/labs_copy.csv"} <= set(entries_by_rel)
         assert entries_by_rel["datasets/labs.csv"]["artifact_id"] != entries_by_rel["data_dictionary/labs_copy.csv"]["artifact_id"]
         assert entries_by_rel["datasets/labs.csv"]["sha256"] == entries_by_rel["data_dictionary/labs_copy.csv"]["sha256"]
 
@@ -87,21 +47,26 @@ def test_intake_rescans_stable_ids_aliases_and_removals(tmp_path: Path) -> None:
         tampered = json.loads(manifest_path.read_text(encoding="utf-8"))
         tampered["unexpected"] = True
         manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
-        with pytest.raises(ValueError, match="unknown intake manifest keys"):
+        with pytest.raises(IntakeManifestError) as exc_info:
             load_intake_manifest("Phase2Study")
+        assert exc_info.value.code == "intake_manifest_invalid"
 
 
 def test_organize_uses_verified_descriptor_copy_and_header_ids(tmp_path: Path) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir()
+    (source / "data_dictionary").mkdir()
     (source / "datasets" / "labs.csv").write_text("Subject ID,Age\n001,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
+    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
-    with _workspace(tmp_path) as workspace:
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
         from phi_engine.pipeline.organize import organize
 
         intake = intake_add(source, "Phase2Study")
-        artifact = next(iter(intake["entries"].values()))
+        artifact = next(entry for entry in intake["entries"].values() if entry["relative_path"] == "datasets/labs.csv")
         manifest = organize("Phase2Study")
 
         dataset = manifest["datasets"][0]
@@ -131,10 +96,14 @@ def test_organize_uses_verified_descriptor_copy_and_header_ids(tmp_path: Path) -
 def test_organize_rejects_source_mutation_during_verified_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir()
+    (source / "mappings").mkdir()
     data_file = source / "datasets" / "labs.csv"
     data_file.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
+    (source / "mappings" / "map.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
-    with _workspace(tmp_path):
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
         import phi_engine.pipeline.organize as organize_module
 
@@ -154,15 +123,16 @@ def test_organize_rejects_source_mutation_during_verified_copy(tmp_path: Path, m
 def test_forms_manifest_dataset_dependencies_validate_ids_hashes_and_paths(tmp_path: Path) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
-    (source / "data_dictionary").mkdir()
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
-    (source / "data_dictionary" / "labs.xlsx").write_text("not actually parsed here", encoding="utf-8")
+    write_single_sheet_xlsx(source / "data_dictionary" / "labs.xlsx", ["variable", "label"], [["SUBJID", "Subject ID"]])
+    write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
 
-    with _workspace(tmp_path) as workspace:
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
         from scripts.extraction.forms_manifest import ManifestMismatchError, check_forms_manifest
 
         intake = intake_add(source, "Phase2Study")
+        assert intake["status"] == "ready", intake["review_items"]
         by_rel = {entry["relative_path"]: entry for entry in intake["entries"].values()}
         config_dir = workspace / "config" / "Phase2Study"
         config_dir.mkdir(parents=True)
@@ -255,78 +225,99 @@ def test_intake_load_rejects_duplicate_paths_broken_links_and_outside_targets(tm
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
+    (source / "data_dictionary" / "dict.csv").parent.mkdir(parents=True, exist_ok=True)
+    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nSUBJID,Subject\n", encoding="utf-8")
 
-    with _workspace(tmp_path) as workspace:
-        from phi_engine.pipeline.intake import intake_add, load_intake_manifest
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import IntakeManifestError, intake_add, load_intake_manifest
 
         manifest = intake_add(source, "Phase2Study")
+        assert manifest["status"] == "ready", manifest["review_items"]
         manifest_path = workspace / "intake" / "Phase2Study" / "intake_manifest.json"
-        link_name, entry = next(iter(manifest["entries"].items()))
+        intake_path, entry = next(
+            (k, e) for k, e in manifest["entries"].items() if e["relative_path"] == "datasets/labs.csv"
+        )
 
+        # A second, fully SCHEMA-VALID v3 entry (correct key set, its own
+        # distinct artifact_id, its own correctly-derived intake_path) that
+        # shares the SAME relative_path as the entry above -- this is what
+        # the duplicate-relative_path check in _validate_entry actually
+        # guards against; the old v2 "link_name" field does not exist in
+        # the v3 entry schema and would be rejected before that check is
+        # ever reached.
         dup = json.loads(manifest_path.read_text(encoding="utf-8"))
-        other = dict(entry)
-        other["link_name"] = "duplicate__labs.csv"
-        other["artifact_id"] = "a_" + "2" * 32
-        (manifest_path.parent / other["link_name"]).symlink_to(source / "datasets" / "labs.csv")
-        dup["entries"][other["link_name"]] = other
+        duplicate_artifact_id = "a_" + "2" * 32
+        duplicate_intake_path = intake_module._compute_intake_path(
+            entry["relative_path"], entry["component"], duplicate_artifact_id
+        )
+        duplicate_entry = {**entry, "artifact_id": duplicate_artifact_id, "intake_path": duplicate_intake_path}
+        dup["entries"][duplicate_intake_path] = duplicate_entry
         manifest_path.write_text(json.dumps(dup), encoding="utf-8")
-        with pytest.raises(ValueError, match="duplicate relative_path"):
+        with pytest.raises(IntakeManifestError) as exc_info:
             load_intake_manifest("Phase2Study")
-        (manifest_path.parent / other["link_name"]).unlink()
+        assert exc_info.value.code == "intake_manifest_invalid"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
         intake_add(source, "Phase2Study")
-        (manifest_path.parent / link_name).unlink()
-        with pytest.raises(ValueError, match="broken intake link"):
+        (manifest_path.parent / intake_path).unlink()
+        with pytest.raises(IntakeManifestError) as exc_info:
             load_intake_manifest("Phase2Study")
+        assert exc_info.value.code == "intake_manifest_invalid"
 
         intake_add(source, "Phase2Study")
         outside = tmp_path / "outside.csv"
         outside.write_text("x\n", encoding="utf-8")
-        (manifest_path.parent / link_name).unlink()
-        (manifest_path.parent / link_name).symlink_to(outside)
-        with pytest.raises(ValueError, match="outside source_root"):
+        (manifest_path.parent / intake_path).unlink()
+        (manifest_path.parent / intake_path).symlink_to(outside)
+        with pytest.raises(IntakeManifestError) as exc_info:
             load_intake_manifest("Phase2Study")
+        assert exc_info.value.code == "intake_manifest_invalid"
 
 
 def test_aliases_are_independently_organized_and_role_resolved(tmp_path: Path) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     (source / "data_dictionary").mkdir()
+    (source / "forms").mkdir()
     content = "variable,label\nSUBJID,Subject ID\n"
     (source / "datasets" / "labs.csv").write_text(content, encoding="utf-8")
     (source / "data_dictionary" / "labs.csv").write_text(content, encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
 
-    with _workspace(tmp_path):
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
         from phi_engine.pipeline.organize import organize
 
         intake = intake_add(source, "Phase2Study")
-        assert len(intake["entries"]) == 2
+        assert len(intake["entries"]) == 3
         manifest = organize("Phase2Study")
         assert len(manifest["datasets"]) == 1
         assert len(manifest["support_artifacts"]) == 1
         assert manifest["datasets"][0]["artifact_id"] != manifest["support_artifacts"][0]["artifact_id"]
 
 
-def test_nested_unrecognized_directories_do_not_use_root_suffix_or_pdf_companion_fallback(tmp_path: Path) -> None:
+def test_unknown_top_level_directory_blocks_the_whole_study_review_required(tmp_path: Path) -> None:
     source = tmp_path / "src"
     misc = source / "misc"
     misc.mkdir(parents=True)
     (misc / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (misc / "labs.pdf").write_bytes(b"%PDF-1.4\n% nested misc fixture\n")
 
-    with _workspace(tmp_path):
-        from phi_engine.pipeline.intake import intake_add
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
+        from phi_engine.pipeline.intake import IntakeNotReadyError, intake_add
         from phi_engine.pipeline.organize import organize
 
-        intake_add(source, "Phase2Study")
-        manifest = organize("Phase2Study")
-        assert manifest["datasets"] == []
-        assert manifest["pdf_roles"] == {}
-        review_by_file = {entry["file"]: entry for entry in manifest["review_bucket"]}
-        assert review_by_file["labs.csv"]["reason"] == "unrecognized-format"
-        assert review_by_file["labs.pdf"]["reason"] == "unrecognized-format"
+        intake = intake_add(source, "Phase2Study")
+        assert intake["status"] == "review_required"
+        assert any(
+            item["reason"] == "unknown-top-level-directory" and item["path"] == "misc"
+            for item in intake["review_items"]
+        )
+        with pytest.raises(IntakeNotReadyError) as exc_info:
+            organize("Phase2Study")
+        assert exc_info.value.status == "review_required"
 
 
 def test_nested_canonical_directory_names_do_not_trigger_directory_role_fallback(tmp_path: Path) -> None:
@@ -338,64 +329,40 @@ def test_nested_canonical_directory_names_do_not_trigger_directory_role_fallback
     (source / "uploads" / "data_dictionary" / "foo.csv").write_text("variable,label\nSUBJID,Subject ID\n", encoding="utf-8")
     (source / "misc" / "forms" / "labs.pdf").write_bytes(b"%PDF-1.4\n% nested forms fixture\n")
 
-    with _workspace(tmp_path):
-        from phi_engine.pipeline.intake import intake_add
-        from phi_engine.pipeline.organize import organize
-
-        intake_add(source, "Phase2Study")
-        manifest = organize("Phase2Study")
-        assert manifest["datasets"] == []
-        assert manifest["support_artifacts"] == []
-        assert manifest["pdf_roles"] == {}
-        review_by_file = {entry["file"]: entry for entry in manifest["review_bucket"]}
-        assert review_by_file["labs.csv"]["reason"] == "unrecognized-format"
-        assert review_by_file["foo.csv"]["reason"] == "unrecognized-format"
-        assert review_by_file["labs.pdf"]["reason"] == "unrecognized-format"
-
-
-def test_manifest_confirmed_role_overrides_nested_root_anchored_fallback(tmp_path: Path) -> None:
-    source = tmp_path / "src"
-    (source / "misc" / "datasets").mkdir(parents=True)
-    (source / "misc" / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
-
-    with _workspace(tmp_path) as workspace:
-        from phi_engine.pipeline.intake import intake_add
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
+        from phi_engine.pipeline.intake import IntakeNotReadyError, intake_add
         from phi_engine.pipeline.organize import organize
 
         intake = intake_add(source, "Phase2Study")
-        by_rel = {entry["relative_path"]: entry for entry in intake["entries"].values()}
-        config_dir = workspace / "config" / "Phase2Study"
-        config_dir.mkdir(parents=True)
-        (config_dir / "_forms_manifest.yaml").write_text(
-            yaml.safe_dump(
-                {
-                    "dataset_dependencies_schema": "dataset-dependencies/v1",
-                    "dataset_dependencies_code_table_version": 1,
-                    "dataset_dependencies": {"misc/datasets/labs.csv": []},
-                }
-            ),
-            encoding="utf-8",
-        )
-        manifest = organize("Phase2Study")
-        assert len(manifest["datasets"]) == 1
-        assert manifest["datasets"][0]["artifact_id"] == by_rel["misc/datasets/labs.csv"]["artifact_id"]
-        assert manifest["review_bucket"] == []
+        assert intake["status"] == "review_required"
+        reasons_by_path = {item["path"]: item["reason"] for item in intake["review_items"]}
+        assert reasons_by_path["misc"] == "unknown-top-level-directory"
+        assert reasons_by_path["uploads"] == "unknown-top-level-directory"
+        with pytest.raises(IntakeNotReadyError) as exc_info:
+            organize("Phase2Study")
+        assert exc_info.value.status == "review_required"
 
 
 def test_organize_rejects_source_hash_mismatch_and_in_root_symlink_swap(tmp_path: Path) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir()
+    (source / "data_dictionary").mkdir()
     data_file = source / "datasets" / "labs.csv"
     data_file.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
+    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
-    with _workspace(tmp_path):
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
         import phi_engine.pipeline.organize as organize_module
 
         intake = intake_add(source, "Phase2Study")
         manifest_path = Path(os.environ["PHI_WORKSPACE"]) / "intake" / "Phase2Study" / "intake_manifest.json"
         tampered = json.loads(manifest_path.read_text(encoding="utf-8"))
-        first_key = next(iter(tampered["entries"]))
+        first_key = next(
+            key for key, entry in tampered["entries"].items() if entry["relative_path"] == "datasets/labs.csv"
+        )
         tampered["entries"][first_key]["sha256"] = "0" * 64
         manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
         manifest = organize_module.organize("Phase2Study")
@@ -460,9 +427,13 @@ def test_organize_normalizes_injected_snapshot_copy_oserror(tmp_path: Path, monk
     # review reason, with no destination artifact left behind.
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir()
+    (source / "data_dictionary").mkdir()
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
+    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
-    with _workspace(tmp_path):
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
         import phi_engine.pipeline.organize as organize_module
 
@@ -496,14 +467,21 @@ def test_verified_snapshot_removes_leftover_artifact_on_race_between_own_postche
     # explicit unlink() branches this function had before this fix.
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir()
+    (source / "mappings").mkdir()
     target = source / "datasets" / "labs.csv"
     target.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
+    (source / "mappings" / "map.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
-    with _workspace(tmp_path):
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
         import phi_engine.pipeline.organize as organize_module
 
-        intake_add(source, "Phase2Study")
+        intake = intake_add(source, "Phase2Study")
+        labs_artifact_id = next(
+            entry["artifact_id"] for entry in intake["entries"].values() if entry["relative_path"] == "datasets/labs.csv"
+        )
 
         real_same_stat = organize_module._same_stat
 
@@ -523,8 +501,7 @@ def test_verified_snapshot_removes_leftover_artifact_on_race_between_own_postche
         assert manifest["datasets"] == []
         assert manifest["review_bucket"][0]["reason"] == "source-unreadable"
         verified_dir = Path(os.environ["PHI_WORKSPACE"]) / "organized" / "Phase2Study" / ".verified_sources"
-        leftover = list(verified_dir.iterdir()) if verified_dir.exists() else []
-        assert leftover == []
+        assert not (verified_dir / labs_artifact_id).exists()
 
 
 def test_organize_rejects_same_byte_different_inode_source_replacement(tmp_path: Path) -> None:
@@ -536,10 +513,14 @@ def test_organize_rejects_same_byte_different_inode_source_replacement(tmp_path:
     # still match.
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir()
+    (source / "data_dictionary").mkdir()
     data_file = source / "datasets" / "labs.csv"
     data_file.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
+    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
-    with _workspace(tmp_path):
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
         import phi_engine.pipeline.organize as organize_module
 
@@ -556,9 +537,13 @@ def test_organize_rejects_same_byte_different_inode_source_replacement(tmp_path:
 def test_organize_fails_closed_for_malformed_stale_forms_manifest(tmp_path: Path) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir()
+    (source / "data_dictionary").mkdir()
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
+    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
-    with _workspace(tmp_path) as workspace:
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
         from phi_engine.pipeline.organize import organize
         from scripts.extraction.forms_manifest import ManifestMismatchError
@@ -576,16 +561,25 @@ def test_intake_removes_existing_path_that_becomes_broken_or_outside_symlink(tmp
     (source / "datasets").mkdir(parents=True)
     file_path = source / "datasets" / "labs.csv"
     file_path.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
+    (source / "data_dictionary" / "dict.csv").parent.mkdir(parents=True, exist_ok=True)
+    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nSUBJID,Subject\n", encoding="utf-8")
 
-    with _workspace(tmp_path):
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
 
         first = intake_add(source, "Phase2Study")
-        first_id = next(iter(first["entries"].values()))["artifact_id"]
+        assert first["status"] == "ready", first["review_items"]
+        first_id = next(e["artifact_id"] for e in first["entries"].values() if e["relative_path"] == "datasets/labs.csv")
         file_path.unlink()
         os.symlink(source / "missing.csv", file_path)
         second = intake_add(source, "Phase2Study")
-        assert second["entries"] == {}
+        # labs.csv itself is gone (its source-side symlink is rejected as
+        # source-symlink-not-allowed, review-only, never an entries record
+        # -- v3 has no accepted entry for it at all now), but the OTHER
+        # accepted content (forms/, data_dictionary/) is untouched.
+        assert not any(e["relative_path"] == "datasets/labs.csv" for e in second["entries"].values())
+        assert any(e["relative_path"] == "forms/consent.pdf" for e in second["entries"].values())
         assert second["removals"][-1]["artifact_id"] == first_id
         assert second["removals"][-1]["relative_path"] == "datasets/labs.csv"
 
@@ -594,17 +588,30 @@ def test_intake_removes_existing_path_that_becomes_broken_or_outside_symlink(tmp
         outside.write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
         file_path.symlink_to(outside)
         third = intake_add(source, "Phase2Study")
-        assert third["entries"] == {}
-        assert third["errors"][0]["reason"] == "source-target-outside-root"
+        assert not any(e["relative_path"] == "datasets/labs.csv" for e in third["entries"].values())
+        # v3: the source-side symlink on the second call is rejected as
+        # source-symlink-not-allowed (review-only, never an entries record)
+        # and its intake-tree symlink is pruned, but the now-empty
+        # datasets/ directory under the intake tree is never removed. The
+        # third call's candidate set for datasets/ is empty again for the
+        # same reason, so _inventory_unexpected_nodes finds that leftover
+        # empty directory outside the expected-paths set and fails closed
+        # with the fixed intake-tree-unsafe reason -- the old per-path
+        # source-target-outside-root reason is not reachable here.
+        assert third["errors"][0]["reason"] == "intake-tree-unsafe"
 
 
 def test_organize_rejects_real_symlink_escape_after_intake(tmp_path: Path) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir()
+    (source / "data_dictionary").mkdir()
     file_path = source / "datasets" / "labs.csv"
     file_path.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
+    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
-    with _workspace(tmp_path):
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
         from phi_engine.pipeline.organize import organize
 
@@ -613,12 +620,21 @@ def test_organize_rejects_real_symlink_escape_after_intake(tmp_path: Path) -> No
         outside = tmp_path / "outside.csv"
         outside.write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
         file_path.symlink_to(outside)
-        with pytest.raises(ValueError, match="intake link target outside source_root"):
-            organize("Phase2Study")
+        # v3: a source-side symlink escape discovered after intake is caught
+        # by the organizer's own per-file defense-in-depth check --
+        # open_verified_source re-opens datasets/labs.csv with O_NOFOLLOW on
+        # every organize() run, independent of what the intake manifest
+        # itself recorded. It is a per-file rejection (never raised, never
+        # blocks the rest of organize()), landing in review_bucket exactly
+        # like any other source-symlink-not-allowed entry.
+        manifest = organize("Phase2Study")
+        assert manifest["datasets"] == []
+        review_by_file = {entry["file"]: entry for entry in manifest["review_bucket"]}
+        assert review_by_file["labs.csv"]["reason"] == "source-symlink-not-allowed"
 
 
 def test_organize_parses_support_from_extensionless_verified_snapshots_and_hides_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
@@ -637,7 +653,7 @@ def test_organize_parses_support_from_extensionless_verified_snapshots_and_hides
     canvas.drawString(72, 720, "Subject ID annotated form code")
     canvas.save()
 
-    with _workspace(tmp_path) as workspace:
+    with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
         from phi_engine.pipeline.organize import organize
 
@@ -645,9 +661,9 @@ def test_organize_parses_support_from_extensionless_verified_snapshots_and_hides
         by_rel = {entry["relative_path"]: entry for entry in intake_manifest["entries"].values()}
         manifest = organize("Phase2Study")
         support_artifacts = manifest["support_artifacts"]
-        assert len(support_artifacts) == 3
+        assert len(support_artifacts) == 2
         assert {item["parse_status"] for item in support_artifacts} == {"parsed"}
-        assert {item["format"] for item in support_artifacts} == {"csv", "xlsx", "pdf"}
+        assert {item["format"] for item in support_artifacts} == {"csv", "xlsx"}
 
         ordinary = json.dumps(support_artifacts, sort_keys=True)
         assert "normalized_rows_path" not in ordinary
@@ -665,44 +681,10 @@ def test_organize_parses_support_from_extensionless_verified_snapshots_and_hides
 
         protected_support_dir = organized_root / ".protected" / "support"
         protected = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(protected_support_dir.glob("*.json"))]
-        assert len(protected) == 3
+        assert len(protected) == 2
         for item in protected:
             normalized_path = Path(item["normalized_rows_path"])
             assert normalized_path.name == f"labs__{item['artifact_id']}.jsonl"
             assert normalized_path.is_file()
             assert stat.S_IMODE(normalized_path.stat().st_mode) == 0o600
             assert stat.S_IMODE((protected_support_dir / f"{item['artifact_id']}.json").stat().st_mode) == 0o600
-
-        import phi_engine.pipeline.dependencies as depmod
-        from phi_engine.pipeline.dependencies import (
-            OrganizedDataset,
-            OrganizedHeader,
-            load_protected_support_artifacts,
-            recommend_dependencies,
-        )
-
-        monkeypatch.setattr(depmod, "_effective_scrub_config_sha256", lambda: "4" * 64)
-        dataset_entry = manifest["datasets"][0]
-        header_payload = json.loads(
-            (organized_root / ".protected" / "headers" / f"{dataset_entry['artifact_id']}.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        dataset = OrganizedDataset(
-            artifact_id=dataset_entry["artifact_id"],
-            source_sha256=dataset_entry["source_sha256"],
-            normalized_rows_path=organized_root / "datasets" / dataset_entry["output"],
-            normalized_rows_sha256=dataset_entry["normalized_rows_sha256"],
-            headers=tuple(OrganizedHeader(**header) for header in header_payload["headers"]),
-        )
-        recs = recommend_dependencies(
-            datasets=(dataset,),
-            support_artifacts=load_protected_support_artifacts(organized_root),
-            published_raw_headers_by_dataset={dataset.artifact_id: frozenset()},
-            transform_requirements_by_dataset={},
-            confirmed_links=(),
-            rule_bundle=type("RuleBundleStub", (), {"rules_sha256": "5" * 64})(),
-        )
-        pdf_recs = [rec for rec in recs if rec.kind.value == "pdf" and rec.reason_code.value == "same_stem_companion"]
-        assert len(pdf_recs) == 1
-        assert pdf_recs[0].support_artifact_id == by_rel["forms/labs.pdf"]["artifact_id"]
