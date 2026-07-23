@@ -367,13 +367,14 @@ def _run_two_dataset_scenario(
         "load_intake_manifest",
         lambda *_: {"source_root": str(source_root), "status": "ready"},
     )
-    monkeypatch.setattr(pipeline_run, "organize", lambda *_: organize_manifest)
+    # dependency_relations is reused from _organize_locked's own result
+    # (see run.py's removal of _load_manifest_dependency_relations and its
+    # Path.resolve()/check_forms_manifest second source-root read) --
+    # never a separate check_forms_manifest mock here.
     monkeypatch.setattr(
         pipeline_run,
-        "check_forms_manifest",
-        lambda *_: SimpleNamespace(
-            dependency_relations={"datasets/alpha.csv": relations}
-        ),
+        "_organize_locked",
+        lambda *_: {**organize_manifest, "dependency_relations": {"datasets/alpha.csv": relations}},
     )
     monkeypatch.setattr(pipeline_run, "load_review_decisions", lambda *_: {})
     monkeypatch.setattr(pipeline_run, "load_study_dependency_decisions", lambda *_: decisions)

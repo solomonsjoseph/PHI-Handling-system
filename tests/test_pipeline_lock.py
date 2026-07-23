@@ -731,7 +731,7 @@ def test_locked_body_creates_run_and_resolves_rulebook_before_mutable_intake(
     monkeypatch.setattr(pipeline_run, "load_study_privacy_config", record_load_privacy)
     monkeypatch.setattr(pipeline_run, "resolve_rulebook", record_resolve)
     monkeypatch.setattr(pipeline_run, "load_intake_manifest", record_load_manifest)
-    monkeypatch.setattr(pipeline_run, "organize", record_organize)
+    monkeypatch.setattr(pipeline_run, "_organize_locked", record_organize)
     monkeypatch.setattr(config, "ORGANIZED_DIR", tmp_path / "organized")
     monkeypatch.setattr(config, "RAW_DATA_DIR", tmp_path / "raw")
 

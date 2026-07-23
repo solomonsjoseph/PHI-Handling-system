@@ -513,3 +513,150 @@ def test_main_does_not_swallow_spoofed_same_named_exception(monkeypatch, tmp_pat
     captured = capsys.readouterr()
     assert spoofed_payload not in captured.err
     assert captured.err == ""
+
+
+# --- lexical --workspace preservation: symlinked / dotdot-after-symlink CLI cases -------------
+
+
+def _run_cli_raw(args: list[str]) -> subprocess.CompletedProcess:
+    """Like ``_run_cli`` but WITHOUT its ``data/raw/dummy`` pre-seed side
+    effect. Every test using this helper always supplies an explicit
+    ``--study`` (so config's own STUDY_NAME auto-detection never runs),
+    and the workspace argument itself may be a symlink or contain a ``..``
+    segment -- a pre-seeding ``mkdir`` through that argument would write
+    through the very evidence these tests assert is never followed."""
+    env = dict(os.environ)
+    env.pop("STUDY_NAME", None)
+    env.pop("PHI_WORKSPACE", None)
+    return subprocess.run(
+        [sys.executable, "-m", "phi_engine", *args],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink safety")
+def test_symlinked_workspace_argument_yields_fixed_code_no_write_through(tmp_path: Path) -> None:
+    """``--workspace`` pointing AT a symlink (distinct from
+    ``test_symlinked_intake_dir_yields_fixed_code_no_traceback`` above,
+    where only ``intake/`` inside an already-real workspace is symlinked)
+    must fail the same way: the CLI must lexically preserve the argument
+    (expand ``~``/prefix cwd only) instead of ``Path.resolve()``-ing it,
+    or the symlink evidence is erased before config's descriptor-relative
+    NOFOLLOW ancestry walkers ever get a chance to reject it."""
+    real_workspace = tmp_path / "real-workspace"
+    real_workspace.mkdir()
+    workspace_link = tmp_path / "workspace-link"
+    workspace_link.symlink_to(real_workspace)
+    source = tmp_path / "source"
+    _make_canonical_source(source, sentinel="unused")
+
+    result = _run_cli_raw(
+        ["intake", "--study", "SymlinkWsStudy", "--source", str(source), "--workspace", str(workspace_link)]
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "intake-tree-unsafe\n"
+    assert "Traceback" not in result.stderr
+    assert workspace_link.is_symlink()  # never replaced
+    assert list(real_workspace.iterdir()) == []  # no write-through
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink safety")
+def test_dotdot_after_symlink_workspace_argument_yields_fixed_code_no_write_through(tmp_path: Path) -> None:
+    """A ``..`` segment placed AFTER a symlink component in ``--workspace``
+    must not be silently collapsed by the CLI -- collapsing it would erase
+    the symlink evidence exactly like ``Path.resolve()`` would. It must
+    reach the descriptor-relative walker lexically intact and fail the
+    same fixed way, never writing through the symlink target."""
+    real = tmp_path / "real"
+    (real / "sibling").mkdir(parents=True)
+    (real / "escape").mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real / "sibling")
+    source = tmp_path / "source"
+    _make_canonical_source(source, sentinel="unused")
+
+    result = _run_cli_raw(
+        [
+            "intake",
+            "--study",
+            "DotDotWsStudy",
+            "--source",
+            str(source),
+            "--workspace",
+            str(link / ".." / "escape"),
+        ]
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "intake-tree-unsafe\n"
+    assert "Traceback" not in result.stderr
+    assert list((real / "escape").iterdir()) == []  # no write-through
+
+
+# --- shared study-name validation: explicit --study rejected before STUDY_NAME/config ----------
+
+
+@pytest.mark.parametrize(
+    "study",
+    [
+        "../escape",
+        "nested/study",
+        "trailing.",
+        "A" * 129,
+        "bad name",
+        "bad@name",
+        "CON",
+        "com1.txt",
+    ],
+    ids=[
+        "path-traversal",
+        "path-separator",
+        "dot-ending",
+        "overlong",
+        "invalid-char-space",
+        "invalid-char-at",
+        "windows-reserved-bare",
+        "windows-reserved-with-extension",
+    ],
+)
+def test_invalid_explicit_study_yields_fixed_code_before_config_import(tmp_path: Path, study: str) -> None:
+    """Every distinct invalid-name category (path-like, dot-ending,
+    overlong, invalid-character, Windows-reserved) collapses to the SAME
+    fixed ``invalid_study_name`` public code, exit 2, empty stdout, and no
+    traceback/path leakage -- validated through the shared dependency-free
+    validator BEFORE ``STUDY_NAME`` is set or ``phi_engine.config.config``
+    is imported, so config's own defense-in-depth STUDY_NAME check is
+    never reached and can never chain a second traceback."""
+    workspace = tmp_path / "ws"
+
+    result = _run_cli_raw(["status", "--study", study, "--workspace", str(workspace)])
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "invalid_study_name\n"
+    assert "Traceback" not in result.stderr
+    assert str(tmp_path) not in result.stderr
+    assert not workspace.exists()  # no config-driven directory creation ever ran
+
+
+def test_valid_study_name_unaffected_by_shared_validator(tmp_path: Path) -> None:
+    """A conservative, always-valid study name must still work end to end
+    through the CLI -- the shared validator must not have narrowed the
+    accepted set relative to the pre-existing contract."""
+    workspace = tmp_path / "ws"
+    source = tmp_path / "source"
+    _make_canonical_source(source, sentinel="unused")
+
+    result = _run_cli_raw(
+        ["intake", "--study", "Valid_Study-01.alpha", "--source", str(source), "--workspace", str(workspace)]
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["study"] == "Valid_Study-01.alpha"

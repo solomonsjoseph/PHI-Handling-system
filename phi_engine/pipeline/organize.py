@@ -19,11 +19,38 @@ from phi_engine.audit.review_paths import organizer_review_path
 from phi_engine.pipeline.dependencies import DependencyKind, OrganizedHeader, SupportParseStatus
 from phi_engine.pipeline.intake import IntakeNotReadyError, load_intake_manifest
 from phi_engine.pipeline.support_files import parse_support_artifact
-from phi_engine.pipeline.verified_source import FileIdentity, VerifiedSourceError, open_verified_source
+from phi_engine.pipeline.verified_source import FileIdentity, VerifiedSourceError, _open_from_root_fd, _open_pinned_root
 from phi_engine.security.phi_review import normalize_header
 from phi_engine.utils._extraction_io.sheet_split import promote_header, split_sheet_into_tables
+from phi_engine.utils.pipeline_lock import held_lock_path, lock_path_for, pipeline_lock
 
-__all__ = ["intake_manifest_sha", "organize", "_copy_descriptor_to_verified"]
+__all__ = ["intake_manifest_sha", "organize", "OrganizerLockNotHeldError", "_copy_descriptor_to_verified"]
+
+
+class OrganizerLockNotHeldError(RuntimeError):
+    """Typed, value-free failure: ``_organize_locked`` was invoked without
+    the caller already holding ``pipeline_lock(study)``. ``_organize_locked``
+    is documented lock-required (see its own docstring); this enforces
+    that contract at entry using the existing per-thread lock-ownership
+    machinery (``held_lock_path``) instead of trusting caller discipline
+    alone -- an unlocked direct call fails closed with this fixed code
+    before any read or write, never a raw study name or path."""
+
+    code = "organizer_lock_not_held"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+def _require_pipeline_lock_owned(study: str) -> None:
+    """Fail closed unless the CALLING THREAD already holds
+    ``pipeline_lock(study)`` -- via ``organize()``'s own wrapper, or via
+    run.py's ``run_pipeline`` (which acquires the identical non-reentrant
+    per-study lock before ``_run_pipeline_locked`` calls this module's
+    lock-required body directly). Reuses the existing per-thread
+    lock-ownership check rather than a new bespoke registry."""
+    if held_lock_path() != lock_path_for(study):
+        raise OrganizerLockNotHeldError()
 
 
 def _normalized_source_stem(relative_path: str) -> str:
@@ -187,7 +214,7 @@ def _same_stat(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
-def _verified_snapshot(entry: dict[str, Any], source_root: Path, verified_dir: Path) -> tuple[Path | None, str | None, str | None]:
+def _verified_snapshot(entry: dict[str, Any], root_fd: int, verified_dir: Path) -> tuple[Path | None, str | None, str | None]:
     relative_path = str(entry["relative_path"])
     try:
         expected_identity = FileIdentity(
@@ -199,19 +226,20 @@ def _verified_snapshot(entry: dict[str, Any], source_root: Path, verified_dir: P
     except (KeyError, TypeError, ValueError):
         return None, None, "source-unreadable"
 
-    # open_verified_source's own pre/post identity check (against
-    # expected_identity, and again on exit) can override a pending `return`
-    # from inside the `with` block with its own generic source-unreadable
-    # VerifiedSourceError. detected_reason/detected_sha survive that
-    # override (they are set before the return, in this enclosing scope) so
-    # the more specific organizer-detected reason is what actually gets
-    # reported, while a genuine identity mismatch this function never
-    # noticed itself still fails closed via the except branch below.
+    # _open_from_root_fd's own pre/post identity check (via the shared
+    # _open_verified_core, against expected_identity, and again on exit)
+    # can override a pending `return` from inside the `with` block with
+    # its own generic source-unreadable VerifiedSourceError.
+    # detected_reason/detected_sha survive that override (they are set
+    # before the return, in this enclosing scope) so the more specific
+    # organizer-detected reason is what actually gets reported, while a
+    # genuine identity mismatch this function never noticed itself still
+    # fails closed via the except branch below.
     detected_reason: str | None = None
     detected_sha: str | None = None
     dest = verified_dir / str(entry["artifact_id"])
     try:
-        with open_verified_source(source_root, relative_path, expected_identity=expected_identity) as fd:
+        with _open_from_root_fd(root_fd, relative_path, expected_identity=expected_identity) as fd:
             pre = os.fstat(fd)
             copied_sha = _copy_descriptor_to_verified(fd, dest)
             post = os.fstat(fd)
@@ -226,7 +254,7 @@ def _verified_snapshot(entry: dict[str, Any], source_root: Path, verified_dir: P
                 return None, detected_sha, detected_reason
             return dest, copied_sha, None
     except VerifiedSourceError as exc:
-        # open_verified_source's own post-yield identity re-check (fired
+        # _open_from_root_fd's own post-yield identity re-check (fired
         # after the `with` block already returned normally, i.e. a race
         # this function's own pre/post fstat comparison never caught) can
         # land here even though _copy_descriptor_to_verified already wrote
@@ -239,7 +267,7 @@ def _verified_snapshot(entry: dict[str, Any], source_root: Path, verified_dir: P
         return None, None, exc.reason
     except OSError:
         # fstat/dup/lseek/read/write/fsync/rename failures during the
-        # snapshot copy itself -- distinct from anything open_verified_source
+        # snapshot copy itself -- distinct from anything _open_from_root_fd
         # already normalizes. Never leak the raw OSError text; clean up any
         # artifact the copy may have partially produced before this point.
         dest.unlink(missing_ok=True)
@@ -263,7 +291,7 @@ class _Router:
         intake_dir: Path,
         datasets_dir: Path,
         organized_root: Path,
-        manifest: dict[str, Any],
+        root_fd: int,
     ) -> None:
         self.study = study
         self.intake_dir = intake_dir
@@ -277,7 +305,11 @@ class _Router:
         self.pdf_roles: dict[str, dict[str, Any]] = {}
         self.review_bucket: list[dict[str, Any]] = []
         self._used_stems: dict[str, str] = {}
-        self.source_root = Path(str(manifest["source_root"])).resolve(strict=True)
+        # Held for the router's entire lifetime -- never re-derived from
+        # source_root's lexical pathname; see _organize_locked's own
+        # docstring for why this single pinned descriptor is threaded
+        # through every verified snapshot instead.
+        self.root_fd = root_fd
 
     def _role_for(self, entry: dict[str, Any]) -> str:
         component = str(entry.get("component", "_unclassified"))
@@ -290,7 +322,7 @@ class _Router:
         return _unique_stem(base_stem, link_name, self._used_stems)
 
     def _snapshot(self, link_name: str, entry: dict[str, Any]) -> Path | None:
-        snapshot, copied_sha, reason = _verified_snapshot(entry, self.source_root, self.verified_dir)
+        snapshot, copied_sha, reason = _verified_snapshot(entry, self.root_fd, self.verified_dir)
         if reason is not None:
             self._review(link_name, entry, reason, copied_sha=copied_sha)
             return None
@@ -460,6 +492,69 @@ def intake_manifest_sha(manifest: dict[str, Any]) -> str:
 
 
 def organize(study: str) -> dict[str, Any]:
+    """Public standalone entrypoint. Holds the per-study pipeline lock for
+    the ENTIRE operation -- manifest load/status gate through every write
+    -- so a concurrent re-intake can never mutate the intake decision this
+    call is acting on: whichever of organize()/intake_add() acquires the
+    non-reentrant per-study lock first serializes the other out with an
+    immediate PipelineBusyError, never a stale in-flight read. See
+    ``_organize_locked`` for the lock-required body; ``_run_pipeline_locked``
+    (which already owns this same lock for the whole run) calls that body
+    directly, since re-entering this wrapper would itself raise
+    PipelineBusyError."""
+    with pipeline_lock(study):
+        return _organize_locked(study)
+
+
+def _dataset_component_basenames(entries: dict[str, dict[str, Any]]) -> tuple[str, ...]:
+    """Recreate the exact basename set check_forms_manifest previously
+    derived from an ordinary (symlink-following) top-level directory
+    listing of source_root/datasets -- from the intake manifest's
+    already-verified 'datasets' component entries instead, so this
+    metadata read never touches source_root's filesystem at all. Only
+    entries directly under datasets/ (not a nested subdirectory) are
+    included, matching the prior non-recursive Path.iterdir() exactly;
+    'datasets' component entries are already restricted to the same
+    accepted suffixes check_forms_manifest's own scan filtered for, by
+    intake's closed source-format matrix."""
+    names: list[str] = []
+    for entry in entries.values():
+        if entry.get("component") != "datasets":
+            continue
+        rel = PurePosixPath(str(entry.get("relative_path", "")))
+        if rel.parent == PurePosixPath("datasets"):
+            names.append(rel.name)
+    return tuple(sorted(names))
+
+
+def _require_pinned_root_unchanged(source_root: Path, root_fd: int) -> None:
+    """Fail closed with the SAME fixed reason open_verified_source uses
+    for any other identity drift if source_root's LEXICAL identity no
+    longer matches the descriptor _open_pinned_root just pinned -- e.g. a
+    rename+symlink-replace race landing in the instant between the
+    ancestry walk completing and this check running, a window the walk
+    itself cannot observe since it already finished. A single no-follow
+    lstat is used purely for identity comparison, never to open or read
+    through source_root's pathname; every subsequent read of source
+    content in this operation goes through root_fd itself instead."""
+    try:
+        pinned = os.fstat(root_fd)
+        current = os.lstat(source_root)
+    except OSError:
+        raise VerifiedSourceError("source-unreadable") from None
+    if (current.st_dev, current.st_ino) != (pinned.st_dev, pinned.st_ino):
+        raise VerifiedSourceError("source-unreadable")
+
+
+def _organize_locked(study: str) -> dict[str, Any]:
+    """Lock-required body. Caller MUST already hold pipeline_lock(study)
+    -- via this module's own organize() wrapper, or via run.py's
+    run_pipeline, which acquires the identical non-reentrant per-study
+    lock before _run_pipeline_locked calls this function directly. That
+    contract is enforced below, not just documented: an unlocked direct
+    call raises OrganizerLockNotHeldError before any read or write."""
+    _require_pipeline_lock_owned(study)
+
     intake_dir = Path(config.INTAKE_DIR) / study
     manifest = load_intake_manifest(study)
     status = manifest.get("status")
@@ -470,36 +565,59 @@ def organize(study: str) -> dict[str, Any]:
 
     from scripts.extraction.forms_manifest import check_forms_manifest
 
-    source_root = Path(str(manifest["source_root"])).resolve(strict=True)
-    check_forms_manifest(source_root / "datasets")
+    # Pin the source root exactly ONCE and hold that SAME descriptor
+    # through the forms-manifest metadata read below and every per-entry
+    # verified snapshot in the routing loop -- never Path.resolve()
+    # (silently follows a symlink placed anywhere in source_root's
+    # ancestry) and never an ordinary Path.exists()/is_dir()/iterdir()/
+    # open() on source_root or any descendant. _require_pinned_root_
+    # unchanged closes the window between the ancestry walk completing and
+    # this check running: a swap landing there fails closed immediately,
+    # before check_forms_manifest, before organized/ is deleted/recreated,
+    # and before anything else is written.
+    source_root = Path(str(manifest["source_root"]))
+    root_fd = _open_pinned_root(source_root)
+    try:
+        _require_pinned_root_unchanged(source_root, root_fd)
 
-    organized_root = Path(config.ORGANIZED_DIR) / study
-    datasets_dir = organized_root / "datasets"
-    if organized_root.exists():
-        shutil.rmtree(organized_root)
-    datasets_dir.mkdir(parents=True, exist_ok=True)
+        # The forms-manifest gate's dataset inventory is derived from the
+        # already-verified intake entries, never from a fresh (symlink-
+        # following) directory listing of source_root/datasets.
+        manifest_check = check_forms_manifest(
+            source_root / "datasets",
+            study=study,
+            actual_files=_dataset_component_basenames(entries),
+        )
 
-    router = _Router(
-        study,
-        intake_dir,
-        datasets_dir,
-        organized_root,
-        manifest,
-    )
+        organized_root = Path(config.ORGANIZED_DIR) / study
+        datasets_dir = organized_root / "datasets"
+        if organized_root.exists():
+            shutil.rmtree(organized_root)
+        datasets_dir.mkdir(parents=True, exist_ok=True)
 
-    for link_name, entry in sorted(entries.items(), key=lambda item: item[1].get("relative_path", item[0])):
-        role = router._role_for(entry)
-        if role == "dataset":
-            router.route_dataset(link_name, entry)
-        elif role == "dictionary":
-            router.route_support(link_name, entry, DependencyKind.DICTIONARY)
-        elif role == "mapping":
-            router.route_support(link_name, entry, DependencyKind.MAPPING)
-        # role in {"pdf", "_unclassified"}: pdf routed in the second pass below;
-        # _unclassified is never parsed.
-    for link_name, entry in sorted(entries.items(), key=lambda item: item[1].get("relative_path", item[0])):
-        if router._role_for(entry) == "pdf":
-            router.route_pdf(link_name, entry)
+        router = _Router(
+            study,
+            intake_dir,
+            datasets_dir,
+            organized_root,
+            root_fd,
+        )
+
+        for link_name, entry in sorted(entries.items(), key=lambda item: item[1].get("relative_path", item[0])):
+            role = router._role_for(entry)
+            if role == "dataset":
+                router.route_dataset(link_name, entry)
+            elif role == "dictionary":
+                router.route_support(link_name, entry, DependencyKind.DICTIONARY)
+            elif role == "mapping":
+                router.route_support(link_name, entry, DependencyKind.MAPPING)
+            # role in {"pdf", "_unclassified"}: pdf routed in the second pass below;
+            # _unclassified is never parsed.
+        for link_name, entry in sorted(entries.items(), key=lambda item: item[1].get("relative_path", item[0])):
+            if router._role_for(entry) == "pdf":
+                router.route_pdf(link_name, entry)
+    finally:
+        os.close(root_fd)
 
     audit_dir = Path(config.STUDY_AUDIT_DIR) if study == config.STUDY_NAME else (Path(config.OUTPUT_DIR) / study / "audit")
     review_path = organizer_review_path(audit_dir)
@@ -520,4 +638,8 @@ def organize(study: str) -> dict[str, Any]:
     manifest_path = organized_root / "organize_manifest.json"
     manifest_path.write_text(json.dumps(organize_manifest, indent=2, sort_keys=True, default=_json_default), encoding="utf-8")
     manifest_path.chmod(0o600)
+    # Attached AFTER the on-disk write above so organize_manifest.json's
+    # persisted shape is unchanged; run.py reuses this in-memory result
+    # directly instead of performing its own second source-derived read.
+    organize_manifest["dependency_relations"] = manifest_check.dependency_relations
     return organize_manifest

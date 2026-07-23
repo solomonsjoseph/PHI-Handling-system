@@ -54,6 +54,36 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Dependency-free (zero phi_engine imports of its own -- see its module
+# docstring) -- safe to import eagerly at module scope, unlike every other
+# typed exception below, which is imported LAZILY only inside main()'s
+# except block because it lives under phi_engine.config/pipeline/utils and
+# those packages must not be imported before _set_workspace_env has set
+# PHI_WORKSPACE/STUDY_NAME.
+from phi_engine.study_name import (
+    STUDY_NAME_INVALID_CODE,
+    InvalidStudyNameError,
+    validate_study_name,
+)
+
+
+def _lexical_workspace_path(raw: str) -> str:
+    """Expand ``~`` and, for a relative path, prefix the shell's cwd --
+    WITHOUT resolving symlinks, normalizing, or collapsing ``..`` segments.
+
+    Mirrors ``phi_engine.config.config.BASE_DIR``'s lexical-preservation
+    contract exactly (same expand-then-cwd-join construction, deliberately
+    never ``Path.resolve()``/``os.path.abspath()``): a workspace argument
+    with a symlinked component, or a literal ``..`` segment that would
+    otherwise silently erase one, must reach the descriptor-relative
+    NOFOLLOW ancestry walkers in ``phi_engine.utils.pipeline_lock``/
+    ``phi_engine.pipeline.intake`` with that evidence intact, or those
+    walks (which reject symlinks AND ``..``/``.`` segments themselves) can
+    never see it to reject it with ``intake-tree-unsafe``.
+    """
+    path = Path(raw).expanduser()
+    return str(path if path.is_absolute() else Path.cwd() / path)
+
 
 def _set_workspace_env(args: argparse.Namespace) -> None:
     """Set PHI_WORKSPACE/STUDY_NAME BEFORE any phi_engine.config import.
@@ -64,11 +94,20 @@ def _set_workspace_env(args: argparse.Namespace) -> None:
     and workspace-relative (never study-relative), so a study-less intake
     invocation must not let config's import-time env fallback claim any
     study identity for this process.
+
+    An explicit ``--study`` is validated through the shared dependency-free
+    :func:`validate_study_name` BEFORE it is written to ``STUDY_NAME`` or
+    ``phi_engine.config.config`` is imported -- an invalid value must never
+    reach config's own (defense-in-depth) STUDY_NAME check, whose failure
+    partway through config's module execution is what previously produced
+    a raw, chained traceback instead of this module's fixed-code contract.
     """
     if getattr(args, "workspace", None):
-        os.environ["PHI_WORKSPACE"] = str(Path(args.workspace).resolve())
-    if getattr(args, "study", None):
-        os.environ["STUDY_NAME"] = args.study
+        os.environ["PHI_WORKSPACE"] = _lexical_workspace_path(args.workspace)
+    study = getattr(args, "study", None)
+    if study:
+        validate_study_name(study)
+        os.environ["STUDY_NAME"] = study
     else:
         # An intake invocation that omits --study must be study-neutral
         # even under an inherited STUDY_NAME (e.g. a stale parent-shell
@@ -347,6 +386,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
+    except InvalidStudyNameError:
+        # Value-free AND dependency-free (phi_engine.study_name has zero
+        # phi_engine imports of its own, already imported at module scope
+        # above) -- classifying this exception NEVER re-imports
+        # phi_engine.config.config, even when THAT module's own STUDY_NAME
+        # defense-in-depth check is what raised it (reachable only via an
+        # inherited environment STUDY_NAME that bypassed
+        # _set_workspace_env's own up-front validation, since a --study
+        # argument is validated and rejected before config is ever
+        # imported). Re-importing a config module whose own execution just
+        # failed with this same exception would only raise it again from
+        # scratch, producing a second, chained traceback.
+        print(STUDY_NAME_INVALID_CODE, file=sys.stderr)
+        return 2
     except Exception as exc:
         from phi_engine.config.config import LocalLLMConfigurationError
         from phi_engine.pipeline.intake import IntakeManifestError

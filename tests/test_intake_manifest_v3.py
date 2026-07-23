@@ -877,9 +877,9 @@ def test_note_fsync_failure_after_rename_restores_absence(tmp_path: Path) -> Non
 
         original_atomic_write = intake_module._atomic_write_in_dir
 
-        def write_rename_then_fail(dir_fd, filename, payload, mode):
+        def write_rename_then_fail(dir_fd, filename, payload, mode, *, on_committed=None):
             if filename != "intake_review.md":
-                return original_atomic_write(dir_fd, filename, payload, mode)
+                return original_atomic_write(dir_fd, filename, payload, mode, on_committed=on_committed)
             # Reproduce the real write+fsync+rename sequence verbatim (the
             # note IS durably renamed into place), then fail exactly where
             # the real function's directory fsync would run next -- a
@@ -895,6 +895,9 @@ def test_note_fsync_failure_after_rename_restores_absence(tmp_path: Path) -> Non
             finally:
                 os.close(fd)
             os.rename(temp_name, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            if on_committed is not None:
+                info = os.lstat(filename, dir_fd=dir_fd)
+                on_committed((info.st_dev, info.st_ino))
             raise OSError("simulated fsync failure after note rename")
 
         intake_module._atomic_write_in_dir = write_rename_then_fail
@@ -1009,6 +1012,204 @@ def test_removal_then_reappearance_gets_new_artifact_id(tmp_path: Path) -> None:
         assert new_id != old_id
 
 
+def test_removing_last_dataset_yields_review_required_and_stays_loadable(tmp_path: Path) -> None:
+    """Removing the only dataset leaves the ``datasets/`` component empty
+    -- a blocking review item, not an error -- and the directory that
+    entry's now-stale link lived under must be pruned so the manifest
+    THIS call persists is still loadable on the very next call."""
+    source = tmp_path / "source"
+    _make_canonical_source(source)
+
+    with _workspace(tmp_path) as workspace:
+        from phi_engine.pipeline.intake import intake_add, load_intake_manifest
+
+        first = intake_add(source, "LastDatasetStudy")
+        assert first["status"] == "ready"
+        assert len(first["entries"]) == 3
+
+        (source / "datasets" / "labs.csv").unlink()
+        second = intake_add(source, "LastDatasetStudy")
+
+        assert second["status"] == "review_required"
+        assert not second["errors"]
+        reasons = {item["reason"] for item in second["review_items"]}
+        assert "missing-component-content" in reasons
+        assert "datasets/labs.csv" not in _entries_by_rel(second)
+
+        study_dir = workspace / "intake" / "LastDatasetStudy"
+        assert not (study_dir / "datasets").exists()
+
+        # the manifest THIS call just persisted must load cleanly, not
+        # raise intake_manifest_invalid over the pruned-away directory
+        reloaded = load_intake_manifest("LastDatasetStudy")
+        assert reloaded == second
+
+
+def test_removing_last_mapping_keeps_ready_when_dictionary_remains(tmp_path: Path) -> None:
+    """The optional support group is satisfied by EITHER
+    ``data_dictionary/`` or ``mappings/``: removing the only mapping
+    file while ``data_dictionary/`` still has content must not demote
+    status, and the now-empty ``mappings/`` directory must be pruned so
+    the manifest stays loadable."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir(parents=True)
+    (source / "data_dictionary").mkdir(parents=True)
+    (source / "mappings").mkdir(parents=True)
+    (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+    (source / "mappings" / "map.csv").write_text("from,to\nA,B\n", encoding="utf-8")
+
+    with _workspace(tmp_path) as workspace:
+        from phi_engine.pipeline.intake import intake_add, load_intake_manifest
+
+        first = intake_add(source, "LastMappingStudy")
+        assert first["status"] == "ready"
+        assert len(first["entries"]) == 4
+
+        (source / "mappings" / "map.csv").unlink()
+        second = intake_add(source, "LastMappingStudy")
+
+        assert second["status"] == "ready"
+        assert not second["review_items"]
+        assert not second["errors"]
+        assert "mappings/map.csv" not in _entries_by_rel(second)
+
+        study_dir = workspace / "intake" / "LastMappingStudy"
+        assert not (study_dir / "mappings").exists()
+
+        reloaded = load_intake_manifest("LastMappingStudy")
+        assert reloaded == second
+
+
+def test_pruned_directory_rollback_recreates_empty_component_dir(tmp_path: Path) -> None:
+    """A reconcile attempt that successfully prunes the last entry (and
+    its now-empty directory) under a component, then fails during the
+    manifest commit, must recreate that pruned directory on rollback --
+    not leave the tree one directory short of its exact prior shape."""
+    source = tmp_path / "source"
+    _make_canonical_source(source)
+
+    with _workspace(tmp_path) as workspace:
+        from phi_engine.pipeline.intake import intake_add
+
+        first = intake_add(source, "PruneDirRollbackStudy")
+        assert first["status"] == "ready"
+        study_dir = workspace / "intake" / "PruneDirRollbackStudy"
+        manifest_path = study_dir / "intake_manifest.json"
+        prior_bytes = manifest_path.read_bytes()
+        prior_tree = _snapshot_tree(study_dir)
+
+        (source / "forms" / "consent.pdf").unlink()  # empties forms/, the ONLY forms entry
+
+        real_write = os.write
+
+        def failing_write(fd, data):
+            if data.startswith(b'{\n  "entries"'):
+                raise OSError("simulated disk failure during update manifest write")
+            return real_write(fd, data)
+
+        os.write = failing_write
+        try:
+            with pytest.raises(OSError):
+                intake_add(source, "PruneDirRollbackStudy")
+        finally:
+            os.write = real_write
+
+        assert manifest_path.read_bytes() == prior_bytes
+        assert _snapshot_tree(study_dir) == prior_tree
+        assert (study_dir / "forms").is_dir()
+
+
+def test_pruned_directory_restore_failure_leaves_descendant_link_retained_not_adopted(tmp_path: Path) -> None:
+    """The exact narrower rollback-adoption race the closure review
+    found: rollback's directory-restore step correctly leaves the
+    original pruned ``datasets/nested/`` directory retained in
+    quarantine when an unrelated actor has since reclaimed that name --
+    but it must NOT then descend into that replacement directory and
+    adopt the pruned ``a.csv`` link inside it. Both the pruned
+    directory and its pruned link must stay exactly retained in
+    quarantine, and the replacement directory's own marker file and
+    mode must be completely untouched. ``datasets/b.csv`` stays present
+    throughout so the component-content requirement is never at issue
+    -- the ONLY thing under test is the occupied-ancestor restore race."""
+    source = tmp_path / "source"
+    (source / "datasets" / "nested").mkdir(parents=True)
+    (source / "forms").mkdir(parents=True)
+    (source / "data_dictionary").mkdir(parents=True)
+    (source / "datasets" / "b.csv").write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
+    (source / "datasets" / "nested" / "a.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import intake_add
+
+        first = intake_add(source, "OccupiedAncestorStudy")
+        assert first["status"] == "ready"
+        study_dir = workspace / "intake" / "OccupiedAncestorStudy"
+
+        (source / "datasets" / "nested" / "a.csv").unlink()  # empties nested/, the ONLY entry there
+
+        real_write = os.write
+
+        def failing_write(fd, data):
+            if data.startswith(b'{\n  "entries"'):
+                raise OSError("simulated disk failure during update manifest write")
+            return real_write(fd, data)
+
+        original_rename = intake_module._renameat2_noreplace
+        injected = {"done": False}
+
+        def racing_rename(old_dir_fd, old, new_dir_fd, new):
+            # Fires exactly once: rollback's directory-restore step
+            # renaming the quarantined "dir.*" node back to "nested"
+            # (under "datasets/"). Occupy "nested" with unrelated
+            # content first, so the no-replace restore rename fails
+            # closed on EEXIST.
+            if not injected["done"] and old.startswith("dir.") and new == "nested":
+                injected["done"] = True
+                os.mkdir(new, 0o755, dir_fd=new_dir_fd)
+                sub_fd = os.open(new, os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=new_dir_fd)
+                try:
+                    marker_fd = os.open(
+                        "marker.txt", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=sub_fd
+                    )
+                    try:
+                        os.write(marker_fd, b"UNRELATED")
+                    finally:
+                        os.close(marker_fd)
+                finally:
+                    os.close(sub_fd)
+            return original_rename(old_dir_fd, old, new_dir_fd, new)
+
+        os.write = failing_write
+        intake_module._renameat2_noreplace = racing_rename
+        try:
+            with pytest.raises(OSError):
+                intake_add(source, "OccupiedAncestorStudy")
+        finally:
+            os.write = real_write
+            intake_module._renameat2_noreplace = original_rename
+
+        assert injected["done"]
+
+        nested_dir = study_dir / "datasets" / "nested"
+        assert nested_dir.is_dir()
+        assert stat.S_IMODE(nested_dir.stat().st_mode) == 0o755  # replacement mode untouched
+        marker_path = nested_dir / "marker.txt"
+        assert marker_path.read_bytes() == b"UNRELATED"  # marker untouched
+        assert [p.name for p in nested_dir.iterdir()] == ["marker.txt"]  # nothing adopted into it
+
+        quarantine_root = workspace / ".intake_quarantine"
+        retained_dirs = list(quarantine_root.glob("dir.*"))
+        retained_links = list(quarantine_root.glob("link.*"))
+        assert len(retained_dirs) == 1  # the pruned nested/ dir stays retained -- restore failed closed
+        assert len(retained_links) == 1  # the pruned a.csv link stays retained too -- never adopted
+
+
 # --- collisions --------------------------------------------------------------------------------
 
 
@@ -1086,6 +1287,61 @@ def test_destination_occupied_by_unrelated_source_fails_closed(tmp_path: Path) -
 
         assert (workspace / "intake" / study_a).is_dir()  # original generated tree untouched
         assert (workspace / "intake" / "TakenName").is_dir()  # unrelated study untouched
+
+
+
+def test_generated_collision_with_ready_different_source_never_reconciles(tmp_path: Path) -> None:
+    """A freshly allocated generated token that happens to collide with
+    an unrelated, already-``ready`` different-source study must fail
+    ``study-name-collision`` before ever reconciling -- never adopting
+    that tree, never pruning its links, never touching a single byte of
+    either source or the existing study's manifest/tree."""
+    source_a = tmp_path / "source_a"
+    _make_canonical_source(source_a)
+    source_b = tmp_path / "source_b"
+    (source_b / "datasets").mkdir(parents=True)
+    (source_b / "forms").mkdir(parents=True)
+    (source_b / "data_dictionary").mkdir(parents=True)
+    (source_b / "datasets" / "other.csv").write_text("X,Y\n1,2\n", encoding="utf-8")
+    (source_b / "forms" / "other.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    (source_b / "data_dictionary" / "other.csv").write_text("var,label\nX,Xval\n", encoding="utf-8")
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake_naming as intake_naming_module
+        from phi_engine.pipeline.intake import IntakeManifestError, intake_add
+
+        first = intake_add(source_a)
+        study_a = first["study"]
+        assert first["study_name_source"] == "generated"
+
+        manifest_path = workspace / "intake" / study_a / "intake_manifest.json"
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw["status"] = "ready"
+        raw["review_items"] = []
+        raw["errors"] = []
+        tmp = manifest_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.chmod(0o600)
+        os.replace(tmp, manifest_path)
+
+        before_a_manifest = manifest_path.read_bytes()
+        before_a_tree = _snapshot_tree(workspace / "intake" / study_a)
+        before_source_a = _snapshot_tree(source_a)
+        before_source_b = _snapshot_tree(source_b)
+
+        original_generate = intake_naming_module._generate_study_name
+        intake_naming_module._generate_study_name = lambda: study_a
+        try:
+            with pytest.raises(IntakeManifestError, match="study-name-collision"):
+                intake_add(source_b)
+        finally:
+            intake_naming_module._generate_study_name = original_generate
+
+        assert manifest_path.read_bytes() == before_a_manifest
+        assert _snapshot_tree(workspace / "intake" / study_a) == before_a_tree
+        assert _snapshot_tree(source_a) == before_source_a
+        assert _snapshot_tree(source_b) == before_source_b
+        assert sorted(p.name for p in (workspace / "intake").iterdir()) == [study_a]
 
 
 def test_ready_generated_tree_is_never_promoted(tmp_path: Path) -> None:
@@ -1267,6 +1523,878 @@ def test_concurrent_registry_scans_serialize_generated_allocation(tmp_path: Path
             t.join(timeout=5)
 
         assert results["threaded"]["status"] == "ready"
+
+
+# --- hostile-namespace check/use races (atomic quarantine/rename) --------------------------------
+
+
+def test_promotion_race_destination_created_just_before_atomic_rename_fails_closed(tmp_path: Path) -> None:
+    """Deterministic injection of the exact race the security review
+    found: a destination directory materializes in the instant between
+    a caller's absence check and the promotion rename itself. The
+    atomic no-replace rename must fail closed with study-name-collision
+    -- never silently replace the racing directory, never leave the old
+    generated tree half-renamed."""
+    source = tmp_path / "source"
+    _make_canonical_source(source)
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import IntakeManifestError, intake_add
+
+        generated = intake_add(source, support_confirmed_no_phi=False)
+        study_a = generated["study"]
+
+        original_rename = intake_module._renameat2_noreplace
+        injected = {"done": False}
+
+        def racing_rename(old_dir_fd, old, new_dir_fd, new):
+            if not injected["done"] and old == study_a and new == "RacedPromotion":
+                injected["done"] = True
+                os.mkdir(new, 0o700, dir_fd=new_dir_fd)  # adversary wins the race first
+            return original_rename(old_dir_fd, old, new_dir_fd, new)
+
+        intake_module._renameat2_noreplace = racing_rename
+        try:
+            with pytest.raises(IntakeManifestError, match="study-name-collision"):
+                intake_add(source, "RacedPromotion")
+        finally:
+            intake_module._renameat2_noreplace = original_rename
+
+        assert injected["done"]
+        assert (workspace / "intake" / study_a).is_dir()
+        assert (workspace / "intake" / "RacedPromotion").is_dir()
+        assert list((workspace / "intake" / "RacedPromotion").iterdir()) == []
+
+
+def test_stale_link_race_swaps_content_just_before_quarantine_leaves_unrelated_untouched(tmp_path: Path) -> None:
+    """Deterministic injection of the exact race the security review
+    found: a hostile actor swaps the stale symlink for unrelated
+    content in the instant before this attempt's quarantine rename.
+    The quarantine must still grab and verify whatever is actually
+    there, discover the mismatch, and restore the unrelated content
+    untouched rather than deleting it."""
+    source = tmp_path / "source"
+    _make_canonical_source(source)
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import intake_add
+
+        first = intake_add(source, "RaceStaleStudy")
+        by_rel = _entries_by_rel(first)
+        dataset_key = by_rel["datasets/labs.csv"]["intake_path"]
+        basename = dataset_key.rsplit("/", 1)[-1]
+        study_dir = workspace / "intake" / "RaceStaleStudy"
+        link_path = study_dir / dataset_key
+
+        (source / "datasets" / "labs.csv").unlink()  # makes the entry stale
+
+        original_rename = intake_module._renameat2_noreplace
+        injected = {"done": False}
+
+        def racing_rename(old_dir_fd, old, new_dir_fd, new):
+            if not injected["done"] and old == basename and new.startswith("link."):
+                injected["done"] = True
+                os.unlink(old, dir_fd=old_dir_fd)
+                fd = os.open(old, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=old_dir_fd)
+                try:
+                    os.write(fd, b"UNRELATED")
+                finally:
+                    os.close(fd)
+            return original_rename(old_dir_fd, old, new_dir_fd, new)
+
+        intake_module._renameat2_noreplace = racing_rename
+        try:
+            second = intake_add(source, "RaceStaleStudy")
+        finally:
+            intake_module._renameat2_noreplace = original_rename
+
+        assert injected["done"]
+        assert second["status"] == "failed"
+        assert any(e["reason"] == "intake-tree-unsafe" for e in second["errors"])
+        assert link_path.is_file() and not link_path.is_symlink()
+        assert link_path.read_bytes() == b"UNRELATED"
+
+
+def test_created_link_rollback_race_leaves_swapped_content_untouched(tmp_path: Path) -> None:
+    """A manifest-write failure triggers rollback of every symlink this
+    attempt created; a hostile actor swapping in unrelated content at
+    one of those link paths in the instant before rollback's quarantine
+    rename must survive untouched -- rollback deletes only by proven
+    identity, never by name alone."""
+    source = tmp_path / "source"
+    _make_canonical_source(source)
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import intake_add
+
+        real_write = os.write
+
+        def failing_write(fd, data):
+            if data.startswith(b'{\n  "entries"'):
+                raise OSError("simulated disk failure during initial manifest write")
+            return real_write(fd, data)
+
+        original_rename = intake_module._renameat2_noreplace
+        injected = {"done": False}
+
+        def racing_rename(old_dir_fd, old, new_dir_fd, new):
+            if not injected["done"] and old.endswith("labs.csv") and new.startswith("link."):
+                injected["done"] = True
+                os.unlink(old, dir_fd=old_dir_fd)
+                fd = os.open(old, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=old_dir_fd)
+                try:
+                    os.write(fd, b"UNRELATED")
+                finally:
+                    os.close(fd)
+            return original_rename(old_dir_fd, old, new_dir_fd, new)
+
+        os.write = failing_write
+        intake_module._renameat2_noreplace = racing_rename
+        try:
+            with pytest.raises(OSError):
+                intake_add(source, "RaceRollbackStudy")
+        finally:
+            os.write = real_write
+            intake_module._renameat2_noreplace = original_rename
+
+        assert injected["done"]
+        study_dir = workspace / "intake" / "RaceRollbackStudy"
+        assert not (study_dir / "intake_manifest.json").exists()
+        matches = list(study_dir.rglob("*labs.csv"))
+        assert len(matches) == 1
+        assert matches[0].is_file() and not matches[0].is_symlink()
+        assert matches[0].read_bytes() == b"UNRELATED"
+
+
+def test_review_note_restore_race_leaves_swapped_content_untouched(tmp_path: Path) -> None:
+    """A manifest-write failure AFTER the review note already committed
+    triggers restore-to-absence; a hostile actor swapping in unrelated
+    content at the note path in the instant before that restore's
+    quarantine rename must survive untouched rather than be deleted."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "datasets" / "unsupported.json").write_text("{}", encoding="utf-8")
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import intake_add
+
+        real_write = os.write
+
+        def failing_write(fd, data):
+            if data.startswith(b'{\n  "entries"'):
+                raise OSError("simulated disk failure during manifest write after note committed")
+            return real_write(fd, data)
+
+        original_rename = intake_module._renameat2_noreplace
+        injected = {"done": False}
+
+        def racing_rename(old_dir_fd, old, new_dir_fd, new):
+            if not injected["done"] and old == "intake_review.md" and new.startswith("file."):
+                injected["done"] = True
+                os.unlink(old, dir_fd=old_dir_fd)
+                fd = os.open(old, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=old_dir_fd)
+                try:
+                    os.write(fd, b"UNRELATED NOTE")
+                finally:
+                    os.close(fd)
+            return original_rename(old_dir_fd, old, new_dir_fd, new)
+
+        os.write = failing_write
+        intake_module._renameat2_noreplace = racing_rename
+        try:
+            with pytest.raises(OSError):
+                intake_add(source, "RaceNoteStudy")
+        finally:
+            os.write = real_write
+            intake_module._renameat2_noreplace = original_rename
+
+        assert injected["done"]
+        note_path = workspace / "output" / "RaceNoteStudy" / "audit" / "human_review" / "intake" / "intake_review.md"
+        assert note_path.is_file()
+        assert note_path.read_bytes() == b"UNRELATED NOTE"
+
+
+def test_fresh_reservation_race_injected_after_absence_check_fails_closed_untouched(tmp_path: Path) -> None:
+    """The exact security-review race: a foreign, unrelated intake tree
+    for a DIFFERENT source materializes at the chosen destination name
+    in the instant between this call's absence check and its actual
+    reservation. The reservation must be one atomic state transition --
+    a bare, check-free ``mkdir`` treating any resulting EEXIST as
+    study-name-collision -- never adopt whatever is found there, never
+    reconcile it, never touch a single byte of the foreign tree or
+    either source."""
+    source_a = tmp_path / "source_a"
+    _make_canonical_source(source_a)
+    foreign_source = tmp_path / "foreign_source"
+    (foreign_source / "datasets").mkdir(parents=True)
+    (foreign_source / "forms").mkdir(parents=True)
+    (foreign_source / "data_dictionary").mkdir(parents=True)
+    (foreign_source / "datasets" / "f.csv").write_text("A,B\n1,2\n", encoding="utf-8")
+    (foreign_source / "forms" / "f.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    (foreign_source / "data_dictionary" / "f.csv").write_text("var,label\nA,Aval\n", encoding="utf-8")
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import IntakeManifestError, intake_add
+
+        foreign = intake_add(foreign_source, "ForeignTemplate")
+        assert foreign["study"] == "ForeignTemplate"
+        template_dir = workspace / "intake" / "ForeignTemplate"
+        before_source_a = _snapshot_tree(source_a)
+        before_foreign_source = _snapshot_tree(foreign_source)
+
+        original_absent = intake_module._study_dir_absent
+        injected = {"done": False}
+
+        def racing_absent(study_name: str) -> bool:
+            answer = original_absent(study_name)
+            if not injected["done"] and study_name == "TargetStudy" and answer:
+                injected["done"] = True
+                shutil.copytree(template_dir, workspace / "intake" / "TargetStudy", symlinks=True)
+                os.chmod(workspace / "intake" / "TargetStudy", 0o700)
+            return answer
+
+        intake_module._study_dir_absent = racing_absent
+        try:
+            with pytest.raises(IntakeManifestError, match="study-name-collision"):
+                intake_add(source_a, "TargetStudy")
+        finally:
+            intake_module._study_dir_absent = original_absent
+
+        assert injected["done"]
+        injected_dir = workspace / "intake" / "TargetStudy"
+        assert injected_dir.is_dir()
+        assert (injected_dir / "intake_manifest.json").read_bytes() == (
+            template_dir / "intake_manifest.json"
+        ).read_bytes()
+        assert sorted(p.name for p in (workspace / "intake").iterdir()) == sorted(["ForeignTemplate", "TargetStudy"])
+        assert _snapshot_tree(source_a) == before_source_a
+        assert _snapshot_tree(foreign_source) == before_foreign_source
+
+
+def test_reused_generated_match_source_swap_between_scan_and_pin_fails_closed(tmp_path: Path) -> None:
+    """The registry scan finds a sole generated match by its
+    source_root at scan time; if a hostile actor swaps that
+    destination's manifest source_root before the pinned descriptor is
+    actually read during reconcile, the reuse must be rejected as
+    study-name-collision -- never silently adopted -- because the
+    'reusable' guarantee has to be reproven on the pinned descriptor,
+    not trusted from the earlier scan alone."""
+    source_a = tmp_path / "source_a"
+    _make_canonical_source(source_a)
+    source_c = tmp_path / "source_c"
+    (source_c / "datasets").mkdir(parents=True)
+    (source_c / "forms").mkdir(parents=True)
+    (source_c / "data_dictionary").mkdir(parents=True)
+    (source_c / "datasets" / "c.csv").write_text("A,B\n1,2\n", encoding="utf-8")
+    (source_c / "forms" / "c.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    (source_c / "data_dictionary" / "c.csv").write_text("var,label\nA,Aval\n", encoding="utf-8")
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import IntakeManifestError, intake_add
+
+        first = intake_add(source_a)
+        study_a = first["study"]
+        assert first["study_name_source"] == "generated"
+        manifest_path = workspace / "intake" / study_a / "intake_manifest.json"
+
+        canonical_c = intake_module.intake_naming.canonical_source_root(source_c)
+
+        original_scan = intake_module._scan_generated_manifests_for_source
+        swapped = {"done": False}
+
+        def racing_scan(canonical_source_arg):
+            result = original_scan(canonical_source_arg)
+            if not swapped["done"] and [m.study for m in result] == [study_a]:
+                swapped["done"] = True
+                raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+                raw["source_root"] = canonical_c
+                for entry in raw["entries"].values():
+                    entry["original_path"] = f"{canonical_c}/{entry['relative_path']}"
+                tmp = manifest_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(raw, indent=2, sort_keys=True), encoding="utf-8")
+                tmp.chmod(0o600)
+                os.replace(tmp, manifest_path)
+            return result
+
+        intake_module._scan_generated_manifests_for_source = racing_scan
+        try:
+            with pytest.raises(IntakeManifestError, match="study-name-collision"):
+                intake_add(source_a)
+        finally:
+            intake_module._scan_generated_manifests_for_source = original_scan
+
+        assert swapped["done"]
+        after_raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert after_raw["source_root"] == canonical_c  # the hostile swap itself -- our code never touched it further
+        assert sorted(p.name for p in (workspace / "intake").iterdir()) == [study_a]
+
+
+def test_reused_generated_match_directory_identity_swap_between_scan_and_pin_fails_closed(tmp_path: Path) -> None:
+    """The registry scan pins the exact scanned study-directory AND
+    manifest device/inode identity, not merely its declared
+    source_root string. If a hostile actor replaces the destination
+    directory with a byte-for-byte identical same-source copy (a fresh
+    inode, unchanged source_root) in the instant before the pinned
+    descriptor is actually opened during reconcile, the reuse must be
+    rejected as study-name-collision -- never silently adopted --
+    because the scanned directory itself has to be reproven on the
+    pinned descriptor, never trusted from the earlier scan alone."""
+    source = tmp_path / "source"
+    _make_canonical_source(source)
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import IntakeManifestError, intake_add
+
+        first = intake_add(source)
+        study_a = first["study"]
+        assert first["study_name_source"] == "generated"
+        study_dir = workspace / "intake" / study_a
+        manifest_path = study_dir / "intake_manifest.json"
+        before_bytes = manifest_path.read_bytes()
+        before_ino = study_dir.stat().st_ino
+
+        original_scan = intake_module._scan_generated_manifests_for_source
+        swapped: dict[str, Any] = {"done": False}
+
+        def racing_scan(canonical_source_arg):
+            result = original_scan(canonical_source_arg)
+            if not swapped["done"] and [m.study for m in result] == [study_a]:
+                swapped["done"] = True
+                shadow = workspace / "intake" / f"{study_a}.shadow"
+                shutil.copytree(study_dir, shadow, symlinks=True)
+                shutil.rmtree(study_dir)
+                shadow.rename(study_dir)
+                os.chmod(study_dir, 0o700)
+                swapped["after_ino"] = study_dir.stat().st_ino
+            return result
+
+        intake_module._scan_generated_manifests_for_source = racing_scan
+        try:
+            with pytest.raises(IntakeManifestError, match="study-name-collision"):
+                intake_add(source)
+        finally:
+            intake_module._scan_generated_manifests_for_source = original_scan
+
+        assert swapped["done"]
+        assert swapped["after_ino"] != before_ino  # the swap really did replace the directory's identity
+        assert sorted(p.name for p in (workspace / "intake").iterdir()) == [study_a]
+        assert manifest_path.read_bytes() == before_bytes  # the swapped-in replacement was never mutated
+
+
+def test_stale_link_quarantine_is_retained_not_deleted_lifecycle(tmp_path: Path) -> None:
+    """Pruning a legitimately stale symlink (the ordinary, non-hostile
+    case) never unlinks it by name -- POSIX has no conditional-unlink
+    primitive that could prove, at the instant of deletion, that a
+    mutable name still holds the exact object just verified. Instead
+    the verified symlink is atomically retained in the shared protected
+    quarantine directory (BASE_DIR/.intake_quarantine), completely
+    outside both the registry scan's and the study's own tree-
+    invariant walk, so it can never resurface as an unexpected node."""
+    source = tmp_path / "source"
+    _make_canonical_source(source)
+
+    with _workspace(tmp_path) as workspace:
+        from phi_engine.pipeline.intake import intake_add, load_intake_manifest
+
+        first = intake_add(source, "QuarantineLifecycleStudy")
+        assert first["status"] == "ready"
+        expected_target = _entries_by_rel(first)["datasets/labs.csv"]["original_path"]
+
+        (source / "datasets" / "labs.csv").unlink()
+        second = intake_add(source, "QuarantineLifecycleStudy")
+        assert second["status"] == "review_required"
+
+        study_dir = workspace / "intake" / "QuarantineLifecycleStudy"
+        assert not (study_dir / "datasets").exists()
+
+        quarantine_root = workspace / ".intake_quarantine"
+        assert quarantine_root.is_dir()
+        assert stat.S_IMODE(quarantine_root.stat().st_mode) == 0o700
+        retained_links = [p for p in quarantine_root.iterdir() if p.name.startswith("link.")]
+        assert len(retained_links) == 1
+        assert retained_links[0].is_symlink()
+        assert os.readlink(retained_links[0]) == expected_target
+
+        reloaded = load_intake_manifest("QuarantineLifecycleStudy")
+        assert reloaded == second
+
+
+def test_stale_directory_swap_just_before_quarantine_leaves_unrelated_untouched(tmp_path: Path) -> None:
+    """The exact security-review race for stale directory pruning: a
+    hostile actor swaps the verified-empty, owned-and-recorded
+    ``mappings/`` directory for unrelated content in the instant before
+    this attempt's quarantine rename. The quarantine must still grab
+    and verify whatever is actually there against the descriptor-
+    recorded identity, discover the mismatch, and restore the unrelated
+    content untouched rather than deleting or losing it."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir(parents=True)
+    (source / "data_dictionary").mkdir(parents=True)
+    (source / "mappings").mkdir(parents=True)
+    (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+    (source / "mappings" / "map.csv").write_text("from,to\nA,B\n", encoding="utf-8")
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import intake_add
+
+        first = intake_add(source, "StaleDirRaceStudy")
+        assert first["status"] == "ready"
+
+        (source / "mappings" / "map.csv").unlink()  # empties mappings/, triggering directory prune
+
+        original_rename = intake_module._renameat2_noreplace
+        injected = {"done": False}
+
+        def racing_rename(old_dir_fd, old, new_dir_fd, new):
+            if not injected["done"] and old == "mappings" and new.startswith("dir."):
+                injected["done"] = True
+                os.rmdir(old, dir_fd=old_dir_fd)
+                fd = os.open(old, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=old_dir_fd)
+                try:
+                    os.write(fd, b"UNRELATED-DIR-SWAP")
+                finally:
+                    os.close(fd)
+            return original_rename(old_dir_fd, old, new_dir_fd, new)
+
+        intake_module._renameat2_noreplace = racing_rename
+        try:
+            second = intake_add(source, "StaleDirRaceStudy")
+        finally:
+            intake_module._renameat2_noreplace = original_rename
+
+        assert injected["done"]
+        assert second["status"] == "failed"
+        assert any(e["reason"] == "intake-tree-unsafe" for e in second["errors"])
+        mappings_path = workspace / "intake" / "StaleDirRaceStudy" / "mappings"
+        assert mappings_path.is_file() and not mappings_path.is_symlink()
+        assert mappings_path.read_bytes() == b"UNRELATED-DIR-SWAP"
+
+
+def test_created_directory_rollback_race_leaves_swapped_content_untouched(tmp_path: Path) -> None:
+    """A manifest-write failure triggers rollback of every directory
+    this attempt freshly created; a hostile actor swapping in unrelated
+    content at one of those directory paths in the instant before
+    rollback's quarantine rename must survive untouched -- rollback
+    removes only by proven DEVICE/INODE identity, never by name alone."""
+    source = tmp_path / "source"
+    _make_canonical_source(source)
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import intake_add
+
+        first = intake_add(source, "CreatedDirRaceStudy")
+        assert first["status"] == "ready"
+        study_dir = workspace / "intake" / "CreatedDirRaceStudy"
+        manifest_path = study_dir / "intake_manifest.json"
+        prior_bytes = manifest_path.read_bytes()
+
+        (source / "datasets" / "nested").mkdir()
+        (source / "datasets" / "nested" / "extra.csv").write_text("A,B\n1,2\n", encoding="utf-8")
+
+        real_write = os.write
+
+        def failing_write(fd, data):
+            if data.startswith(b'{\n  "entries"'):
+                raise OSError("simulated disk failure during update manifest write")
+            return real_write(fd, data)
+
+        original_rename = intake_module._renameat2_noreplace
+        injected = {"done": False}
+
+        def racing_rename(old_dir_fd, old, new_dir_fd, new):
+            if not injected["done"] and old == "nested" and new.startswith("dir."):
+                injected["done"] = True
+                os.rmdir(old, dir_fd=old_dir_fd)
+                fd = os.open(old, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=old_dir_fd)
+                try:
+                    os.write(fd, b"UNRELATED-CREATED-DIR")
+                finally:
+                    os.close(fd)
+            return original_rename(old_dir_fd, old, new_dir_fd, new)
+
+        os.write = failing_write
+        intake_module._renameat2_noreplace = racing_rename
+        try:
+            with pytest.raises(OSError):
+                intake_add(source, "CreatedDirRaceStudy")
+        finally:
+            os.write = real_write
+            intake_module._renameat2_noreplace = original_rename
+
+        assert injected["done"]
+        assert manifest_path.read_bytes() == prior_bytes
+        nested_path = study_dir / "datasets" / "nested"
+        assert nested_path.is_file() and not nested_path.is_symlink()
+        assert nested_path.read_bytes() == b"UNRELATED-CREATED-DIR"
+
+
+def test_manifest_rollback_same_bytes_different_inode_impostor_is_untouched(tmp_path: Path) -> None:
+    """A hostile actor can replace this attempt's own just-committed
+    manifest with a byte-for-byte IDENTICAL copy at a fresh inode in
+    the instant before a later failure triggers rollback. Because the
+    rollback gate proves identity by DEVICE/INODE -- captured at this
+    attempt's own commit time -- never by content, the impostor is
+    recognized as NOT this attempt's own write and is left completely
+    untouched, never blindly replaced with the prior manifest bytes."""
+    source = tmp_path / "source"
+    _make_canonical_source(source)
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import intake_add
+
+        first = intake_add(source, "ImpostorStudy")
+        assert first["status"] == "ready"
+        manifest_path = workspace / "intake" / "ImpostorStudy" / "intake_manifest.json"
+        prior_bytes = manifest_path.read_bytes()
+
+        (source / "data_dictionary" / "extra.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+
+        original_atomic_write = intake_module._atomic_write_in_dir
+        impostor_holder: dict[str, bytes] = {}
+
+        def swap_after_commit(dir_fd, filename, payload, mode, *, on_committed=None):
+            if filename != "intake_manifest.json":
+                return original_atomic_write(dir_fd, filename, payload, mode, on_committed=on_committed)
+            original_atomic_write(dir_fd, filename, payload, mode, on_committed=on_committed)
+            impostor_holder["bytes"] = payload
+            tmp_name = ".impostor.tmp"
+            fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+            try:
+                os.write(fd, payload)
+            finally:
+                os.close(fd)
+            os.rename(tmp_name, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            raise OSError("simulated failure after impostor swap")
+
+        intake_module._atomic_write_in_dir = swap_after_commit
+        try:
+            with pytest.raises(OSError):
+                intake_add(source, "ImpostorStudy")
+        finally:
+            intake_module._atomic_write_in_dir = original_atomic_write
+
+        after_bytes = manifest_path.read_bytes()
+        assert after_bytes == impostor_holder["bytes"]
+        assert after_bytes != prior_bytes
+
+
+def test_manifest_rollback_prior_absent_impostor_content_is_preserved_in_quarantine_not_destroyed(
+    tmp_path: Path,
+) -> None:
+    """Concrete reproduction from the security review: a hostile actor
+    replaces the just-committed fresh manifest with unrelated content
+    (different bytes AND a fresh inode) in the instant before a later
+    failure triggers rollback-to-absence. The impostor is proven not to
+    be this attempt's own write and is preserved EXACTLY where the
+    hostile actor put it -- never destroyed by a blind ``os.unlink``.
+    Because the reservation directory is consequently NOT empty (the
+    preserved impostor still occupies it), the directory itself is left
+    in place too -- rollback fails closed without clobber rather than
+    forcing a "clean" removal that would require moving or hiding the
+    unrelated content. Every directory THIS attempt itself created
+    (now genuinely empty again, since only ITS OWN links lived there)
+    is still safely reclaimed into the retained quarantine directory."""
+    source = tmp_path / "source"
+    _make_canonical_source(source)
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import intake_add
+
+        original_atomic_write = intake_module._atomic_write_in_dir
+        impostor_bytes = b'{"impostor": "UNRELATED-MANIFEST-CONTENT"}'
+
+        def swap_after_commit(dir_fd, filename, payload, mode, *, on_committed=None):
+            if filename != "intake_manifest.json":
+                return original_atomic_write(dir_fd, filename, payload, mode, on_committed=on_committed)
+            original_atomic_write(dir_fd, filename, payload, mode, on_committed=on_committed)
+            tmp_name = ".impostor.tmp"
+            fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+            try:
+                os.write(fd, impostor_bytes)
+            finally:
+                os.close(fd)
+            os.rename(tmp_name, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            raise OSError("simulated failure after impostor swap on fresh reservation")
+
+        intake_module._atomic_write_in_dir = swap_after_commit
+        try:
+            with pytest.raises(OSError):
+                intake_add(source, "FreshImpostorStudy")
+        finally:
+            intake_module._atomic_write_in_dir = original_atomic_write
+
+        study_dir = workspace / "intake" / "FreshImpostorStudy"
+        retained_manifest = study_dir / "intake_manifest.json"
+        assert retained_manifest.is_file()
+        assert retained_manifest.read_bytes() == impostor_bytes  # preserved, never destroyed by unlink
+
+        # this attempt's own datasets/forms/data_dictionary directories
+        # -- genuinely empty once their own just-created links were
+        # quarantined -- are still safely reclaimed
+        quarantine_root = workspace / ".intake_quarantine"
+        retained_dirs = list(quarantine_root.glob("dir.*"))
+        assert len(retained_dirs) == 3
+
+
+def test_review_note_rollback_same_bytes_different_inode_impostor_is_untouched(tmp_path: Path) -> None:
+    """A hostile actor can replace this attempt's own just-committed
+    review note with a byte-for-byte IDENTICAL copy at a fresh inode in
+    the instant before a later manifest-write failure triggers note
+    rollback. Because the rollback gate proves identity by DEVICE/INODE
+    -- captured at this attempt's own commit time -- never by content,
+    the impostor is recognized as NOT this attempt's own write and is
+    left completely untouched, never blindly overwritten with the
+    prior note content."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "datasets" / "unsupported.json").write_text("{}", encoding="utf-8")
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import intake_add
+
+        first = intake_add(source, "NoteImpostorStudy")
+        assert first["status"] == "review_required"
+        note_path = (
+            workspace / "output" / "NoteImpostorStudy" / "audit" / "human_review" / "intake" / "intake_review.md"
+        )
+        prior_note_bytes = note_path.read_bytes()
+
+        (source / "datasets" / "unsupported2.json").write_text("{}", encoding="utf-8")
+
+        real_write = os.write
+
+        def failing_write(fd, data):
+            if data.startswith(b'{\n  "entries"'):
+                raise OSError("simulated disk failure during manifest write after note committed")
+            return real_write(fd, data)
+
+        original_atomic_write = intake_module._atomic_write_in_dir
+        impostor_holder: dict[str, bytes] = {}
+
+        def swap_note_after_commit(dir_fd, filename, payload, mode, *, on_committed=None):
+            if filename != "intake_review.md":
+                return original_atomic_write(dir_fd, filename, payload, mode, on_committed=on_committed)
+            original_atomic_write(dir_fd, filename, payload, mode, on_committed=on_committed)
+            impostor_holder["bytes"] = payload
+            tmp_name = ".impostor_note.tmp"
+            fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+            try:
+                os.write(fd, payload)
+            finally:
+                os.close(fd)
+            os.rename(tmp_name, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            return None
+
+        os.write = failing_write
+        intake_module._atomic_write_in_dir = swap_note_after_commit
+        try:
+            with pytest.raises(OSError):
+                intake_add(source, "NoteImpostorStudy")
+        finally:
+            os.write = real_write
+            intake_module._atomic_write_in_dir = original_atomic_write
+
+        after_note_bytes = note_path.read_bytes()
+        assert after_note_bytes == impostor_holder["bytes"]
+        assert after_note_bytes != prior_note_bytes
+
+
+# --- retained-quarantine hard bound -------------------------------------------------------------
+
+
+def test_quarantine_entry_count_hard_bound_fails_closed(tmp_path: Path) -> None:
+    """The shared retained-quarantine root enforces a fixed maximum
+    entry count, checked descriptor-relatively BEFORE accepting any new
+    move. Once the bound is reached, ordinary stale-link pruning fails
+    closed with the fixed quarantine-limit-exceeded code instead of
+    silently growing past it -- the bound is a hard ceiling, never a
+    best-effort target -- and (removing the stale file without changing
+    any other candidate, so the failing attempt writes nothing new to
+    roll back) the prior manifest remains exactly loadable afterward."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir(parents=True)
+    (source / "data_dictionary").mkdir(parents=True)
+    (source / "datasets" / "a.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "datasets" / "b.csv").write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import IntakeManifestError, intake_add, load_intake_manifest
+
+        original_max_entries = intake_module._QUARANTINE_MAX_ENTRIES
+        intake_module._QUARANTINE_MAX_ENTRIES = 1
+        try:
+            first = intake_add(source, "QuotaEntryStudy")
+            assert first["status"] == "ready"
+
+            # removing a.csv (b.csv, forms, and data_dictionary untouched)
+            # makes only its intake-tree link stale; pruning it consumes
+            # the single allowed quarantine slot
+            (source / "datasets" / "a.csv").unlink()
+            second = intake_add(source, "QuotaEntryStudy")
+            assert second["status"] == "ready"
+
+            quarantine_root = workspace / ".intake_quarantine"
+            assert len(list(quarantine_root.iterdir())) == 1
+
+            # removing the last remaining dataset must prune ANOTHER
+            # stale link, but the bound is already exhausted -- fails
+            # closed, never adopted. Every other candidate (forms/,
+            # data_dictionary/) is unchanged and idempotently verified,
+            # never recreated, so this attempt writes nothing new and
+            # its rollback is a clean no-op.
+            (source / "datasets" / "b.csv").unlink()
+            with pytest.raises(IntakeManifestError, match="quarantine-limit-exceeded"):
+                intake_add(source, "QuotaEntryStudy")
+
+            assert len(list(quarantine_root.iterdir())) == 1  # never grew past the bound
+            reloaded = load_intake_manifest("QuotaEntryStudy")
+            assert reloaded == second  # the failed attempt made no lasting change
+        finally:
+            intake_module._QUARANTINE_MAX_ENTRIES = original_max_entries
+
+
+def test_quarantine_byte_bound_hard_fails_closed_before_first_entry(tmp_path: Path) -> None:
+    """The shared retained-quarantine root also enforces a fixed maximum
+    allocated-byte footprint, checked descriptor-relatively BEFORE
+    accepting any new move -- a bound of zero available bytes means
+    even the FIRST prune must fail closed with the fixed
+    quarantine-limit-exceeded code rather than ever writing into
+    quarantine at all. Removing the stale file without changing any
+    other candidate means the failing attempt writes nothing new, so
+    the prior manifest remains exactly loadable afterward."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir(parents=True)
+    (source / "data_dictionary").mkdir(parents=True)
+    (source / "datasets" / "a.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "datasets" / "b.csv").write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import IntakeManifestError, intake_add, load_intake_manifest
+
+        first = intake_add(source, "QuotaByteStudy")
+        assert first["status"] == "ready"
+
+        (source / "datasets" / "a.csv").unlink()  # b.csv, forms, and data_dictionary untouched
+
+        original_max_bytes = intake_module._QUARANTINE_MAX_BYTES
+        intake_module._QUARANTINE_MAX_BYTES = 0
+        try:
+            with pytest.raises(IntakeManifestError, match="quarantine-limit-exceeded"):
+                intake_add(source, "QuotaByteStudy")
+        finally:
+            intake_module._QUARANTINE_MAX_BYTES = original_max_bytes
+
+        quarantine_root = workspace / ".intake_quarantine"
+        assert list(quarantine_root.iterdir()) == []
+        reloaded = load_intake_manifest("QuotaByteStudy")
+        assert reloaded == first  # the failed attempt made no lasting change
+
+
+def test_quarantine_root_stays_mode_0700_after_bound_rejection(tmp_path: Path) -> None:
+    """Hitting the hard bound never weakens the quarantine root's
+    private mode -- it stays a private ``0700`` directory even on the
+    fail-closed path, exactly as it is on every successful retain."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir(parents=True)
+    (source / "data_dictionary").mkdir(parents=True)
+    (source / "datasets" / "a.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import IntakeManifestError, intake_add
+
+        intake_add(source, "QuotaModeStudy")
+        (source / "datasets" / "a.csv").rename(source / "datasets" / "b.csv")
+
+        original_max_bytes = intake_module._QUARANTINE_MAX_BYTES
+        intake_module._QUARANTINE_MAX_BYTES = 0
+        try:
+            with pytest.raises(IntakeManifestError, match="quarantine-limit-exceeded"):
+                intake_add(source, "QuotaModeStudy")
+        finally:
+            intake_module._QUARANTINE_MAX_BYTES = original_max_bytes
+
+        quarantine_root = workspace / ".intake_quarantine"
+        assert stat.S_IMODE(quarantine_root.stat().st_mode) == 0o700
+
+
+def test_quarantine_byte_bound_rejects_incoming_symlink_exceeding_remaining_capacity(tmp_path: Path) -> None:
+    """The hard byte bound must reject the incoming node whenever ITS
+    OWN descriptor-relative size alone exceeds available capacity, not
+    merely when prior usage had already fully exhausted the bound. A
+    bound strictly between zero and the incoming symlink's exact byte
+    footprint (``0 < max < incoming``) must still fail closed before
+    any rename -- the original link stays exactly where it was,
+    quarantine usage stays exactly at zero, and the quarantine root's
+    private mode stays ``0700``."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir(parents=True)
+    (source / "data_dictionary").mkdir(parents=True)
+    (source / "datasets" / "a.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "datasets" / "b.csv").write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
+    (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import IntakeManifestError, intake_add, load_intake_manifest
+
+        first = intake_add(source, "QuotaByteBoundaryStudy")
+        assert first["status"] == "ready"
+        study_dir = workspace / "intake" / "QuotaByteBoundaryStudy"
+        a_entry = next(e for e in first["entries"].values() if e["relative_path"] == "datasets/a.csv")
+        link_path = study_dir / a_entry["intake_path"]
+        assert link_path.is_symlink()
+        incoming_bytes = len(os.readlink(link_path))
+        assert incoming_bytes > 1
+
+        (source / "datasets" / "a.csv").unlink()  # b.csv, forms, and data_dictionary untouched
+
+        quarantine_root = workspace / ".intake_quarantine"
+        assert list(quarantine_root.iterdir()) == []
+
+        original_max_bytes = intake_module._QUARANTINE_MAX_BYTES
+        intake_module._QUARANTINE_MAX_BYTES = incoming_bytes - 1  # 0 < max < incoming
+        assert 0 < intake_module._QUARANTINE_MAX_BYTES < incoming_bytes
+        try:
+            with pytest.raises(IntakeManifestError, match="quarantine-limit-exceeded"):
+                intake_add(source, "QuotaByteBoundaryStudy")
+        finally:
+            intake_module._QUARANTINE_MAX_BYTES = original_max_bytes
+
+        assert link_path.is_symlink()  # original stays -- never renamed into quarantine
+        assert os.readlink(link_path) == a_entry["original_path"]
+        assert list(quarantine_root.iterdir()) == []  # usage unchanged
+        assert stat.S_IMODE(quarantine_root.stat().st_mode) == 0o700  # root 0700
+        reloaded = load_intake_manifest("QuotaByteBoundaryStudy")
+        assert reloaded == first  # the failed attempt made no lasting change
 
 
 # --- source immutability --------------------------------------------------------------------------

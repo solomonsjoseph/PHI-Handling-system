@@ -254,12 +254,23 @@ def detect_study_name(*, strict: bool | None = None) -> str:
         return DEFAULT_DATASET_NAME
 
 
-# ENV override ALWAYS wins
+# ENV override ALWAYS wins. Validation is delegated to the dependency-free
+# phi_engine.study_name module -- the SAME plain-folder-name contract
+# phi_engine.utils.pipeline_lock.lock_path_for enforces, so there is exactly
+# one convention rather than two independently-drifting ones. That module
+# lives directly under ``phi_engine`` (not ``phi_engine.utils`` or
+# ``phi_engine.config``) and has zero phi_engine dependencies, so importing
+# it here -- partway through config.py's own execution, before later
+# constants in this module are defined -- can never trigger the circular
+# "config failed to import" scenario this defense-in-depth check exists to
+# catch (e.g. STUDY_NAME inherited from a stale parent-shell export rather
+# than a CLI-validated ``--study`` argument); see phi_engine/study_name.py's
+# module docstring for the concrete import cycle this placement avoids.
 _STUDY_NAME_ENV = _get_env("STUDY_NAME")
 if _STUDY_NAME_ENV:
-    if "/" in _STUDY_NAME_ENV or "\\" in _STUDY_NAME_ENV or _STUDY_NAME_ENV in {".", ".."}:
-        raise ValueError("STUDY_NAME must be a plain folder name, not a path")
-    STUDY_NAME = _STUDY_NAME_ENV
+    from phi_engine.study_name import validate_study_name as _validate_study_name
+
+    STUDY_NAME = _validate_study_name(_STUDY_NAME_ENV)
 else:
     STUDY_NAME = detect_study_name()
 

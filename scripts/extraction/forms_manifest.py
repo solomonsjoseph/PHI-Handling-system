@@ -6,6 +6,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -242,11 +243,35 @@ def _validate_dependencies(
     return parsed, relations
 
 
-def check_forms_manifest(datasets_dir: Path | str) -> ManifestCheckResult:
+def check_forms_manifest(
+    datasets_dir: Path | str,
+    *,
+    study: str | None = None,
+    actual_files: Iterable[str] | None = None,
+) -> ManifestCheckResult:
+    """Validate *datasets_dir* against its study's forms manifest.
+
+    ``study``, when supplied, names the manifest's owning study directly
+    instead of inferring it from ``datasets_dir``'s lexical basename --
+    callers that already know the study (organize/run) should always pass
+    it explicitly.
+
+    ``actual_files``, when supplied, is used verbatim as the set of
+    dataset basenames present in ``datasets_dir`` instead of an ordinary
+    (symlink-following) ``Path.is_dir()``/``Path.iterdir()`` scan of that
+    directory -- callers holding only a descriptor-verified inventory
+    (e.g. an intake manifest's already-verified ``datasets`` component
+    entries) must pass this instead of a directory to read, so this
+    function never performs a filesystem access on an external/hostile
+    source root itself.
+    """
     from phi_engine.config import config
 
     datasets_dir = Path(datasets_dir)
-    study_name = config.STUDY_NAME if Path(config.study_config_path("_forms_manifest.yaml", study=config.STUDY_NAME)).exists() else datasets_dir.parent.name
+    if study is not None:
+        study_name = study
+    else:
+        study_name = config.STUDY_NAME if Path(config.study_config_path("_forms_manifest.yaml", study=config.STUDY_NAME)).exists() else datasets_dir.parent.name
     manifest_path = config.study_config_path("_forms_manifest.yaml", study=study_name)
 
     if not manifest_path.exists():
@@ -280,14 +305,17 @@ def check_forms_manifest(datasets_dir: Path | str) -> ManifestCheckResult:
         date_locales[upper] = value
     dataset_dependencies, dependency_relations = _validate_dependencies(raw, study_name)
 
-    if not datasets_dir.is_dir():
-        return ManifestCheckResult(required=tuple(required), optional=tuple(optional), reject=tuple(reject), date_locales=date_locales, rejected_files=frozenset(), dataset_dependencies=dataset_dependencies, dependency_relations=dependency_relations)
+    if actual_files is not None:
+        actual_files = sorted(set(actual_files))
+    else:
+        if not datasets_dir.is_dir():
+            return ManifestCheckResult(required=tuple(required), optional=tuple(optional), reject=tuple(reject), date_locales=date_locales, rejected_files=frozenset(), dataset_dependencies=dataset_dependencies, dependency_relations=dependency_relations)
 
-    actual_files: list[str] = sorted(
-        p.name
-        for p in datasets_dir.iterdir()
-        if p.is_file() and not p.name.startswith(".") and not p.name.startswith("~$") and p.suffix.lower() in SUPPORTED_EXTENSIONS
-    )
+        actual_files = sorted(
+            p.name
+            for p in datasets_dir.iterdir()
+            if p.is_file() and not p.name.startswith(".") and not p.name.startswith("~$") and p.suffix.lower() in SUPPORTED_EXTENSIONS
+        )
 
     required_set: frozenset[str] = frozenset(required)
     optional_set: frozenset[str] = frozenset(optional)

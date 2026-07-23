@@ -19,20 +19,42 @@ not change): every naming candidate is re-checked against a fresh
 descriptor-relative scan of ``datasets/`` immediately before its content is
 parsed, and again immediately before any evidence is dispatched to the
 local model, discarding all collected evidence and dispatching nothing the
-moment such an alias is found.
+moment such an alias is found. The same all-or-nothing rule applies to any
+OTHER symlink/hardlink/identity/hash safety finding, whether preflight
+already recorded it (a support file it quarantined to ``_unclassified`` for
+``cross-component-hardlink``/``source-symlink-not-allowed`` before naming
+ever ran -- checked first, before any candidate is even opened) or naming
+discovers it itself while validating an admitted candidate (a descriptor
+identity/hash mismatch, or a naming-time symlink rejection): the entire
+naming attempt aborts with zero further reads and zero dispatch, not just
+exclusion of the one affected candidate, while the specific fixed
+review/error record for that finding is preserved.
 
-**How.** Evidence is extracted with fixed, ordered readers (PDF via
-``pdfplumber``, CSV via ``TextIOWrapper``/``csv.reader``, ``.xlsx`` via
-``openpyxl``) operating directly on a duplicated descriptor
-(``os.fdopen(os.dup(fd), "rb")``) for the *entire* verified-descriptor
-lifetime -- hashing, ZIP/archive validation, and parsing all happen while
-``open_verified_source``'s context is still open, and every reader/workbook
-object is closed before that context exits (so its post-read identity
-check always covers the complete, exact read). No full-document byte copy
-is ever retained. Every reader/parser failure -- including openpyxl's lazy
-worksheet iteration, not just ``load_workbook`` -- collapses to the fixed
-``support-evidence-limit`` code; a raw descriptor ``OSError`` collapses to
-``source-unreadable``; never a raw exception. Evidence is built
+**How.** Every admitted candidate is validated in a complete first pass --
+descriptor open, expected identity, a fresh ``datasets/``-alias rescan,
+and a bounded SHA-256 hash, each through
+:func:`~phi_engine.pipeline.verified_source.open_verified_source` -- before
+ANY candidate's content is parsed in the second pass; a later candidate's
+safety failure is never discoverable only after an earlier, otherwise-
+clean candidate was already parsed. Evidence is then extracted with
+fixed, ordered readers (PDF via ``pdfplumber``, isolated in a spawned
+worker process bound by hard address-space, CPU-time, a single monotonic
+wall-clock deadline, and result-byte limits so a small, highly
+compressible content stream cannot decompress into far more memory than
+its on-disk size implies; CSV via ``TextIOWrapper``/``csv.reader``;
+``.xlsx`` via ``openpyxl``) operating directly on a duplicated descriptor
+(``os.fdopen(os.dup(fd), "rb")``) from a SECOND, revalidating
+``open_verified_source`` call immediately before each parser call --
+re-checking expected identity and freshly rescanning ``datasets/`` again,
+so a hardlink created in the window between validation and this specific
+parse is still caught. Every reader/workbook object is closed before
+that second context exits (so its post-read identity check always
+covers the complete, exact read). No full-document byte copy is ever
+retained. Every reader/parser failure -- including openpyxl's lazy
+worksheet iteration and any PDF worker limit/termination/pathology, not
+just ``load_workbook`` -- collapses to the fixed ``support-evidence-limit``
+code; a raw descriptor ``OSError`` collapses to ``source-unreadable``;
+never a raw exception. Evidence is built
 incrementally against each 8,192-UTF-8-byte cap *while parsing* (forms and
 dictionary/mapping tracked independently; combined rebuilt from the same
 already-bounded fragments), so retained state never scales with the total
@@ -75,19 +97,20 @@ import hashlib
 import io
 import json
 import math
+import multiprocessing
 import os
 import secrets
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, Iterator, Literal, Mapping
 
 import openpyxl
-import pdfplumber
 
 from phi_engine.audit.review_paths import safe_review_slug
 from phi_engine.config import config
-from phi_engine.pipeline import intake_preflight, support_files
+from phi_engine.pipeline import _pdf_extract_worker, intake_preflight, support_files
 from phi_engine.pipeline.intake_preflight import IntakeCandidate, IntakePreflight
 from phi_engine.pipeline.verified_source import VerifiedSourceError, open_verified_source
 from phi_engine.security.llm_tool_guard import LLMToolOutputBlocked, guard_llm_output
@@ -121,6 +144,26 @@ _MAX_EVIDENCE_BYTES = 8192
 _MAX_OUTPUT_TOKENS = 128
 _MAX_MODEL_RESPONSE_BYTES = 4096
 _HASH_CHUNK_SIZE = 1 << 20
+
+# --- PDF worker isolation bounds (bounded, standard-library-only) ----------------------
+#
+# pdfplumber/pdfminer decompress PDF content streams fully before this
+# module's own _MAX_FRAGMENT_CODEPOINTS check ever sees the result, so a
+# small, highly compressible stream can otherwise expand into far more
+# memory than _MAX_DOCUMENT_BYTES (the on-disk cap) would suggest. The
+# actual pdfplumber.open()/extract_text() call therefore never runs in
+# this process: it runs in a spawned child bound by a hard address-space
+# ceiling (RLIMIT_AS), a hard CPU-time ceiling (RLIMIT_CPU) applied inside
+# the child before pdfplumber ever touches the bytes, a wall-clock ceiling
+# enforced here via poll()/join() timeouts, and a bounded result read
+# (recv_bytes(maxlength=...)) so an oversized/malformed reply cannot be
+# received either. Any of these firing -- OOM kill, CPU-time kill, hang,
+# oversized reply, or a caught pdfplumber/pdfminer exception inside the
+# child -- collapses to the same fixed _EvidenceLimitError.
+_PDF_WORKER_MAX_ADDRESS_BYTES = 256 * 1024 * 1024
+_PDF_WORKER_MAX_CPU_SECONDS = 5
+_PDF_WORKER_MAX_WALL_SECONDS = 10
+_PDF_WORKER_MAX_RESULT_BYTES = 65536
 
 # VerifiedSourceError reasons that mean "we could not trust this read at
 # all" -- bucketed as value-free errors, mirroring intake_preflight.py's
@@ -211,6 +254,33 @@ def _hardlink_race_detected(source: Path, identities: frozenset[tuple[int, int]]
     return bool(identities & current)
 
 
+# --- preflight-time source-trust safety findings ----------------------------------------
+#
+# Preflight already quarantines a support file it catches aliased into
+# datasets/ (cross-component-hardlink) or sitting behind a symlink
+# (source-symlink-not-allowed) to _unclassified, recording a fixed review
+# item for it and never handing it to naming as a candidate at all; a
+# source it could not even trust enough to classify (source-unreadable,
+# source-target-outside-root) is recorded as a preflight ERROR instead,
+# using the identical verified-source vocabulary this module's own
+# _ERROR_REASONS bucket already uses. Both buckets are the SAME safety
+# catalog -- one complete, fixed set of verified-source trust codes --
+# and naming must abort before opening ANY candidate or constructing a
+# local model client the moment either bucket contains one, not just the
+# review-item subset: an unreadable/out-of-root source elsewhere in the
+# tree is exactly as untrustworthy a signal about the whole source as a
+# caught symlink or hardlink is. Naming adds nothing new here, it just
+# refuses to read or dispatch anything.
+
+_SOURCE_TRUST_SAFETY_REASONS = frozenset({"source-symlink-not-allowed", "cross-component-hardlink"} | _ERROR_REASONS)
+
+
+def _preflight_has_safety_finding(preflight: IntakePreflight) -> bool:
+    return any(item.get("reason") in _SOURCE_TRUST_SAFETY_REASONS for item in preflight.review_items) or any(
+        item.get("reason") in _SOURCE_TRUST_SAFETY_REASONS for item in preflight.errors
+    )
+
+
 # --- entry point -------------------------------------------------------------------------
 
 
@@ -243,6 +313,14 @@ def _resolve_intake_study(
             errors=(),
         )
 
+    if _preflight_has_safety_finding(preflight):
+        return StudyResolution(
+            name=generate_study_name(),
+            source="generated",
+            review_items=(),
+            errors=(),
+        )
+
     admitted = sorted(
         (
             candidate
@@ -252,17 +330,18 @@ def _resolve_intake_study(
         key=lambda c: c.relative_path,
     )
 
-    forms_docs, dict_docs, review_items, errors, contributing_identities, hardlink_detected = _collect_evidence(
+    forms_docs, dict_docs, review_items, errors, verified_identities, aborted = _collect_evidence(
         source, admitted
     )
 
-    if hardlink_detected:
+    if aborted:
         return StudyResolution(
             name=generate_study_name(),
             source="generated",
-            review_items=({"path": _ROOT_PATH, "reason": "cross-component-hardlink", "blocking": True},),
-            errors=(),
+            review_items=tuple(review_items),
+            errors=tuple(errors),
         )
+
 
     forms_payload = _forms_payload_dict(forms_docs)
     dict_payload = _dict_payload_dict(dict_docs)
@@ -286,7 +365,7 @@ def _resolve_intake_study(
         whose own first call creates a dict-to-datasets hardlink must
         never see a second call."""
         nonlocal hardlink_race
-        if _hardlink_race_detected(source, contributing_identities):
+        if _hardlink_race_detected(source, verified_identities):
             hardlink_race = True
             return None
         return _dispatch(get_client, evidence_json, errors)
@@ -500,35 +579,87 @@ def _hash_fd_bounded(fd: int, max_bytes: int) -> str:
     return digest.hexdigest()
 
 
-def _process_candidate(
-    source: Path, candidate: IntakeCandidate, *, parse_content: bool
-) -> tuple[Any, bool, dict[str, Any] | None, dict[str, Any] | None]:
-    """Open, dataset-hardlink-recheck, hash-verify, and (when
-    ``parse_content``) parse one admitted naming candidate.
+def _validate_candidate(
+    source: Path, candidate: IntakeCandidate
+) -> tuple[bool, dict[str, Any] | None, dict[str, Any] | None]:
+    """Pass 1 of 2 (validation): open the verified descriptor, freshly
+    rescan ``datasets/`` for a hardlink alias, and hash-verify content --
+    the complete safety checkpoint for one candidate, run for EVERY
+    admitted candidate before ANY candidate's content is parsed (see
+    :func:`_collect_evidence`). Never opens by raw pathname; the caller's
+    own :class:`~phi_engine.pipeline.intake_preflight.IntakeCandidate`
+    (its already-computed identity/sha256) is the only thing carried
+    forward -- there is no live descriptor to "keep" across passes, so
+    pass 2 re-verifies through the same sanctioned primitive immediately
+    before its one parser call instead.
 
-    Returns ``(fragments, hardlink_detected, review_item, error_item)``.
-    ``fragments`` is ``list[str]`` (pages) for a forms candidate, or
-    ``list[tuple[sheet_index, rows]]`` for a dictionary/mapping candidate;
-    ``None``/``[]`` when nothing was retained. ``hardlink_detected`` is
-    ``True`` only when this candidate's current descriptor identity now
-    aliases something under ``datasets/`` -- the caller must discard all
-    evidence and dispatch nothing when this fires, not just skip this one
-    candidate. Every admitted candidate is opened, hardlink-rechecked, and
-    hash-verified regardless of ``parse_content`` (so a later candidate
-    past an already-exhausted evidence budget can still trip the hardlink
-    guard); ``parse_content=False`` only skips the expensive reader call
-    for content that would never be retained.
-
-    The verified-descriptor context stays open for hashing AND parsing;
-    every reader/workbook object opened from a duplicate of that
-    descriptor is closed before this function returns, so the descriptor's
-    own post-read identity check (performed by ``open_verified_source`` on
-    context exit) always covers the exact, complete read.
+    Returns ``(ok, review_item, error_item)``. ``ok`` is ``False`` for a
+    dataset-alias hit, a descriptor identity/hash mismatch, or a
+    naming-time symlink rejection -- the caller must discard everything
+    collected so far and abort the WHOLE naming attempt, not just this
+    candidate. An oversized candidate (``support-evidence-limit``) is the
+    one failure that leaves ``ok`` ``True``: its descriptor identity is
+    still trusted and tracked by the caller for the pre-dispatch
+    hardlink guard, only its content is never parsed.
     """
+    try:
+        with open_verified_source(
+            source,
+            candidate.relative_path,
+            required_source_component=candidate.source_component,
+            expected_identity=candidate.identity,
+        ) as fd:
+            info = os.fstat(fd)
+            current_datasets = _current_dataset_identities(source)
+            if current_datasets is None or (info.st_dev, info.st_ino) in current_datasets:
+                return False, None, None
 
-    if candidate.identity.size > _MAX_DOCUMENT_BYTES:
-        return None, False, {"path": candidate.relative_path, "reason": "support-evidence-limit", "blocking": True}, None
+            digest = _hash_fd_bounded(fd, _MAX_DOCUMENT_BYTES)
+            if digest != candidate.sha256:
+                raise VerifiedSourceError("source-unreadable")
+    except VerifiedSourceError as exc:
+        if exc.reason in _ERROR_REASONS:
+            return False, None, {"path": candidate.relative_path, "reason": exc.reason}
+        return False, {"path": candidate.relative_path, "reason": exc.reason, "blocking": True}, None
+    except OSError:
+        # Descriptor-level read failure distinct from what
+        # open_verified_source's own identity/symlink checks normalize.
+        return False, None, {"path": candidate.relative_path, "reason": "source-unreadable"}
+    except _EvidenceLimitError:
+        return True, {"path": candidate.relative_path, "reason": "support-evidence-limit", "blocking": True}, None
 
+    return True, None, None
+
+
+def _extract_candidate(
+    source: Path, candidate: IntakeCandidate
+) -> tuple[Any, bool, dict[str, Any] | None, dict[str, Any] | None]:
+    """Pass 2 of 2 (extraction): re-open the ALREADY-validated candidate
+    through the same sanctioned :func:`open_verified_source` primitive --
+    re-checking its expected identity and freshly rescanning
+    ``datasets/`` again immediately before this specific parser call, so
+    a hardlink created in the window between pass 1 and this call is
+    still caught. A same-inode, same-size mutation whose mtime has been
+    restored to the identity pass 1 already validated defeats
+    ``open_verified_source``'s identity check alone, so this pass also
+    recomputes the bounded SHA-256 from the freshly opened descriptor
+    and compares it against ``candidate.sha256`` -- exactly like pass 1
+    -- before rewinding the descriptor and handing it to any parser.
+    Never reopens by raw pathname.
+
+    Returns ``(fragments, abort, review_item, error_item)`` with the same
+    ``abort``/record contract as :func:`_validate_candidate`'s ``ok``.
+    ``fragments`` is ``list[str]`` (pages) for a forms candidate, or
+    ``list[tuple[sheet_index, rows]]`` for a dictionary/mapping
+    candidate; ``None``/``[]`` when nothing was retained.
+
+    The verified-descriptor context stays open for the whole hash-recheck
+    and parse; the reader/workbook object opened from a duplicate of that
+    descriptor is closed before this function returns, so the
+    descriptor's own post-read identity check (performed by
+    ``open_verified_source`` on context exit) always covers the exact,
+    complete read.
+    """
     is_forms = candidate.component == "forms"
     suffix = PurePosixPath(candidate.relative_path).suffix.lower()
 
@@ -547,11 +678,8 @@ def _process_candidate(
             digest = _hash_fd_bounded(fd, _MAX_DOCUMENT_BYTES)
             if digest != candidate.sha256:
                 raise VerifiedSourceError("source-unreadable")
-
-            if not parse_content:
-                return None, False, None, None
-
             os.lseek(fd, 0, os.SEEK_SET)
+
             stream = os.fdopen(os.dup(fd), "rb")
             if is_forms:
                 fragments: Any = _extract_pdf_pages(stream)
@@ -561,12 +689,12 @@ def _process_candidate(
                 fragments = _extract_xlsx_sheets(stream)
     except VerifiedSourceError as exc:
         if exc.reason in _ERROR_REASONS:
-            return None, False, None, {"path": candidate.relative_path, "reason": exc.reason}
-        return None, False, {"path": candidate.relative_path, "reason": exc.reason, "blocking": True}, None
+            return None, True, None, {"path": candidate.relative_path, "reason": exc.reason}
+        return None, True, {"path": candidate.relative_path, "reason": exc.reason, "blocking": True}, None
     except OSError:
         # Descriptor-level read/dup/fdopen failure distinct from what
         # open_verified_source's own identity/symlink checks normalize.
-        return None, False, None, {"path": candidate.relative_path, "reason": "source-unreadable"}
+        return None, True, None, {"path": candidate.relative_path, "reason": "source-unreadable"}
     except _EvidenceLimitError:
         return None, False, {"path": candidate.relative_path, "reason": "support-evidence-limit", "blocking": True}, None
 
@@ -583,44 +711,85 @@ def _collect_evidence(
     frozenset[tuple[int, int]],
     bool,
 ]:
-    """Validate every admitted candidate (open, dataset-hardlink recheck,
-    hash-verify) and incrementally grow the forms/dictionary_mapping
-    evidence dicts fragment-by-fragment, each capped at
-    ``_MAX_EVIDENCE_BYTES`` the moment it would be exceeded -- so retained
-    state is always already-bounded, never an unbounded intermediate list
-    of every parsed document. Once a component's budget closes, further
-    candidates of that component are still opened/validated (for the
-    hardlink guard) but their content is not parsed. A dataset hardlink
-    found on any candidate immediately discards everything collected so
-    far and stops the whole scan.
+    """Two-pass evidence collection. Pass 1 validates EVERY admitted
+    candidate (descriptor open, expected identity, fresh dataset-alias
+    scan, bounded hash, post-read identity via
+    :func:`_validate_candidate`) before pass 2 ever parses ANY of them --
+    a later candidate's safety failure is no longer discoverable only
+    after an earlier, otherwise-clean candidate was already parsed. A
+    single symlink/hardlink/identity/hash safety failure on any
+    candidate, in either pass, immediately discards everything collected
+    so far (including from earlier, otherwise-clean candidates) and
+    aborts the whole naming attempt with zero further reads and zero
+    dispatch; an oversized (``support-evidence-limit``) candidate does
+    not abort.
+
+    Pass 2 then parses only the pass-1-validated candidates, honoring
+    the per-component evidence-byte budget -- once a component's budget
+    closes, further candidates of that component are skipped entirely
+    (their pass-1 validation already ran) -- and revalidates (fresh
+    descriptor open + expected identity + dataset-alias rescan)
+    immediately before each individual parser call.
+
+    The identity set returned to the caller is the COMPLETE pass-1
+    admitted set -- oversized, budget-closed (non-contributing), and
+    parser-rejected candidates included, not just candidates that
+    contributed a retained evidence fragment -- so the caller's
+    pre-dispatch hardlink guard cannot be defeated by hardlinking a
+    candidate that never produced retained evidence.
     """
-    forms_docs: dict[int, list[str]] = {}
-    dict_docs: dict[int, tuple[str, dict[int, list[list[str]]]]] = {}
     review_items: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
-    contributing_identities: set[tuple[int, int]] = set()
+    verified: list[IntakeCandidate] = []
+    admitted_identities: set[tuple[int, int]] = set()
+
+    for candidate in admitted:
+        ok, review_item, error_item = _validate_candidate(source, candidate)
+        if review_item is not None:
+            review_items.append(review_item)
+        if error_item is not None:
+            errors.append(error_item)
+        if not ok:
+            # No candidate-specific record (a bare dataset-alias scan
+            # hit) -- fall back to one fixed root-level note so the
+            # caller still has something to report.
+            if review_item is None and error_item is None:
+                review_items.append({"path": _ROOT_PATH, "reason": "cross-component-hardlink", "blocking": True})
+            return {}, {}, review_items, errors, frozenset(), True
+        admitted_identities.add((candidate.identity.device, candidate.identity.inode))
+        if review_item is None:
+            # An oversized (support-evidence-limit) candidate already got
+            # its one fixed review record here in pass 1 -- its identity
+            # is tracked above, but pass 2 must not attempt to read it
+            # again (which would just rediscover the same oversize and
+            # append a second, duplicate record).
+            verified.append(candidate)
+
+    forms_docs: dict[int, list[str]] = {}
+    dict_docs: dict[int, tuple[str, dict[int, list[list[str]]]]] = {}
     form_index = 0
     dict_index = 0
     forms_budget_open = True
     dict_budget_open = True
 
-    for candidate in admitted:
+    for candidate in verified:
         is_forms = candidate.component == "forms"
         budget_open = forms_budget_open if is_forms else dict_budget_open
+        if not budget_open:
+            continue
 
-        fragments, hardlink_detected, review_item, error_item = _process_candidate(
-            source, candidate, parse_content=budget_open
-        )
-        if hardlink_detected:
-            return {}, {}, [], [], frozenset(), True
+        fragments, abort, review_item, error_item = _extract_candidate(source, candidate)
         if review_item is not None:
             review_items.append(review_item)
         if error_item is not None:
             errors.append(error_item)
-        if not fragments or not budget_open:
+        if abort:
+            if review_item is None and error_item is None:
+                review_items.append({"path": _ROOT_PATH, "reason": "cross-component-hardlink", "blocking": True})
+            return {}, {}, review_items, errors, frozenset(), True
+        if not fragments:
             continue
 
-        identity_key = (candidate.identity.device, candidate.identity.inode)
         if is_forms:
             form_index += 1
             idx = form_index
@@ -631,7 +800,6 @@ def _collect_evidence(
                     forms_budget_open = False
                     break
                 forms_docs = trial
-                contributing_identities.add(identity_key)
         else:
             dict_index += 1
             idx = dict_index
@@ -653,26 +821,178 @@ def _collect_evidence(
                         stop = True
                         break
                     dict_docs = trial
-                    contributing_identities.add(identity_key)
 
-    return forms_docs, dict_docs, review_items, errors, frozenset(contributing_identities), False
+    return forms_docs, dict_docs, review_items, errors, frozenset(admitted_identities), False
+
+
+_PDF_WORKER_CONTEXT = multiprocessing.get_context("spawn")
+
+# Reap grace is deliberately SEPARATE from _PDF_WORKER_MAX_WALL_SECONDS:
+# the wall bound governs how long an ordinary poll()/join() may wait for
+# a cooperating worker; this grace governs only how long terminate()/
+# kill() are given to actually land once the wall deadline has already
+# expired and the child is being forcibly reaped. Applying the wall
+# bound twice (once to poll, again to join) would silently double the
+# effective hang tolerance -- this module uses ONE monotonic deadline
+# shared by poll() and join(), never two independent full-duration waits.
+_PDF_WORKER_REAP_GRACE_SECONDS = 2.0
+
+
+def _reap_pdf_worker(process: Any) -> None:
+    """Positively terminate, escalating to kill, a still-alive worker.
+    Never called unless ``process.start()`` already succeeded. Each step
+    is independently exception-guarded -- a raw exception from
+    ``is_alive``/``terminate``/``join`` must never skip the kill
+    escalation that follows it, or a child could be left alive simply
+    because ``terminate()`` itself raised. Best-effort: this function
+    itself never raises."""
+    try:
+        if process.is_alive():
+            process.terminate()
+    except Exception:
+        pass
+    try:
+        if process.is_alive():
+            process.join(_PDF_WORKER_REAP_GRACE_SECONDS)
+    except Exception:
+        pass
+    try:
+        if process.is_alive():
+            process.kill()
+    except Exception:
+        pass
+    try:
+        if process.is_alive():
+            process.join(_PDF_WORKER_REAP_GRACE_SECONDS)
+    except Exception:
+        pass
+
+
+def _run_pdf_worker(process: Any, parent_conn: Any, child_conn: Any) -> bytes | None:
+    """Runs the spawned worker under ONE monotonic wall-clock deadline
+    shared by the initial ``poll()`` and the post-signal ``join()`` --
+    the configured wall bound is never applied twice before termination.
+    Positively reaps a started child on every path (never leaves it
+    alive), closes both pipe endpoints and the ``Process`` handle
+    regardless of outcome, and normalizes every lifecycle exception
+    (``start``/``poll``/``recv_bytes``/``join``/``terminate``/``kill``)
+    to a bare ``None`` result rather than letting a raw library
+    exception (whose message could echo source content, or simply
+    library-internal detail) escape this boundary -- the caller raises
+    the one fixed ``_EvidenceLimitError`` for every such outcome, with no
+    exception chaining back to whatever was actually raised here.
+    """
+    deadline = time.monotonic() + _PDF_WORKER_MAX_WALL_SECONDS
+    started = False
+    raw: bytes | None = None
+    exitcode: int | None = None
+    try:
+        process.start()
+        started = True
+        try:
+            child_conn.close()  # only the child writes; the parent's copy must not linger
+        except OSError:
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining > 0 and parent_conn.poll(remaining):
+            raw = parent_conn.recv_bytes(maxlength=_PDF_WORKER_MAX_RESULT_BYTES)
+        process.join(max(0.0, deadline - time.monotonic()))
+    except Exception:
+        raw = None
+    finally:
+        try:
+            if started:
+                _reap_pdf_worker(process)
+        except Exception:
+            raw = None
+        if started:
+            # Exitcode must be read BEFORE process.close() -- a closed
+            # Process handle raises on every further attribute access,
+            # exitcode included.
+            try:
+                exitcode = process.exitcode
+            except Exception:
+                exitcode = None
+        for conn in (parent_conn, child_conn):
+            try:
+                conn.close()
+            except Exception:
+                pass
+        try:
+            process.close()
+        except Exception:
+            pass
+
+    if not started or raw is None or exitcode != 0:
+        return None
+    return raw
+
+
+def _decode_worker_reply(raw: bytes) -> list[str]:
+    """Strict schema validation of the worker's bounded, non-executable
+    UTF-8 (ASCII-subset) JSON reply: an exact two-key
+    ``{"status", "pages"}`` object, literal ``"ok"`` status, a ``pages``
+    list bounded by ``_MAX_PDF_PAGES``, and each page a non-boolean
+    ``str`` within ``_MAX_FRAGMENT_CODEPOINTS``. Any other shape, type,
+    key, or cardinality collapses to the fixed ``_EvidenceLimitError`` --
+    never a raw parse/type exception, and never ``pickle`` or any other
+    format capable of executing code while being decoded."""
+    try:
+        payload = json.loads(raw.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise _EvidenceLimitError() from None
+    if not isinstance(payload, dict) or set(payload) != {"status", "pages"}:
+        raise _EvidenceLimitError()
+    status = payload["status"]
+    texts = payload["pages"]
+    if status != "ok" or not isinstance(texts, list) or len(texts) > _MAX_PDF_PAGES:
+        raise _EvidenceLimitError()
+    for text in texts:
+        if not isinstance(text, str) or isinstance(text, bool) or len(text) > _MAX_FRAGMENT_CODEPOINTS:
+            raise _EvidenceLimitError()
+    return texts
 
 
 def _extract_pdf_pages(stream: BinaryIO) -> list[str]:
+    """Extract text from at most ``_MAX_PDF_PAGES`` pages. The actual
+    ``pdfplumber``/``pdfminer`` parse -- the only step that can decompress
+    a hostile PDF content stream into far more memory than its on-disk
+    size implies -- runs isolated in a spawned child bound by hard
+    address-space (``RLIMIT_AS``), CPU-time (``RLIMIT_CPU``), a single
+    monotonic wall-clock deadline (:func:`_run_pdf_worker`), and
+    result-byte (bounded ``recv_bytes``) limits. The spawned child runs
+    :func:`phi_engine.pipeline._pdf_extract_worker.run` -- a private
+    module that imports nothing from ``phi_engine`` -- rather than a
+    function defined in this module, because ``intake_naming.py``'s own
+    top-level imports (``config``, the security/model-routing
+    chokepoints, ``intake_preflight``) pull in a multi-gigabyte virtual-
+    address-space baseline before a single PDF byte is ever touched,
+    which would make the address-space bound meaningless for a spawned
+    process that had already imported this module first. Any worker
+    limit, termination, or pathology -- a failed resource-limit
+    application, an out-of-memory kill, a CPU-time kill, a hang past the
+    wall-clock deadline, or an oversized/malformed reply -- collapses to
+    the fixed ``_EvidenceLimitError``, never a raw exception. The reply
+    itself crosses the process boundary as bounded, non-executable JSON,
+    never ``pickle``.
+    """
     try:
-        try:
-            with pdfplumber.open(stream) as pdf:
-                texts = [(page.extract_text() or "") for page in pdf.pages[:_MAX_PDF_PAGES]]
-        finally:
-            stream.close()
-    except _EvidenceLimitError:
-        raise
-    except Exception:
-        raise _EvidenceLimitError() from None
-    for text in texts:
-        if len(text) > _MAX_FRAGMENT_CODEPOINTS:
-            raise _EvidenceLimitError()
-    return texts
+        data = stream.read(_MAX_DOCUMENT_BYTES + 1)
+    finally:
+        stream.close()
+    if len(data) > _MAX_DOCUMENT_BYTES:
+        raise _EvidenceLimitError()
+
+    parent_conn, child_conn = _PDF_WORKER_CONTEXT.Pipe(duplex=False)
+    process = _PDF_WORKER_CONTEXT.Process(
+        target=_pdf_extract_worker.run,
+        args=(data, _MAX_PDF_PAGES, _PDF_WORKER_MAX_ADDRESS_BYTES, _PDF_WORKER_MAX_CPU_SECONDS, child_conn),
+        daemon=True,
+    )
+    raw = _run_pdf_worker(process, parent_conn, child_conn)
+    if raw is None:
+        raise _EvidenceLimitError()
+    return _decode_worker_reply(raw)
 
 
 def _extract_csv_rows(stream: BinaryIO) -> list[list[str]]:

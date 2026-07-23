@@ -12,12 +12,15 @@ that is otherwise awkward to construct realistically end to end.
 
 from __future__ import annotations
 
+import builtins
 import inspect
 import io
 import json
 import os
 import re
+import time
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -161,6 +164,37 @@ def _write_pdf(path: Path, *lines: str) -> None:
         pdf.drawString(72, 750, line)
         pdf.showPage()
     pdf.save()
+
+
+def _write_flate_bomb_pdf(path: Path, raw_size: int) -> None:
+    """A minimal, valid, hand-assembled single-page PDF whose one content
+    stream is Flate-compressed: small on disk, but pdfminer/pdfplumber
+    must fully zlib-decompress it (well before this module's own
+    per-fragment codepoint check ever sees the result) just to read it --
+    the exact expansion vector the isolated PDF worker's address-space
+    bound exists to catch."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    compressed = zlib.compress(b"0" * raw_size, 9)
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> "
+        b"/MediaBox [0 0 612 792] /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length %d /Filter /FlateDecode >>\nstream\n" % len(compressed) + compressed + b"\nendstream",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for index, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % index + body + b"\nendobj\n"
+    xref_offset = len(out)
+    count = len(objects) + 1
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % count
+    for offset in offsets:
+        out += b"%010d 00000 n \n" % offset
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF" % (count, xref_offset)
+    path.write_bytes(bytes(out))
 
 
 def _write_workbook(path: Path, rows: list[list[object]], *, sheet_names: list[str] | None = None) -> None:
@@ -364,7 +398,11 @@ def test_dataset_and_unclassified_candidates_never_open_for_evidence(tmp_path, m
         source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
     )
 
-    assert opened == sorted(opened)
+    # Two-phase collection (validate-all, then extract) opens each
+    # admitted candidate up to twice -- once per pass -- so the raw
+    # `opened` sequence is no longer a single sorted run; the first-seen
+    # order (i.e. the order pass 1 visits candidates) still is.
+    assert list(dict.fromkeys(opened)) == sorted(dict.fromkeys(opened))
     assert all(not p.startswith("datasets/") for p in opened)
     assert all(not p.startswith("_unclassified") for p in opened)
     for prompt in _prompts_sent():
@@ -611,7 +649,54 @@ def test_hash_drift_with_matching_identity_is_rejected(tmp_path, monkeypatch):
     assert resolution.errors == ({"path": "forms/consent.pdf", "reason": "source-unreadable"},)
 
 
-def test_cross_component_hardlink_is_excluded_before_naming_ever_sees_it(tmp_path, monkeypatch):
+def test_validation_completes_for_every_candidate_before_any_extraction_begins(tmp_path, monkeypatch):
+    """Regression for the audited interleaving defect ('Candidate
+    validation and extraction are interleaved, so a later mutation is
+    found only after earlier content was parsed'): validation is a
+    complete pass over EVERY admitted candidate before extraction ever
+    begins for ANY of them. A lexically-earlier, otherwise-clean
+    candidate (``data_dictionary/dict.csv``) must never be parsed just
+    because a lexically-later candidate's (``forms/z.pdf``) safety
+    failure is only discovered afterward."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir(parents=True)
+    (source / "data_dictionary").mkdir(parents=True)
+    _write_pdf(source / "forms" / "z.pdf", "hello")  # sorts AFTER dict.csv
+    (source / "data_dictionary" / "dict.csv").write_text("VAR\n1\n", encoding="utf-8")
+    preflight = inspect_intake_source(source)
+    assert preflight.candidates[0].relative_path < preflight.candidates[1].relative_path
+
+    # TOCTOU: mutate the LATER-sorted candidate after preflight computed
+    # its identity/sha256.
+    (source / "forms" / "z.pdf").write_bytes(b"mutated-bytes-different")
+
+    extraction_calls = {"n": 0}
+    real_extract_csv = naming._extract_csv_rows
+
+    def counting_extract_csv(stream):
+        extraction_calls["n"] += 1
+        return real_extract_csv(stream)
+
+    monkeypatch.setattr(naming, "_extract_csv_rows", counting_extract_csv)
+    _forbid_client(monkeypatch)
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+
+    assert extraction_calls["n"] == 0
+    assert resolution.source == "generated"
+    assert resolution.errors == ({"path": "forms/z.pdf", "reason": "source-unreadable"},)
+
+
+def test_cross_component_hardlink_preflight_finding_aborts_naming_with_zero_reads_and_zero_calls(tmp_path, monkeypatch):
+    """A preflight-detected cross-component hardlink on ONE support file
+    must abort the ENTIRE naming attempt -- including a perfectly clean,
+    otherwise-admitted forms candidate -- with zero content reads and
+    zero model dispatch. Preflight already recorded the fixed
+    cross-component-hardlink review item for the aliased file (merged by
+    the caller); naming must add nothing new and must not read or
+    dispatch any other admitted candidate's evidence."""
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
@@ -624,15 +709,51 @@ def test_cross_component_hardlink_is_excluded_before_naming_ever_sees_it(tmp_pat
     assert any(item["reason"] == "cross-component-hardlink" for item in preflight.review_items)
     assert not any(c.component == "data_dictionary" for c in preflight.candidates)
 
-    _install_fake_client(monkeypatch, _queue_dispatch((None, _REJECT_CONF), (None, _REJECT_CONF)))
+    monkeypatch.setattr(naming, "open_verified_source", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not open")))
+    _forbid_client(monkeypatch)
     resolution = naming.resolve_intake_study(
         source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
     )
-    for prompt in _prompts_sent():
-        assert "SUBJID" not in prompt
-        assert "labs.csv" not in prompt
-        assert "aliased.csv" not in prompt
+    assert FakeHTTPConnection.requests == []
     assert resolution.source == "generated"
+    assert resolution.review_items == ()
+    assert resolution.errors == ()
+
+
+@pytest.mark.parametrize("reason", ["source-unreadable", "source-target-outside-root"])
+def test_preflight_trust_error_aborts_naming_with_zero_reads_and_zero_calls(tmp_path, monkeypatch, reason):
+    """A preflight ERROR (not just a review item) recording a
+    verified-source trust failure elsewhere in the tree -- either
+    ``source-unreadable`` or ``source-target-outside-root`` -- must abort
+    the ENTIRE naming attempt exactly like a preflight-recorded
+    symlink/hardlink review item does: zero candidate opens, zero client
+    construction, zero dispatch, even though an otherwise-clean, fully
+    admitted dictionary candidate exists. Exact reproduction of the
+    audited PoC: a real, clean dictionary candidate plus a synthetic
+    preflight error for an unrelated path."""
+    source = tmp_path / "source"
+    (source / "forms").mkdir(parents=True)
+    (source / "data_dictionary").mkdir(parents=True)
+    _write_pdf(source / "forms" / "consent.pdf", "hello")
+    _write_workbook(source / "data_dictionary" / "dict.xlsx", [["a", "b"]])
+    preflight = inspect_intake_source(source)
+    assert any(c.component == "data_dictionary" for c in preflight.candidates)
+
+    poisoned_preflight = IntakePreflight(
+        preflight.candidates,
+        preflight.review_items,
+        preflight.errors + ({"path": "forms/unreadable.pdf", "reason": reason},),
+    )
+
+    monkeypatch.setattr(naming, "open_verified_source", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not open")))
+    _forbid_client(monkeypatch)
+    resolution = naming.resolve_intake_study(
+        source, poisoned_preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+    assert FakeHTTPConnection.requests == []
+    assert resolution.source == "generated"
+    assert resolution.review_items == ()
+    assert resolution.errors == ()
 
 
 def test_symlink_naming_candidate_is_rejected_before_read(tmp_path, monkeypatch):
@@ -669,20 +790,107 @@ def test_symlink_naming_candidate_is_rejected_before_read(tmp_path, monkeypatch)
 # --- oversized document: skipped before open, blocking review ----------------------------
 
 
-def test_oversized_document_is_never_opened_and_flags_support_evidence_limit(tmp_path, monkeypatch):
+def test_oversized_document_still_goes_through_hardlink_and_hash_gates_before_dispatch(tmp_path, monkeypatch):
+    """Oversized candidates are no longer skipped by a stat-only
+    pre-check before the hardlink/identity checkpoint (that used to hide
+    a late hardlink on an over-limit candidate, see the regression
+    below) -- they are opened, hardlink-rechecked, and hash-bounded-read
+    like every other admitted candidate, and _MAX_DOCUMENT_BYTES is
+    enforced by the bounded hash read itself, not a stat pre-check."""
     source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
     big = source / "forms" / "huge.pdf"
     big.write_bytes(b"0" * (naming._MAX_DOCUMENT_BYTES + 1))
     preflight = inspect_intake_source(source)
 
-    monkeypatch.setattr(naming, "open_verified_source", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not open")))
     _forbid_client(monkeypatch)
     resolution = naming.resolve_intake_study(
         source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
     )
     assert resolution.review_items == ({"path": "forms/huge.pdf", "reason": "support-evidence-limit", "blocking": True},)
     assert resolution.source == "generated"
+
+
+def test_oversized_candidate_with_late_hardlink_reports_hardlink_not_size_limit(tmp_path, monkeypatch):
+    """Exact reproduction of the audited PoC: an oversized forms
+    candidate is hardlinked into datasets/ AFTER preflight, alongside an
+    otherwise-clean dictionary candidate. The old stat-only oversize
+    pre-check hid this candidate from the hardlink/identity checkpoint
+    entirely, letting the clean dictionary candidate still dispatch (two
+    model calls were observed in the audit). It must now abort the
+    entire attempt with zero dispatch and the hardlink code, not
+    support-evidence-limit."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir(parents=True)
+    (source / "data_dictionary").mkdir(parents=True)
+    (source / "datasets" / "labs.csv").write_text("SUBJID\n1\n", encoding="utf-8")
+    big = source / "forms" / "huge.pdf"
+    big.write_bytes(b"0" * (naming._MAX_DOCUMENT_BYTES + 1))
+    (source / "data_dictionary" / "dict.csv").write_text("VAR,DESC\n1,2\n", encoding="utf-8")
+    preflight = inspect_intake_source(source)
+    assert any(c.relative_path == "forms/huge.pdf" for c in preflight.candidates)
+
+    os.link(big, source / "datasets" / "late-huge.csv")
+
+    _forbid_client(monkeypatch)
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+    assert FakeHTTPConnection.requests == []
+    assert resolution.source == "generated"
+    assert resolution.review_items == ({"path": "", "reason": "cross-component-hardlink", "blocking": True},)
+    assert resolution.errors == ()
+
+
+def test_late_hardlink_on_oversized_noncontributing_candidate_yields_zero_dispatch(tmp_path, monkeypatch):
+    """Exact reproduction of the audited PoC (finding: 'A late hardlink
+    on an oversized/non-contributing candidate is missed before model
+    dispatch'): an oversized forms candidate that NEVER contributes a
+    retained evidence fragment must still be tracked by the pre-dispatch
+    hardlink guard's identity set. A hardlink created into datasets/
+    AFTER evidence collection finishes (but before dispatch) -- aliasing
+    the OVERSIZED candidate specifically, which the guard used to ignore
+    because only fragment-contributing identities were tracked -- must
+    still be caught, with zero dispatch of the clean dictionary
+    candidate's content."""
+    monkeypatch.setattr(naming, "_MAX_DOCUMENT_BYTES", 32)
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir(parents=True)
+    (source / "data_dictionary").mkdir(parents=True)
+    (source / "datasets" / "labs.csv").write_text("SUBJID\n1\n", encoding="utf-8")
+    huge = source / "forms" / "huge.pdf"
+    huge.write_bytes(b"0" * 33)  # exceeds the reduced 32-byte cap
+    (source / "data_dictionary" / "dict.csv").write_text("VAR,DESC\n1,2\n", encoding="utf-8")
+    preflight = inspect_intake_source(source)
+    assert any(c.relative_path == "forms/huge.pdf" for c in preflight.candidates)
+
+    real_collect = naming._collect_evidence
+
+    def wrapped_collect(src, admitted):
+        result = real_collect(src, admitted)
+        # The race: link a NEW dataset dirent to the oversized, never-
+        # contributing candidate's inode ONLY after collection returns.
+        os.link(huge, src / "datasets" / "late-huge.csv")
+        return result
+
+    monkeypatch.setattr(naming, "_collect_evidence", wrapped_collect)
+    _forbid_client(monkeypatch)
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+    assert FakeHTTPConnection.requests == []
+    assert resolution.source == "generated"
+    assert resolution.review_items == (
+        {"path": "forms/huge.pdf", "reason": "support-evidence-limit", "blocking": True},
+        {"path": "", "reason": "cross-component-hardlink", "blocking": True},
+    )
+    assert resolution.errors == ()
+    dumped = json.dumps(resolution.review_items)
+    assert "VAR" not in dumped and "DESC" not in dumped
+
 
 
 # --- descriptor lifecycle: reader closes before context exit -----------------------------
@@ -712,6 +920,64 @@ def test_descriptor_stays_verified_through_hash_and_parse(tmp_path, monkeypatch)
     )
     assert resolution.source == "generated"
     assert resolution.errors == ({"path": "forms/consent.pdf", "reason": "source-unreadable"},)
+
+
+def test_between_pass_mutation_with_restored_identity_and_size_is_rejected(tmp_path, monkeypatch):
+    """Pass 1 (:func:`_validate_candidate`) hashes and clears a candidate;
+    pass 2 (:func:`_extract_candidate`) then re-opens it. FileIdentity
+    (device/inode/size/mtime_ns) alone cannot see a same-inode, same-size
+    content swap whose mtime is restored to the exact value pass 1 already
+    validated -- ``open_verified_source``'s own identity checks (both at
+    open and at post-read context exit) pass cleanly. Only pass 2's own
+    fresh SHA-256 recheck against ``candidate.sha256``, performed before
+    any parser call, can catch it. Exact reproduction of the audited PoC:
+    a data_dictionary candidate is rewritten with same-length content
+    between pass 1 and pass 2."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "data_dictionary").mkdir(parents=True)
+    dict_path = source / "data_dictionary" / "dict.csv"
+    dict_path.write_text("VAR,DESC\n1,SAFE\n", encoding="utf-8")
+    preflight = inspect_intake_source(source)
+    candidate = preflight.candidates[0]
+    assert candidate.relative_path == "data_dictionary/dict.csv"
+    expected_mtime_ns = candidate.identity.mtime_ns
+
+    real_validate = naming._validate_candidate
+
+    def mutate_between_passes(src, cand):
+        result = real_validate(src, cand)
+        # Same-inode, same-size mutation with mtime restored to the exact
+        # value pass 1 already validated -- identity alone cannot see it.
+        dict_path.write_text("VAR,DESC\n1,EVIL\n", encoding="utf-8")
+        os.utime(dict_path, ns=(expected_mtime_ns, expected_mtime_ns))
+        post = os.stat(dict_path)
+        assert post.st_ino == cand.identity.inode
+        assert post.st_size == cand.identity.size
+        assert post.st_mtime_ns == expected_mtime_ns
+        return result
+
+    monkeypatch.setattr(naming, "_validate_candidate", mutate_between_passes)
+
+    extraction_calls = {"n": 0}
+    real_extract_csv = naming._extract_csv_rows
+
+    def counting_extract_csv(stream):
+        extraction_calls["n"] += 1
+        return real_extract_csv(stream)
+
+    monkeypatch.setattr(naming, "_extract_csv_rows", counting_extract_csv)
+    _forbid_client(monkeypatch)
+
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+
+    assert extraction_calls["n"] == 0
+    assert FakeHTTPConnection.requests == []
+    assert resolution.source == "generated"
+    assert resolution.review_items == ()
+    assert resolution.errors == ({"path": "data_dictionary/dict.csv", "reason": "source-unreadable"},)
 
 
 # --- exact readers/order/canonical JSON (public behavior) ---------------------------------
@@ -880,6 +1146,603 @@ def test_pdf_reader_caps_at_two_pages_in_order():
     assert len(pages) == 2
     assert pages[0].strip().startswith("Page One")
     assert pages[1].strip().startswith("Page Two")
+
+
+# --- bounded PDF worker: compressed expansion cannot exhaust the parent ------------------
+
+
+def test_compressed_pdf_expansion_is_bounded_and_never_dispatches(tmp_path, monkeypatch):
+    """A small, valid, Flate-compressed PDF (well under _MAX_DOCUMENT_BYTES
+    on disk) that decompresses to far more memory than its on-disk size
+    implies must be rejected as support-evidence-limit by the isolated
+    worker's hard address-space bound, not silently parsed to completion
+    or allowed to exhaust this process. Zero model dispatch either way."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir(parents=True)
+    bomb = source / "forms" / "bomb.pdf"
+    _write_flate_bomb_pdf(bomb, 300 * 1024 * 1024)
+    assert bomb.stat().st_size < naming._MAX_DOCUMENT_BYTES
+    preflight = inspect_intake_source(source)
+    assert any(c.relative_path == "forms/bomb.pdf" for c in preflight.candidates)
+
+    _forbid_client(monkeypatch)
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+    assert FakeHTTPConnection.requests == []
+    assert resolution.review_items == ({"path": "forms/bomb.pdf", "reason": "support-evidence-limit", "blocking": True},)
+    assert resolution.source == "generated"
+    assert resolution.errors == ()
+
+
+def test_normal_support_pdf_naming_still_works_after_worker_isolation(tmp_path, monkeypatch):
+    """Sanity companion to the bomb regression above: a normal, small,
+    legitimate forms PDF must still name successfully end to end through
+    the isolated worker -- the address-space/CPU/wall-time bounds must
+    not reject ordinary input."""
+    source = tmp_path / "source"
+    _make_minimal_forms_source(source, "Alpha consent")
+    preflight = inspect_intake_source(source)
+
+    _install_fake_client(monkeypatch, _queue_dispatch(("StudyAlpha", _ACCEPT_CONF)))
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+    assert resolution.name == "StudyAlpha"
+    assert resolution.source == "ai"
+    assert resolution.review_items == ()
+    assert resolution.errors == ()
+
+
+# --- worker lifecycle: hung/unresponsive child is reaped, never leaked ------------------
+
+
+class _FakeConn:
+    def __init__(self):
+        self.closed = False
+
+    def poll(self, timeout):
+        return False
+
+    def recv_bytes(self, maxlength=None):
+        raise EOFError()
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeHangingProcess:
+    """Simulates a spawned PDF worker that never sends data and never
+    exits on its own -- exactly what an OOM-killed-too-slowly or a
+    genuine pdfminer hang looks like from the parent's side.
+    ``responds_to_terminate`` controls whether SIGTERM (``terminate()``)
+    is enough, or whether escalation to SIGKILL (``kill()``) is
+    required -- both must leave the process reaped, never leaked."""
+
+    def __init__(self, *, responds_to_terminate: bool):
+        self._alive = True
+        self.terminate_called = False
+        self.kill_called = False
+        self.closed = False
+        self._responds_to_terminate = responds_to_terminate
+        self.exitcode = None
+
+    def start(self):
+        pass
+
+    def is_alive(self):
+        return self._alive
+
+    def join(self, timeout=None):
+        pass
+
+    def terminate(self):
+        self.terminate_called = True
+        if self._responds_to_terminate:
+            self._alive = False
+            self.exitcode = -15
+
+    def kill(self):
+        self.kill_called = True
+        self._alive = False
+        self.exitcode = -9
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeHangingContext:
+    def __init__(self, *, responds_to_terminate: bool):
+        self._responds_to_terminate = responds_to_terminate
+        self.processes: list[_FakeHangingProcess] = []
+        self.conns: list[_FakeConn] = []
+
+    def Pipe(self, duplex=False):
+        parent_conn, child_conn = _FakeConn(), _FakeConn()
+        self.conns.extend([parent_conn, child_conn])
+        return parent_conn, child_conn
+
+    def Process(self, target, args, daemon):
+        process = _FakeHangingProcess(responds_to_terminate=self._responds_to_terminate)
+        self.processes.append(process)
+        return process
+
+
+@pytest.mark.parametrize("responds_to_terminate", [True, False])
+def test_hung_pdf_worker_is_terminated_or_killed_never_leaked(monkeypatch, responds_to_terminate):
+    """A PDF worker that never responds and never exits on its own (an
+    OOM/CPU-limit kill that has not landed yet, or a genuine pdfminer
+    hang past the wall-clock bound) must be positively reaped by the
+    parent -- ``terminate()``, escalating to ``kill()`` when that alone
+    is not enough -- so the wall-clock bound can never leave a runaway
+    child process behind. Content is treated as unusable
+    (``support-evidence-limit``) either way."""
+    fake_context = _FakeHangingContext(responds_to_terminate=responds_to_terminate)
+    monkeypatch.setattr(naming, "_PDF_WORKER_CONTEXT", fake_context)
+    monkeypatch.setattr(naming, "_PDF_WORKER_MAX_WALL_SECONDS", 0)
+
+    with pytest.raises(naming._EvidenceLimitError):
+        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+
+    assert len(fake_context.processes) == 1
+    process = fake_context.processes[0]
+    assert process.terminate_called
+    if not responds_to_terminate:
+        assert process.kill_called
+    assert not process.is_alive()
+    assert process.closed
+    assert all(conn.closed for conn in fake_context.conns)
+
+
+# --- worker: fail-closed resource limits, mandatory before pdfplumber import -------------
+
+
+class _CapturingConn:
+    def __init__(self):
+        self.sent: list[bytes] = []
+        self.closed = False
+
+    def send_bytes(self, data):
+        self.sent.append(data)
+
+    def close(self):
+        self.closed = True
+
+
+def test_worker_fails_closed_when_resource_module_unavailable():
+    """If `resource` cannot even be imported (a non-POSIX platform),
+    pdfplumber must never be imported and the PDF bytes must never be
+    touched -- only the fixed error sentinel is sent."""
+    from phi_engine.pipeline import _pdf_extract_worker as worker
+
+    real_import = builtins.__import__
+    imported = {"pdfplumber": False}
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "resource":
+            raise ImportError("simulated unavailable resource module")
+        if name == "pdfplumber":
+            imported["pdfplumber"] = True
+        return real_import(name, *args, **kwargs)
+
+    original = builtins.__import__
+    builtins.__import__ = guarded_import
+    try:
+        conn = _CapturingConn()
+        worker.run(b"whatever-pdf-bytes", 2, 256 * 1024 * 1024, 5, conn)
+    finally:
+        builtins.__import__ = original
+
+    assert imported["pdfplumber"] is False
+    assert conn.closed
+    assert len(conn.sent) == 1
+    assert json.loads(conn.sent[0].decode("ascii")) == {"status": "error", "pages": []}
+
+
+@pytest.mark.parametrize("failing_limit_name", ["RLIMIT_AS", "RLIMIT_CPU"])
+def test_worker_fails_closed_before_pdfplumber_import_when_setrlimit_fails(monkeypatch, failing_limit_name):
+    """Either hard limit failing to apply -- RLIMIT_AS or RLIMIT_CPU --
+    must prevent pdfplumber from EVER being imported or touching the
+    (possibly hostile) PDF bytes; a best-effort fallback to an unbounded
+    parse would defeat the entire point of this isolated worker. Exact
+    reproduction of the audited PoC: `resource.setrlimit` replaced with a
+    function that raises `OSError`."""
+    import resource
+
+    from phi_engine.pipeline import _pdf_extract_worker as worker
+
+    failing_limit = getattr(resource, failing_limit_name)
+    calls: list[int] = []
+
+    def fake_setrlimit(which, limits):
+        calls.append(which)
+        if which == failing_limit:
+            raise OSError(f"simulated {failing_limit_name} rejection")
+        return None  # never touches the real process limits for the OTHER call
+
+    monkeypatch.setattr(resource, "setrlimit", fake_setrlimit)
+
+    imported = {"pdfplumber": False}
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "pdfplumber":
+            imported["pdfplumber"] = True
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    conn = _CapturingConn()
+    worker.run(b"whatever-pdf-bytes", 2, 256 * 1024 * 1024, 5, conn)
+
+    # Both hard limits are attempted, IN ORDER, before pdfplumber -- a
+    # failing RLIMIT_AS is the very first thing attempted, so RLIMIT_CPU
+    # is never even reached; a failing RLIMIT_CPU is only discovered
+    # after RLIMIT_AS already succeeded.
+    if failing_limit_name == "RLIMIT_AS":
+        assert calls == [resource.RLIMIT_AS]
+    else:
+        assert calls == [resource.RLIMIT_AS, resource.RLIMIT_CPU]
+    assert imported["pdfplumber"] is False
+    assert conn.closed
+    assert len(conn.sent) == 1
+    assert json.loads(conn.sent[0].decode("ascii")) == {"status": "error", "pages": []}
+
+
+def test_worker_applies_both_hard_limits_before_pdfplumber_when_they_succeed(monkeypatch):
+    """Sanity companion: when both setrlimit calls succeed, pdfplumber IS
+    reached -- proof the fail-closed guard above isn't blocking
+    legitimate use."""
+    import resource
+
+    from phi_engine.pipeline import _pdf_extract_worker as worker
+
+    calls: list[int] = []
+
+    def recording_setrlimit(which, limits):
+        # Record the attempt without ever touching this test process's
+        # own real resource limits.
+        calls.append(which)
+        return None
+
+    monkeypatch.setattr(resource, "setrlimit", recording_setrlimit)
+
+    conn = _CapturingConn()
+    worker.run(b"not a real pdf", 2, 256 * 1024 * 1024, 5, conn)
+
+    assert calls == [resource.RLIMIT_AS, resource.RLIMIT_CPU]
+    assert conn.closed
+    assert len(conn.sent) == 1
+    payload = json.loads(conn.sent[0].decode("ascii"))
+    assert set(payload) == {"status", "pages"}
+    assert payload["status"] == "error"  # garbage bytes: pdfplumber itself rejects them, not a limit failure
+
+
+# --- parent-side worker reply: bounded, non-executable, strictly-schema-validated JSON ----
+
+
+def _malformed_worker_replies() -> list[bytes]:
+    max_pages = naming._MAX_PDF_PAGES
+    max_codepoints = naming._MAX_FRAGMENT_CODEPOINTS
+    too_many_pages = json.dumps({"status": "ok", "pages": ["p"] * (max_pages + 1)}, separators=(",", ":")).encode("ascii")
+    too_long_page = json.dumps({"status": "ok", "pages": ["a" * (max_codepoints + 1)]}, separators=(",", ":")).encode(
+        "ascii"
+    )
+    return [
+        b"not json at all",
+        b'{"status": "ok"}',
+        b'{"status": "ok", "pages": [], "extra": 1}',
+        b'{"status": "bad", "pages": []}',
+        b'{"status": "ok", "pages": "not-a-list"}',
+        b'{"status": "ok", "pages": [1, 2]}',
+        b'{"status": "ok", "pages": [true, false]}',
+        too_many_pages,
+        too_long_page,
+        b"[]",
+        b"null",
+    ]
+
+
+@pytest.mark.parametrize("raw", _malformed_worker_replies())
+def test_worker_reply_schema_rejects_every_malformed_shape(raw):
+    with pytest.raises(naming._EvidenceLimitError):
+        naming._decode_worker_reply(raw)
+
+
+def test_worker_reply_schema_accepts_the_exact_valid_shape():
+    payload = json.dumps({"status": "ok", "pages": ["Page one", "Page two"]}, separators=(",", ":")).encode("ascii")
+    assert naming._decode_worker_reply(payload) == ["Page one", "Page two"]
+
+
+def test_worker_reply_rejects_a_pickle_payload_without_executing_it(capsys):
+    """Defense-in-depth: even if the bytes crossing the pipe were an
+    actual pickle stream instead of JSON (a compromised worker, or
+    anything impersonating it), the parent's strict ASCII-JSON decode
+    must reject it outright. Nothing in this module calls
+    `pickle.loads` any more, so a malicious `__reduce__` payload has no
+    path to execute -- proven here with a `__reduce__` that would print
+    a detectable sentinel if it ever ran."""
+    import pickle
+
+    class _Exploit:
+        def __reduce__(self):
+            return (print, ("PICKLE-EXECUTED-DURING-DECODE",))
+
+    malicious = pickle.dumps(_Exploit())
+    with pytest.raises(naming._EvidenceLimitError):
+        naming._decode_worker_reply(malicious)
+    assert "PICKLE-EXECUTED-DURING-DECODE" not in capsys.readouterr().out
+
+
+class _ImmediateReplyConn:
+    def __init__(self, payload: bytes | None):
+        self._payload = payload
+        self.closed = False
+
+    def poll(self, timeout):
+        return self._payload is not None
+
+    def recv_bytes(self, maxlength=None):
+        if self._payload is None:
+            raise EOFError()
+        return self._payload
+
+    def close(self):
+        self.closed = True
+
+
+class _ImmediateExitProcess:
+    def __init__(self):
+        self.exitcode = 0
+        self._alive = False
+        self.closed = False
+
+    def start(self):
+        pass
+
+    def is_alive(self):
+        return self._alive
+
+    def join(self, timeout=None):
+        pass
+
+    def terminate(self):
+        self._alive = False
+
+    def kill(self):
+        self._alive = False
+
+    def close(self):
+        self.closed = True
+
+
+class _ImmediateReplyContext:
+    def __init__(self, payload: bytes | None):
+        self._payload = payload
+
+    def Pipe(self, duplex=False):
+        return _ImmediateReplyConn(self._payload), _ImmediateReplyConn(None)
+
+    def Process(self, target, args, daemon):
+        return _ImmediateExitProcess()
+
+
+def _malicious_end_to_end_replies() -> list[bytes]:
+    return [
+        b"not json",
+        json.dumps({"status": "ok", "pages": [], "sneaky": True}, separators=(",", ":")).encode("ascii"),
+        json.dumps({"status": "ok", "pages": [1, 2]}, separators=(",", ":")).encode("ascii"),
+        json.dumps({"status": "ok", "pages": ["a"] * (naming._MAX_PDF_PAGES + 5)}, separators=(",", ":")).encode("ascii"),
+    ]
+
+
+@pytest.mark.parametrize("payload", _malicious_end_to_end_replies())
+def test_extract_pdf_pages_rejects_malicious_worker_reply_end_to_end(monkeypatch, payload):
+    """The full end-to-end path (the spawned worker replaced by a fake
+    that returns attacker-controlled bytes) must reject any malformed/
+    malicious reply through the same fixed _EvidenceLimitError, never
+    accepting or partially trusting it."""
+    monkeypatch.setattr(naming, "_PDF_WORKER_CONTEXT", _ImmediateReplyContext(payload))
+    with pytest.raises(naming._EvidenceLimitError):
+        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+
+
+# --- parent lifecycle: raw exceptions normalize; the wall deadline is single and shared ---
+
+
+class _RaisingConn:
+    def __init__(self, *, poll_exc: BaseException | None = None, sleep_before_poll: float = 0.0):
+        self._poll_exc = poll_exc
+        self._sleep_before_poll = sleep_before_poll
+        self.poll_calls: list[float] = []
+        self.closed = False
+
+    def poll(self, timeout):
+        self.poll_calls.append(timeout)
+        if self._sleep_before_poll:
+            time.sleep(min(timeout, self._sleep_before_poll))
+        if self._poll_exc is not None:
+            raise self._poll_exc
+        return False
+
+    def recv_bytes(self, maxlength=None):
+        raise EOFError()
+
+    def close(self):
+        self.closed = True
+
+
+class _RaisingProcess:
+    def __init__(
+        self,
+        *,
+        start_exc: BaseException | None = None,
+        terminate_exc: BaseException | None = None,
+        kill_exc: BaseException | None = None,
+    ):
+        self._start_exc = start_exc
+        self._terminate_exc = terminate_exc
+        self._kill_exc = kill_exc
+        self._alive = False
+        self.exitcode = None
+        self.terminate_called = False
+        self.kill_called = False
+        self.closed = False
+        self.join_calls: list[float | None] = []
+
+    def start(self):
+        if self._start_exc is not None:
+            raise self._start_exc
+        self._alive = True
+
+    def is_alive(self):
+        return self._alive
+
+    def join(self, timeout=None):
+        self.join_calls.append(timeout)
+
+    def terminate(self):
+        self.terminate_called = True
+        if self._terminate_exc is not None:
+            raise self._terminate_exc
+        self._alive = False
+        self.exitcode = -15
+
+    def kill(self):
+        self.kill_called = True
+        if self._kill_exc is not None:
+            raise self._kill_exc
+        self._alive = False
+        self.exitcode = -9
+
+    def close(self):
+        self.closed = True
+
+
+class _OneShotContext:
+    def __init__(self, process, parent_conn, child_conn=None):
+        self._process = process
+        self._parent_conn = parent_conn
+        self._child_conn = child_conn if child_conn is not None else _RaisingConn()
+
+    def Pipe(self, duplex=False):
+        return self._parent_conn, self._child_conn
+
+    def Process(self, target, args, daemon):
+        return self._process
+
+
+def test_worker_start_raw_exception_normalizes_with_zero_live_child(monkeypatch):
+    """A raw exception from Process.start() -- never a fixed sentinel
+    from this library -- must still collapse to _EvidenceLimitError.
+    Since the child never actually started, no reap is attempted, but
+    both pipe endpoints are still closed."""
+    process = _RaisingProcess(start_exc=RuntimeError("RAW-WORKER-START-SENTINEL"))
+    parent_conn = _RaisingConn()
+    child_conn = _RaisingConn()
+    ctx = _OneShotContext(process, parent_conn, child_conn)
+    monkeypatch.setattr(naming, "_PDF_WORKER_CONTEXT", ctx)
+
+    with pytest.raises(naming._EvidenceLimitError):
+        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+
+    assert not process.is_alive()
+    assert process.closed
+    assert parent_conn.closed
+    assert child_conn.closed
+
+
+def test_worker_poll_raw_exception_still_reaps_and_normalizes(monkeypatch):
+    """A raw exception from Connection.poll() must not prevent the
+    started child from being positively reaped, nor leak a raw
+    exception -- both collapse to the same fixed _EvidenceLimitError."""
+    process = _RaisingProcess()
+    parent_conn = _RaisingConn(poll_exc=RuntimeError("RAW-IPC-SENTINEL"))
+    child_conn = _RaisingConn()
+    ctx = _OneShotContext(process, parent_conn, child_conn)
+    monkeypatch.setattr(naming, "_PDF_WORKER_CONTEXT", ctx)
+
+    with pytest.raises(naming._EvidenceLimitError):
+        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+
+    assert process.terminate_called
+    assert not process.is_alive()
+    assert process.closed
+    assert parent_conn.closed
+    assert child_conn.closed
+
+
+def test_worker_terminate_raw_exception_still_escalates_to_kill(monkeypatch):
+    """A raw exception from terminate() itself must not skip the kill()
+    escalation -- otherwise a child whose SIGTERM handling itself raised
+    inside the Python wrapper could be left alive forever."""
+    process = _RaisingProcess(terminate_exc=RuntimeError("RAW-TERMINATE-SENTINEL"))
+    parent_conn = _RaisingConn()
+    monkeypatch.setattr(naming, "_PDF_WORKER_MAX_WALL_SECONDS", 0)
+    ctx = _OneShotContext(process, parent_conn)
+    monkeypatch.setattr(naming, "_PDF_WORKER_CONTEXT", ctx)
+
+    with pytest.raises(naming._EvidenceLimitError):
+        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+
+    assert process.terminate_called
+    assert process.kill_called
+    assert not process.is_alive()
+    assert process.closed
+
+
+def test_worker_kill_raw_exception_never_crashes_the_parent(monkeypatch):
+    """Even if kill() itself also raises after a failed terminate(), the
+    parent must still normalize to the fixed error and finish cleanup
+    rather than propagating a raw exception."""
+    process = _RaisingProcess(terminate_exc=RuntimeError("term fails"), kill_exc=RuntimeError("kill fails too"))
+    parent_conn = _RaisingConn()
+    monkeypatch.setattr(naming, "_PDF_WORKER_MAX_WALL_SECONDS", 0)
+    ctx = _OneShotContext(process, parent_conn)
+    monkeypatch.setattr(naming, "_PDF_WORKER_CONTEXT", ctx)
+
+    with pytest.raises(naming._EvidenceLimitError):
+        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+
+    assert process.terminate_called
+    assert process.kill_called
+    assert process.closed
+
+
+def test_wall_deadline_is_shared_between_poll_and_join_not_doubled(monkeypatch):
+    """The configured wall bound must be ONE shared monotonic deadline,
+    not applied in full to poll() and then again in full to join() --
+    that would silently double the effective hang tolerance. A
+    genuinely hanging poll() (it sleeps for its full requested timeout,
+    exactly like a real blocking wait on an unresponsive pipe) must
+    leave join() with only whatever time remains under the SAME
+    deadline, and total wall-clock elapsed must stay close to ONE
+    configured wall period, not two."""
+    process = _RaisingProcess()
+    parent_conn = _RaisingConn(sleep_before_poll=10.0)  # would hang far longer than the wall bound
+    child_conn = _RaisingConn()
+    ctx = _OneShotContext(process, parent_conn, child_conn)
+    monkeypatch.setattr(naming, "_PDF_WORKER_CONTEXT", ctx)
+    monkeypatch.setattr(naming, "_PDF_WORKER_MAX_WALL_SECONDS", 0.3)
+
+    started_at = time.monotonic()
+    with pytest.raises(naming._EvidenceLimitError):
+        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+    elapsed = time.monotonic() - started_at
+
+    assert len(parent_conn.poll_calls) == 1
+    assert parent_conn.poll_calls[0] == pytest.approx(0.3, abs=0.15)
+    # join() must receive only the LEFTOVER time under the same
+    # deadline poll() already consumed -- never another independent
+    # 0.3-second wait (the exact bug: poll(WALL) then join(WALL) would
+    # double the effective hang tolerance).
+    assert process.join_calls[0] < 0.1
+    assert elapsed < 0.7
+    assert process.terminate_called
+    assert not process.is_alive()
+    assert process.closed and parent_conn.closed and child_conn.closed
+
 
 
 # --- archive/source/cell/field/parser boundaries -------------------------------------------

@@ -12,7 +12,6 @@ import contextlib
 import errno
 import json
 import os
-import re
 import stat
 import threading
 from collections.abc import Iterator
@@ -20,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import phi_engine.config.config as config
+from phi_engine.study_name import validate_study_name
 
 __all__ = [
     "PipelineBusyError",
@@ -48,12 +48,10 @@ class PipelineBusyError(RuntimeError):
         super().__init__(f"Study pipeline lock is busy: {lock_path}")
 
 
-_STUDY_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z", re.ASCII)
-_WINDOWS_RESERVED_NAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL"}
-    | {f"COM{index}" for index in range(1, 10)}
-    | {f"LPT{index}" for index in range(1, 10)}
-)
+# Study-name pattern/reserved-name enforcement lives in the dependency-free
+# phi_engine.study_name module (imported above) -- reused as-is here and by
+# phi_engine.config.config's own STUDY_NAME fallback validation, so there
+# is exactly one plain-folder-name convention across the codebase.
 
 
 @dataclass(frozen=True)
@@ -72,15 +70,7 @@ _LOCK_OWNERS_GUARD = threading.Lock()
 
 
 def _validated_study_name(study: str | None) -> str:
-    study_name = config.STUDY_NAME if study is None else study
-    if (
-        not isinstance(study_name, str)
-        or _STUDY_NAME_PATTERN.fullmatch(study_name) is None
-        or study_name.endswith(".")
-        or study_name.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES
-    ):
-        raise ValueError("study must be a plain folder name, not a path")
-    return study_name
+    return validate_study_name(config.STUDY_NAME if study is None else study)
 
 
 def lock_path_for(study: str | None = None) -> Path:

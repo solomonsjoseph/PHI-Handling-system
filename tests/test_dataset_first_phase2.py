@@ -566,7 +566,7 @@ def test_intake_removes_existing_path_that_becomes_broken_or_outside_symlink(tmp
     (source / "data_dictionary" / "dict.csv").write_text("variable,label\nSUBJID,Subject\n", encoding="utf-8")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
-        from phi_engine.pipeline.intake import intake_add
+        from phi_engine.pipeline.intake import intake_add, load_intake_manifest
 
         first = intake_add(source, "Phase2Study")
         assert first["status"] == "ready", first["review_items"]
@@ -588,17 +588,25 @@ def test_intake_removes_existing_path_that_becomes_broken_or_outside_symlink(tmp
         outside.write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
         file_path.symlink_to(outside)
         third = intake_add(source, "Phase2Study")
+        # v3: the now-empty datasets/ directory left behind by the pruned
+        # source-symlink entry is ordinary stale-directory pruning, not an
+        # unsafe workspace node -- it produces no error, only the same
+        # missing-component-content/source-symlink-not-allowed review pair
+        # as the second call. The tombstone for the original labs.csv
+        # remains, no new removal is added (nothing changed since the
+        # second call), and the manifest this call committed stays fully
+        # loadable.
+        assert third["status"] == "review_required"
+        assert third["errors"] == []
         assert not any(e["relative_path"] == "datasets/labs.csv" for e in third["entries"].values())
-        # v3: the source-side symlink on the second call is rejected as
-        # source-symlink-not-allowed (review-only, never an entries record)
-        # and its intake-tree symlink is pruned, but the now-empty
-        # datasets/ directory under the intake tree is never removed. The
-        # third call's candidate set for datasets/ is empty again for the
-        # same reason, so _inventory_unexpected_nodes finds that leftover
-        # empty directory outside the expected-paths set and fails closed
-        # with the fixed intake-tree-unsafe reason -- the old per-path
-        # source-target-outside-root reason is not reachable here.
-        assert third["errors"][0]["reason"] == "intake-tree-unsafe"
+        review_reasons = {(item["path"], item["reason"]) for item in third["review_items"]}
+        assert ("datasets", "missing-component-content") in review_reasons
+        assert ("datasets/labs.csv", "source-symlink-not-allowed") in review_reasons
+        assert third["removals"][-1]["artifact_id"] == first_id
+        assert third["removals"][-1]["relative_path"] == "datasets/labs.csv"
+
+        loaded = load_intake_manifest("Phase2Study")
+        assert loaded["status"] == "review_required"
 
 
 def test_organize_rejects_real_symlink_escape_after_intake(tmp_path: Path) -> None:

@@ -38,7 +38,7 @@ from typing import Any, Mapping
 import phi_engine.config.config as config
 from phi_engine.audit import review_paths
 from phi_engine.pipeline.intake import IntakeManifestError, load_intake_manifest
-from phi_engine.pipeline.organize import organize
+from phi_engine.pipeline.organize import _organize_locked
 from phi_engine.pipeline.profile import profile_column
 from phi_engine.pipeline.dependencies import (
     DependencyDecision,
@@ -95,7 +95,6 @@ from phi_engine.security.phi_rulebook import (
 from scripts.extraction.forms_manifest import (
     DependencyRelation,
     DependencyRelationState,
-    check_forms_manifest,
 )
 from phi_engine.utils.pipeline_lock import (
     PipelineBusyError,
@@ -200,20 +199,6 @@ class _HydratedDependencyInputs:
 class _DependencyDisposition:
     held_dataset_ids: frozenset[str]
     review_recommendation_ids: frozenset[str]
-
-
-def _load_manifest_dependency_relations(
-    study: str,
-    intake_manifest: object,
-) -> Mapping[str, tuple[DependencyRelation, ...]]:
-    if not isinstance(intake_manifest, Mapping):
-        return {}
-    source_root = intake_manifest.get("source_root")
-    if not isinstance(source_root, str):
-        return {}
-    return check_forms_manifest(
-        Path(source_root).resolve(strict=True) / "datasets"
-    ).dependency_relations
 
 
 def _write_pending_dependency_recommendations(
@@ -1135,13 +1120,21 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
 
     # -- a. organize every locked run so descriptor verification and dependency roles
     # can never be skipped by a stale organizer cache.  Keep the intake manifest
-    # hash inside organize_manifest as provenance only.
+    # hash inside organize_manifest as provenance only. Call the private
+    # lock-required body directly, never the public organize() wrapper --
+    # this call already runs under the per-study lock run_pipeline() holds
+    # for the whole _run_pipeline_locked body, and that lock is
+    # non-reentrant: reacquiring it here would raise PipelineBusyError.
+    #
+    # dependency_relations is pulled from organize_manifest below instead
+    # of a second, independent source-root read here: _organize_locked
+    # already derived it from its own pinned/verified inventory, and
+    # reopening source_root/datasets by pathname a second time (even via
+    # check_forms_manifest, let alone Path.resolve()) would reintroduce
+    # exactly the unsafe path this module must never touch.
     organized_root = Path(config.ORGANIZED_DIR) / study
-    dependency_relations = _load_manifest_dependency_relations(
-        study,
-        intake_manifest,
-    )
-    organize_manifest = organize(study)
+    organize_manifest = _organize_locked(study)
+    dependency_relations = organize_manifest.get("dependency_relations") or {}
     hydrated_dependencies = _hydrate_dependency_inputs(
         organized_root,
         organize_manifest,
