@@ -12,7 +12,6 @@ import json
 import os
 import shutil
 import stat
-import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -20,63 +19,16 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
-
-TEST_PHI_KEY_HEX = "0" * 64
-
-
-def _drop_phi_runtime_modules() -> None:
-    # ``phi_engine.utils.pipeline_lock`` stays resident: reloading it would
-    # re-run ``os.register_at_fork`` on every test, accumulating duplicate
-    # atfork callbacks across the whole session and perturbing the real
-    # fork-safety tests elsewhere in the combined suite. Its own module-
-    # level ``config`` reference is instead explicitly rebound by
-    # ``_workspace()`` below, right after the fresh reimport, so it never
-    # reads a stale ``TMP_DIR``/``INTAKE_DIR`` left over from a previous
-    # test's workspace.
-    keep = {"phi_engine", "phi_engine.utils", "phi_engine.utils.pipeline_lock"}
-    for name in list(sys.modules):
-        if name in keep:
-            continue
-        if name.startswith("phi_engine."):
-            del sys.modules[name]
+from tests._workspace_harness import hermetic_phi_workspace
 
 
 @contextmanager
-def _workspace(tmp_path: Path, study: str = "V3Study", *, workspace: Path | None = None) -> Iterator[Path]:
-    old_workspace = os.environ.get("PHI_WORKSPACE")
-    old_study = os.environ.get("STUDY_NAME")
-    old_key = os.environ.get("PHI_KEY_PATH")
-    key = tmp_path / "phi_key"
-    key.write_text(TEST_PHI_KEY_HEX, encoding="utf-8")
-    key.chmod(0o600)
-    import phi_engine.utils.pipeline_lock as _pipeline_lock_module
+def _workspace(
+    tmp_path: Path, study: str = "V3Study", *, workspace: Path | None = None
+) -> Iterator[Path]:
+    with hermetic_phi_workspace(tmp_path, study, workspace=workspace) as workspace_path:
+        yield workspace_path
 
-    original_pipeline_lock_config = _pipeline_lock_module.config
-    workspace_path = workspace if workspace is not None else (tmp_path / "workspace")
-    try:
-        os.environ["PHI_WORKSPACE"] = str(workspace_path)
-        os.environ["STUDY_NAME"] = study
-        os.environ["PHI_KEY_PATH"] = str(key)
-        _drop_phi_runtime_modules()
-        import phi_engine.config.config as _fresh_config
-
-        _pipeline_lock_module.config = _fresh_config
-        yield Path(os.environ["PHI_WORKSPACE"])
-    finally:
-        if old_workspace is None:
-            os.environ.pop("PHI_WORKSPACE", None)
-        else:
-            os.environ["PHI_WORKSPACE"] = old_workspace
-        if old_study is None:
-            os.environ.pop("STUDY_NAME", None)
-        else:
-            os.environ["STUDY_NAME"] = old_study
-        if old_key is None:
-            os.environ.pop("PHI_KEY_PATH", None)
-        else:
-            os.environ["PHI_KEY_PATH"] = old_key
-        _pipeline_lock_module.config = original_pipeline_lock_config
-        _drop_phi_runtime_modules()
 
 
 def _make_canonical_source(root: Path) -> None:

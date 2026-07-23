@@ -1,18 +1,12 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import yaml
+from tests._workspace_harness import hermetic_phi_workspace
 
 
-def _drop_phi_runtime_modules() -> None:
-    """Force PHI_WORKSPACE/STUDY_NAME-derived runtime paths to resolve fresh."""
-
-    for name in list(sys.modules):
-        if name == "phi_engine" or name.startswith("phi_engine."):
-            del sys.modules[name]
 
 
 def test_joined_query_view_feeds_phi_review_sot_signals(tmp_path: Path) -> None:
@@ -101,7 +95,7 @@ def test_joined_query_view_feeds_phi_review_sot_signals(tmp_path: Path) -> None:
     }
 
 
-def test_generate_sot_smoke_writes_joined_view_or_review_hold(tmp_path: Path, monkeypatch) -> None:
+def test_generate_sot_smoke_writes_joined_view_or_review_hold(tmp_path: Path) -> None:
     from reportlab.pdfgen import canvas
 
     workspace = tmp_path / "workspace"
@@ -119,16 +113,10 @@ def test_generate_sot_smoke_writes_joined_view_or_review_hold(tmp_path: Path, mo
     pdf.save()
     (datasets / f"{form_stem}.csv").write_text("SUBJID,NOTES\nS001,baseline\n", encoding="utf-8")
 
-    monkeypatch.setenv("PHI_WORKSPACE", str(workspace))
-    monkeypatch.setenv("STUDY_NAME", study)
-    _drop_phi_runtime_modules()
-
-    try:
+    with hermetic_phi_workspace(tmp_path, study, workspace=workspace):
         from phi_engine.sot import generate_sot
 
         rc = generate_sot(study)
-    finally:
-        _drop_phi_runtime_modules()
 
     output_root = workspace / "output" / study
     joined_views = list(
