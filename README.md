@@ -29,30 +29,64 @@ Requires Python 3.10+ (`pyproject.toml` `requires-python = ">=3.10"`).
 
 ## CLI usage
 
-Every subcommand accepts `--workspace` (sets `PHI_WORKSPACE`) and `--study`
-(sets `STUDY_NAME`); both env vars are set before `phi_engine.config.config`
-is imported, since that module resolves workspace/study paths at import
-time.
+Every subcommand accepts `--workspace` (sets `PHI_WORKSPACE`). `--study`
+(sets `STUDY_NAME`) is REQUIRED for every subcommand except `intake`, where
+it is optional. Both env vars are set before `phi_engine.config.config` is
+imported, since that module resolves workspace/study paths at import time.
 
 ```bash
 # Symlink-ingest a source tree (never copies/modifies/deletes source bytes).
+# The source root MUST hold the mandatory intake-manifest/v3 component
+# package: datasets/ (required), forms/ (required), and at least one of
+# data_dictionary/ or mappings/.
 python -m phi_engine intake --study MyStudy --source /path/to/raw/data --workspace /path/to/workspace
 
-# Route intake into normalized dataset JSONL (xlsx/xls/csv/json/jsonl/pdf-tables);
-# unrecognized/unparseable files land in a review bucket recording only
-# filename/link-name/reason/diagnostic metadata (never row values). Runs
-# automatically on `run` if skipped, but can be run standalone for inspection.
+# --study is optional for intake ONLY. When omitted, intake resolves the
+# study name itself: a local-only, support-content-only AI inference (a
+# loopback, attested, digest-pinned local client, never an external
+# provider), permitted only by the positive attestation
+# --support-confirmed-no-phi; otherwise, or when no name is inferred, intake
+# assigns a random study-<8hex> name and reuses/promotes it for the same
+# source on a later intake. There is no negative "may contain PHI" flag; with
+# neither --study nor --support-confirmed-no-phi, intake performs zero
+# naming-content extraction and zero model calls.
+python -m phi_engine intake --source /path/to/raw/data --support-confirmed-no-phi --workspace /path/to/workspace
+
+# intake prints ONLY a redacted receipt to stdout and maps its status to the
+# process exit code (ready -> 0, review_required -> 8, failed -> 2):
+#   {"study": <name>, "status": <status>, "linked": <N>, "review": <N>,
+#    "errors": <N>, "manifest": <protected-manifest-path>}
+# It never prints entry paths, review/error detail, or raw exception text.
+
+# Accepted formats per component (intake_preflight._COMPONENT_SUFFIXES):
+#   datasets/ .csv .xls .xlsx (single-sheet)   forms/ .pdf only
+#   data_dictionary/ and mappings/ .csv .xlsx
+# .json/.jsonl are NOT accepted datasets; an unsupported suffix, invalid
+# workbook, multi-sheet dataset xlsx, cross-component hardlink, or source
+# symlink lands in an _unclassified review bucket recording only
+# filename/reason metadata (never row values). Nested subdirectories and
+# duplicate content are preserved as distinct entries.
+
+# Route intake into normalized dataset JSONL, purely by the component each
+# entry was assigned at intake (component-authoritative, no path re-guessing).
+# Runs automatically on `run` if skipped, but can be run standalone for
+# inspection. Refuses to organize an intake that is not `ready`, printing only
+# `intake_review_required` (exit 8) or `intake_failed` (exit 2).
 python -m phi_engine organize --study MyStudy --workspace /path/to/workspace
 
 # Full pipeline: organize (if stale) -> classify (pinned jurisdiction rules,
 # headers-only) -> synthesize the scrub config from the classification ->
 # scrub -> residual PHI guard -> publish. Exit codes: 0 clean, 8 partial
 # (held forms or a non-empty review queue), 5 guard failure, 1 scrub raised,
-# 2 config/input error.
+# 2 config/input error. No source-of-truth tree is generated automatically;
+# standalone SoT remains available only to callers that explicitly maintain
+# its legacy annotated-PDF layout.
 python -m phi_engine run --study MyStudy --jurisdiction us --workspace /path/to/workspace
 
 # List everything awaiting human review (organizer bucket, held forms, LLM
-# uncertain queue) and record a decision. Decisions apply on the NEXT run.
+# uncertain queue, dependency recommendations) and record a decision. To
+# correct a held study, inspect the protected manifest, fix the package or
+# pass --study, and rerun; decisions apply on the NEXT run.
 python -m phi_engine review --study MyStudy --workspace /path/to/workspace list
 python -m phi_engine review --study MyStudy --workspace /path/to/workspace decide --header NOTES --decision override --action drop
 # --decision is one of keep|drop|override ([--action ...] required only for override;
@@ -75,11 +109,15 @@ See `python -m phi_engine --help` for the full argument reference, including
   also performs a direct metadata-only read of an optional forms manifest
   from the external source root (`organize.py`), separate from the row-data
   path.
-- **Fail-closed handling.** Any unrecognized suffix, broken intake symlink,
-  unreadable `.xls`, or parse failure lands in the review bucket with a
-  record retaining filename, link name, reason, and diagnostic metadata --
-  never row values,
-  never silently dropped or silently parsed as garbage. An unavailable or
+- **Fail-closed handling.** Any unsupported suffix, invalid or multi-sheet
+  dataset `.xlsx`, unreadable `.xls`, cross-component hardlink, or source
+  symlink lands in an `_unclassified` review bucket with a `{path, reason,
+  blocking}` record retaining filename, link name, and reason -- never row
+  values, never silently dropped or silently parsed as garbage. A missing
+  or empty required component (`datasets/`, `forms/`, and one of
+  `data_dictionary/`/`mappings/`) also blocks. Any single blocking review
+  item holds the whole study; a missing/malformed/v2 manifest fails with a
+  fixed public code (clean v3 cutover, no legacy reader). An unavailable or
   weakened rulebook exits non-zero rather than running with a silently
   downgraded rule set.
 - **Publish guard, with a disclosed fallback gap.** The published

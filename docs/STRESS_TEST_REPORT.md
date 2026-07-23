@@ -1,7 +1,8 @@
 # Standalone Pipeline Stress Test Report
 
 Method: every number below is read directly from an actual CLI run's output
-or exit code. Commands are given verbatim for every claim.
+or exit code against the intake-manifest/v3 fixtures. Commands are given
+verbatim for every claim.
 
 ## Commands run
 
@@ -19,86 +20,138 @@ python -m harness.spec_check --workspace "$SMOKE_ROOT/workspace" --study Removal
 
 ## Fixture tree (`harness/make_stress_fixtures.py`, seed 42)
 
-15 regular files under `$SMOKE_ROOT/source/` (manifest:
-`$SMOKE_ROOT/source.manifest/stress_manifest.json`), covering: nested
-folders, a clean CRF-shaped xlsx, a csv, a jsonl, a genuine legacy `.xls`
-(`legacy_site.xls`), a PDF with an embedded table, an annotated CRF PDF
-matching a dataset stem, a malformed (truncated) xlsx, three roster `.jsonl`
-duplicates (same content, different paths) plus one same-name/different-content
-conflict, a broken symlink (`vanished_file.jsonl`), an unknown `.dat` file,
-and `site_notes.jsonl` planting SSN-shaped values under `NOTES` and
-phone-shaped values under `COMMENT`.
+`build_stress_fixtures` emits the mandatory intake-manifest/v3 component
+package under `$SMOKE_ROOT/source/`, all in accepted formats (manifest:
+`$SMOKE_ROOT/source.manifest/stress_manifest.json`, a complete atime-excluding
+entry snapshot):
 
-## 1. Intake
+- `datasets/`: `labs.csv`; `batch_2026/site_04/labs_dup.csv` (identical bytes
+  to `labs.csv`, in a nested subdirectory -- duplicate content and nested
+  directories must BOTH survive intake as distinct entries); `screening.xlsx`
+  (single-sheet); `legacy_site.xls` (a genuine legacy `.xls` via `xlwt` when
+  installable, else a mislabeled-`.xls` fallback fixture); and `site_notes.csv`
+  planting SSN-shaped values under a `NOTES` header and phone-shaped values
+  under `COMMENT`.
+- `forms/`: `consent_table.pdf` (an embedded extractable table) and
+  `screening_form.pdf` (no extractable table). `forms/` holds PDFs only and
+  never distinguishes annotated from non-annotated documents.
+- `data_dictionary/`: `dict.csv` and `labs_dup.csv` (a cross-component
+  duplicate with identical bytes to `datasets/labs.csv`, kept as its own
+  independent entry, never merged or deduplicated).
+- `mappings/`: `site_map.csv`.
+
+Ten regular files total. A separate, deliberately-invalid package
+(`build_review_required_fixtures`, seed 43) exercises every fixed intake
+review reason and is covered in section 1a.
+
+## 1. Intake (ready package)
 
 ```
 intake exit=0
 ```
 
-`intake_manifest.json`: **15 entries linked, 0 duplicates recorded, 1
-error** —
+Redacted receipt:
 
 ```json
-{"path": ".../source/vanished_file.jsonl", "reason": "broken-symlink-in-source"}
+{"study": "RemovalSmoke", "status": "ready", "linked": 10, "review": 0, "errors": 0, "manifest": ".../workspace/intake/RemovalSmoke/intake_manifest.json"}
 ```
 
-Source-immutability: `harness/spec_check.py`'s `source_immutability` check
-(re-hashes all manifest files against the intake-time sha256) — **PASS**,
-zero drift.
+All ten accepted-format files link cleanly: `status == "ready"`, zero review
+items, zero errors. The `intake-manifest/v3` `schema`/`study`/
+`study_name_source`/`status`/`source_root`/`entries`/`review_items`/`errors`/
+`removals` document records each entry's `artifact_id`, `intake_path`,
+`component`, `relative_path`, `original_path`, `sha256`, `size`, `mtime_ns`,
+`device`, `inode`, and `mode`.
 
-## 2. Organize
+Source-immutability: `harness/spec_check.py`'s `source_immutability` check
+compares the complete entry set (type, sha256, size, mode, `mtime_ns`, uid,
+gid, and symlink target, excluding atime) against the fixture-build-time
+manifest -- **PASS**, zero drift.
+
+## 1a. Intake (review-required package, seed 43)
+
+```
+intake exit=8
+```
+
+Redacted receipt: `{"study": "RRPkg", "status": "review_required", "linked": 8, "review": 6, "errors": 0, ...}`. The six blocking review items map one-to-one
+to the fixed v3 preflight reasons:
+
+| Path | Reason |
+|---|---|
+| `datasets/mystery_export.dat` | `unsupported-format` |
+| `datasets/corrupted_workbook.xlsx` | `xlsx-workbook-invalid` |
+| `datasets/multi_sheet.xlsx` | `dataset-xlsx-multiple-sheets` |
+| `datasets/broken_link.csv` (a source symlink) | `source-symlink-not-allowed` |
+| `datasets/extra_group.json` | `unsupported-format` |
+| `datasets/demographics.jsonl` | `unsupported-format` |
+
+`.json` and `.jsonl` are NOT accepted dataset formats under v3: they are
+demoted to `_unclassified` review items, not normalized. A source symlink
+anywhere in the tree is rejected outright rather than followed. Any single
+blocking item holds the whole study, so this package is intentionally never
+organized or run.
+
+## 2. Organize (ready package)
 
 ```
 organize exit=0
 ```
 
-`organize_manifest.json`: **6 datasets produced, 9 in the review bucket**.
-`phi_engine/pipeline/organize.py::_role_for` routes ANY file whose
-relative path has more than one path segment (i.e. lives in a nested
-subdirectory of the source tree) straight to `review` with reason
-`unrecognized-format`, regardless of suffix, UNLESS its top-level
-directory is one of `datasets/`, `data_dictionary/`, `mappings/`,
-`annotated_pdfs/`, or `forms/`. This run's nested fixtures
-(`batch_2026/site_04/1A_Screening.xlsx`, `.../1A_Screening.pdf`,
-`.../2_Demographics.jsonl`, and the three `dup_*/roster*.jsonl` copies)
-all land in the review bucket for exactly this reason -- NOT because
-`.xlsx`/`.pdf`/`.jsonl` are unsupported suffixes; each of those suffixes
-IS routed to a dataset/pdf role when the file sits at the source root
-(single path segment). `corrupted_workbook.xlsx` (top-level, single
-segment) reaches the dataset route and fails there instead
-(`excel-open-error`, `BadZipFile`). `mystery_export.dat` (top-level) is a
-genuinely unrecognized suffix.
+`organize_manifest.json`: **6 datasets produced, 1 in the review bucket**.
+Organization is component-authoritative -- the organizer routes each entry
+purely by the `component` the intake manifest already assigned
+(`_COMPONENT_ROLES`: `datasets -> dataset`, `data_dictionary -> dictionary`,
+`mappings -> mapping`, `forms -> pdf`; `_unclassified` is never parsed). It
+does not re-guess a role from the file path or suffix.
 
-`pdf_roles`: `lab_results_table.pdf` -> `table_extracted` (1 table
-extracted into `lab_results_table__pdftable0.jsonl`).
+Datasets produced (nested and duplicate entries both survive as distinct
+outputs): `labs.jsonl` and `labs_dup.jsonl` (the nested duplicate),
+`legacy_site__Legacy.jsonl` (from the `.xls`), `screening__Screening.jsonl`
+(from the single-sheet `.xlsx`), `site_notes.jsonl`, and
+`consent_table__pdftable0.jsonl` (one table extracted from the forms PDF).
+Support artifacts: two dictionary CSVs and one mapping CSV.
 
-xls/csv/json/jsonl (top-level files) routed to datasets:
-`legacy_site__Legacy.jsonl` (from `.xls`), `3_Labs.jsonl` (from `.csv`),
-`extra_group.jsonl` (from `.json`), `roster_copy.jsonl` and
-`site_notes.jsonl` (from `.jsonl`). The clean `.xlsx` fixture was present
-but was NOT exercised through the dataset route in this run -- it sits in
-a nested subdirectory, so `_role_for` sent it to the review bucket instead
-(see §2 above); XLSX sheet-split/header-promote routing is implemented
-(`docs/STANDALONE_SPEC.md` §3) but this specific run did not exercise it.
+`pdf_roles`: `consent_table.pdf` -> `table_extracted` (1 table);
+`screening_form.pdf` -> `review` with reason `pdf-no-extractable-table`. That
+single PDF is the only review-bucket entry, recording filename, link name, and
+reason -- never row values.
 
-## 3. Run — partial exit, zero leak
+## 3. Run -- partial exit, zero leak
 
 ```
 run exit=8
 ```
 
 `pipeline_result.json`: `exit_code: 8`, `forms_held: []`, `forms_processed`:
-the 6 datasets listed above, `organizer_review_count: 9`,
-`review_queue_size: 9`, `profile_escalations: 0`, `profile_auto_clears: 0`,
-`guard_ok: true`, `guard_failed: false`, `published_count: 6`,
-`scrub_raised: null`, `sot_generation_error: null`.
+the 6 datasets above, `organizer_review_count: 1`, `dependency_review_count:
+16`, `review_queue_size: 17`, `profile_escalations: 0`,
+`profile_auto_clears: 0`, `guard_ok: true`, `guard_failed: false`,
+`published_count: 6`, `scrub_raised: null`. There is no automatic
+source-of-truth generation step in `run_pipeline` and therefore no
+`sot_generation_error` field: standalone SoT is available only to callers that
+explicitly maintain the legacy annotated-PDF layout (see section 3a).
 
 `site_notes.jsonl`'s published output contains neither a `NOTES` nor a
 `COMMENT` key (both are `usa_free_text_suppression`-classified,
 `action: suppress`, force-dropped by `phi_scrub.run_scrub`'s SUPPRESS
 dual-path). `exit_code == 8` is exactly the "held/review present by
-construction" outcome the messy fixture guarantees (9 organizer
-review-bucket entries).
+construction" outcome the fixtures guarantee (one organizer review-bucket
+entry plus sixteen dependency recommendations awaiting decision).
+
+Planted-identifier check:
+`grep -rlE '[0-9]{3}-[0-9]{2}-[0-9]{4}' $WS/output/RemovalSmoke/llm_source/`
+-> exit 1 (zero matching files). No SSN-shaped planted identifier reached the
+published tree.
+
+## 3a. No automatic source-of-truth generation
+
+`run_pipeline` reads SoT variable signals when a caller has explicitly
+maintained an SoT tree (`load_sot_variable_signals`), but it never generates
+one automatically. This is deliberate: the undifferentiated v3 `forms/`
+contract cannot prove any PDF is an annotated CRF, so the pipeline does not
+synthesize an SoT from it. Standalone SoT remains available to callers that
+explicitly maintain its legacy annotated-PDF layout.
 
 ## 4. Review and status
 
@@ -107,20 +160,25 @@ review list exit=0
 status exit=0
 ```
 
-`review list` returns the 9-entry `organizer_review_bucket`, empty
-`held_forms`, and empty `llm_uncertain_queue`. `status` reports the single
-completed run and echoes `pipeline_result.json` as `latest_result`.
+`review list` returns `organizer_review_bucket` of size 1,
+`dependency_recommendations` of 16, and empty `held_forms`,
+`llm_uncertain_queue`, and `intake_review_items`. `status` reports the single
+completed run and echoes `pipeline_result.json` (`exit_code: 8`) as
+`latest_result`.
 
 ## 5. LLM boundary
 
-`tests/test_stress_standalone.py::test_llm_boundary_zero_prompts_in_default_run_and_egress_gate_blocks_contamination`
-covers this invariant: a monkeypatched call-recording spy over a full stress
-intake->organize->run pass records **zero calls** — the default
-deterministic classification path (`phi_review.review_form_headers` with no
-`aligner=` injected) never constructs an LLM prompt at all. Separately, a
-real `LLMClient(provider="ollama", ...).complete(...)` call contaminated
-with a planted SSN value raises `PHIEgressBlockedError` without echoing the
-planted value in the exception message.
+`tests/test_stress_standalone.py` covers this invariant: a monkeypatched
+call-recording spy over a full stress intake->organize->run pass records
+**zero calls** -- the default deterministic classification path
+(`phi_review.review_form_headers` with no `aligner=` injected) never
+constructs an LLM prompt at all. Separately, a real
+`LLMClient(provider="ollama", ...).complete(...)` call contaminated with a
+planted SSN value raises `PHIEgressBlockedError` without echoing the planted
+value in the exception message. Intake's own optional study-name inference is
+the only sanctioned local-LLM path and is exercised only when `--study` is
+omitted with `--support-confirmed-no-phi`; the deterministic runs above never
+reach it.
 
 ## 6. spec_check against the full stress run
 
@@ -131,11 +189,22 @@ planted value in the exception message.
 ALL PASS
 ```
 
-(`llm_boundary_canary`: `llm.provider` default `none`, zero
-`get_llm_client()` calls outside the `llm_detector`/`phi_alignment`
-exemption under `phi_engine/pipeline/`. `source_immutability`: every
-stress-source file sha256-matches its intake-time hash after the full
-intake+organize+run sequence.)
+- `intake_symlink_invariant`: every entry under `<workspace>/intake/<study>/`
+  is a symlink or the `intake_manifest.json` bookkeeping file, and the intake
+  root, study directory, and each component directory
+  (`datasets`/`forms`/`data_dictionary`/`mappings`/`_unclassified`) are
+  `lstat`-checked and rejected if any is itself a symlink.
+- `llm_boundary_canary`: `llm.provider` default `none`; zero `get_llm_client()`
+  calls outside the `llm_detector`/`phi_alignment` exemption under
+  `phi_engine/pipeline/`; and `model_routing.new_offline_local_client()` --
+  the sole sanctioned local-LLM factory for intake study naming -- is
+  referenced ONLY as the callee of the one sanctioned call inside
+  `intake_naming.resolve_intake_study`/`_resolve_intake_study`. Any alias
+  import, any other callsite, or any direct `OfflineLocalLLMClient(...)`
+  construction under `phi_engine/pipeline/` is a violation.
+- `source_immutability`: every stress-source entry matches its
+  fixture-build-time snapshot across the full comparison field set after the
+  complete intake+organize+run sequence.
 
 ## Test coverage
 
@@ -150,8 +219,8 @@ pass/fail counts rather than trusting a stale number in this report.
 
 ## Known limitations carried into this report
 
-- `.xls` fail-closed routing (mislabeled/unreadable -> review bucket) is
-  implemented (`phi_engine/pipeline/organize.py`'s `ImportError` branch) but
-  not exercised by this run, because `xlwt` is installed in this
-  environment and the fixture's `.xls` is a genuine legacy workbook. The
-  code path is present; this run did not need the fallback.
+- `.xls` fail-closed routing (a mislabeled or unreadable workbook lands in the
+  review bucket) is implemented but not exercised by the ready package when
+  `xlwt` is installed and the fixture's `.xls` is a genuine legacy workbook.
+  The mislabeled-`.xls` fallback fixture and the review-required package's
+  invalid workbooks cover the fail-closed paths.

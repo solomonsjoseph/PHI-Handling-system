@@ -2,7 +2,7 @@
 
 Every number below cites a command actually run in this repository. Vendor-only numbers are never reported here.
 
-## 1. Fail-closed regression against a deliberately malformed source tree
+## 1. Fail-closed review-routing regression against the v3 fixture packages
 
 Commands (in order, `$SRC`/`$WS` are scratch directories):
 ```
@@ -15,14 +15,14 @@ python -m harness.spec_check --skip-pytest --workspace $WS --study PrivacyGatewa
 
 | Stage | Measured outcome |
 |---|---|
-| intake | 15 files symlink-linked, 1 error (`vanished_file.jsonl`: `broken-symlink-in-source`, correctly rejected rather than silently skipped) |
-| organize | 6 datasets recognized, 9 routed to the review bucket (filenames/reasons recorded, never row values) |
-| run | `exit_code=8` ("partial run -- held forms or a non-empty review queue"), `guard_ok=true`, `guard_failed=false`, `published_count=6`, `review_queue_size=9` |
-| spec_check | `ALL PASS` — `intake_symlink_invariant`, `llm_boundary_canary`, `source_immutability` |
+| intake | 10 accepted-format files symlink-linked, 0 review, 0 errors, `status=ready` (the mandatory `datasets/` + `forms/` + `data_dictionary/` + `mappings/` v3 package) |
+| organize | 6 datasets produced, 1 routed to the review bucket (`screening_form.pdf`: `pdf-no-extractable-table`, filename/reason recorded, never row values) |
+| run | `exit_code=8` ("partial run -- held forms or a non-empty review queue"), `guard_ok=true`, `guard_failed=false`, `published_count=6`, `review_queue_size=17` (1 organizer review item + 16 dependency recommendations) |
+| spec_check | `ALL PASS` -- `intake_symlink_invariant`, `llm_boundary_canary`, `source_immutability` |
 
 **Planted-identifier check:** `grep -rlE '[0-9]{3}-[0-9]{2}-[0-9]{4}' $WS/output/PrivacyGatewayStress/llm_source/` → exit code 1 (zero matching files). No SSN-shaped planted identifier from the stress fixture reached the published tree.
 
-**Conclusion:** malformed/ambiguous inputs are routed to the review bucket (9/15 files), never silently published; partial exit 8 is distinct from and never conflated with clean exit 0 in the result JSON; the normal combined residual-guard path (Presidio AND legacy regex, both clean) passed and the six recognized datasets published. This exercises the malformed-input review-routing invariant, NOT the guard's detector-outage fail-closed behavior (see §5).
+**Conclusion:** the mandatory-component ready package publishes only its six recognized datasets; the one non-extractable form and the planted free-text SSN/phone columns are held or suppressed, never silently published; partial exit 8 is distinct from and never conflated with clean exit 0 in the result JSON; the normal combined residual-guard path (Presidio AND legacy regex, both clean) passed. The companion review-required package (`build_review_required_fixtures`, seed 43) drives every fixed intake review reason -- `unsupported-format` (including the JSON/JSONL cases v3 demotes from accepted datasets), `xlsx-workbook-invalid`, `dataset-xlsx-multiple-sheets`, and `source-symlink-not-allowed` -- so malformed inputs fail closed at intake and never reach organize. This exercises the malformed-input review-routing invariant, NOT the guard's detector-outage fail-closed behavior (see §5).
 
 ## 2. Adversarial-channel exercise (structural gaps, code-level)
 
@@ -58,7 +58,7 @@ Code-traced (`config.yaml`, `phi_scrub.py`, `phi_keystore.py`):
 
 ## 6. Summary
 
-- Malformed-input review routing: **confirmed intact** (stress fixture tree, §1) -- the normal combined-guard path (both scanners clean) published six scrubbed files with zero planted SSN-shaped matches; nine ambiguous/malformed files were held in the review bucket, never silently published.
+- Malformed-input review routing: **confirmed intact** (v3 fixture packages, §1) -- the ready package's normal combined-guard path (both scanners clean) published six scrubbed datasets with zero planted SSN-shaped matches while holding the one non-extractable form; the review-required package failed closed at intake on all six malformed inputs, none reaching organize or publish.
 - Detector-outage fail-closed behavior is **NOT intact and NOT exercised by this stress pass**: the guard-exception legacy-only fallback (§5) remains open, so a Presidio failure during a real run would still publish on the legacy scanner alone.
 - Zero planted identifiers reached the published tree.
 - Two structural gaps confirmed by code reading: base64-encoded payloads and split-across-chunk secrets, neither covered by any current control.

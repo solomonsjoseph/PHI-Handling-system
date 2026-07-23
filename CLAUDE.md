@@ -79,6 +79,43 @@ and zero code changes.
   decision (`python -m phi_engine review --study S decide ...`) is
   persisted and applied on the NEXT `run` -- not merely logged.
 
+## Intake contract (intake-manifest/v3)
+
+- **Required package.** A source root MUST provide `datasets/` (required),
+  `forms/` (required), and at least one of `data_dictionary/` or
+  `mappings/`. Missing/empty required components are blocking review items.
+- **Closed accepted-format matrix** (`intake_preflight._COMPONENT_SUFFIXES`):
+  `datasets/` = `.csv`/`.xls`/`.xlsx` (dataset `.xlsx` must be single-sheet);
+  `forms/` = `.pdf` only (annotated and non-annotated are not distinguished,
+  no `annotated_pdfs` alias); `data_dictionary/` and `mappings/` =
+  `.csv`/`.xlsx`. `.json`/`.jsonl` are NOT accepted datasets. Any
+  unsupported suffix, invalid/multi-sheet workbook, or cross-component
+  hardlink becomes an `_unclassified` review item. Nested subdirectories and
+  duplicate content are preserved as distinct entries.
+- **Source symlink rejection.** The whole source subtree is opened
+  `O_NOFOLLOW`; a symlink anywhere yields `source-symlink-not-allowed` and is
+  never followed.
+- **Study naming.** `--study` (source `user`) is required for every
+  subcommand except `intake`. Omitted at intake: local-only, support-content
+  -only AI naming (source `ai`, loopback/attested/digest-pinned client, never
+  `config.get_llm_client()`) is permitted ONLY by the positive attestation
+  `--support-confirmed-no-phi`; otherwise a random `study-<8hex>` name
+  (source `generated`) is assigned and reused/promoted for the same source.
+  There is no negative "may contain PHI" flag.
+- **Manifest.** `intake-manifest/v3` keys `schema`/`study`/
+  `study_name_source`/`status`/`source_root`/`entries`/`review_items`/
+  `errors`/`removals`; statuses `ready`/`review_required`/`failed` map to
+  exit `0`/`8`/`2`. Clean cutover: a missing/malformed/v2 manifest fails with
+  a fixed public code, no legacy reader or shim.
+- **Redacted output.** `intake` prints only `{"study", "status", "linked",
+  "review", "errors", "manifest"}` to stdout, never entry paths, review/error
+  detail, or raw exceptions.
+- **Organize is component-authoritative.** The organizer routes each entry by
+  the `component` intake assigned, never by re-guessing from path/suffix;
+  `_unclassified` is never parsed. `run_pipeline` generates no source-of-truth
+  tree automatically; standalone SoT is available only to callers that
+  explicitly maintain the legacy annotated-PDF layout.
+
 ## Authority grounding
 
 Every classification/action claim in code comments or documentation should

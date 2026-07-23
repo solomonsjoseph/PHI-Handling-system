@@ -22,36 +22,65 @@ below is checkable against the working tree with file:line evidence.
       path outside `<workspace>/intake/`) and writes derived artifacts
       under `<workspace>/organized/<study>/` — never back into the SOURCE
       tree (the external directory passed to `intake_add`). Writes
-      elsewhere WITHIN the workspace are allowed and expected: compatibility
-      symlinks under `<workspace>/data/raw/<study>/{datasets,annotated_pdfs}/`
-      (so unmodified engine constants like `config.DATASETS_DIR` keep
-      working) and the review bucket under
-      `<workspace>/output/<study>/audit/human_review/`.
-      "Never touches source" is the invariant under test — not "writes to a
+      elsewhere WITHIN the workspace are allowed and expected: a compatibility
+      symlink tree under `<workspace>/data/raw/<study>/datasets/` (so
+      unmodified engine constants like `config.DATASETS_DIR` keep working) and
+      the review bucket under `<workspace>/output/<study>/audit/human_review/`.
+      "Never touches source" is the invariant under test -- not "writes to a
       single directory." KNOWN EXCEPTION: `organize()` also performs a
       direct, read-only lookup of an optional forms manifest at
       `source_root / "datasets"` (the external source tree itself, not an
       intake symlink) via `scripts.extraction.forms_manifest.check_forms_manifest`
-      — a metadata-only read outside `<workspace>/intake/`, not a write.
-- [ ] `harness/spec_check.py`'s `source_immutability` check re-hashes every
-      stress-fixture source file after a full intake+organize+run pass and
-      compares against the fixture-build-time manifest; any drift is FAIL.
+      -- a metadata-only read outside `<workspace>/intake/`, not a write.
+- [ ] `harness/spec_check.py`'s `source_immutability` check compares the
+      complete source entry set (type, sha256, size, mode, `mtime_ns`, uid,
+      gid, and symlink target, excluding atime) after a full
+      intake+organize+run pass against the fixture-build-time manifest; any
+      drift, vanished, or newly-appeared entry is FAIL.
 
-## 3. Organizer handles messy inputs
+## 3. Required package and accepted-format matrix (intake-manifest/v3)
 
-- [ ] Raw variables/datasets in `.jsonl` and `.json` are validated and
-      normalized into `organized/<study>/datasets/`.
-- [ ] `.csv` is parsed (`dtype=str`, no NA coercion) into JSONL.
-- [ ] `.xlsx` is sheet-split and header-promoted (one JSONL per sheet-table).
-- [ ] `.xls` is read via `xlrd` when available; unreadable/mislabeled `.xls`
-      routes to human review (fail-closed), never silently dropped or
-      silently parsed as garbage.
-- [ ] `.pdf` is either routed to `annotated_pdfs/` (CRF companion, matched by
-      stem) or table-extracted via `pdfplumber`; a PDF with no extractable
-      table and no dataset-stem match lands in the review bucket.
-- [ ] Any unrecognized suffix, broken intake symlink, or parse failure lands
-      in the review bucket with a `{file, reason}` record — filename/reason
-      metadata only, never row values.
+- [ ] A ready intake source tree MUST provide the mandatory component
+      packages at the source root: `datasets/` (required), `forms/`
+      (required), and at least one of `data_dictionary/` or `mappings/`. A
+      missing component directory or an empty one is a blocking review item
+      (`missing-component-directory` / `missing-component-content`);
+      `phi_engine/pipeline/intake_preflight.py::inspect_intake_source`.
+- [ ] Intake classifies each file by the exact per-component suffix matrix
+      (`_COMPONENT_SUFFIXES`), never by guessing a role from the path:
+      `datasets/` accepts `.csv`, `.xls`, `.xlsx`; `forms/` accepts `.pdf`
+      only; `data_dictionary/` and `mappings/` accept `.csv` and `.xlsx`. A
+      dataset `.xlsx` MUST be single-sheet; a multi-sheet dataset workbook is
+      a `dataset-xlsx-multiple-sheets` review item. `.json` and `.jsonl` are
+      NOT accepted dataset formats: any file whose suffix is not allowed for
+      its component becomes an `unsupported-format` `_unclassified` review
+      item, never normalized.
+- [ ] `forms/` holds PDFs only and does NOT distinguish annotated from
+      non-annotated documents; there is no `annotated_pdfs` intake alias.
+- [ ] Nested subdirectories inside a component and duplicate content (same
+      bytes under different paths, within or across components) are all
+      preserved as distinct intake entries -- never merged, deduplicated, or
+      routed to review for being nested.
+- [ ] A file physically under `datasets/` that is hardlink-identical to a
+      file placed under `forms/`, `data_dictionary/`, or `mappings/` is a
+      blocking `cross-component-hardlink` review item.
+- [ ] Any unrecognized suffix, invalid `.xlsx` workbook, over-limit support
+      workbook, or unsupported component file lands in the review bucket as an
+      `_unclassified` item with a `{path, reason, blocking}` record --
+      filename/reason metadata only, never row values, never silently dropped
+      or silently parsed as garbage. The organizer never parses an
+      `_unclassified` entry.
+
+## 3a. Source symlink rejection
+
+- [ ] The entire source tree (root, every ancestor path segment, every
+      component directory, and every entry beneath) is opened
+      descriptor-relatively with `O_NOFOLLOW`. A symlink or reparse point
+      anywhere in the source subtree fails closed: intake records a
+      `source-symlink-not-allowed` review item and never follows the link.
+      `harness/spec_check.py`'s `intake_symlink_invariant` additionally
+      `lstat`-rejects a symlinked intake root, study directory, or component
+      directory in the workspace.
 
 ## 4. Regulation-driven classification, methods applied per classification
 

@@ -128,7 +128,7 @@ Security properties to preserve:
 | STRIDE category | Threat | Required control evidence | Residual risk |
 |---|---|---|---|
 | Spoofing | An artifact pretends to be a clean/published run result. | `run_pipeline`'s `pipeline_result.json` records `guard_ok`/`guard_failed`/`exit_code` per run, checkable via `python -m phi_engine status`. | Result JSON proves pipeline state, not institutional approval. |
-| Tampering | Source or organized files change after intake. | `harness/spec_check.py`'s `source_immutability` check re-hashes every intake-time file and compares against the intake manifest. | Manifest itself must be independently reviewed alongside any published claim. |
+| Tampering | Source or organized files change after intake. | `harness/spec_check.py`'s `source_immutability` check compares the complete source entry set -- type, sha256, size, mode, `mtime_ns`, uid, gid, and symlink target (excluding atime) -- against the fixture-build-time manifest; any drift, vanished, or newly-appeared entry fails. | Manifest itself must be independently reviewed alongside any published claim. |
 | Repudiation | A review decision or scrub outcome cannot be tied to who/what decided it. | `review_decisions.yaml` records `decided_by`/`source`; audit records are written per run. | Human signoff for real-PHI use remains an operational responsibility outside this repository. |
 | Information disclosure | Real PHI or a row value reaches an LLM or the published tree. | `guard_llm_output` (live only on two provider-response paths -- see OWASP mapping), `phi_gate_check`, `phi_guard_gate.run_phi_guard_gate` (both scanners clean); on a guard exception, `phi_guard_gate.run_phi_guard_gate` is bypassed and only the legacy scanner runs (see Data flows §5). `validate_llm_read_path` is defined but has no production caller. | Rule-based/model-based scanning reduces risk but is not proof that arbitrary future content is PHI-free; the guard-exception fallback and unwired read-path wrapper are open gaps (see Release gates). |
 | Denial of service | Large intake, organize, or LLM operations exhaust resources. | Commands are explicit and reproducible; external LLM providers are disabled by default. | Dedicated resource limits are not a substitute for operational deployment controls. |
@@ -154,8 +154,16 @@ all of the following are true:
   `tests/test_stress_standalone.py`, `tests/test_phase3_run_pipeline_integration.py`,
   `tests/test_phase3_run_review_integration.py`, `tests/test_pipeline_lock.py`,
   `tests/test_phi_llm_safety.py`, `tests/test_llm_egress_gate.py`).
-- `harness/spec_check.py` reports `ALL PASS` (`intake_symlink_invariant`,
-  `llm_boundary_canary`, `source_immutability`) against a real run.
+- `harness/spec_check.py` reports `ALL PASS` against a real run:
+  `intake_symlink_invariant` (symlink-only intake tree, plus `lstat`
+  rejection of a symlinked intake root/study/component directory),
+  `llm_boundary_canary` (provider default `none`, no stray `get_llm_client`,
+  and `model_routing.new_offline_local_client()` referenced only as the
+  callee of the one sanctioned call inside
+  `intake_naming.resolve_intake_study`/`_resolve_intake_study` -- any alias,
+  other callsite, or direct `OfflineLocalLLMClient(...)` construction under
+  `phi_engine/pipeline/` is a violation), and `source_immutability`
+  (complete-entry-set comparison, see Tampering above).
 - External provider egress is explicitly approved before any PHI-task
   external LLM provider is used.
 - Encryption-at-rest, RBAC, and log encryption are enabled, or an explicit,
