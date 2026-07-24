@@ -262,7 +262,7 @@ def test_organizer_validates_manifest_structure_before_deleting_old_tree(tmp_pat
 def test_dependency_shared_enums_are_exact_authoritative_tokens() -> None:
     from phi_engine.pipeline.dependencies import DependencyKind, DependencyReasonCode, RoleSource, Sensitivity, SupportFailureCode
 
-    assert {item.value for item in DependencyKind} == {"pdf", "dictionary", "mapping"}
+    assert {item.value for item in DependencyKind} == {"pdf", "dictionary", "mapping", "dictionary_mapping"}
     assert {item.value for item in Sensitivity} == {"confidential", "non_confidential"}
     assert {item.value for item in DependencyReasonCode} == {
         "manifest_declared",
@@ -293,4 +293,6 @@ def test_dependency_shared_enums_are_exact_authoritative_tokens() -> None:
         "signal_conflict",
         "stale_decision",
         "residual_gate_failed",
+        "reader_unavailable",
+        "resource_limit",
     }

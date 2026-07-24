@@ -31,6 +31,7 @@ pytest>=8.3.3
 pytest-cov>=6.0.0
 pytest-timeout>=2.3.1
 hypothesis>=6.115.5
+PyYAML>=6.0.0  # tests/test_xls_dependency_contract.py parses .github/workflows/ci.yml
 
 # Security
 cryptography>=43.0.3
@@ -41,7 +42,7 @@ click>=8.0.0
 
 # Standalone organizer -- messy-input ingestion
 pdfplumber>=0.11
-xlrd>=2.0.1
+xlrd==2.0.2
 # xlwt is BIFF-only (legacy .xls writer); used solely by the stress-fixture
 # builder (harness/make_stress_fixtures.py) to author a genuine .xls sample.
 xlwt>=1.3.0

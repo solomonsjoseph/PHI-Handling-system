@@ -96,7 +96,7 @@ def decision() -> DependencyDecision:
 
 
 def test_authoritative_enum_tokens_are_exact() -> None:
-    assert {x.value for x in DependencyKind} == {"pdf", "dictionary", "mapping"}
+    assert {x.value for x in DependencyKind} == {"pdf", "dictionary", "mapping", "dictionary_mapping"}
     assert {x.value for x in DependencyLevel} == {"required", "helpful", "ignored"}
     assert {x.value for x in Sensitivity} == {"confidential", "non_confidential"}
     assert {x.value for x in RoleSource} == {"manifest", "directory", "inferred"}
@@ -128,6 +128,8 @@ def test_authoritative_enum_tokens_are_exact() -> None:
         "signal_conflict",
         "stale_decision",
         "residual_gate_failed",
+        "reader_unavailable",
+        "resource_limit",
     }
 
 

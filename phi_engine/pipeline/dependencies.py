@@ -32,6 +32,13 @@ class DependencyKind(str, Enum):
     PDF = "pdf"
     DICTIONARY = "dictionary"
     MAPPING = "mapping"
+    # Unified dictionary/mapping metadata kind for the XLS isolation
+    # boundary (phi_engine.pipeline.xls_isolation). Additive: DICTIONARY/
+    # MAPPING stay defined for now -- collapsing them into this single
+    # member, bumping CODE_TABLE_VERSION, and cutting every caller over is
+    # the dictionary-mapping-support-plan's Approach 4 (out of this
+    # module's Approach-1 scope), not done here.
+    DICTIONARY_MAPPING = "dictionary_mapping"
 
 
 class DependencyLevel(str, Enum):
@@ -80,6 +87,11 @@ class SupportFailureCode(str, Enum):
     SIGNAL_CONFLICT = "signal_conflict"
     STALE_DECISION = "stale_decision"
     RESIDUAL_GATE_FAILED = "residual_gate_failed"
+    # XLS isolation boundary failure codes (phi_engine.pipeline.
+    # xls_isolation), additive ahead of Approach 4's full support_files.py
+    # SupportFailureCode wiring.
+    READER_UNAVAILABLE = "reader_unavailable"
+    RESOURCE_LIMIT = "resource_limit"
 
 
 class SupportParseStatus(str, Enum):
