@@ -974,7 +974,7 @@ def apply_decisions_to_classifications(
 
 
 def _intake_review_items(study: str) -> list[dict[str, Any]]:
-    """Redacted intake-manifest/v3 review items for *study*: ``artifact_id``
+    """Redacted intake-manifest/v4 review items for *study*: ``artifact_id``
     (when present), ``reason``, ``blocking``, ``detail`` (when present), and
     a fixed ``source: "intake"`` marker -- never the manifest's protected
     ``path`` or, for ``study-name-conflict``, its ``candidates``. Missing or

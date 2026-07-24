@@ -1,6 +1,6 @@
-"""Symlink-only intake for the standalone PHI pipeline (intake-manifest/v3).
+"""Symlink-only intake for the standalone PHI pipeline (intake-manifest/v4).
 
-Clean v3 cutover: no v2 schema, no deprecation shim, no legacy reader. Every
+Clean v4 cutover: no v2/v3 schema, no deprecation shim, no legacy reader. Every
 workspace path (INTAKE_DIR, OUTPUT_DIR, and everything beneath them) is
 treated as hostile -- opened/created descriptor-relatively with
 ``O_NOFOLLOW``, verified to be a private ``0700`` directory (or a ``0600``
@@ -63,7 +63,7 @@ class IntakeNotReadyError(Exception):
         super().__init__(status)
 
 
-_MANIFEST_SCHEMA = "intake-manifest/v3"
+_MANIFEST_SCHEMA = "intake-manifest/v4"
 _MANIFEST_FILENAME = "intake_manifest.json"
 
 _ALLOWED_MANIFEST_KEYS = {
@@ -90,7 +90,7 @@ _ENTRY_KEYS = {
     "inode",
     "mode",
 }
-_COMPONENTS = frozenset({"datasets", "forms", "data_dictionary", "mappings", "_unclassified"})
+_COMPONENTS = frozenset({"datasets", "dictionary_mapping", "forms", "_unclassified"})
 _STUDY_NAME_SOURCES = frozenset({"user", "ai", "generated"})
 _STATUSES = frozenset({"ready", "review_required", "failed"})
 _REVIEW_REQUIRED_KEYS = {"path", "reason", "blocking"}
@@ -826,7 +826,7 @@ def _restore_manifest_bytes(
             _atomic_write_in_dir_noreplace(study_fd, _MANIFEST_FILENAME, prior_bytes, 0o600)
 
 
-# --- v3 schema validation (pure; no I/O) ----------------------------------------------------
+# --- v4 schema validation (pure; no I/O) ----------------------------------------------------
 
 
 def _validate_entry(
@@ -955,7 +955,7 @@ def _validate_removals(raw: Any) -> list[dict[str, Any]]:
     return result
 
 
-def _validate_manifest_v3(raw: Any, *, expect_study: str | None) -> dict[str, Any]:
+def _validate_manifest_v4(raw: Any, *, expect_study: str | None) -> dict[str, Any]:
     if not isinstance(raw, dict) or set(raw) != _ALLOWED_MANIFEST_KEYS:
         raise IntakeManifestError("intake_manifest_invalid")
     if raw.get("schema") != _MANIFEST_SCHEMA:
@@ -1012,7 +1012,7 @@ def _validate_manifest_v3(raw: Any, *, expect_study: str | None) -> dict[str, An
     }
 
 
-def _empty_manifest_v3() -> dict[str, Any]:
+def _empty_manifest_v4() -> dict[str, Any]:
     return {
         "schema": _MANIFEST_SCHEMA,
         "study": None,
@@ -1075,7 +1075,7 @@ def _open_and_read_manifest(study: str, *, verify_links: bool) -> dict[str, Any]
             raw = _read_manifest_json(study_fd)
             if raw is None:
                 raise IntakeManifestError("intake_manifest_missing")
-            manifest = _validate_manifest_v3(raw, expect_study=study)
+            manifest = _validate_manifest_v4(raw, expect_study=study)
             if verify_links:
                 _verify_entry_links(study_fd, manifest)
                 if _inventory_unexpected_nodes(study_fd, set(manifest["entries"])):
@@ -1088,7 +1088,7 @@ def _open_and_read_manifest(study: str, *, verify_links: bool) -> dict[str, Any]
 
 
 def load_intake_manifest(study: str) -> dict[str, Any]:
-    """Load and fully validate ``study``'s intake-manifest/v3, re-verifying
+    """Load and fully validate ``study``'s intake-manifest/v4, re-verifying
     every recorded symlink live. Never returns a synthetic empty manifest:
     raises :class:`IntakeManifestError` with a fixed code instead."""
     return _open_and_read_manifest(study, verify_links=True)
@@ -1115,7 +1115,7 @@ class _GeneratedMatch(NamedTuple):
 
 
 def _scan_generated_manifests_for_source(canonical_source: str) -> list[_GeneratedMatch]:
-    """Every study whose v3 manifest is ``study_name_source == "generated"``
+    """Every study whose v4 manifest is ``study_name_source == "generated"``
     and whose ``source_root`` canonically matches -- each returned with the
     (device, inode) identity of BOTH its study directory and its manifest
     file, captured from the SAME descriptors this scan itself opened and
@@ -1173,7 +1173,7 @@ def _scan_generated_manifests_for_source(canonical_source: str) -> list[_Generat
                         raw = json.loads(raw_bytes.decode("utf-8"))
                     except (UnicodeDecodeError, json.JSONDecodeError):
                         raise IntakeManifestError("intake-tree-unsafe") from None
-                    manifest = _validate_manifest_v3(raw, expect_study=name)
+                    manifest = _validate_manifest_v4(raw, expect_study=name)
                 except IntakeManifestError:
                     raise IntakeManifestError("intake-tree-unsafe") from None
             finally:
@@ -1518,7 +1518,7 @@ def _load_existing_for_reconcile(
     expected_study_dir_identity: tuple[int, int] | None = None,
     expected_manifest_identity: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
-    """In-memory empty v3 state ONLY when ``freshly_reserved`` -- THIS
+    """In-memory empty v4 state ONLY when ``freshly_reserved`` -- THIS
     call created the study directory, proving no prior manifest could
     ever have existed. A pre-existing directory with no manifest file is
     NOT the same as brand-new; it fails ``intake-tree-unsafe`` rather
@@ -1553,7 +1553,7 @@ def _load_existing_for_reconcile(
         raise IntakeManifestError("intake_manifest_invalid") from None
     if result is None:
         if freshly_reserved:
-            return _empty_manifest_v3()
+            return _empty_manifest_v4()
         raise IntakeManifestError("intake-tree-unsafe")
     raw_bytes, manifest_identity = result
     if expected_manifest_identity is not None and manifest_identity != expected_manifest_identity:
@@ -1562,7 +1562,7 @@ def _load_existing_for_reconcile(
         raw = json.loads(raw_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise IntakeManifestError("intake_manifest_invalid") from None
-    existing = _validate_manifest_v3(raw, expect_study=expected_prior_study)
+    existing = _validate_manifest_v4(raw, expect_study=expected_prior_study)
     if not freshly_reserved and existing["source_root"] != canonical_source:
         raise IntakeManifestError("study-name-collision")
     return existing
@@ -2264,7 +2264,7 @@ def _reconcile_study_tree(
                         "errors": errors,
                         "removals": removals,
                     }
-                    _validate_manifest_v3(manifest, expect_study=study)  # self-check before persisting
+                    _validate_manifest_v4(manifest, expect_study=study)  # self-check before persisting
 
                     # Mark the note transaction touched BEFORE attempting the
                     # write (not after it returns): any failure from this point
@@ -2364,7 +2364,7 @@ def _study_lock_or_unsafe(study: str):
 def intake_add(source: Path, study: str | None = None, *, support_confirmed_no_phi: bool = False) -> dict[str, Any]:
     """Deterministic, symlink-only intake reconciliation. Runs preflight
     (never an LLM), resolves the study name (local-only, support-content-
-    only AI boundary), reconciles the intake-manifest/v3 tree atomically
+    only AI boundary), reconciles the intake-manifest/v4 tree atomically
     under the registry-then-study lock order, and returns the persisted
     manifest. Never copies/moves/writes/chmods/deletes a source artifact."""
     raw_source = Path(source)

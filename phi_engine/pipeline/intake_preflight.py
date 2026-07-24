@@ -1,11 +1,12 @@
 """Deterministic, non-LLM intake preflight for the standalone PHI pipeline.
 
 Inspects an organized study source tree (``datasets/``, ``forms/``,
-``data_dictionary/``/``mappings/``) and classifies every discovered file into
+``dictionary_mapping/``) and classifies every discovered file into
 a supported :data:`Component`, a blocking review item, or a hard error --
-using only path/format inspection and bounded ``.xlsx`` sheet-count metadata.
-This module never imports or calls an LLM/model client of any kind, and
-never inspects dataset cell values, document text, or row content.
+using only path/format inspection and bounded ``.xlsx``/``.xls`` sheet-count
+metadata. This module never imports or calls an LLM/model client of any
+kind, and never inspects dataset cell values, document text, or row
+content.
 
 The source root is pinned once (via ``verified_source._open_pinned_root``)
 and held for the entire inspection. Traversal uses an explicit,
@@ -25,6 +26,7 @@ import hashlib
 import os
 import stat
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, Literal
@@ -33,7 +35,7 @@ import defusedxml.ElementTree as defused_ET
 import defusedxml.common as defused_common
 import xml.etree.ElementTree as ET
 
-from phi_engine.pipeline import support_files
+from phi_engine.pipeline import support_files, xls_isolation
 from phi_engine.pipeline.verified_source import (
     FileIdentity,
     VerifiedSourceError,
@@ -52,20 +54,41 @@ __all__ = [
     "count_xlsx_sheets",
 ]
 
-Component = Literal["datasets", "forms", "data_dictionary", "mappings", "_unclassified"]
+Component = Literal["datasets", "dictionary_mapping", "forms", "_unclassified"]
 
-_KNOWN_COMPONENTS: tuple[str, ...] = ("datasets", "forms", "data_dictionary", "mappings")
+_KNOWN_COMPONENTS: tuple[str, ...] = ("datasets", "dictionary_mapping", "forms")
 _COMPONENT_SUFFIXES: dict[str, frozenset[str]] = {
     "datasets": frozenset({".csv", ".xls", ".xlsx"}),
+    "dictionary_mapping": frozenset({".csv", ".xls", ".xlsx"}),
     "forms": frozenset({".pdf"}),
-    "data_dictionary": frozenset({".csv", ".xlsx"}),
-    "mappings": frozenset({".csv", ".xlsx"}),
 }
 _HASH_CHUNK_SIZE = 1 << 20
 _WORKBOOK_MEMBER = "xl/workbook.xml"
 _SHEET_QNAME = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet"
 _ROOT_PATH = ""  # fixed string path for whole-source-root review/error records
 _MAX_TRAVERSAL_DEPTH = 64  # generous bound; anything deeper fails closed, not a Python RecursionError
+
+# Approach 2.3: a metadata-only pre-scan pass bounds the whole package
+# BEFORE any hashing, XLS worker spawn, or write -- exact boundary values
+# are accepted, only a strict "+1" breach (or wall-deadline expiry,
+# checked at every traversal step/read chunk/operation, including one
+# occurring inside a later spawned XLS-inspection child) fails the WHOLE
+# package with a single fixed root review item, discarding every
+# candidate gathered so far.
+_MAX_PACKAGE_ENTRIES = 4096
+_MAX_PACKAGE_CHECKED_BYTES = 4 * 1024**3
+_MAX_PACKAGE_XLS_FILES = 256
+_PACKAGE_WALL_SECONDS = 1800
+
+# Protocol-level cap passed to xls_isolation.inspect_xls's own max_sheets
+# argument -- generous enough that no real workbook is ever rejected as
+# "protocol-invalid" for merely reporting more sheets than this module's
+# OWN business thresholds (1 for a dataset, support_files.DEFAULT_LIMITS
+# ["max_sheets"] for dictionary_mapping/forms support). The business
+# threshold, not this protocol cap, is what actually classifies an
+# over-limit workbook into "dataset-xls-multiple-sheets" or
+# "support-xls-sheet-limit" below.
+_XLS_INSPECT_MAX_SHEETS = 1_000_000
 
 # Bucket: TOCTOU/escape/unreadable source access failures that mean "we could
 # not trust this read at all" are "errors". Structural/format issues a human
@@ -96,6 +119,16 @@ class _XlsxWorkbookError(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class _PackageLimitError(Exception):
+    """Private, value-free control-flow signal: the metadata pre-scan (or
+    a later deadline recheck fed the same package deadline) tripped one
+    of the fixed package-wide ceilings (entry count, checked bytes, XLS
+    file count, or the absolute wall deadline). Always converted by the
+    caller into the single fixed root review item ``intake-resource-limit``,
+    discarding every candidate gathered for the whole package -- never a
+    per-file finding."""
 
 
 def _identity(info: os.stat_result) -> FileIdentity:
@@ -211,31 +244,42 @@ def _walk_tree(
 
     stack: list[_WalkFrame] = [_WalkFrame(root_handle, (), root_entries, root_extra, False)]
     tree_ok = True
-    while stack:
-        frame = stack[-1]
-        if frame.index >= len(frame.entries):
-            if on_dir_exit is not None and not on_dir_exit(frame.handle, frame.prefix, frame.extra):
-                tree_ok = False
+    try:
+        while stack:
+            frame = stack[-1]
+            if frame.index >= len(frame.entries):
+                if on_dir_exit is not None and not on_dir_exit(frame.handle, frame.prefix, frame.extra):
+                    tree_ok = False
+                if frame.owns_handle:
+                    close_handle(frame.handle)
+                stack.pop()
+                continue
+
+            entry = frame.entries[frame.index]
+            frame.index += 1
+            prefix = frame.prefix + (entry.name,)
+
+            action = classify(frame.handle, entry, prefix, frame.extra, len(stack))
+            if action is _SKIP:
+                continue
+            if isinstance(action, _AsFile):
+                on_file(frame.handle, entry, prefix, frame.extra, action.extra)
+                continue
+            # _Descend: classify() already opened and scanned this child.
+            if len(stack) >= max_depth:
+                close_handle(action.handle)
+                continue
+            stack.append(_WalkFrame(action.handle, prefix, action.entries, action.extra, True))
+    finally:
+        # If any callback (classify/on_file/on_dir_exit) raises -- notably
+        # _PackageLimitError aborting the whole package -- every directory
+        # handle still held on the stack is reaped here rather than leaked;
+        # the normal-path loop above already empties the stack itself on
+        # every non-exceptional exit, so this drain is a no-op on success.
+        while stack:
+            frame = stack.pop()
             if frame.owns_handle:
                 close_handle(frame.handle)
-            stack.pop()
-            continue
-
-        entry = frame.entries[frame.index]
-        frame.index += 1
-        prefix = frame.prefix + (entry.name,)
-
-        action = classify(frame.handle, entry, prefix, frame.extra, len(stack))
-        if action is _SKIP:
-            continue
-        if isinstance(action, _AsFile):
-            on_file(frame.handle, entry, prefix, frame.extra, action.extra)
-            continue
-        # _Descend: classify() already opened and scanned this child.
-        if len(stack) >= max_depth:
-            close_handle(action.handle)
-            continue
-        stack.append(_WalkFrame(action.handle, prefix, action.entries, action.extra, True))
 
     return tree_ok
 
@@ -320,6 +364,92 @@ def _close_fd_quietly(fd: int) -> None:
         os.close(fd)
     except OSError:
         pass
+
+
+def _prescan_package(root_fd: int, deadline: float) -> None:
+    """Metadata-only pre-scan bound over the whole package, run BEFORE any
+    hashing, ``.xlsx``/``.xls`` inspection, or child process spawn --
+    built on the exact same shared :func:`_walk_tree` traversal engine
+    :func:`_walk_and_process` itself uses, never a second, divergent
+    traversal convention. Opens each directory NOFOLLOW (no identity
+    verification against a prior discovery -- this pass is an advisory
+    cost bound, not the trust boundary; :func:`_walk_and_process` still
+    independently verifies everything on the real pass) and inspects only
+    the no-follow ``lstat`` metadata ``os.scandir`` already carries --
+    never opens a file's content.
+
+    Raises :class:`_PackageLimitError` the instant any ceiling is
+    exceeded: more than :data:`_MAX_PACKAGE_ENTRIES` entries visited, more
+    than :data:`_MAX_PACKAGE_CHECKED_BYTES` cumulative regular-file bytes,
+    more than :data:`_MAX_PACKAGE_XLS_FILES` ``.xls``-suffixed files, or
+    the absolute wall ``deadline`` has passed -- checked at every
+    traversal step, so a hostile tree is aborted the moment truth is
+    known, never only after full enumeration. Exact boundary counts/bytes
+    and the deadline instant itself are accepted; only a strict "+1"
+    breach or an already-past deadline fails.
+    """
+
+    counts = {"entries": 0, "bytes": 0, "xls": 0}
+
+    def check_deadline() -> None:
+        if time.monotonic() > deadline:
+            raise _PackageLimitError()
+
+    def classify(parent_fd: int, entry: "os.DirEntry[str]", _prefix: tuple[str, ...], _parent_extra: Any, depth: int) -> Any:
+        check_deadline()
+        counts["entries"] += 1
+        if counts["entries"] > _MAX_PACKAGE_ENTRIES:
+            raise _PackageLimitError()
+        if entry.name.startswith(".") or entry.name in DEFAULT_JUNK_FILENAMES:
+            return _SKIP
+        try:
+            is_link = entry.is_symlink()
+        except OSError:
+            return _SKIP
+        if is_link:
+            return _SKIP
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            return _SKIP
+        if not is_dir:
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                return _SKIP
+            counts["bytes"] += max(info.st_size, 0)
+            if counts["bytes"] > _MAX_PACKAGE_CHECKED_BYTES:
+                raise _PackageLimitError()
+            lower_name = entry.name.lower()
+            if lower_name.endswith(".xls") and not lower_name.endswith(".xlsx"):
+                counts["xls"] += 1
+                if counts["xls"] > _MAX_PACKAGE_XLS_FILES:
+                    raise _PackageLimitError()
+            return _SKIP
+        if depth >= _MAX_TRAVERSAL_DEPTH:
+            return _SKIP
+        child_fd, _reason = _open_component_dir_fresh(parent_fd, entry.name)
+        if child_fd is None:
+            return _SKIP
+        try:
+            child_entries = sorted(os.scandir(child_fd), key=lambda e: e.name)
+        except OSError:
+            _close_fd_quietly(child_fd)
+            return _SKIP
+        return _Descend(child_fd, child_entries, None)
+
+    def on_file(*_args: Any) -> None:
+        return None
+
+    check_deadline()
+    _walk_tree(
+        root_fd,
+        None,
+        classify=classify,
+        on_file=on_file,
+        close_handle=_close_fd_quietly,
+    )
+    check_deadline()
 
 
 def _scan_component_identities(
@@ -519,23 +649,20 @@ def _check_required_component(
         review.append({"path": name, "reason": "missing-component-content", "blocking": True})
 
 
-def _check_support_group(
+def _check_support_requirement(
     known_top_dirs: frozenset[str], final_candidates: list[IntakeCandidate], review: list[dict[str, Any]]
 ) -> None:
-    states: dict[str, bool] = {}
-    satisfied_any = False
-    for name in ("data_dictionary", "mappings"):
-        present = name in known_top_dirs
-        states[name] = present
-        if present and _final_component_present(final_candidates, name):
-            satisfied_any = True
-    if satisfied_any:
-        return
-    for name, present in states.items():
-        if not present:
-            review.append({"path": name, "reason": "missing-component-directory", "blocking": True})
-        else:
-            review.append({"path": name, "reason": "missing-component-content", "blocking": True})
+    """The alternative-group requirement: at least one of ``dictionary_mapping``
+    or ``forms`` must have a final accepted candidate. This is a single
+    application-policy requirement over an alternative group, not two
+    independent per-component requirements -- so a shortfall produces
+    exactly one root-level review item, never one finding per missing
+    component (which would falsely imply both are mandatory).
+    """
+    for name in ("dictionary_mapping", "forms"):
+        if name in known_top_dirs and _final_component_present(final_candidates, name):
+            return
+    review.append({"path": _ROOT_PATH, "reason": "missing-support-component", "blocking": True})
 
 
 def _process_entry_file(
@@ -546,6 +673,7 @@ def _process_entry_file(
     *,
     classify: bool,
     expected_identity: FileIdentity,
+    deadline: float,
     candidates: list[IntakeCandidate],
     review: list[dict[str, Any]],
     errors: list[dict[str, Any]],
@@ -561,8 +689,24 @@ def _process_entry_file(
     stale committed candidate.
     """
 
+    if time.monotonic() > deadline:
+        raise _PackageLimitError()
+
     staged_candidate: IntakeCandidate | None = None
     staged_review: dict[str, Any] | None = None
+    # Set (never raised directly) by the package-resource-limit branch
+    # below: raising _PackageLimitError from INSIDE the `with
+    # _open_from_parent_fd(...)` block would let that context manager's
+    # own post-yield identity-mismatch `finally` (verified_source.py's
+    # _open_verified_core) SILENTLY REPLACE it with
+    # VerifiedSourceError("source-unreadable") if this exact file's
+    # identity also happens to change during the same window -- a real
+    # concurrent-write race, not merely theoretical, that would downgrade
+    # a whole-package abort into one per-file error and let the walk
+    # continue. Checked and (re-)raised strictly AFTER the `with` block
+    # has fully exited (including its own finally), in both the normal
+    # path and every except clause below, so it always takes precedence.
+    package_limit_hit = False
     try:
         with _open_from_parent_fd(parent_fd, name, expected_identity=expected_identity) as fd:
             info = os.fstat(fd)
@@ -612,6 +756,80 @@ def _process_entry_file(
                                 }
                             else:
                                 staged_review = {"path": relative_path, "reason": "xlsx-workbook-invalid", "blocking": True}
+                elif suffix == ".xls":
+                    max_source_bytes = xls_isolation.INSPECT_LIMITS["max_source_bytes"]
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    dup_fd = os.dup(fd)
+                    try:
+                        with os.fdopen(dup_fd, "rb") as stream:
+                            xls_data = stream.read(max_source_bytes + 1)
+                    finally:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                    if len(xls_data) > max_source_bytes:
+                        staged_review = {"path": relative_path, "reason": "xls-workbook-invalid", "blocking": True}
+                    else:
+                        try:
+                            count = xls_isolation.inspect_xls(
+                                xls_data,
+                                sha256_hex,
+                                max_sheets=_XLS_INSPECT_MAX_SHEETS,
+                                deadline=deadline,
+                            )
+                        except xls_isolation.XlsIsolationError as exc:
+                            # The external package-deadline code takes
+                            # precedence over every other finding and
+                            # aborts the WHOLE package (Approach 2.3/2.4),
+                            # never a per-file review item.
+                            if exc.code == "package-resource-limit":
+                                package_limit_hit = True
+                            elif exc.code == "isolation-unavailable":
+                                staged_review = {
+                                    "path": relative_path,
+                                    "reason": "xls-reader-unavailable",
+                                    "blocking": True,
+                                }
+                            else:
+                                staged_review = {
+                                    "path": relative_path,
+                                    "reason": "xls-workbook-invalid",
+                                    "blocking": True,
+                                }
+                        except xls_isolation.XlsWorkerError:
+                            staged_review = {"path": relative_path, "reason": "xls-workbook-invalid", "blocking": True}
+                        else:
+                            if source_component == "datasets":
+                                if count == 1:
+                                    component, sheet_count = "datasets", count
+                                elif count > 1:
+                                    sheet_count = count
+                                    staged_review = {
+                                        "path": relative_path,
+                                        "reason": "dataset-xls-multiple-sheets",
+                                        "blocking": True,
+                                    }
+                                else:
+                                    staged_review = {
+                                        "path": relative_path,
+                                        "reason": "xls-workbook-invalid",
+                                        "blocking": True,
+                                    }
+                            else:
+                                max_support_sheets = support_files.DEFAULT_LIMITS["max_sheets"]
+                                if 1 <= count <= max_support_sheets:
+                                    component, sheet_count = source_component, count  # type: ignore[assignment]
+                                elif count > max_support_sheets:
+                                    sheet_count = count
+                                    staged_review = {
+                                        "path": relative_path,
+                                        "reason": "support-xls-sheet-limit",
+                                        "blocking": True,
+                                    }
+                                else:
+                                    staged_review = {
+                                        "path": relative_path,
+                                        "reason": "xls-workbook-invalid",
+                                        "blocking": True,
+                                    }
                 else:
                     component = source_component  # type: ignore[assignment]
 
@@ -623,18 +841,24 @@ def _process_entry_file(
                 sha256=sha256_hex,
                 sheet_count=sheet_count,
             )
+        if package_limit_hit:
+            raise _PackageLimitError() from None
         # Reached only on a fully-consistent verified read.
         if staged_review is not None:
             review.append(staged_review)
         if staged_candidate is not None:
             candidates.append(staged_candidate)
     except VerifiedSourceError as exc:
+        if package_limit_hit:
+            raise _PackageLimitError() from None
         record = {"path": relative_path, "reason": exc.reason}
         if exc.reason in _ERROR_REASONS:
             errors.append(record)
         else:
             review.append({**record, "blocking": True})
     except OSError:
+        if package_limit_hit:
+            raise _PackageLimitError() from None
         # os.dup/os.lseek/os.fstat/read failures during hashing or workbook
         # duplication -- a filesystem-level failure distinct from anything
         # the verified-source primitive itself already normalizes.
@@ -650,7 +874,7 @@ def _dirent_identity(entry: "os.DirEntry[str]") -> FileIdentity | None:
 
 
 def _walk_and_process(
-    root_fd: int, root_identity: FileIdentity
+    root_fd: int, root_identity: FileIdentity, deadline: float
 ) -> tuple[list[IntakeCandidate], list[dict[str, Any]], list[dict[str, Any]], frozenset[str], bool, bool]:
     """Classify every entry under ``root_fd`` on the shared :func:`_walk_tree`
     engine. Every directory descriptor is held for its entire subtree
@@ -680,6 +904,8 @@ def _walk_and_process(
         relative_path = "/".join(prefix)
         depth0 = len(prefix) == 1
 
+        if time.monotonic() > deadline:
+            raise _PackageLimitError()
         try:
             is_link = entry.is_symlink()
         except OSError:
@@ -757,6 +983,7 @@ def _walk_and_process(
             source_component,
             classify=classify_flag,
             expected_identity=dirent_identity,
+            deadline=deadline,
             candidates=candidates,
             review=review,
             errors=errors,
@@ -800,7 +1027,7 @@ def inspect_intake_source(source: Path) -> IntakePreflight:
 
     Never opens a source file for write, never calls an LLM/model client,
     and never inspects cell values, document text, or row content -- only
-    paths, formats, and bounded ``.xlsx`` sheet-count metadata. The source
+    paths, formats, and bounded ``.xlsx``/``.xls`` sheet-count metadata. The
     root (including every ancestor path segment, not only its final
     component) is pinned once via a no-follow descriptor and held for the
     entire inspection; every directory descriptor discovered beneath it is
@@ -828,45 +1055,76 @@ def inspect_intake_source(source: Path) -> IntakePreflight:
             return IntakePreflight(candidates=(), review_items=(), errors=({"path": _ROOT_PATH, "reason": "source-unreadable"},))
         root_identity = _identity(root_info)
 
-        candidates, review, errors, known_top_dirs, is_flat, tree_ok = _walk_and_process(root_fd, root_identity)
+        package_deadline = time.monotonic() + _PACKAGE_WALL_SECONDS
+        resource_limit_result = IntakePreflight(
+            candidates=(),
+            review_items=({"path": _ROOT_PATH, "reason": "intake-resource-limit", "blocking": True},),
+            errors=(),
+        )
+        try:
+            _prescan_package(root_fd, package_deadline)
+        except _PackageLimitError:
+            return resource_limit_result
+
+        try:
+            candidates, review, errors, known_top_dirs, is_flat, tree_ok = _walk_and_process(
+                root_fd, root_identity, package_deadline
+            )
+        except _PackageLimitError:
+            return resource_limit_result
 
         if not tree_ok:
             return IntakePreflight(candidates=(), review_items=(), errors=({"path": _ROOT_PATH, "reason": "source-unreadable"},))
 
-        # Cross-component hardlink quarantine: based on lexical source_component
-        # (physical location under datasets/), regardless of whether the file was
-        # already classified _unclassified for an unrelated reason (unsupported
-        # format, invalid workbook, etc.) -- the aliasing itself is the finding.
+        # Cross-component quarantine: a dictionary_mapping/forms candidate
+        # that either shares a dataset candidate's (device, inode) -- a
+        # hardlink alias -- or shares a dataset candidate's SHA-256 under a
+        # DIFFERENT identity -- a byte-for-byte copy -- is downgraded to
+        # _unclassified. Based on lexical source_component (physical
+        # location under datasets/), regardless of whether the file was
+        # already classified _unclassified for an unrelated reason
+        # (unsupported format, invalid workbook, etc.) -- the aliasing/copy
+        # itself is the finding. Each such candidate is preserved as its
+        # own distinct entry -- never merged or dropped -- but can never
+        # satisfy the support requirement once downgraded. Identity match
+        # is checked before hash match so a hardlinked file (which
+        # trivially also matches by hash) is reported once, with the more
+        # specific reason.
         dataset_identities = {
             (candidate.identity.device, candidate.identity.inode) for candidate in candidates if candidate.source_component == "datasets"
         }
+        dataset_hashes = {candidate.sha256 for candidate in candidates if candidate.source_component == "datasets"}
         final_candidates: list[IntakeCandidate] = []
         for candidate in candidates:
-            if candidate.source_component in ("forms", "data_dictionary", "mappings") and (
-                candidate.identity.device,
-                candidate.identity.inode,
-            ) in dataset_identities:
-                review.append({"path": candidate.relative_path, "reason": "cross-component-hardlink", "blocking": True})
-                final_candidates.append(
-                    IntakeCandidate(
-                        relative_path=candidate.relative_path,
-                        source_component=candidate.source_component,
-                        component="_unclassified",
-                        identity=candidate.identity,
-                        sha256=candidate.sha256,
-                        sheet_count=candidate.sheet_count,
-                    )
-                )
+            if candidate.source_component not in ("dictionary_mapping", "forms"):
+                final_candidates.append(candidate)
+                continue
+            identity_key = (candidate.identity.device, candidate.identity.inode)
+            if identity_key in dataset_identities:
+                quarantine_reason = "cross-component-hardlink"
+            elif candidate.sha256 in dataset_hashes:
+                quarantine_reason = "cross-component-dataset-copy"
             else:
                 final_candidates.append(candidate)
+                continue
+            review.append({"path": candidate.relative_path, "reason": quarantine_reason, "blocking": True})
+            final_candidates.append(
+                IntakeCandidate(
+                    relative_path=candidate.relative_path,
+                    source_component=candidate.source_component,
+                    component="_unclassified",
+                    identity=candidate.identity,
+                    sha256=candidate.sha256,
+                    sheet_count=candidate.sheet_count,
+                )
+            )
 
         # Required-content checks run AFTER final classification and hardlink
         # quarantine, so a malformed/multi-sheet/symlinked/hardlinked file
         # never counts as satisfying "at least one accepted file".
         if not is_flat:
             _check_required_component("datasets", known_top_dirs, final_candidates, review)
-            _check_required_component("forms", known_top_dirs, final_candidates, review)
-            _check_support_group(known_top_dirs, final_candidates, review)
+            _check_support_requirement(known_top_dirs, final_candidates, review)
 
         final_candidates.sort(key=lambda c: c.relative_path)
         review.sort(key=lambda item: (item["path"], item["reason"]))

@@ -13,8 +13,10 @@ from pathlib import Path
 
 import openpyxl
 import pytest
+import xlwt
 
 import phi_engine.pipeline.intake_preflight as intake_preflight_module
+from phi_engine.pipeline import xls_isolation
 from phi_engine.pipeline.intake_preflight import (
     count_xlsx_sheets,
     inspect_intake_source,
@@ -25,10 +27,10 @@ from phi_engine.pipeline.support_files import DEFAULT_LIMITS
 def _make_canonical(root: Path) -> None:
     (root / "datasets").mkdir(parents=True)
     (root / "forms").mkdir(parents=True)
-    (root / "data_dictionary").mkdir(parents=True)
+    (root / "dictionary_mapping").mkdir(parents=True)
     (root / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (root / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    _write_workbook(root / "data_dictionary" / "dict.xlsx", sheet_names=["Sheet1"])
+    _write_workbook(root / "dictionary_mapping" / "dict.xlsx", sheet_names=["Sheet1"])
 
 
 def _write_workbook(path: Path, *, sheet_names: list[str]) -> None:
@@ -37,6 +39,17 @@ def _write_workbook(path: Path, *, sheet_names: list[str]) -> None:
     for name in sheet_names[1:]:
         wb.create_sheet(name)
     wb.save(path)
+
+
+def _write_xls_workbook(path: Path, *, sheet_names: list[str]) -> None:
+    """Genuine ``xlwt`` BIFF (.xls) bytes -- matches
+    ``tests/test_xls_isolation.py``'s own fixture convention, exercising
+    the real ``xlrd``-backed worker end to end rather than a stub."""
+    wb = xlwt.Workbook()
+    for name in sheet_names:
+        ws = wb.add_sheet(name)
+        ws.write(0, 0, "value")
+    wb.save(str(path))
 
 
 def _raw_workbook_zip_bytes(sheets_inner_xml: str, *, namespace: str | None = None) -> bytes:
@@ -105,27 +118,25 @@ def test_canonical_package_produces_ready_candidates_no_review_no_errors(tmp_pat
     by_path = _by_path(result.candidates)
     assert by_path["datasets/labs.csv"].component == "datasets"
     assert by_path["forms/consent.pdf"].component == "forms"
-    assert by_path["data_dictionary/dict.xlsx"].component == "data_dictionary"
-    assert by_path["data_dictionary/dict.xlsx"].sheet_count == 1
+    assert by_path["dictionary_mapping/dict.xlsx"].component == "dictionary_mapping"
+    assert by_path["dictionary_mapping/dict.xlsx"].sheet_count == 1
     assert by_path["datasets/labs.csv"].sheet_count is None
     for candidate in result.candidates:
         assert candidate.sha256 and len(candidate.sha256) == 64
         assert candidate.identity.size >= 0
 
 
-def test_mappings_alone_satisfies_the_dictionary_or_mapping_requirement(tmp_path: Path) -> None:
+def test_forms_alone_satisfies_the_support_requirement(tmp_path: Path) -> None:
     (tmp_path / "datasets").mkdir(parents=True)
     (tmp_path / "forms").mkdir(parents=True)
-    (tmp_path / "mappings").mkdir(parents=True)
     (tmp_path / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (tmp_path / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (tmp_path / "mappings" / "map.csv").write_text("code,label\n1,a\n", encoding="utf-8")
 
     result = inspect_intake_source(tmp_path)
 
     assert result.review_items == ()
     assert result.errors == ()
-    assert _by_path(result.candidates)["mappings/map.csv"].component == "mappings"
+    assert _by_path(result.candidates)["forms/consent.pdf"].component == "forms"
 
 
 def test_nested_directories_and_duplicate_bytes_remain_distinct_candidates(tmp_path: Path) -> None:
@@ -392,25 +403,24 @@ def test_unknown_only_root_reports_both_flat_layout_and_unknown_directory(tmp_pa
 
 
 def test_missing_required_directory_is_blocking_review(tmp_path: Path) -> None:
-    (tmp_path / "datasets").mkdir()
-    (tmp_path / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
-    (tmp_path / "data_dictionary").mkdir()
-    (tmp_path / "data_dictionary" / "dict.csv").write_text("code,label\n1,a\n", encoding="utf-8")
+    (tmp_path / "forms").mkdir()
+    (tmp_path / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
 
     result = inspect_intake_source(tmp_path)
 
-    assert _review_map(result)["forms"] == "missing-component-directory"
+    assert _review_map(result)["datasets"] == "missing-component-directory"
 
 
 def test_component_directory_present_but_empty_of_accepted_files_is_blocking_review(tmp_path: Path) -> None:
-    _make_canonical(tmp_path)
-    (tmp_path / "forms" / "readme.txt").write_text("no pdf here", encoding="utf-8")
-    (tmp_path / "forms" / "consent.pdf").unlink()
+    (tmp_path / "datasets").mkdir()
+    (tmp_path / "datasets" / "readme.txt").write_text("no dataset here", encoding="utf-8")
+    (tmp_path / "forms").mkdir()
+    (tmp_path / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
 
     result = inspect_intake_source(tmp_path)
 
-    assert _review_map(result)["forms"] == "missing-component-content"
-    assert _by_path(result.candidates)["forms/readme.txt"].component == "_unclassified"
+    assert _review_map(result)["datasets"] == "missing-component-content"
+    assert _by_path(result.candidates)["datasets/readme.txt"].component == "_unclassified"
 
 
 def test_malformed_xlsx_only_dataset_content_still_reports_missing_component_content(tmp_path: Path) -> None:
@@ -418,10 +428,10 @@ def test_malformed_xlsx_only_dataset_content_still_reports_missing_component_con
     # workbook validation must not count as satisfying the requirement.
     (tmp_path / "datasets").mkdir()
     (tmp_path / "forms").mkdir()
-    (tmp_path / "mappings").mkdir()
+    (tmp_path / "dictionary_mapping").mkdir()
     (tmp_path / "datasets" / "bad.xlsx").write_text("not a zip", encoding="utf-8")
     (tmp_path / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4")
-    (tmp_path / "mappings" / "map.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    (tmp_path / "dictionary_mapping" / "map.csv").write_text("a,b\n1,2\n", encoding="utf-8")
 
     result = inspect_intake_source(tmp_path)
 
@@ -433,12 +443,12 @@ def test_malformed_xlsx_only_dataset_content_still_reports_missing_component_con
 def test_symlink_only_dataset_content_still_reports_missing_component_content(tmp_path: Path) -> None:
     (tmp_path / "datasets").mkdir()
     (tmp_path / "forms").mkdir()
-    (tmp_path / "mappings").mkdir()
+    (tmp_path / "dictionary_mapping").mkdir()
     other = tmp_path / "elsewhere.csv"
     other.write_text("a,b\n1,2\n", encoding="utf-8")
     (tmp_path / "datasets" / "linked.csv").symlink_to(other)
     (tmp_path / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4")
-    (tmp_path / "mappings" / "map.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    (tmp_path / "dictionary_mapping" / "map.csv").write_text("a,b\n1,2\n", encoding="utf-8")
 
     result = inspect_intake_source(tmp_path)
 
@@ -447,41 +457,40 @@ def test_symlink_only_dataset_content_still_reports_missing_component_content(tm
     assert review["datasets/linked.csv"] == "source-symlink-not-allowed"
 
 
-def test_hardlink_only_support_content_still_reports_missing_component_content(tmp_path: Path) -> None:
+def test_hardlink_only_support_content_still_blocks_the_whole_study(tmp_path: Path) -> None:
+    # No forms/ at all, and the only dictionary_mapping content is a
+    # cross-component hardlink alias -- neither support component has a
+    # final accepted candidate, so the single alternative-group review item
+    # fires even though the directory itself "has a file" on disk.
     (tmp_path / "datasets").mkdir()
-    (tmp_path / "forms").mkdir()
-    (tmp_path / "mappings").mkdir()
+    (tmp_path / "dictionary_mapping").mkdir()
     (tmp_path / "datasets" / "labs.csv").write_text("a,b\n1,2\n", encoding="utf-8")
-    (tmp_path / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4")
-    os.link(tmp_path / "datasets" / "labs.csv", tmp_path / "mappings" / "aliased.csv")
+    os.link(tmp_path / "datasets" / "labs.csv", tmp_path / "dictionary_mapping" / "aliased.csv")
 
     result = inspect_intake_source(tmp_path)
 
     review = _review_map(result)
-    assert review["data_dictionary"] == "missing-component-directory"
-    assert review["mappings"] == "missing-component-content"
-    assert "cross-component-hardlink" in _reasons_for_path(result, "mappings/aliased.csv")
+    assert review[""] == "missing-support-component"
+    assert "cross-component-hardlink" in _reasons_for_path(result, "dictionary_mapping/aliased.csv")
 
 
-def test_neither_dictionary_nor_mappings_present_blocks_both(tmp_path: Path) -> None:
+def test_neither_dictionary_mapping_nor_forms_present_blocks_the_whole_study(tmp_path: Path) -> None:
     (tmp_path / "datasets").mkdir()
-    (tmp_path / "forms").mkdir()
     (tmp_path / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
-    (tmp_path / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
 
     result = inspect_intake_source(tmp_path)
 
-    review = _review_map(result)
-    assert review["data_dictionary"] == "missing-component-directory"
-    assert review["mappings"] == "missing-component-directory"
+    # Exactly one root-level review item -- the alternative group is a
+    # single requirement, never two independent per-component findings.
+    assert result.review_items == ({"path": "", "reason": "missing-support-component", "blocking": True},)
 
 
-def test_dictionary_present_with_content_means_mappings_absence_is_not_flagged(tmp_path: Path) -> None:
+def test_dictionary_mapping_present_with_content_means_forms_absence_is_not_flagged(tmp_path: Path) -> None:
     _make_canonical(tmp_path)
 
     result = inspect_intake_source(tmp_path)
 
-    assert "mappings" not in _review_map(result)
+    assert "missing-support-component" not in _reasons(result.review_items)
 
 
 def test_unknown_top_level_directory_is_blocking_review_and_files_retained_unclassified(tmp_path: Path) -> None:
@@ -507,10 +516,8 @@ def test_unknown_top_level_directory_is_blocking_review_and_files_retained_uncla
         ("datasets", "consent.pdf", b"%PDF-1.4"),
         ("forms", "consent.docx", b"not a pdf"),
         ("forms", "data.csv", b"a,b\n1,2\n"),
-        ("data_dictionary", "dict.txt", b"plain text"),
-        ("data_dictionary", "legacy.xls", b"\xd0\xcf\x11\xe0"),
-        ("mappings", "map.json", b"{}"),
-        ("mappings", "legacy.xls", b"\xd0\xcf\x11\xe0"),
+        ("dictionary_mapping", "dict.txt", b"plain text"),
+        ("dictionary_mapping", "map.json", b"{}"),
     ],
 )
 def test_unsupported_format_per_component_is_blocking_review(
@@ -527,17 +534,205 @@ def test_unsupported_format_per_component_is_blocking_review(
     assert _by_path(result.candidates)[rel].component == "_unclassified"
 
 
-def test_xls_dataset_file_accepted_without_sheet_count_rule(tmp_path: Path) -> None:
+# --- .xls inspection (Approach 1's real inspect_xls wired in) ------------------------------
+
+
+def test_xls_dataset_with_exactly_one_sheet_is_accepted(tmp_path: Path) -> None:
     _make_canonical(tmp_path)
-    xls_bytes = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64  # not a real workbook; format-only acceptance
-    (tmp_path / "datasets" / "legacy.xls").write_bytes(xls_bytes)
+    _write_xls_workbook(tmp_path / "datasets" / "legacy.xls", sheet_names=["Sheet1"])
 
     result = inspect_intake_source(tmp_path)
 
     candidate = _by_path(result.candidates)["datasets/legacy.xls"]
     assert candidate.component == "datasets"
-    assert candidate.sheet_count is None
+    assert candidate.sheet_count == 1
     assert result.review_items == ()
+
+
+def test_xls_dataset_with_multiple_sheets_is_blocking_review(tmp_path: Path) -> None:
+    _make_canonical(tmp_path)
+    _write_xls_workbook(tmp_path / "datasets" / "legacy.xls", sheet_names=["S1", "S2"])
+
+    result = inspect_intake_source(tmp_path)
+
+    assert _review_map(result)["datasets/legacy.xls"] == "dataset-xls-multiple-sheets"
+    candidate = _by_path(result.candidates)["datasets/legacy.xls"]
+    assert candidate.component == "_unclassified"
+    assert candidate.sheet_count == 2
+
+
+def test_xls_support_within_max_sheets_is_accepted(tmp_path: Path) -> None:
+    _make_canonical(tmp_path)
+    _write_xls_workbook(tmp_path / "dictionary_mapping" / "legacy.xls", sheet_names=[f"S{i}" for i in range(5)])
+
+    result = inspect_intake_source(tmp_path)
+
+    candidate = _by_path(result.candidates)["dictionary_mapping/legacy.xls"]
+    assert candidate.component == "dictionary_mapping"
+    assert candidate.sheet_count == 5
+    assert result.review_items == ()
+
+
+def test_xls_support_exceeding_max_sheets_is_blocking_review(tmp_path: Path) -> None:
+    _make_canonical(tmp_path)
+    max_sheets = DEFAULT_LIMITS["max_sheets"]
+    names = [f"S{i}" for i in range(max_sheets + 1)]
+    _write_xls_workbook(tmp_path / "dictionary_mapping" / "legacy.xls", sheet_names=names)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert _review_map(result)["dictionary_mapping/legacy.xls"] == "support-xls-sheet-limit"
+    assert _by_path(result.candidates)["dictionary_mapping/legacy.xls"].component == "_unclassified"
+
+
+def test_malformed_xls_is_workbook_invalid_and_unclassified(tmp_path: Path) -> None:
+    _make_canonical(tmp_path)
+    (tmp_path / "datasets" / "corrupt.xls").write_bytes(b"not actually a BIFF file at all")
+
+    result = inspect_intake_source(tmp_path)
+
+    assert _review_map(result)["datasets/corrupt.xls"] == "xls-workbook-invalid"
+    assert _by_path(result.candidates)["datasets/corrupt.xls"].component == "_unclassified"
+
+
+def test_xls_reader_unavailable_maps_to_fixed_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _make_canonical(tmp_path)
+    _write_xls_workbook(tmp_path / "datasets" / "legacy.xls", sheet_names=["Sheet1"])
+
+    def fake_inspect_xls(data, expected_sha256, *, max_sheets, deadline=None):
+        raise xls_isolation.XlsIsolationError("isolation-unavailable")
+
+    monkeypatch.setattr(xls_isolation, "inspect_xls", fake_inspect_xls)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert _review_map(result)["datasets/legacy.xls"] == "xls-reader-unavailable"
+
+
+def test_xls_worker_parse_failure_maps_to_workbook_invalid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _make_canonical(tmp_path)
+    _write_xls_workbook(tmp_path / "datasets" / "legacy.xls", sheet_names=["Sheet1"])
+
+    def fake_inspect_xls(data, expected_sha256, *, max_sheets, deadline=None):
+        raise xls_isolation.XlsWorkerError("parse-error")
+
+    monkeypatch.setattr(xls_isolation, "inspect_xls", fake_inspect_xls)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert _review_map(result)["datasets/legacy.xls"] == "xls-workbook-invalid"
+
+
+def test_xls_generic_isolation_resource_limit_maps_to_workbook_invalid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An ORDINARY (per-file, not package-level) isolation resource-limit
+    # falls into the generic bucket -- never the package-abort path.
+    _make_canonical(tmp_path)
+    _write_xls_workbook(tmp_path / "datasets" / "legacy.xls", sheet_names=["Sheet1"])
+
+    def fake_inspect_xls(data, expected_sha256, *, max_sheets, deadline=None):
+        raise xls_isolation.XlsIsolationError("resource-limit")
+
+    monkeypatch.setattr(xls_isolation, "inspect_xls", fake_inspect_xls)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert _review_map(result)["datasets/legacy.xls"] == "xls-workbook-invalid"
+
+
+def test_xls_package_deadline_precedence_aborts_the_whole_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The external package-deadline code takes precedence over every other
+    # per-file finding and aborts the WHOLE package -- discarding every
+    # candidate (including the otherwise-valid forms/dictionary_mapping
+    # content), never a per-file review item.
+    _make_canonical(tmp_path)
+    _write_xls_workbook(tmp_path / "datasets" / "legacy.xls", sheet_names=["Sheet1"])
+
+    def fake_inspect_xls(data, expected_sha256, *, max_sheets, deadline=None):
+        raise xls_isolation.XlsIsolationError("package-resource-limit")
+
+    monkeypatch.setattr(xls_isolation, "inspect_xls", fake_inspect_xls)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert result.candidates == ()
+    assert result.errors == ()
+    assert result.review_items == ({"path": "", "reason": "intake-resource-limit", "blocking": True},)
+
+
+def test_xls_package_deadline_precedence_survives_a_concurrent_identity_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: the package-abort signal (_PackageLimitError) is raised
+    # from INSIDE the `with _open_from_parent_fd(...) as fd:` block. That
+    # context manager's own finally block re-checks this file's identity
+    # after the block body finishes and raises VerifiedSourceError
+    # ("source-unreadable") if it changed -- which, in CPython, SILENTLY
+    # REPLACES an exception already propagating out of the `with` body.
+    # A genuine concurrent write to this same file racing with the
+    # package-deadline abort must never let that per-file identity-mismatch
+    # finding downgrade the whole-package abort into a single per-file
+    # error that lets the walk continue.
+    _make_canonical(tmp_path)
+    xls_path = tmp_path / "datasets" / "legacy.xls"
+    _write_xls_workbook(xls_path, sheet_names=["Sheet1"])
+
+    def fake_inspect_xls(data, expected_sha256, *, max_sheets, deadline=None):
+        # Simulate the concurrent write racing with this file's own
+        # inspection: its identity (size/mtime) changes before this
+        # function's `with` block exits and its finally re-checks.
+        os.utime(xls_path, (2000000000, 2000000000))
+        raise xls_isolation.XlsIsolationError("package-resource-limit")
+
+    monkeypatch.setattr(xls_isolation, "inspect_xls", fake_inspect_xls)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert result.candidates == ()
+    assert result.errors == ()
+    assert result.review_items == ({"path": "", "reason": "intake-resource-limit", "blocking": True},)
+
+
+def test_xls_inspection_receives_the_package_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _make_canonical(tmp_path)
+    _write_xls_workbook(tmp_path / "datasets" / "legacy.xls", sheet_names=["Sheet1"])
+
+    seen: dict[str, float] = {}
+    real_inspect = xls_isolation.inspect_xls
+
+    def spying_inspect_xls(data, expected_sha256, *, max_sheets, deadline=None):
+        seen["deadline"] = deadline
+        return real_inspect(data, expected_sha256, max_sheets=max_sheets, deadline=deadline)
+
+    monkeypatch.setattr(xls_isolation, "inspect_xls", spying_inspect_xls)
+
+    inspect_intake_source(tmp_path)
+
+    assert isinstance(seen.get("deadline"), float)
+
+
+def test_xls_over_max_source_bytes_is_workbook_invalid_without_calling_inspect_xls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Mirrors test_count_xlsx_sheets_rejects_source_over_max_source_bytes's
+    # monkeypatch technique for the .xls (xls_isolation.INSPECT_LIMITS)
+    # analog of the same per-file size cap: a file between this cap and
+    # the 4-GiB package-wide byte ceiling must fail closed as
+    # xls-workbook-invalid, and the size check must short-circuit BEFORE
+    # ever calling xls_isolation.inspect_xls (proven via a failing spy,
+    # not merely implied).
+    _make_canonical(tmp_path)
+    _write_xls_workbook(tmp_path / "datasets" / "legacy.xls", sheet_names=["Sheet1"])
+    monkeypatch.setitem(xls_isolation.INSPECT_LIMITS, "max_source_bytes", 4)
+
+    def failing_inspect_xls(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("inspect_xls must never be called once the per-file size cap is exceeded")
+
+    monkeypatch.setattr(xls_isolation, "inspect_xls", failing_inspect_xls)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert _review_map(result)["datasets/legacy.xls"] == "xls-workbook-invalid"
+    assert _by_path(result.candidates)["datasets/legacy.xls"].component == "_unclassified"
 
 
 # --- xlsx sheet-count policy ---------------------------------------------------------------
@@ -569,13 +764,12 @@ def test_dataset_xlsx_with_multiple_sheets_becomes_unclassified_review(tmp_path:
 
 def test_support_xlsx_within_max_sheets_is_accepted(tmp_path: Path) -> None:
     _make_canonical(tmp_path)
-    (tmp_path / "mappings").mkdir(exist_ok=True)
-    _write_workbook(tmp_path / "mappings" / "map.xlsx", sheet_names=[f"S{i}" for i in range(5)])
+    _write_workbook(tmp_path / "dictionary_mapping" / "map.xlsx", sheet_names=[f"S{i}" for i in range(5)])
 
     result = inspect_intake_source(tmp_path)
 
-    candidate = _by_path(result.candidates)["mappings/map.xlsx"]
-    assert candidate.component == "mappings"
+    candidate = _by_path(result.candidates)["dictionary_mapping/map.xlsx"]
+    assert candidate.component == "dictionary_mapping"
     assert candidate.sheet_count == 5
 
 
@@ -583,12 +777,12 @@ def test_support_xlsx_exceeding_max_sheets_fails_closed(tmp_path: Path) -> None:
     _make_canonical(tmp_path)
     max_sheets = DEFAULT_LIMITS["max_sheets"]
     names = [f"S{i}" for i in range(max_sheets + 2)]
-    _write_workbook(tmp_path / "data_dictionary" / "huge.xlsx", sheet_names=names)
+    _write_workbook(tmp_path / "dictionary_mapping" / "huge.xlsx", sheet_names=names)
 
     result = inspect_intake_source(tmp_path)
 
-    assert _review_map(result)["data_dictionary/huge.xlsx"] == "support-xlsx-sheet-limit"
-    assert _by_path(result.candidates)["data_dictionary/huge.xlsx"].component == "_unclassified"
+    assert _review_map(result)["dictionary_mapping/huge.xlsx"] == "support-xlsx-sheet-limit"
+    assert _by_path(result.candidates)["dictionary_mapping/huge.xlsx"].component == "_unclassified"
 
 
 def test_malformed_xlsx_is_workbook_invalid_and_unclassified(tmp_path: Path) -> None:
@@ -766,8 +960,8 @@ def test_source_directory_symlink_at_top_level_is_blocking_review_and_not_walked
     (real / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (tmp_path / "forms").mkdir()
     (tmp_path / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (tmp_path / "mappings").mkdir()
-    (tmp_path / "mappings" / "map.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    (tmp_path / "dictionary_mapping").mkdir()
+    (tmp_path / "dictionary_mapping" / "map.csv").write_text("a,b\n1,2\n", encoding="utf-8")
     (tmp_path / "datasets").symlink_to(real)
 
     result = inspect_intake_source(tmp_path)
@@ -789,28 +983,23 @@ def test_hardlink_from_forms_to_dataset_file_is_quarantined(tmp_path: Path) -> N
     candidate = _by_path(result.candidates)["forms/aliased.pdf"]
     assert candidate.component == "_unclassified"
     assert _by_path(result.candidates)["datasets/labs.csv"].component == "datasets"
+    # A hardlink trivially also matches by SHA-256 (same bytes, same
+    # identity) -- the hardlink finding must be the ONLY reason reported
+    # for this path, never also/instead "cross-component-dataset-copy".
+    assert _reasons_for_path(result, "forms/aliased.pdf") == {"cross-component-hardlink"}
+    assert len([item for item in result.review_items if item["path"] == "forms/aliased.pdf"]) == 1
 
 
-def test_hardlink_from_data_dictionary_to_dataset_file_is_quarantined(tmp_path: Path) -> None:
+def test_hardlink_from_dictionary_mapping_to_dataset_file_is_quarantined(tmp_path: Path) -> None:
     _make_canonical(tmp_path)
-    os.link(tmp_path / "datasets" / "labs.csv", tmp_path / "data_dictionary" / "aliased.csv")
+    os.link(tmp_path / "datasets" / "labs.csv", tmp_path / "dictionary_mapping" / "aliased.csv")
 
     result = inspect_intake_source(tmp_path)
 
-    assert _review_map(result)["data_dictionary/aliased.csv"] == "cross-component-hardlink"
-    assert _by_path(result.candidates)["data_dictionary/aliased.csv"].component == "_unclassified"
-
-
-def test_hardlink_from_mappings_to_dataset_file_is_quarantined(tmp_path: Path) -> None:
-    _make_canonical(tmp_path)
-    (tmp_path / "mappings").mkdir()
-    (tmp_path / "mappings" / "map.csv").write_text("a,b\n1,2\n", encoding="utf-8")
-    os.link(tmp_path / "datasets" / "labs.csv", tmp_path / "mappings" / "aliased.csv")
-
-    result = inspect_intake_source(tmp_path)
-
-    assert _review_map(result)["mappings/aliased.csv"] == "cross-component-hardlink"
-    assert _by_path(result.candidates)["mappings/aliased.csv"].component == "_unclassified"
+    assert _review_map(result)["dictionary_mapping/aliased.csv"] == "cross-component-hardlink"
+    assert _by_path(result.candidates)["dictionary_mapping/aliased.csv"].component == "_unclassified"
+    assert _reasons_for_path(result, "dictionary_mapping/aliased.csv") == {"cross-component-hardlink"}
+    assert len([item for item in result.review_items if item["path"] == "dictionary_mapping/aliased.csv"]) == 1
 
 
 def test_hardlink_quarantine_applies_even_when_the_support_file_would_otherwise_be_unclassified(tmp_path: Path) -> None:
@@ -836,6 +1025,244 @@ def test_hardlink_within_datasets_is_not_quarantined(tmp_path: Path) -> None:
 
     assert "cross-component-hardlink" not in _reasons(result.review_items)
     assert _by_path(result.candidates)["datasets/labs_alias.csv"].component == "datasets"
+
+
+# --- cross-component dataset-copy quarantine (byte-identical, distinct identity) -----------
+
+
+def test_dataset_byte_identical_copy_in_dictionary_mapping_is_quarantined_as_dataset_copy(tmp_path: Path) -> None:
+    _make_canonical(tmp_path)
+    dataset_bytes = (tmp_path / "datasets" / "labs.csv").read_bytes()
+    (tmp_path / "dictionary_mapping" / "copy.csv").write_bytes(dataset_bytes)  # distinct inode, identical bytes
+
+    result = inspect_intake_source(tmp_path)
+
+    assert _review_map(result)["dictionary_mapping/copy.csv"] == "cross-component-dataset-copy"
+    candidate = _by_path(result.candidates)["dictionary_mapping/copy.csv"]
+    assert candidate.component == "_unclassified"
+    assert _by_path(result.candidates)["datasets/labs.csv"].component == "datasets"
+
+
+def test_dataset_byte_identical_copy_in_forms_is_quarantined_as_dataset_copy(tmp_path: Path) -> None:
+    _make_canonical(tmp_path)
+    dataset_bytes = (tmp_path / "datasets" / "labs.csv").read_bytes()
+    (tmp_path / "forms" / "copy.pdf").write_bytes(dataset_bytes)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert _review_map(result)["forms/copy.pdf"] == "cross-component-dataset-copy"
+    assert _by_path(result.candidates)["forms/copy.pdf"].component == "_unclassified"
+
+
+def test_dataset_copy_alone_never_satisfies_the_support_requirement(tmp_path: Path) -> None:
+    # dictionary_mapping's ONLY content is a byte-identical dataset copy,
+    # and no forms/ exists at all -- the support requirement must still be
+    # reported missing, exactly like the hardlink-only case.
+    (tmp_path / "datasets").mkdir()
+    (tmp_path / "dictionary_mapping").mkdir()
+    dataset_path = tmp_path / "datasets" / "labs.csv"
+    dataset_path.write_text("a,b\n1,2\n", encoding="utf-8")
+    (tmp_path / "dictionary_mapping" / "copy.csv").write_bytes(dataset_path.read_bytes())
+
+    result = inspect_intake_source(tmp_path)
+
+    review = _review_map(result)
+    assert review[""] == "missing-support-component"
+    assert "cross-component-dataset-copy" in _reasons_for_path(result, "dictionary_mapping/copy.csv")
+
+
+def test_same_component_duplicate_bytes_across_datasets_are_unaffected(tmp_path: Path) -> None:
+    _make_canonical(tmp_path)
+    (tmp_path / "datasets" / "labs_dup.csv").write_bytes((tmp_path / "datasets" / "labs.csv").read_bytes())
+
+    result = inspect_intake_source(tmp_path)
+
+    assert "cross-component-hardlink" not in _reasons(result.review_items)
+    assert "cross-component-dataset-copy" not in _reasons(result.review_items)
+    assert _by_path(result.candidates)["datasets/labs_dup.csv"].component == "datasets"
+
+
+def test_same_component_duplicate_bytes_across_dictionary_mapping_are_unaffected(tmp_path: Path) -> None:
+    _make_canonical(tmp_path)
+    (tmp_path / "dictionary_mapping" / "dict_dup.xlsx").write_bytes(
+        (tmp_path / "dictionary_mapping" / "dict.xlsx").read_bytes()
+    )
+
+    result = inspect_intake_source(tmp_path)
+
+    assert "cross-component-dataset-copy" not in _reasons(result.review_items)
+    assert _by_path(result.candidates)["dictionary_mapping/dict_dup.xlsx"].component == "dictionary_mapping"
+
+
+# --- package matrix (Approach 2.6 acceptance) ------------------------------------------------
+
+
+def test_dataset_plus_dictionary_mapping_only_is_ready(tmp_path: Path) -> None:
+    (tmp_path / "datasets").mkdir(parents=True)
+    (tmp_path / "dictionary_mapping").mkdir(parents=True)
+    (tmp_path / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (tmp_path / "dictionary_mapping" / "dict.csv").write_text("code,label\n1,a\n", encoding="utf-8")
+
+    result = inspect_intake_source(tmp_path)
+
+    assert result.review_items == ()
+    assert result.errors == ()
+
+
+def test_support_present_without_datasets_keeps_the_dataset_missing_reason(tmp_path: Path) -> None:
+    (tmp_path / "forms").mkdir(parents=True)
+    (tmp_path / "dictionary_mapping").mkdir(parents=True)
+    (tmp_path / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    (tmp_path / "dictionary_mapping" / "dict.csv").write_text("code,label\n1,a\n", encoding="utf-8")
+
+    result = inspect_intake_source(tmp_path)
+
+    # datasets is unconditionally required regardless of how much support
+    # content is present -- support presence is irrelevant to this finding.
+    assert result.review_items == ({"path": "datasets", "reason": "missing-component-directory", "blocking": True},)
+
+
+def test_malformed_xls_as_the_only_dictionary_mapping_content_never_satisfies_support(tmp_path: Path) -> None:
+    (tmp_path / "datasets").mkdir(parents=True)
+    (tmp_path / "dictionary_mapping").mkdir(parents=True)
+    (tmp_path / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (tmp_path / "dictionary_mapping" / "bad.xls").write_bytes(b"not actually a BIFF file")
+
+    result = inspect_intake_source(tmp_path)
+
+    review = _review_map(result)
+    assert review["dictionary_mapping/bad.xls"] == "xls-workbook-invalid"
+    assert review[""] == "missing-support-component"
+
+
+# --- package resource-limit pre-scan (Approach 2.3) -------------------------------------------
+
+
+def _canonical_entry_count() -> int:
+    # 3 top-level component directories + 3 files under them.
+    return 6
+
+
+def _canonical_checked_bytes(root: Path) -> int:
+    return sum(
+        (root / rel).stat().st_size
+        for rel in ("datasets/labs.csv", "forms/consent.pdf", "dictionary_mapping/dict.xlsx")
+    )
+
+
+def test_package_prescan_accepts_exact_entry_count_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _make_canonical(tmp_path)
+    monkeypatch.setattr(intake_preflight_module, "_MAX_PACKAGE_ENTRIES", _canonical_entry_count())
+
+    result = inspect_intake_source(tmp_path)
+
+    assert "intake-resource-limit" not in _reasons(result.review_items)
+
+
+def test_package_prescan_rejects_entry_count_plus_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _make_canonical(tmp_path)
+    monkeypatch.setattr(intake_preflight_module, "_MAX_PACKAGE_ENTRIES", _canonical_entry_count() - 1)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert result.candidates == ()
+    assert result.errors == ()
+    assert result.review_items == ({"path": "", "reason": "intake-resource-limit", "blocking": True},)
+
+
+def test_package_prescan_accepts_exact_byte_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _make_canonical(tmp_path)
+    monkeypatch.setattr(intake_preflight_module, "_MAX_PACKAGE_CHECKED_BYTES", _canonical_checked_bytes(tmp_path))
+
+    result = inspect_intake_source(tmp_path)
+
+    assert "intake-resource-limit" not in _reasons(result.review_items)
+
+
+def test_package_prescan_rejects_byte_boundary_plus_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _make_canonical(tmp_path)
+    monkeypatch.setattr(intake_preflight_module, "_MAX_PACKAGE_CHECKED_BYTES", _canonical_checked_bytes(tmp_path) - 1)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert result.candidates == ()
+    assert result.review_items == ({"path": "", "reason": "intake-resource-limit", "blocking": True},)
+
+
+def test_package_prescan_accepts_exact_xls_count_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _make_canonical(tmp_path)
+    for i in range(4):
+        (tmp_path / "datasets" / f"d{i}.xls").write_bytes(b"dummy")
+    monkeypatch.setattr(intake_preflight_module, "_MAX_PACKAGE_XLS_FILES", 4)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert "intake-resource-limit" not in _reasons(result.review_items)
+
+
+def test_package_prescan_rejects_xls_count_plus_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _make_canonical(tmp_path)
+    for i in range(4):
+        (tmp_path / "datasets" / f"d{i}.xls").write_bytes(b"dummy")
+    monkeypatch.setattr(intake_preflight_module, "_MAX_PACKAGE_XLS_FILES", 3)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert result.candidates == ()
+    assert result.review_items == ({"path": "", "reason": "intake-resource-limit", "blocking": True},)
+
+
+def test_package_prescan_deadline_expiry_discards_the_whole_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _make_canonical(tmp_path)
+    monkeypatch.setattr(intake_preflight_module, "_PACKAGE_WALL_SECONDS", -1)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert result.candidates == ()
+    assert result.errors == ()
+    assert result.review_items == ({"path": "", "reason": "intake-resource-limit", "blocking": True},)
+
+
+def test_prescan_package_accepts_the_deadline_instant_itself(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Direct unit-level proof of the exact-instant boundary: freeze
+    # time.monotonic() so every check inside the call observes EXACTLY the
+    # supplied deadline -- never strictly past it -- and confirm the
+    # (private) pre-scan itself raises nothing.
+    _make_canonical(tmp_path)
+    frozen = 1_000_000.0
+    monkeypatch.setattr(intake_preflight_module.time, "monotonic", lambda: frozen)
+
+    root_fd = intake_preflight_module._open_pinned_root(tmp_path)
+    try:
+        intake_preflight_module._prescan_package(root_fd, frozen)  # no exception raised
+    finally:
+        os.close(root_fd)
+
+
+def test_package_resource_limit_never_hashes_or_spawns_before_prescan_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_canonical(tmp_path)
+    monkeypatch.setattr(intake_preflight_module, "_MAX_PACKAGE_ENTRIES", 1)  # guaranteed breach
+
+    hash_calls: list[int] = []
+    real_hash = intake_preflight_module._hash_from_fd
+
+    def spying_hash(fd: int) -> str:
+        hash_calls.append(fd)
+        return real_hash(fd)
+
+    monkeypatch.setattr(intake_preflight_module, "_hash_from_fd", spying_hash)
+
+    def failing_inspect_xls(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("inspect_xls must never be called before a successful pre-scan")
+
+    monkeypatch.setattr(xls_isolation, "inspect_xls", failing_inspect_xls)
+
+    result = inspect_intake_source(tmp_path)
+
+    assert hash_calls == []
+    assert result.review_items == ({"path": "", "reason": "intake-resource-limit", "blocking": True},)
 
 
 def test_source_unreadable_file_is_error_not_candidate_or_review(tmp_path: Path) -> None:
@@ -871,8 +1298,8 @@ def test_deeply_nested_source_fails_closed_without_recursion_error(tmp_path: Pat
     (tmp_path / "datasets").mkdir()
     (tmp_path / "forms").mkdir()
     (tmp_path / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4")
-    (tmp_path / "mappings").mkdir()
-    (tmp_path / "mappings" / "map.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    (tmp_path / "dictionary_mapping").mkdir()
+    (tmp_path / "dictionary_mapping" / "map.csv").write_text("a,b\n1,2\n", encoding="utf-8")
 
     deep = tmp_path / "datasets"
     for i in range(200):
@@ -926,7 +1353,7 @@ def test_mutation_during_xlsx_sheet_count_is_rejected_not_a_stale_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _make_canonical(tmp_path)
-    target = tmp_path / "data_dictionary" / "dict.xlsx"
+    target = tmp_path / "dictionary_mapping" / "dict.xlsx"
     real_count = intake_preflight_module.count_xlsx_sheets
 
     def mutating_count(stream):
@@ -938,8 +1365,8 @@ def test_mutation_during_xlsx_sheet_count_is_rejected_not_a_stale_candidate(
 
     result = inspect_intake_source(tmp_path)
 
-    assert "data_dictionary/dict.xlsx" not in _by_path(result.candidates)
-    assert _error_map(result).get("data_dictionary/dict.xlsx") == "source-unreadable"
+    assert "dictionary_mapping/dict.xlsx" not in _by_path(result.candidates)
+    assert _error_map(result).get("dictionary_mapping/dict.xlsx") == "source-unreadable"
 
 
 # --- reason records stay value-free ---------------------------------------------------------
@@ -1269,4 +1696,4 @@ def test_inspect_intake_source_filters_the_complete_junk_catalog_including_neste
     assert result.review_items == ()
     assert result.errors == ()
     relative = {c.relative_path for c in result.candidates}
-    assert relative == {"datasets/labs.csv", "forms/consent.pdf", "data_dictionary/dict.xlsx"}
+    assert relative == {"datasets/labs.csv", "forms/consent.pdf", "dictionary_mapping/dict.xlsx"}

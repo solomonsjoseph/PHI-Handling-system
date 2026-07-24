@@ -1,5 +1,5 @@
 """Tests for phi_engine.pipeline.intake -- the atomic, symlink-only
-intake-manifest/v3 reconciliation contract, plus the fixed
+intake-manifest/v4 reconciliation contract, plus the fixed
 intake_registry_lock() primitive it depends on.
 
 Every test drives real filesystem state under a hermetic, per-test
@@ -34,10 +34,10 @@ def _workspace(
 def _make_canonical_source(root: Path) -> None:
     (root / "datasets").mkdir(parents=True)
     (root / "forms").mkdir(parents=True)
-    (root / "data_dictionary").mkdir(parents=True)
+    (root / "dictionary_mapping").mkdir(parents=True)
     (root / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (root / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (root / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+    (root / "dictionary_mapping" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
 
 
 def _entries_by_rel(manifest: dict) -> dict[str, dict]:
@@ -58,7 +58,7 @@ def _snapshot_tree(root: Path) -> set[str]:
 # --- schema validation ----------------------------------------------------------------------
 
 
-def test_canonical_package_produces_exact_v3_ready_tree(tmp_path: Path) -> None:
+def test_canonical_package_produces_exact_v4_ready_tree(tmp_path: Path) -> None:
     source = tmp_path / "source"
     _make_canonical_source(source)
 
@@ -67,7 +67,7 @@ def test_canonical_package_produces_exact_v3_ready_tree(tmp_path: Path) -> None:
 
         manifest = intake_add(source, "CanonStudy")
 
-        assert manifest["schema"] == "intake-manifest/v3"
+        assert manifest["schema"] == "intake-manifest/v4"
         assert manifest["study"] == "CanonStudy"
         assert manifest["study_name_source"] == "user"
         assert manifest["status"] == "ready"
@@ -81,7 +81,7 @@ def test_canonical_package_produces_exact_v3_ready_tree(tmp_path: Path) -> None:
         }
 
         by_rel = _entries_by_rel(manifest)
-        assert set(by_rel) == {"datasets/labs.csv", "forms/consent.pdf", "data_dictionary/dict.csv"}
+        assert set(by_rel) == {"datasets/labs.csv", "forms/consent.pdf", "dictionary_mapping/dict.csv"}
         for rel, entry in by_rel.items():
             assert set(entry) == {
                 "artifact_id", "intake_path", "component", "relative_path", "original_path",
@@ -101,9 +101,9 @@ def test_canonical_package_produces_exact_v3_ready_tree(tmp_path: Path) -> None:
 def test_duplicate_bytes_and_nested_duplicate_folders_remain_distinct(tmp_path: Path) -> None:
     source = tmp_path / "source"
     _make_canonical_source(source)
-    (source / "data_dictionary" / "dup1.csv").write_text("x,y\n1,2\n", encoding="utf-8")
-    (source / "data_dictionary" / "nested").mkdir()
-    (source / "data_dictionary" / "nested" / "dup2.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dup1.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "nested").mkdir()
+    (source / "dictionary_mapping" / "nested" / "dup2.csv").write_text("x,y\n1,2\n", encoding="utf-8")
 
     with _workspace(tmp_path):
         from phi_engine.pipeline.intake import intake_add
@@ -111,12 +111,12 @@ def test_duplicate_bytes_and_nested_duplicate_folders_remain_distinct(tmp_path: 
         manifest = intake_add(source, "DupStudy")
         assert manifest["status"] == "ready"
         by_rel = _entries_by_rel(manifest)
-        e1 = by_rel["data_dictionary/dup1.csv"]
-        e2 = by_rel["data_dictionary/nested/dup2.csv"]
+        e1 = by_rel["dictionary_mapping/dup1.csv"]
+        e2 = by_rel["dictionary_mapping/nested/dup2.csv"]
         assert e1["sha256"] == e2["sha256"]
         assert e1["artifact_id"] != e2["artifact_id"]
         assert e1["intake_path"] != e2["intake_path"]
-        assert e2["intake_path"] == f"data_dictionary/nested/{e2['artifact_id']}__dup2.csv"
+        assert e2["intake_path"] == f"dictionary_mapping/nested/{e2['artifact_id']}__dup2.csv"
 
 
 def test_unsupported_and_missing_components_become_review_required(tmp_path: Path) -> None:
@@ -134,7 +134,7 @@ def test_unsupported_and_missing_components_become_review_required(tmp_path: Pat
         assert by_rel["datasets/weird.json"]["intake_path"].startswith("_unclassified/datasets/")
         reasons = {item["reason"] for item in manifest["review_items"]}
         assert "unsupported-format" in reasons
-        assert "missing-component-directory" in reasons  # forms/ absent
+        assert "missing-support-component" in reasons  # neither forms/ nor dictionary_mapping/ present
 
 
 def test_multi_sheet_dataset_xlsx_becomes_unclassified_review(tmp_path: Path) -> None:
@@ -187,7 +187,7 @@ def test_duplicate_artifact_id_or_relative_path_across_entries_is_rejected() -> 
         "size": 1, "mtime_ns": 1, "device": 1, "inode": 1, "mode": 0o644,
     }
     manifest = {
-        "schema": "intake-manifest/v3", "study": "S", "study_name_source": "user", "status": "ready",
+        "schema": "intake-manifest/v4", "study": "S", "study_name_source": "user", "status": "ready",
         "source_root": "/src", "review_items": [], "errors": [], "removals": [],
         "entries": {
             entry_a["intake_path"]: entry_a,
@@ -195,11 +195,11 @@ def test_duplicate_artifact_id_or_relative_path_across_entries_is_rejected() -> 
         },
     }
     with pytest.raises(intake.IntakeManifestError, match="intake_manifest_invalid"):
-        intake._validate_manifest_v3(manifest, expect_study="S")
+        intake._validate_manifest_v4(manifest, expect_study="S")
 
     aid2 = "a_" + "2" * 32
     dup_rel = {
-        "schema": "intake-manifest/v3", "study": "S", "study_name_source": "user", "status": "ready",
+        "schema": "intake-manifest/v4", "study": "S", "study_name_source": "user", "status": "ready",
         "source_root": "/src", "review_items": [], "errors": [], "removals": [],
         "entries": {
             entry_a["intake_path"]: entry_a,
@@ -207,20 +207,20 @@ def test_duplicate_artifact_id_or_relative_path_across_entries_is_rejected() -> 
         },
     }
     with pytest.raises(intake.IntakeManifestError, match="intake_manifest_invalid"):
-        intake._validate_manifest_v3(dup_rel, expect_study="S")
+        intake._validate_manifest_v4(dup_rel, expect_study="S")
 
 
 def test_status_recompute_rejects_inconsistent_stored_status() -> None:
     from phi_engine.pipeline import intake
 
     raw = {
-        "schema": "intake-manifest/v3", "study": "S", "study_name_source": "user",
+        "schema": "intake-manifest/v4", "study": "S", "study_name_source": "user",
         "status": "ready", "source_root": "/src", "entries": {}, "removals": [],
         "review_items": [{"path": "", "reason": "support-phi-status-required", "blocking": True}],
         "errors": [],
     }
     with pytest.raises(intake.IntakeManifestError, match="intake_manifest_invalid"):
-        intake._validate_manifest_v3(raw, expect_study="S")
+        intake._validate_manifest_v4(raw, expect_study="S")
 
 
 def test_removal_record_and_error_record_shapes() -> None:
@@ -257,18 +257,18 @@ def test_validator_rejects_noncanonical_source_root() -> None:
     from phi_engine.pipeline import intake
 
     raw = {
-        "schema": "intake-manifest/v3", "study": "S", "study_name_source": "user", "status": "ready",
+        "schema": "intake-manifest/v4", "study": "S", "study_name_source": "user", "status": "ready",
         "source_root": "/tmp/a/../b", "entries": {}, "review_items": [], "errors": [], "removals": [],
     }
     with pytest.raises(intake.IntakeManifestError, match="intake_manifest_invalid"):
-        intake._validate_manifest_v3(raw, expect_study="S")
+        intake._validate_manifest_v4(raw, expect_study="S")
 
     trailing_slash = dict(raw, source_root="/tmp/a/")
     with pytest.raises(intake.IntakeManifestError, match="intake_manifest_invalid"):
-        intake._validate_manifest_v3(trailing_slash, expect_study="S")
+        intake._validate_manifest_v4(trailing_slash, expect_study="S")
 
     canonical = dict(raw, source_root="/tmp/a")
-    validated = intake._validate_manifest_v3(canonical, expect_study="S")
+    validated = intake._validate_manifest_v4(canonical, expect_study="S")
     assert validated["source_root"] == "/tmp/a"
 
 
@@ -763,7 +763,7 @@ def test_existing_update_failure_restores_prior_tree_and_manifest(tmp_path: Path
         prior_links = sorted(str(p.relative_to(study_dir)) for p in study_dir.rglob("*") if p.is_symlink())
         assert len(prior_links) == 3
 
-        (source / "data_dictionary" / "extra.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+        (source / "dictionary_mapping" / "extra.csv").write_text("x,y\n1,2\n", encoding="utf-8")
 
         real_write = os.write
 
@@ -1045,41 +1045,39 @@ def test_removing_last_dataset_yields_review_required_and_stays_loadable(tmp_pat
         assert reloaded == second
 
 
-def test_removing_last_mapping_keeps_ready_when_dictionary_remains(tmp_path: Path) -> None:
-    """The optional support group is satisfied by EITHER
-    ``data_dictionary/`` or ``mappings/``: removing the only mapping
-    file while ``data_dictionary/`` still has content must not demote
-    status, and the now-empty ``mappings/`` directory must be pruned so
-    the manifest stays loadable."""
+def test_removing_last_form_keeps_ready_when_dictionary_mapping_remains(tmp_path: Path) -> None:
+    """The alternative support-component requirement is satisfied by
+    EITHER ``dictionary_mapping/`` or ``forms/``: removing the only form
+    file while ``dictionary_mapping/`` still has content must not demote
+    status, and the now-empty ``forms/`` directory must be pruned so the
+    manifest stays loadable."""
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
-    (source / "mappings").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
-    (source / "mappings" / "map.csv").write_text("from,to\nA,B\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
 
     with _workspace(tmp_path) as workspace:
         from phi_engine.pipeline.intake import intake_add, load_intake_manifest
 
-        first = intake_add(source, "LastMappingStudy")
+        first = intake_add(source, "LastFormStudy")
         assert first["status"] == "ready"
-        assert len(first["entries"]) == 4
+        assert len(first["entries"]) == 3
 
-        (source / "mappings" / "map.csv").unlink()
-        second = intake_add(source, "LastMappingStudy")
+        (source / "forms" / "consent.pdf").unlink()
+        second = intake_add(source, "LastFormStudy")
 
         assert second["status"] == "ready"
         assert not second["review_items"]
         assert not second["errors"]
-        assert "mappings/map.csv" not in _entries_by_rel(second)
+        assert "forms/consent.pdf" not in _entries_by_rel(second)
 
-        study_dir = workspace / "intake" / "LastMappingStudy"
-        assert not (study_dir / "mappings").exists()
+        study_dir = workspace / "intake" / "LastFormStudy"
+        assert not (study_dir / "forms").exists()
 
-        reloaded = load_intake_manifest("LastMappingStudy")
+        reloaded = load_intake_manifest("LastFormStudy")
         assert reloaded == second
 
 
@@ -1137,11 +1135,11 @@ def test_pruned_directory_restore_failure_leaves_descendant_link_retained_not_ad
     source = tmp_path / "source"
     (source / "datasets" / "nested").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "b.csv").write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
     (source / "datasets" / "nested" / "a.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
 
     with _workspace(tmp_path) as workspace:
         import phi_engine.pipeline.intake as intake_module
@@ -1301,10 +1299,10 @@ def test_generated_collision_with_ready_different_source_never_reconciles(tmp_pa
     source_b = tmp_path / "source_b"
     (source_b / "datasets").mkdir(parents=True)
     (source_b / "forms").mkdir(parents=True)
-    (source_b / "data_dictionary").mkdir(parents=True)
+    (source_b / "dictionary_mapping").mkdir(parents=True)
     (source_b / "datasets" / "other.csv").write_text("X,Y\n1,2\n", encoding="utf-8")
     (source_b / "forms" / "other.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (source_b / "data_dictionary" / "other.csv").write_text("var,label\nX,Xval\n", encoding="utf-8")
+    (source_b / "dictionary_mapping" / "other.csv").write_text("var,label\nX,Xval\n", encoding="utf-8")
 
     with _workspace(tmp_path) as workspace:
         import phi_engine.pipeline.intake_naming as intake_naming_module
@@ -1823,10 +1821,10 @@ def test_fresh_reservation_race_injected_after_absence_check_fails_closed_untouc
     foreign_source = tmp_path / "foreign_source"
     (foreign_source / "datasets").mkdir(parents=True)
     (foreign_source / "forms").mkdir(parents=True)
-    (foreign_source / "data_dictionary").mkdir(parents=True)
+    (foreign_source / "dictionary_mapping").mkdir(parents=True)
     (foreign_source / "datasets" / "f.csv").write_text("A,B\n1,2\n", encoding="utf-8")
     (foreign_source / "forms" / "f.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (foreign_source / "data_dictionary" / "f.csv").write_text("var,label\nA,Aval\n", encoding="utf-8")
+    (foreign_source / "dictionary_mapping" / "f.csv").write_text("var,label\nA,Aval\n", encoding="utf-8")
 
     with _workspace(tmp_path) as workspace:
         import phi_engine.pipeline.intake as intake_module
@@ -1880,10 +1878,10 @@ def test_reused_generated_match_source_swap_between_scan_and_pin_fails_closed(tm
     source_c = tmp_path / "source_c"
     (source_c / "datasets").mkdir(parents=True)
     (source_c / "forms").mkdir(parents=True)
-    (source_c / "data_dictionary").mkdir(parents=True)
+    (source_c / "dictionary_mapping").mkdir(parents=True)
     (source_c / "datasets" / "c.csv").write_text("A,B\n1,2\n", encoding="utf-8")
     (source_c / "forms" / "c.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (source_c / "data_dictionary" / "c.csv").write_text("var,label\nA,Aval\n", encoding="utf-8")
+    (source_c / "dictionary_mapping" / "c.csv").write_text("var,label\nA,Aval\n", encoding="utf-8")
 
     with _workspace(tmp_path) as workspace:
         import phi_engine.pipeline.intake as intake_module
@@ -2020,7 +2018,7 @@ def test_stale_link_quarantine_is_retained_not_deleted_lifecycle(tmp_path: Path)
 def test_stale_directory_swap_just_before_quarantine_leaves_unrelated_untouched(tmp_path: Path) -> None:
     """The exact security-review race for stale directory pruning: a
     hostile actor swaps the verified-empty, owned-and-recorded
-    ``mappings/`` directory for unrelated content in the instant before
+    ``forms/`` directory for unrelated content in the instant before
     this attempt's quarantine rename. The quarantine must still grab
     and verify whatever is actually there against the descriptor-
     recorded identity, discover the mismatch, and restore the unrelated
@@ -2028,12 +2026,10 @@ def test_stale_directory_swap_just_before_quarantine_leaves_unrelated_untouched(
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
-    (source / "mappings").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
-    (source / "mappings" / "map.csv").write_text("from,to\nA,B\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
 
     with _workspace(tmp_path) as workspace:
         import phi_engine.pipeline.intake as intake_module
@@ -2042,13 +2038,13 @@ def test_stale_directory_swap_just_before_quarantine_leaves_unrelated_untouched(
         first = intake_add(source, "StaleDirRaceStudy")
         assert first["status"] == "ready"
 
-        (source / "mappings" / "map.csv").unlink()  # empties mappings/, triggering directory prune
+        (source / "forms" / "consent.pdf").unlink()  # empties forms/, triggering directory prune
 
         original_rename = intake_module._renameat2_noreplace
         injected = {"done": False}
 
         def racing_rename(old_dir_fd, old, new_dir_fd, new):
-            if not injected["done"] and old == "mappings" and new.startswith("dir."):
+            if not injected["done"] and old == "forms" and new.startswith("dir."):
                 injected["done"] = True
                 os.rmdir(old, dir_fd=old_dir_fd)
                 fd = os.open(old, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=old_dir_fd)
@@ -2067,9 +2063,9 @@ def test_stale_directory_swap_just_before_quarantine_leaves_unrelated_untouched(
         assert injected["done"]
         assert second["status"] == "failed"
         assert any(e["reason"] == "intake-tree-unsafe" for e in second["errors"])
-        mappings_path = workspace / "intake" / "StaleDirRaceStudy" / "mappings"
-        assert mappings_path.is_file() and not mappings_path.is_symlink()
-        assert mappings_path.read_bytes() == b"UNRELATED-DIR-SWAP"
+        forms_path = workspace / "intake" / "StaleDirRaceStudy" / "forms"
+        assert forms_path.is_file() and not forms_path.is_symlink()
+        assert forms_path.read_bytes() == b"UNRELATED-DIR-SWAP"
 
 
 def test_created_directory_rollback_race_leaves_swapped_content_untouched(tmp_path: Path) -> None:
@@ -2151,7 +2147,7 @@ def test_manifest_rollback_same_bytes_different_inode_impostor_is_untouched(tmp_
         manifest_path = workspace / "intake" / "ImpostorStudy" / "intake_manifest.json"
         prior_bytes = manifest_path.read_bytes()
 
-        (source / "data_dictionary" / "extra.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+        (source / "dictionary_mapping" / "extra.csv").write_text("x,y\n1,2\n", encoding="utf-8")
 
         original_atomic_write = intake_module._atomic_write_in_dir
         impostor_holder: dict[str, bytes] = {}
@@ -2233,7 +2229,7 @@ def test_manifest_rollback_prior_absent_impostor_content_is_preserved_in_quarant
         assert retained_manifest.is_file()
         assert retained_manifest.read_bytes() == impostor_bytes  # preserved, never destroyed by unlink
 
-        # this attempt's own datasets/forms/data_dictionary directories
+        # this attempt's own datasets/forms/dictionary_mapping directories
         # -- genuinely empty once their own just-created links were
         # quarantined -- are still safely reclaimed
         quarantine_root = workspace / ".intake_quarantine"
@@ -2320,11 +2316,11 @@ def test_quarantine_entry_count_hard_bound_fails_closed(tmp_path: Path) -> None:
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "a.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "datasets" / "b.csv").write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
 
     with _workspace(tmp_path) as workspace:
         import phi_engine.pipeline.intake as intake_module
@@ -2336,7 +2332,7 @@ def test_quarantine_entry_count_hard_bound_fails_closed(tmp_path: Path) -> None:
             first = intake_add(source, "QuotaEntryStudy")
             assert first["status"] == "ready"
 
-            # removing a.csv (b.csv, forms, and data_dictionary untouched)
+            # removing a.csv (b.csv, forms, and dictionary_mapping untouched)
             # makes only its intake-tree link stale; pruning it consumes
             # the single allowed quarantine slot
             (source / "datasets" / "a.csv").unlink()
@@ -2349,7 +2345,7 @@ def test_quarantine_entry_count_hard_bound_fails_closed(tmp_path: Path) -> None:
             # removing the last remaining dataset must prune ANOTHER
             # stale link, but the bound is already exhausted -- fails
             # closed, never adopted. Every other candidate (forms/,
-            # data_dictionary/) is unchanged and idempotently verified,
+            # dictionary_mapping/) is unchanged and idempotently verified,
             # never recreated, so this attempt writes nothing new and
             # its rollback is a clean no-op.
             (source / "datasets" / "b.csv").unlink()
@@ -2375,11 +2371,11 @@ def test_quarantine_byte_bound_hard_fails_closed_before_first_entry(tmp_path: Pa
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "a.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "datasets" / "b.csv").write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
 
     with _workspace(tmp_path) as workspace:
         import phi_engine.pipeline.intake as intake_module
@@ -2388,7 +2384,7 @@ def test_quarantine_byte_bound_hard_fails_closed_before_first_entry(tmp_path: Pa
         first = intake_add(source, "QuotaByteStudy")
         assert first["status"] == "ready"
 
-        (source / "datasets" / "a.csv").unlink()  # b.csv, forms, and data_dictionary untouched
+        (source / "datasets" / "a.csv").unlink()  # b.csv, forms, and dictionary_mapping untouched
 
         original_max_bytes = intake_module._QUARANTINE_MAX_BYTES
         intake_module._QUARANTINE_MAX_BYTES = 0
@@ -2411,10 +2407,10 @@ def test_quarantine_root_stays_mode_0700_after_bound_rejection(tmp_path: Path) -
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "a.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
 
     with _workspace(tmp_path) as workspace:
         import phi_engine.pipeline.intake as intake_module
@@ -2447,11 +2443,11 @@ def test_quarantine_byte_bound_rejects_incoming_symlink_exceeding_remaining_capa
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "a.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "datasets" / "b.csv").write_text("SUBJID,AGE\n2,41\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (source / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
 
     with _workspace(tmp_path) as workspace:
         import phi_engine.pipeline.intake as intake_module
@@ -2466,7 +2462,7 @@ def test_quarantine_byte_bound_rejects_incoming_symlink_exceeding_remaining_capa
         incoming_bytes = len(os.readlink(link_path))
         assert incoming_bytes > 1
 
-        (source / "datasets" / "a.csv").unlink()  # b.csv, forms, and data_dictionary untouched
+        (source / "datasets" / "a.csv").unlink()  # b.csv, forms, and dictionary_mapping untouched
 
         quarantine_root = workspace / ".intake_quarantine"
         assert list(quarantine_root.iterdir()) == []
@@ -2523,7 +2519,7 @@ def test_full_source_tree_snapshot_is_never_modified(tmp_path: Path) -> None:
 
     source = tmp_path / "source"
     _make_canonical_source(source)
-    (source / "data_dictionary" / "extra.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "extra.csv").write_text("x,y\n1,2\n", encoding="utf-8")
     outside_target = tmp_path / "outside_target.pdf"
     outside_target.write_bytes(b"%PDF-1.4\n%%EOF")
     (source / "forms" / "linked.pdf").symlink_to(outside_target)
@@ -2610,6 +2606,36 @@ def test_load_v2_schema_manifest_raises_invalid(tmp_path: Path) -> None:
 
         with pytest.raises(IntakeManifestError, match="intake_manifest_invalid"):
             load_intake_manifest("LegacyV2")
+
+
+def test_load_v3_schema_manifest_raises_invalid(tmp_path: Path) -> None:
+    # Deliberate exception to the repo-wide v3->v4 rename: this fixture
+    # intentionally keeps the OLD "intake-manifest/v3" schema string and
+    # its "v3" test name, because it exists specifically to prove that
+    # string is now rejected. Clean cutover: no migrator, no dual reader
+    # -- a v3 manifest on disk fails exactly the same fixed
+    # "intake_manifest_invalid" way a v2 manifest already does, through
+    # the unchanged `raw.get("schema") != _MANIFEST_SCHEMA` check, never a
+    # special-cased v2/v3 detection path.
+    with _workspace(tmp_path) as workspace:
+        from phi_engine.pipeline.intake import IntakeManifestError, load_intake_manifest
+
+        study_dir = workspace / "intake" / "LegacyV3"
+        study_dir.mkdir(parents=True)
+        study_dir.chmod(0o700)
+        manifest_path = study_dir / "intake_manifest.json"
+        manifest_path.write_text(
+            json.dumps({
+                "schema": "intake-manifest/v3", "study": "LegacyV3", "study_name_source": "user",
+                "status": "ready", "source_root": "/src", "entries": {}, "review_items": [],
+                "errors": [], "removals": [],
+            }),
+            encoding="utf-8",
+        )
+        manifest_path.chmod(0o600)
+
+        with pytest.raises(IntakeManifestError, match="intake_manifest_invalid"):
+            load_intake_manifest("LegacyV3")
 
 
 def test_load_manifest_with_broken_link_raises_invalid(tmp_path: Path) -> None:

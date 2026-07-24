@@ -18,8 +18,8 @@ Provides two things every intake-driving test file otherwise re-implements:
    them leaves a later file's own fresh, unpatched re-import bound to a
    different ``config`` object than the one that file's own top-level
    monkeypatches targeted.
-2. Minimal deterministic writers for the intake-manifest/v3 mandatory
-   ``datasets/`` + ``forms/`` + (``data_dictionary/`` or ``mappings/``)
+2. Minimal deterministic writers for the intake-manifest/v4 mandatory
+   ``datasets/`` + (``dictionary_mapping/`` or ``forms/``)
    source-package layout -- CSV, single-sheet XLSX, and a tiny PDF form.
 """
 
@@ -132,7 +132,7 @@ def hermetic_phi_workspace(
         _restore_phi_runtime_modules(saved_modules, saved_parent_attrs, current_names)
 
 
-# --- minimal intake-manifest/v3 source-package writers ---------------------------------------
+# --- minimal intake-manifest/v4 source-package writers ---------------------------------------
 
 
 def write_csv(path: Path, headers: list[str], rows: list[list[Any]]) -> None:
@@ -197,14 +197,15 @@ def write_minimal_intake_package(
     form_name: str = "form.pdf",
     dictionary_name: str = "dictionary.csv",
 ) -> None:
-    """The smallest v3-ready package: one CSV dataset, one PDF form
+    """The smallest v4-ready package: one CSV dataset, one PDF form
     carrying an extractable table (so it never lands in the organizer's
     non-blocking 'pdf-no-extractable-table' review bucket), one dictionary
     CSV -- satisfies intake_preflight's mandatory ``datasets/`` +
-    ``forms/`` + (``data_dictionary/`` or ``mappings/``) requirement. The
-    dictionary intentionally does NOT name any dataset column, so it never
-    triggers a same-stem/exact-header dependency recommendation a caller
-    would otherwise have to resolve before a clean (exit_code 0) run."""
+    (``dictionary_mapping/`` or ``forms/``) requirement (both are supplied
+    here). The dictionary intentionally does NOT name any dataset column,
+    so it never triggers a same-stem/exact-header dependency
+    recommendation a caller would otherwise have to resolve before a
+    clean (exit_code 0) run."""
     write_csv(
         root / "datasets" / dataset_name,
         dataset_headers or ["SUBJID", "AGE"],
@@ -212,7 +213,7 @@ def write_minimal_intake_package(
     )
     write_pdf_table(root / "forms" / form_name, ["FIELD", "VALUE"], [["consent", "signed"]])
     write_csv(
-        root / "data_dictionary" / dictionary_name,
+        root / "dictionary_mapping" / dictionary_name,
         ["reference_code", "reference_label"],
         [["REF-01", "General study reference material"]],
     )
