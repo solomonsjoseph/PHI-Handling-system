@@ -20,14 +20,11 @@ created.
 from __future__ import annotations
 
 import contextlib
-import ctypes
-import errno
 import json
 import os
 import re
 import secrets
 import stat
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +38,8 @@ from phi_engine.pipeline.dependencies import is_artifact_id, is_sha256, is_times
 from phi_engine.pipeline.intake_preflight import IntakeCandidate, IntakePreflight
 from phi_engine.pipeline.verified_source import VerifiedSourceError, open_verified_source
 from phi_engine.utils import pipeline_lock
+from phi_engine.utils.atomic_fs import AtomicRenameUnavailable
+from phi_engine.utils.atomic_fs import renameat2_noreplace as _shared_renameat2_noreplace
 
 __all__ = ["IntakeManifestError", "IntakeNotReadyError", "intake_add", "load_intake_manifest"]
 
@@ -367,69 +366,24 @@ def _descend(
 # --- atomic no-replace rename / quarantine (hostile-namespace-safe deletes) ---------------
 
 
-_RENAMEAT2_UNSUPPORTED = object()
-_renameat2_fn: Any = None
-_RENAME_NOREPLACE = 0x1
-
-
-def _load_renameat2() -> Any:
-    """Resolve libc's ``renameat2(2)`` once, or the sentinel
-    ``_RENAMEAT2_UNSUPPORTED`` when this platform cannot provide it.
-    Linux-only: no portable equivalent gives the same atomic no-replace
-    guarantee, so every caller of :func:`_renameat2_noreplace` fails
-    closed on any other platform instead of falling back to a racy
-    check-then-rename."""
-    global _renameat2_fn
-    if _renameat2_fn is not None:
-        return _renameat2_fn
-    if not sys.platform.startswith("linux"):
-        _renameat2_fn = _RENAMEAT2_UNSUPPORTED
-        return _renameat2_fn
-    fn = None
-    for loader in (lambda: ctypes.CDLL("libc.so.6", use_errno=True), lambda: ctypes.CDLL(None, use_errno=True)):
-        try:
-            fn = loader().renameat2
-            break
-        except (OSError, AttributeError):
-            continue
-    if fn is None:
-        _renameat2_fn = _RENAMEAT2_UNSUPPORTED
-        return _renameat2_fn
-    fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-    fn.restype = ctypes.c_int
-    _renameat2_fn = fn
-    return _renameat2_fn
-
-
 def _renameat2_noreplace(old_dir_fd: int, old: str, new_dir_fd: int, new: str) -> None:
     """Atomic, no-replace rename via the Linux ``renameat2(2)`` syscall
     (``RENAME_NOREPLACE``): the kernel either performs the rename or
     fails with ``EEXIST`` -- there is no window between an existence
     check and the rename itself for a hostile same-namespace actor to
-    race a fresh node into the destination name. Raises
-    ``FileNotFoundError``/``FileExistsError`` for those specific fixed
-    outcomes, a generic ``OSError`` for any other errno, and
-    ``IntakeManifestError('intake-tree-unsafe')`` -- fail-closed, never
-    a check-then-rename fallback -- when this platform cannot provide
-    the guarantee at all."""
-    fn = _load_renameat2()
-    if fn is _RENAMEAT2_UNSUPPORTED:
-        raise IntakeManifestError("intake-tree-unsafe")
-    result = fn(
-        ctypes.c_int(old_dir_fd),
-        os.fsencode(old),
-        ctypes.c_int(new_dir_fd),
-        os.fsencode(new),
-        ctypes.c_uint(_RENAME_NOREPLACE),
-    )
-    if result == 0:
-        return
-    err = ctypes.get_errno()
-    if err == errno.ENOENT:
-        raise FileNotFoundError(err, os.strerror(err))
-    if err == errno.EEXIST:
-        raise FileExistsError(err, os.strerror(err))
-    raise OSError(err, os.strerror(err))
+    race a fresh node into the destination name. Delegates to the
+    shared primitive (``phi_engine.utils.atomic_fs``) also used by the
+    XLS isolation boundary's bundle publication, so both callers share
+    one ``renameat2(2)`` implementation rather than two independently
+    maintained copies. Raises ``FileNotFoundError``/``FileExistsError``
+    for those specific fixed outcomes, a generic ``OSError`` for any
+    other errno, and ``IntakeManifestError('intake-tree-unsafe')`` --
+    fail-closed, never a check-then-rename fallback -- when this
+    platform cannot provide the guarantee at all."""
+    try:
+        _shared_renameat2_noreplace(old_dir_fd, old, new_dir_fd, new)
+    except AtomicRenameUnavailable:
+        raise IntakeManifestError("intake-tree-unsafe") from None
 
 
 _QUARANTINE_DIRNAME = ".intake_quarantine"

@@ -1567,6 +1567,97 @@ def test_promotion_race_destination_created_just_before_atomic_rename_fails_clos
         assert list((workspace / "intake" / "RacedPromotion").iterdir()) == []
 
 
+def test_renameat2_noreplace_maps_shared_unavailable_to_intake_tree_unsafe() -> None:
+    """``intake._renameat2_noreplace`` is the one wrapper every intake
+    call site above depends on to translate the shared primitive's
+    platform-independent :class:`AtomicRenameUnavailable` into intake's
+    own fixed, value-free ``intake-tree-unsafe`` code -- never a raw
+    ``AtomicRenameUnavailable`` escaping into a caller that only knows
+    about ``IntakeManifestError``. The mapping must also chain with
+    ``from None`` -- a caller inspecting ``__cause__`` must never see
+    the underlying platform-availability exception."""
+    import phi_engine.pipeline.intake as intake_module
+    from phi_engine.pipeline.intake import IntakeManifestError
+    from phi_engine.utils.atomic_fs import AtomicRenameUnavailable
+
+    def _always_unavailable(old_dir_fd, old, new_dir_fd, new):
+        raise AtomicRenameUnavailable()
+
+    original = intake_module._shared_renameat2_noreplace
+    intake_module._shared_renameat2_noreplace = _always_unavailable
+    try:
+        with pytest.raises(IntakeManifestError) as excinfo:
+            intake_module._renameat2_noreplace(0, "old", 0, "new")
+    finally:
+        intake_module._shared_renameat2_noreplace = original
+
+    assert excinfo.value.code == "intake-tree-unsafe"
+    assert excinfo.value.__cause__ is None
+
+
+def test_renameat2_noreplace_passes_through_other_shared_outcomes_unchanged() -> None:
+    """Every other outcome the shared primitive can raise (a specific
+    ``FileExistsError``/``FileNotFoundError``, or an opaque ``OSError``)
+    must reach the caller completely unchanged -- only
+    ``AtomicRenameUnavailable`` gets remapped."""
+    import phi_engine.pipeline.intake as intake_module
+
+    for outcome in (FileExistsError(17, "exists"), FileNotFoundError(2, "absent"), OSError(5, "io error")):
+
+        def _raises(old_dir_fd, old, new_dir_fd, new, _outcome=outcome):
+            raise _outcome
+
+        original = intake_module._shared_renameat2_noreplace
+        intake_module._shared_renameat2_noreplace = _raises
+        try:
+            with pytest.raises(type(outcome)) as excinfo:
+                intake_module._renameat2_noreplace(0, "old", 0, "new")
+        finally:
+            intake_module._shared_renameat2_noreplace = original
+        assert excinfo.value is outcome
+
+
+def test_promotion_fails_closed_as_intake_tree_unsafe_when_rename_primitive_unavailable(tmp_path: Path) -> None:
+    """End-to-end: when the shared atomic-rename primitive reports the
+    platform cannot provide the no-replace guarantee at all (not merely
+    ``EEXIST`` from a racing occupant, which is the distinct
+    ``study-name-collision`` outcome exercised elsewhere), promotion of
+    an already-generated study to a user-chosen name must fail closed
+    with ``intake-tree-unsafe`` and leave the generated tree exactly as
+    it was -- never a raw ``AtomicRenameUnavailable`` escaping
+    ``intake_add``, never a partial rename."""
+    source = tmp_path / "source"
+    _make_canonical_source(source)
+
+    with _workspace(tmp_path) as workspace:
+        import phi_engine.pipeline.intake as intake_module
+        from phi_engine.pipeline.intake import IntakeManifestError, intake_add
+        from phi_engine.utils.atomic_fs import AtomicRenameUnavailable
+
+        generated = intake_add(source, support_confirmed_no_phi=False)
+        study_a = generated["study"]
+
+        original_shared_rename = intake_module._shared_renameat2_noreplace
+        injected = {"done": False}
+
+        def unavailable_for_promotion(old_dir_fd, old, new_dir_fd, new):
+            if not injected["done"] and old == study_a and new == "UnavailablePromotion":
+                injected["done"] = True
+                raise AtomicRenameUnavailable()
+            return original_shared_rename(old_dir_fd, old, new_dir_fd, new)
+
+        intake_module._shared_renameat2_noreplace = unavailable_for_promotion
+        try:
+            with pytest.raises(IntakeManifestError, match="intake-tree-unsafe"):
+                intake_add(source, "UnavailablePromotion")
+        finally:
+            intake_module._shared_renameat2_noreplace = original_shared_rename
+
+        assert injected["done"]
+        assert (workspace / "intake" / study_a).is_dir()
+        assert not (workspace / "intake" / "UnavailablePromotion").exists()
+
+
 def test_stale_link_race_swaps_content_just_before_quarantine_leaves_unrelated_untouched(tmp_path: Path) -> None:
     """Deterministic injection of the exact race the security review
     found: a hostile actor swaps the stale symlink for unrelated
