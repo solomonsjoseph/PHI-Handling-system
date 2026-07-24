@@ -3,7 +3,7 @@
 **What.** Given a verified :class:`~phi_engine.pipeline.intake_preflight.IntakePreflight`
 result, decide the study name for an intake run: the user-supplied name, an
 AI-inferred name derived *only* from support-component evidence (``forms``,
-``data_dictionary``, ``mappings`` -- never ``datasets`` or ``_unclassified``),
+``dictionary_mapping`` -- never ``datasets`` or ``_unclassified``),
 or a random fallback when neither is available.
 
 **Why.** Dataset content must never reach an LLM, even a local one. This
@@ -19,8 +19,20 @@ not change): every naming candidate is re-checked against a fresh
 descriptor-relative scan of ``datasets/`` immediately before its content is
 parsed, and again immediately before any evidence is dispatched to the
 local model, discarding all collected evidence and dispatching nothing the
-moment such an alias is found. The same all-or-nothing rule applies to any
-OTHER symlink/hardlink/identity/hash safety finding, whether preflight
+moment such an alias is found. Identity alone still cannot see a same-
+inode, same-size dataset content swap whose mtime is restored to its
+preflight-recorded value, nor a lexically-distinct, byte-identical dataset
+COPY landing in a support component -- neither shares an inode with
+anything identity comparison would flag. A second, independent layer
+closes both gaps: immediately before any support evidence is parsed, and
+again immediately before every individual local-model dispatch, EVERY
+preflight-known ``datasets/`` candidate is freshly re-opened and re-
+hashed against its preflight-recorded SHA-256; any drift aborts the whole
+attempt, and any support candidate whose identity or SHA-256 already
+matches a freshly verified dataset is silently excluded from admission,
+causing zero parser calls, not merely zero dispatch. The same all-or-
+nothing rule applies to any OTHER symlink/hardlink/identity/hash safety
+finding, whether preflight
 already recorded it (a support file it quarantined to ``_unclassified`` for
 ``cross-component-hardlink``/``source-symlink-not-allowed`` before naming
 ever ran -- checked first, before any candidate is even opened) or naming
@@ -36,25 +48,35 @@ and a bounded SHA-256 hash, each through
 :func:`~phi_engine.pipeline.verified_source.open_verified_source` -- before
 ANY candidate's content is parsed in the second pass; a later candidate's
 safety failure is never discoverable only after an earlier, otherwise-
-clean candidate was already parsed. Evidence is then extracted with
-fixed, ordered readers (PDF via ``pdfplumber``, isolated in a spawned
-worker process bound by hard address-space, CPU-time, a single monotonic
+clean candidate was already parsed. The second pass performs exactly ONE
+bounded read of the verified descriptor into an immutable local
+``data: bytes`` buffer, computing its SHA-256 in the same pass
+(:func:`_read_and_hash_fd_bounded`) and comparing it against
+``candidate.sha256`` before any parsing begins -- never a second,
+separate hash-then-rewind-then-reread of the same descriptor, for any
+format. Evidence is then extracted from that one buffer with fixed,
+ordered readers (PDF via ``pdfplumber``, isolated in a spawned worker
+process bound by hard address-space, CPU-time, a single monotonic
 wall-clock deadline, and result-byte limits so a small, highly
 compressible content stream cannot decompress into far more memory than
-its on-disk size implies; CSV via ``TextIOWrapper``/``csv.reader``;
-``.xlsx`` via ``openpyxl``) operating directly on a duplicated descriptor
-(``os.fdopen(os.dup(fd), "rb")``) from a SECOND, revalidating
-``open_verified_source`` call immediately before each parser call --
-re-checking expected identity and freshly rescanning ``datasets/`` again,
-so a hardlink created in the window between validation and this specific
-parse is still caught. Every reader/workbook object is closed before
-that second context exits (so its post-read identity check always
-covers the complete, exact read). No full-document byte copy is ever
-retained. Every reader/parser failure -- including openpyxl's lazy
-worksheet iteration and any PDF worker limit/termination/pathology, not
-just ``load_workbook`` -- collapses to the fixed ``support-evidence-limit``
-code; a raw descriptor ``OSError`` collapses to ``source-unreadable``;
-never a raw exception. Evidence is built
+its on-disk size implies; CSV via ``TextIOWrapper``/``csv.reader`` over
+``io.BytesIO(data)``; ``.xlsx`` via ``openpyxl`` over
+``io.BytesIO(data)``; ``.xls`` via the isolated
+:func:`phi_engine.pipeline.xls_isolation.extract_xls_naming` worker
+boundary, the ONLY module outside ``xls_isolation.py``/``_xls_worker.py``
+allowed to parse legacy BIFF bytes) -- dispatched purely by suffix, never
+by a stat-time guess. Every reader/workbook object is closed before this
+pass returns; the descriptor's own post-read identity check (performed
+by ``open_verified_source`` on context exit) always covers the exact,
+complete read that produced ``data``. A single candidate's bounded
+``data: bytes`` is transiently held for its own hash+parse and released
+before the next candidate is read -- never more than one candidate's
+buffer alive at once, and never all candidates' buffers simultaneously.
+Every reader/parser failure -- including openpyxl's lazy worksheet
+iteration, any PDF worker limit/termination/pathology, and any
+``xls_isolation`` worker/isolation error -- collapses to the fixed
+``support-evidence-limit`` code; a raw descriptor ``OSError`` collapses
+to ``source-unreadable``; never a raw exception. Evidence is built
 incrementally against each 8,192-UTF-8-byte cap *while parsing* (forms and
 dictionary/mapping tracked independently; combined rebuilt from the same
 already-bounded fragments), so retained state never scales with the total
@@ -110,7 +132,7 @@ import openpyxl
 
 from phi_engine.audit.review_paths import safe_review_slug
 from phi_engine.config import config
-from phi_engine.pipeline import _pdf_extract_worker, intake_preflight, support_files
+from phi_engine.pipeline import _pdf_extract_worker, intake_preflight, support_files, xls_isolation
 from phi_engine.pipeline.intake_preflight import IntakeCandidate, IntakePreflight
 from phi_engine.pipeline.verified_source import VerifiedSourceError, open_verified_source
 from phi_engine.security.llm_tool_guard import LLMToolOutputBlocked, guard_llm_output
@@ -171,7 +193,7 @@ _PDF_WORKER_MAX_RESULT_BYTES = 65536
 # reasons are retryable-by-a-human review items versus hard errors.
 _ERROR_REASONS = frozenset({"source-unreadable", "source-target-outside-root"})
 
-_NAMING_COMPONENTS = frozenset({"forms", "data_dictionary", "mappings"})
+_NAMING_COMPONENTS = frozenset({"dictionary_mapping", "forms"})
 _ROOT_PATH = ""  # fixed string path for whole-source-root review/error records
 
 
@@ -330,7 +352,35 @@ def _resolve_intake_study(
         key=lambda c: c.relative_path,
     )
 
-    forms_docs, dict_docs, review_items, errors, verified_identities, aborted = _collect_evidence(
+    # Item 4: before parsing ANY support evidence, freshly verify every
+    # preflight-known datasets/ candidate's current identity AND SHA-256
+    # against its preflight record. Any failure aborts the whole naming
+    # attempt (source-unreadable, zero further reads, zero dispatch).
+    # Candidates that are themselves a lexical alias or an independent
+    # byte-identical copy of a verified dataset are silently excluded
+    # from admission -- they cause zero parser calls, never even
+    # reaching _validate_candidate/_extract_candidate -- and are never
+    # modified or reported a second time (preflight's own phase-2
+    # cross-component quarantine already reports what it can see).
+    dataset_ok, verified_dataset_identities, verified_dataset_hashes, dataset_error = _verify_dataset_snapshot(
+        source, preflight
+    )
+    if not dataset_ok:
+        return StudyResolution(
+            name=generate_study_name(),
+            source="generated",
+            review_items=(),
+            errors=(dataset_error,) if dataset_error is not None else (),
+        )
+
+    admitted = [
+        candidate
+        for candidate in admitted
+        if (candidate.identity.device, candidate.identity.inode) not in verified_dataset_identities
+        and candidate.sha256 not in verified_dataset_hashes
+    ]
+
+    forms_docs, dict_docs, review_items, errors, verified_identities, verified_candidates, aborted = _collect_evidence(
         source, admitted
     )
 
@@ -341,7 +391,6 @@ def _resolve_intake_study(
             review_items=tuple(review_items),
             errors=tuple(errors),
         )
-
 
     forms_payload = _forms_payload_dict(forms_docs)
     dict_payload = _dict_payload_dict(dict_docs)
@@ -360,12 +409,37 @@ def _resolve_intake_study(
         return client
 
     def dispatch_guarded(evidence_json: str) -> str | None:
-        """Recheck the dataset-hardlink guard immediately before THIS
-        specific dispatch (not once for the whole resolution) -- a client
-        whose own first call creates a dict-to-datasets hardlink must
-        never see a second call."""
+        """Recheck two INDEPENDENT, deliberately redundant guards
+        immediately before THIS specific dispatch (not once for the
+        whole resolution) -- a client whose own first call creates a
+        dict-to-datasets hardlink must never see a second call. First,
+        the pre-existing identity-only ``_hardlink_race_detected`` scan
+        (unchanged). Second, item 5's fresh repeat of the item-4 dataset
+        descriptor scan/hash PLUS a genuinely live re-hash of every
+        retained support candidate's CURRENT bytes
+        (:func:`_live_support_hashes`) -- comparing a fresh dataset
+        SHA-256 set against these candidates' STATIC preflight-recorded
+        hashes would be a no-op (identical by construction since
+        admission, so it could never observe a race happening strictly
+        after admission); only a live re-read of the support side closes
+        that window. Every dataset candidate must still match its
+        preflight record, AND no freshly recomputed dataset SHA-256 may
+        now intersect any retained support candidate's LIVE current
+        SHA-256 (a copy-based race introduced between evidence
+        collection and this specific dispatch, which an identity-only
+        check alone cannot see). A scan-failure (``not dataset_ok`` or
+        ``live_support_hashes is None``, as opposed to a SHA
+        intersection) has no distinct review code of its own here --
+        deliberately folded into the same fixed cross-component-hardlink
+        vocabulary as every other post-collection race this module
+        tracks, rather than exposing a new code per failure mode."""
         nonlocal hardlink_race
         if _hardlink_race_detected(source, verified_identities):
+            hardlink_race = True
+            return None
+        dataset_ok, _fresh_identities, fresh_hashes, _dataset_error = _verify_dataset_snapshot(source, preflight)
+        live_support_hashes = _live_support_hashes(source, verified_candidates)
+        if not dataset_ok or live_support_hashes is None or (fresh_hashes & live_support_hashes):
             hardlink_race = True
             return None
         return _dispatch(get_client, evidence_json, errors)
@@ -579,6 +653,151 @@ def _hash_fd_bounded(fd: int, max_bytes: int) -> str:
     return digest.hexdigest()
 
 
+def _read_and_hash_fd_bounded(fd: int, max_bytes: int) -> tuple[bytes, str]:
+    """Single bounded read of the current descriptor's remaining content --
+    the ONE read pass 2 ever performs, closing the former hash-then-
+    rewind-then-reread window. Accumulates bytes into a local ``bytearray``
+    while simultaneously updating a running SHA-256 digest over each chunk
+    read, mirroring :func:`_hash_fd_bounded`'s own chunked style but
+    RETAINING the bytes (up to ``max_bytes``) for the caller's single parse
+    instead of discarding them. Raises :class:`_EvidenceLimitError` the
+    instant total bytes read exceeds ``max_bytes``, exactly as
+    :func:`_hash_fd_bounded` already does."""
+    digest = hashlib.sha256()
+    buf = bytearray()
+    while True:
+        chunk = os.read(fd, _HASH_CHUNK_SIZE)
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > max_bytes:
+            raise _EvidenceLimitError()
+        digest.update(chunk)
+    return bytes(buf), digest.hexdigest()
+
+
+# --- fresh dataset descriptor/hash snapshot (plan step 3, items 4-5) ------------------------
+#
+# The pre-existing _current_dataset_identities/_hardlink_race_detected
+# pair is an identity-only (device, inode) guard: it catches a NEW
+# datasets/ dirent hardlinked to an already-admitted support candidate's
+# inode, but it cannot see a lexically-distinct, byte-identical COPY of
+# a dataset (no shared inode at all) landing in a support component, nor
+# can it independently confirm that preflight's own recorded dataset
+# bytes are still exactly what preflight saw. _verify_dataset_snapshot
+# closes both gaps with a fresh, independent, descriptor-verified
+# re-hash of every preflight-known dataset candidate, run immediately
+# before any support evidence is ever parsed and again immediately
+# before every individual local-model dispatch -- deliberately redundant
+# with (never a replacement for) the identity-only guard above.
+#
+# Cost note: every datasets/ candidate is fully re-hashed once at item 4
+# and again inside EVERY dispatch_guarded call (up to 3x for forms/
+# dict/combined), so up to 4 full re-hashes of the whole datasets/ tree
+# can happen per naming resolution -- a deliberate, correct security
+# trade-off (never a shortcut on this boundary), not an accidental
+# performance regression a future investigation should mistake for one.
+
+
+def _hash_fd_streaming(fd: int) -> str:
+    """Chunked SHA-256 of the current descriptor's remaining content with
+    no evidence-sized bound -- used only to verify a ``datasets/``
+    candidate's current bytes against its preflight-recorded ``sha256``,
+    never to retain or parse dataset content. Unlike
+    :func:`_hash_fd_bounded`/:func:`_read_and_hash_fd_bounded`, this
+    applies no ``_MAX_DOCUMENT_BYTES``-style cap: dataset files are
+    legitimately far larger than any support document this module ever
+    parses, and none of their bytes are ever retained here regardless."""
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, _HASH_CHUNK_SIZE)
+        if not chunk:
+            break
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_dataset_snapshot(
+    source: Path, preflight: IntakePreflight
+) -> tuple[bool, frozenset[tuple[int, int]], frozenset[str], dict[str, Any] | None]:
+    """Fresh, independent descriptor-open plus streaming-hash of EVERY
+    ``preflight.candidates`` entry whose ``source_component ==
+    "datasets"`` -- filtered by ``source_component``, never by the
+    (possibly reclassified) logical ``component``, so a dataset preflight
+    itself downgraded to ``_unclassified`` (for example a rejected
+    ``dataset-xls-multiple-sheets`` candidate) is still included: its
+    bytes must never leak into naming evidence via a support candidate
+    that happens to share its hash. Each candidate is opened through the
+    same :func:`open_verified_source` primitive used everywhere else in
+    this module, requiring BOTH the current descriptor identity
+    (``open_verified_source``'s own ``expected_identity`` check) AND a
+    freshly recomputed SHA-256 to equal the candidate's preflight-
+    recorded ``sha256``.
+
+    Returns ``(ok, identities, hashes, error_item)``. ``ok`` is ``False``
+    the instant any dataset candidate cannot be opened/verified or its
+    hash has drifted -- the caller MUST abort the WHOLE naming attempt
+    with the same all-or-nothing contract as every other safety failure
+    in this module: zero further reads, zero dispatch, reporting the
+    fixed ``source-unreadable`` ``error_item``. On success,
+    ``identities``/``hashes`` are this fresh scan's complete
+    ``(device, inode)``/``sha256`` sets, used by the caller to silently
+    exclude any dictionary_mapping/forms candidate that is a lexical
+    alias or an independent byte-identical copy of a verified dataset --
+    never a second review/error report; preflight's own phase-2
+    cross-component quarantine already reports what it can see from its
+    own vantage point, this is naming's own independent, silent,
+    defense-in-depth exclusion layer."""
+    identities: set[tuple[int, int]] = set()
+    hashes: set[str] = set()
+    for candidate in preflight.candidates:
+        if candidate.source_component != "datasets":
+            continue
+        try:
+            with open_verified_source(
+                source,
+                candidate.relative_path,
+                required_source_component="datasets",
+                expected_identity=candidate.identity,
+            ) as fd:
+                digest = _hash_fd_streaming(fd)
+        except (VerifiedSourceError, OSError):
+            return False, frozenset(), frozenset(), {"path": candidate.relative_path, "reason": "source-unreadable"}
+        if digest != candidate.sha256:
+            return False, frozenset(), frozenset(), {"path": candidate.relative_path, "reason": "source-unreadable"}
+        identities.add((candidate.identity.device, candidate.identity.inode))
+        hashes.add(candidate.sha256)
+    return True, frozenset(identities), frozenset(hashes), None
+
+
+def _live_support_hashes(source: Path, candidates: tuple[IntakeCandidate, ...]) -> frozenset[str] | None:
+    """Re-hash the CURRENT on-disk bytes of every pass-1-admitted support
+    candidate, fresh, immediately before a dispatch. Unlike a comparison
+    against ``candidate.sha256`` (the preflight-recorded value, static
+    since admission -- identical whether read at item 4 or item 5, so it
+    can never observe a race that happens strictly after admission),
+    this is a genuinely live read: a candidate whose bytes are swapped
+    for a dataset's bytes AFTER pass-1 validation, with identity
+    (size/mtime) restored to defeat ``open_verified_source``'s own
+    check alone, is still caught here. Returns ``None`` -- never a
+    partial/best-effort set -- the instant any candidate cannot be
+    reopened/rehashed, exactly like every other verified-source failure
+    in this module: fail closed."""
+    hashes: set[str] = set()
+    for candidate in candidates:
+        try:
+            with open_verified_source(
+                source,
+                candidate.relative_path,
+                required_source_component=candidate.source_component,
+                expected_identity=candidate.identity,
+            ) as fd:
+                hashes.add(_hash_fd_bounded(fd, _MAX_DOCUMENT_BYTES))
+        except (VerifiedSourceError, OSError, _EvidenceLimitError):
+            return None
+    return frozenset(hashes)
+
+
 def _validate_candidate(
     source: Path, candidate: IntakeCandidate
 ) -> tuple[bool, dict[str, Any] | None, dict[str, Any] | None]:
@@ -642,9 +861,12 @@ def _extract_candidate(
     still caught. A same-inode, same-size mutation whose mtime has been
     restored to the identity pass 1 already validated defeats
     ``open_verified_source``'s identity check alone, so this pass also
-    recomputes the bounded SHA-256 from the freshly opened descriptor
-    and compares it against ``candidate.sha256`` -- exactly like pass 1
-    -- before rewinding the descriptor and handing it to any parser.
+    performs exactly ONE bounded read of the freshly opened descriptor
+    into an immutable local ``data: bytes`` while simultaneously
+    computing its SHA-256 (:func:`_read_and_hash_fd_bounded`) -- never a
+    second, separate hash-then-rewind-then-reread of the same
+    descriptor -- and compares the finished digest against
+    ``candidate.sha256`` -- exactly like pass 1 -- before parsing.
     Never reopens by raw pathname.
 
     Returns ``(fragments, abort, review_item, error_item)`` with the same
@@ -653,12 +875,11 @@ def _extract_candidate(
     ``list[tuple[sheet_index, rows]]`` for a dictionary/mapping
     candidate; ``None``/``[]`` when nothing was retained.
 
-    The verified-descriptor context stays open for the whole hash-recheck
-    and parse; the reader/workbook object opened from a duplicate of that
-    descriptor is closed before this function returns, so the
-    descriptor's own post-read identity check (performed by
-    ``open_verified_source`` on context exit) always covers the exact,
-    complete read.
+    The verified-descriptor context stays open for the whole read+hash;
+    only the resulting ``data: bytes`` (never the live descriptor) is
+    handed to a parser, so the descriptor's own post-read identity check
+    (performed by ``open_verified_source`` on context exit) always
+    covers the exact, complete read.
     """
     is_forms = candidate.component == "forms"
     suffix = PurePosixPath(candidate.relative_path).suffix.lower()
@@ -675,18 +896,25 @@ def _extract_candidate(
             if current_datasets is None or (info.st_dev, info.st_ino) in current_datasets:
                 return None, True, None, None
 
-            digest = _hash_fd_bounded(fd, _MAX_DOCUMENT_BYTES)
+            data, digest = _read_and_hash_fd_bounded(fd, _MAX_DOCUMENT_BYTES)
             if digest != candidate.sha256:
                 raise VerifiedSourceError("source-unreadable")
-            os.lseek(fd, 0, os.SEEK_SET)
 
-            stream = os.fdopen(os.dup(fd), "rb")
             if is_forms:
-                fragments: Any = _extract_pdf_pages(stream)
+                fragments: Any = _extract_pdf_pages(data)
             elif suffix == ".csv":
-                fragments = [(1, _extract_csv_rows(stream))]
+                fragments = [(1, _extract_csv_rows(io.BytesIO(data)))]
+            elif suffix == ".xlsx":
+                fragments = _extract_xlsx_sheets(io.BytesIO(data))
+            elif suffix == ".xls":
+                try:
+                    fragments = xls_isolation.extract_xls_naming(data, candidate.sha256)
+                except (xls_isolation.XlsIsolationError, xls_isolation.XlsWorkerError):
+                    raise _EvidenceLimitError() from None
             else:
-                fragments = _extract_xlsx_sheets(stream)
+                # Structurally impossible given
+                # intake_preflight._COMPONENT_SUFFIXES -- defensive only.
+                raise _EvidenceLimitError()
     except VerifiedSourceError as exc:
         if exc.reason in _ERROR_REASONS:
             return None, True, None, {"path": candidate.relative_path, "reason": exc.reason}
@@ -705,10 +933,11 @@ def _collect_evidence(
     source: Path, admitted: list[IntakeCandidate]
 ) -> tuple[
     dict[int, list[str]],
-    dict[int, tuple[str, dict[int, list[list[str]]]]],
+    dict[int, dict[int, list[list[str]]]],
     list[dict[str, Any]],
     list[dict[str, Any]],
     frozenset[tuple[int, int]],
+    tuple[IntakeCandidate, ...],
     bool,
 ]:
     """Two-pass evidence collection. Pass 1 validates EVERY admitted
@@ -736,12 +965,22 @@ def _collect_evidence(
     parser-rejected candidates included, not just candidates that
     contributed a retained evidence fragment -- so the caller's
     pre-dispatch hardlink guard cannot be defeated by hardlinking a
-    candidate that never produced retained evidence.
+    candidate that never produced retained evidence. The candidate
+    objects returned alongside it are that SAME complete pass-1-admitted
+    set (not just fragment-contributing ones, for the identical reason),
+    letting the caller's pre-dispatch dataset-SHA cross-check
+    (:func:`_live_support_hashes`) re-open and re-hash each one's LIVE
+    current bytes immediately before a dispatch -- a genuinely fresh
+    read, never a comparison against these candidates' own static
+    preflight-recorded ``sha256`` (which cannot, by construction, differ
+    from what admission already saw and so could never observe a race
+    happening strictly after admission).
     """
     review_items: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     verified: list[IntakeCandidate] = []
     admitted_identities: set[tuple[int, int]] = set()
+    admitted_candidates: list[IntakeCandidate] = []
 
     for candidate in admitted:
         ok, review_item, error_item = _validate_candidate(source, candidate)
@@ -755,8 +994,9 @@ def _collect_evidence(
             # caller still has something to report.
             if review_item is None and error_item is None:
                 review_items.append({"path": _ROOT_PATH, "reason": "cross-component-hardlink", "blocking": True})
-            return {}, {}, review_items, errors, frozenset(), True
+            return {}, {}, review_items, errors, frozenset(), (), True
         admitted_identities.add((candidate.identity.device, candidate.identity.inode))
+        admitted_candidates.append(candidate)
         if review_item is None:
             # An oversized (support-evidence-limit) candidate already got
             # its one fixed review record here in pass 1 -- its identity
@@ -766,7 +1006,7 @@ def _collect_evidence(
             verified.append(candidate)
 
     forms_docs: dict[int, list[str]] = {}
-    dict_docs: dict[int, tuple[str, dict[int, list[list[str]]]]] = {}
+    dict_docs: dict[int, dict[int, list[list[str]]]] = {}
     form_index = 0
     dict_index = 0
     forms_budget_open = True
@@ -786,7 +1026,7 @@ def _collect_evidence(
         if abort:
             if review_item is None and error_item is None:
                 review_items.append({"path": _ROOT_PATH, "reason": "cross-component-hardlink", "blocking": True})
-            return {}, {}, review_items, errors, frozenset(), True
+            return {}, {}, review_items, errors, frozenset(), (), True
         if not fragments:
             continue
 
@@ -803,26 +1043,24 @@ def _collect_evidence(
         else:
             dict_index += 1
             idx = dict_index
-            kind = candidate.component
             stop = False
             for sheet_index, rows in fragments:
                 if stop:
                     break
                 for row in rows:
                     trial = {
-                        key: (value[0], {sk: list(sv) for sk, sv in value[1].items()}) for key, value in dict_docs.items()
+                        key: {sk: list(sv) for sk, sv in value.items()} for key, value in dict_docs.items()
                     }
-                    _, sheets = trial.get(idx, (kind, {}))
-                    sheets = dict(sheets)
+                    sheets = dict(trial.get(idx, {}))
                     sheets[sheet_index] = [*sheets.get(sheet_index, []), row]
-                    trial[idx] = (kind, sheets)
+                    trial[idx] = sheets
                     if _encoded_len(_dict_payload_dict(trial)) > _MAX_EVIDENCE_BYTES:
                         dict_budget_open = False
                         stop = True
                         break
                     dict_docs = trial
 
-    return forms_docs, dict_docs, review_items, errors, frozenset(admitted_identities), False
+    return forms_docs, dict_docs, review_items, errors, frozenset(admitted_identities), tuple(admitted_candidates), False
 
 
 _PDF_WORKER_CONTEXT = multiprocessing.get_context("spawn")
@@ -953,14 +1191,17 @@ def _decode_worker_reply(raw: bytes) -> list[str]:
     return texts
 
 
-def _extract_pdf_pages(stream: BinaryIO) -> list[str]:
-    """Extract text from at most ``_MAX_PDF_PAGES`` pages. The actual
-    ``pdfplumber``/``pdfminer`` parse -- the only step that can decompress
-    a hostile PDF content stream into far more memory than its on-disk
-    size implies -- runs isolated in a spawned child bound by hard
-    address-space (``RLIMIT_AS``), CPU-time (``RLIMIT_CPU``), a single
-    monotonic wall-clock deadline (:func:`_run_pdf_worker`), and
-    result-byte (bounded ``recv_bytes``) limits. The spawned child runs
+def _extract_pdf_pages(data: bytes) -> list[str]:
+    """Extract text from at most ``_MAX_PDF_PAGES`` pages. ``data`` is the
+    caller's already-hashed, already-bounded (``_MAX_DOCUMENT_BYTES``)
+    buffer from :func:`_extract_candidate`'s single read -- this function
+    never reads a stream itself. The actual ``pdfplumber``/``pdfminer``
+    parse -- the only step that can decompress a hostile PDF content
+    stream into far more memory than its on-disk size implies -- runs
+    isolated in a spawned child bound by hard address-space
+    (``RLIMIT_AS``), CPU-time (``RLIMIT_CPU``), a single monotonic
+    wall-clock deadline (:func:`_run_pdf_worker`), and result-byte
+    (bounded ``recv_bytes``) limits. The spawned child runs
     :func:`phi_engine.pipeline._pdf_extract_worker.run` -- a private
     module that imports nothing from ``phi_engine`` -- rather than a
     function defined in this module, because ``intake_naming.py``'s own
@@ -976,13 +1217,6 @@ def _extract_pdf_pages(stream: BinaryIO) -> list[str]:
     itself crosses the process boundary as bounded, non-executable JSON,
     never ``pickle``.
     """
-    try:
-        data = stream.read(_MAX_DOCUMENT_BYTES + 1)
-    finally:
-        stream.close()
-    if len(data) > _MAX_DOCUMENT_BYTES:
-        raise _EvidenceLimitError()
-
     parent_conn, child_conn = _PDF_WORKER_CONTEXT.Pipe(duplex=False)
     process = _PDF_WORKER_CONTEXT.Process(
         target=_pdf_extract_worker.run,
@@ -1094,14 +1328,14 @@ def _forms_fragments_from_docs(docs: dict[int, list[str]]) -> list[tuple[int, st
 
 
 def _dict_fragments_from_docs(
-    docs: dict[int, tuple[str, dict[int, list[list[str]]]]]
-) -> list[tuple[int, str, int, list[str]]]:
-    result: list[tuple[int, str, int, list[str]]] = []
+    docs: dict[int, dict[int, list[list[str]]]]
+) -> list[tuple[int, int, list[str]]]:
+    result: list[tuple[int, int, list[str]]] = []
     for index in sorted(docs):
-        kind, sheets = docs[index]
+        sheets = docs[index]
         for sheet_index in sorted(sheets):
             for row in sheets[sheet_index]:
-                result.append((index, kind, sheet_index, row))
+                result.append((index, sheet_index, row))
     return result
 
 
@@ -1109,18 +1343,18 @@ def _forms_payload_dict(docs: dict[int, list[str]]) -> dict[str, Any]:
     return {"component": "forms", "documents": [{"index": i, "pages": docs[i]} for i in sorted(docs)]}
 
 
-def _dict_payload_dict(docs: dict[int, tuple[str, dict[int, list[list[str]]]]]) -> dict[str, Any]:
+def _dict_payload_dict(docs: dict[int, dict[int, list[list[str]]]]) -> dict[str, Any]:
     documents = []
     for i in sorted(docs):
-        kind, sheets = docs[i]
+        sheets = docs[i]
         documents.append(
-            {"index": i, "kind": kind, "sheets": [{"index": s, "rows": sheets[s]} for s in sorted(sheets)]}
+            {"index": i, "sheets": [{"index": s, "rows": sheets[s]} for s in sorted(sheets)]}
         )
     return {"component": "dictionary_mapping", "documents": documents}
 
 
 def _combined_payload_dict(
-    forms_docs: dict[int, list[str]], dict_docs: dict[int, tuple[str, dict[int, list[list[str]]]]]
+    forms_docs: dict[int, list[str]], dict_docs: dict[int, dict[int, list[list[str]]]]
 ) -> dict[str, Any]:
     return {
         "component": "combined",
@@ -1130,7 +1364,7 @@ def _combined_payload_dict(
 
 
 def _grow_combined(
-    forms_fragments: list[tuple[int, str]], dict_fragments: list[tuple[int, str, int, list[str]]], budget: int
+    forms_fragments: list[tuple[int, str]], dict_fragments: list[tuple[int, int, list[str]]], budget: int
 ) -> dict[str, Any]:
     """Rebuild the combined payload from the SAME already-bounded
     forms/dictionary_mapping fragments under one shared budget, appending
@@ -1138,7 +1372,7 @@ def _grow_combined(
     the first fragment that would exceed the cap (a single, deterministic,
     monotonic truncation boundary)."""
     forms_docs: dict[int, list[str]] = {}
-    dict_docs: dict[int, tuple[str, dict[int, list[list[str]]]]] = {}
+    dict_docs: dict[int, dict[int, list[list[str]]]] = {}
     stopped = False
 
     for index, page in forms_fragments:
@@ -1151,14 +1385,13 @@ def _grow_combined(
             break
         forms_docs = trial
 
-    for index, kind, sheet_index, row in dict_fragments:
+    for index, sheet_index, row in dict_fragments:
         if stopped:
             break
-        trial = {key: (value[0], {sk: list(sv) for sk, sv in value[1].items()}) for key, value in dict_docs.items()}
-        _, sheets = trial.get(index, (kind, {}))
-        sheets = dict(sheets)
+        trial = {key: {sk: list(sv) for sk, sv in value.items()} for key, value in dict_docs.items()}
+        sheets = dict(trial.get(index, {}))
         sheets[sheet_index] = [*sheets.get(sheet_index, []), row]
-        trial[index] = (kind, sheets)
+        trial[index] = sheets
         if _encoded_len(_combined_payload_dict(forms_docs, trial)) > budget:
             stopped = True
             break

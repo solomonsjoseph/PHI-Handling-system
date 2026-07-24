@@ -26,11 +26,13 @@ from pathlib import Path
 
 import openpyxl
 import pytest
+import xlwt
 from reportlab.pdfgen import canvas
 
 import phi_engine.pipeline.intake_naming as naming
 import phi_engine.security.model_routing as routing
 from phi_engine.config import config
+from phi_engine.pipeline import xls_isolation
 from phi_engine.pipeline.intake_preflight import IntakeCandidate, IntakePreflight, inspect_intake_source
 from phi_engine.pipeline.verified_source import FileIdentity
 from phi_engine.utils import pipeline_lock
@@ -209,6 +211,20 @@ def _write_workbook(path: Path, rows: list[list[object]], *, sheet_names: list[s
     wb.save(path)
 
 
+def _write_xls(path: Path, rows: list[list[object]], *, sheet_name: str = "Sheet1") -> None:
+    """Build a real, genuine BIFF (.xls) file with ``xlwt`` -- the same
+    fixture convention ``tests/test_xls_isolation.py`` uses -- so the
+    naming-dispatch tests exercise the real ``xlrd``-backed isolation
+    worker, never a stub."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet(sheet_name)
+    for r, row in enumerate(rows):
+        for c, value in enumerate(row):
+            ws.write(r, c, value)
+    wb.save(str(path))
+
+
 def _make_minimal_forms_source(root: Path, *lines: str) -> None:
     (root / "datasets").mkdir(parents=True)
     (root / "forms").mkdir(parents=True)
@@ -218,10 +234,10 @@ def _make_minimal_forms_source(root: Path, *lines: str) -> None:
 def _make_canonical_source(root: Path) -> None:
     (root / "datasets").mkdir(parents=True)
     (root / "forms").mkdir(parents=True)
-    (root / "data_dictionary").mkdir(parents=True)
+    (root / "dictionary_mapping").mkdir(parents=True)
     (root / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     _write_pdf(root / "forms" / "consent.pdf", "StudyAlpha Consent Form")
-    _write_workbook(root / "data_dictionary" / "dict.xlsx", [["StudyAlpha", "Dictionary"]])
+    _write_workbook(root / "dictionary_mapping" / "dict.xlsx", [["StudyAlpha", "Dictionary"]])
 
 
 def _synthetic_candidate(
@@ -334,22 +350,32 @@ def test_lexical_source_component_mismatch_is_never_admitted(tmp_path, monkeypat
     mismatched = [
         # logical component says "forms", but it physically lives under datasets/
         _synthetic_candidate("datasets/evil.pdf", source_component="datasets", component="forms"),
-        # logical component says "data_dictionary", but it's lexically _unclassified
-        _synthetic_candidate("_unclassified/evil.csv", source_component="_unclassified", component="data_dictionary"),
-        # both individually supported values, but mismatched from each other
-        _synthetic_candidate("mappings/evil.xlsx", source_component="mappings", component="data_dictionary"),
-        _synthetic_candidate("data_dictionary/evil.csv", source_component="data_dictionary", component="mappings"),
+        # logical component says "dictionary_mapping", but it's lexically _unclassified
+        _synthetic_candidate("_unclassified/evil.csv", source_component="_unclassified", component="dictionary_mapping"),
+        # both individually supported values, but swapped/mismatched from each other
+        _synthetic_candidate("forms/evil.xlsx", source_component="forms", component="dictionary_mapping"),
+        _synthetic_candidate("dictionary_mapping/evil.csv", source_component="dictionary_mapping", component="forms"),
     ]
     preflight = IntakePreflight(tuple(mismatched), (), ())
     opened: list[str] = []
-    monkeypatch.setattr(naming, "open_verified_source", lambda src, rel, **kw: opened.append(rel) or (_ for _ in ()).throw(AssertionError))
+
+    def raising_open(src, rel, **kw):
+        opened.append(rel)
+        raise naming.VerifiedSourceError("source-unreadable")
+
+    monkeypatch.setattr(naming, "open_verified_source", raising_open)
     _forbid_client(monkeypatch)
 
     resolution = naming.resolve_intake_study(
         source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
     )
 
-    assert opened == []
+    # Only the datasets/-sourced synthetic candidate is ever opened -- by
+    # the item-4 fresh dataset-verification scan, which fails closed the
+    # instant it cannot verify a datasets/ candidate, aborting before any
+    # of the three lexically-mismatched support candidates are ever
+    # touched by an admission-filter bug.
+    assert opened == ["datasets/evil.pdf"]
     assert resolution.source == "generated"
 
 
@@ -362,18 +388,38 @@ def test_datasets_and_unclassified_components_are_never_admission_eligible(tmp_p
     ]
     preflight = IntakePreflight(tuple(candidates), (), ())
     _forbid_client(monkeypatch)
-    monkeypatch.setattr(naming, "open_verified_source", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no read")))
+    opened: list[str] = []
+
+    def raising_open(src, rel, **kw):
+        opened.append(rel)
+        raise naming.VerifiedSourceError("source-unreadable")
+
+    monkeypatch.setattr(naming, "open_verified_source", raising_open)
 
     resolution = naming.resolve_intake_study(
         source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
     )
+    # Only the item-4 dataset-verification scan opens datasets/labs.csv
+    # (source_component == "datasets"); _unclassified/odd.json is never
+    # opened at all -- neither by that scan (different source_component)
+    # nor by admission (neither candidate's component is in
+    # _NAMING_COMPONENTS, so neither could ever become naming evidence).
+    assert opened == ["datasets/labs.csv"]
     assert resolution.source == "generated"
 
 
 # --- support-only candidate guard: datasets/_unclassified never open for evidence --------
 
 
-def test_dataset_and_unclassified_candidates_never_open_for_evidence(tmp_path, monkeypatch):
+def test_dataset_candidates_are_hash_verified_but_never_become_evidence(tmp_path, monkeypatch):
+    """datasets/ candidates -- including one preflight reclassified to
+    _unclassified for an unsupported format, since it still shares
+    source_component == "datasets" -- ARE opened by the item-4/5 fresh
+    descriptor-verification scans (their identity/hash must match
+    preflight before any support evidence is trusted), but their content
+    is never read into naming evidence: only the unbounded streaming
+    hash touches them, and _extract_candidate/_collect_evidence never
+    process a datasets/-sourced candidate at all."""
     source = tmp_path / "source"
     _make_canonical_source(source)
     (source / "datasets" / "unsupported.json").write_text("{}", encoding="utf-8")
@@ -398,13 +444,21 @@ def test_dataset_and_unclassified_candidates_never_open_for_evidence(tmp_path, m
         source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
     )
 
-    # Two-phase collection (validate-all, then extract) opens each
-    # admitted candidate up to twice -- once per pass -- so the raw
-    # `opened` sequence is no longer a single sorted run; the first-seen
-    # order (i.e. the order pass 1 visits candidates) still is.
-    assert list(dict.fromkeys(opened)) == sorted(dict.fromkeys(opened))
-    assert all(not p.startswith("datasets/") for p in opened)
+    # datasets/ candidates (including the reclassified _unclassified
+    # unsupported.json, since it is still physically under datasets/ and
+    # so shares source_component == "datasets") ARE opened by the fresh
+    # dataset-verification scans -- but never for evidence content.
+    assert "datasets/labs.csv" in opened
+    assert "datasets/unsupported.json" in opened
+    # A genuinely non-dataset _unclassified path is never opened.
     assert all(not p.startswith("_unclassified") for p in opened)
+    # Two-phase collection (validate-all, then extract) opens each
+    # admitted support candidate up to twice -- once per pass -- so the
+    # support-only subsequence of `opened` is no longer a single sorted
+    # run; the first-seen order (i.e. the order pass 1 visits support
+    # candidates) still is.
+    support_opened = [p for p in opened if not p.startswith("datasets/")]
+    assert list(dict.fromkeys(support_opened)) == sorted(dict.fromkeys(support_opened))
     for prompt in _prompts_sent():
         assert "SUBJID" not in prompt
         assert "labs.csv" not in prompt
@@ -425,14 +479,14 @@ def test_late_dataset_hardlink_created_after_preflight_causes_zero_dispatch(tmp_
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     _write_pdf(source / "forms" / "consent.pdf", "Alpha consent")
-    alias = source / "data_dictionary" / "alias.csv"
+    alias = source / "dictionary_mapping" / "alias.csv"
     alias.write_text("SECRET_HEADER\nsecret-value\n", encoding="utf-8")
 
     preflight = inspect_intake_source(source)
-    assert any(c.relative_path == "data_dictionary/alias.csv" for c in preflight.candidates)
+    assert any(c.relative_path == "dictionary_mapping/alias.csv" for c in preflight.candidates)
 
     # The race: link a NEW dataset dirent to the SAME inode after preflight.
     os.link(alias, source / "datasets" / "late-alias.csv")
@@ -457,10 +511,10 @@ def test_late_hardlink_on_one_of_two_candidates_discards_all_evidence(tmp_path, 
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "labs.csv").write_text("SUBJID\n1\n", encoding="utf-8")
     _write_pdf(source / "forms" / "consent.pdf", "Clean forms content")
-    tampered = source / "data_dictionary" / "tampered.csv"
+    tampered = source / "dictionary_mapping" / "tampered.csv"
     tampered.write_text("A,B\n1,2\n", encoding="utf-8")
 
     preflight = inspect_intake_source(source)
@@ -483,10 +537,10 @@ def test_hardlink_recheck_before_dispatch_catches_a_race_after_collection(tmp_pa
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "labs.csv").write_text("SUBJID\n1\n", encoding="utf-8")
     _write_pdf(source / "forms" / "consent.pdf", "Alpha consent")
-    dict_file = source / "data_dictionary" / "dict.csv"
+    dict_file = source / "dictionary_mapping" / "dict.csv"
     dict_file.write_text("A,B\n1,2\n", encoding="utf-8")
     preflight = inspect_intake_source(source)
 
@@ -521,17 +575,21 @@ def test_hardlink_recheck_before_dispatch_catches_a_race_after_collection(tmp_pa
 def test_symlinked_datasets_directory_after_preflight_fails_closed(tmp_path, monkeypatch):
     """The exact audited PoC: datasets/ is renamed and replaced by a
     directory symlink to the renamed tree after preflight. A fail-open
-    scan would see this as "no dataset identities"; the shared
-    intake_preflight._scan_component_identities primitive must instead
-    report the scan itself as unsafe/inconclusive, which naming must
-    treat identically to a confirmed hardlink alias."""
+    scan would see this as "no dataset identities"; both the pre-
+    existing _current_dataset_identities guard AND the item-4 fresh
+    dataset descriptor-verification scan must instead treat an
+    unsafe/inconclusive/symlink-blocked path identically to a confirmed
+    hardlink alias -- here the item-4 scan is the FIRST to see it (it
+    runs before any support evidence is even collected), so it reports
+    its own fixed source-unreadable error rather than ever reaching the
+    older cross-component-hardlink review path."""
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "labs.csv").write_text("SUBJID\n1\n", encoding="utf-8")
     _write_pdf(source / "forms" / "consent.pdf", "Alpha consent")
-    (source / "data_dictionary" / "dict.csv").write_text("A,B\n1,2\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("A,B\n1,2\n", encoding="utf-8")
     preflight = inspect_intake_source(source)
 
     real_datasets = tmp_path / "elsewhere_datasets"
@@ -544,7 +602,8 @@ def test_symlinked_datasets_directory_after_preflight_fails_closed(tmp_path, mon
     )
     assert FakeHTTPConnection.requests == []
     assert resolution.source == "generated"
-    assert resolution.review_items == ({"path": "", "reason": "cross-component-hardlink", "blocking": True},)
+    assert resolution.review_items == ()
+    assert resolution.errors == ({"path": "datasets/labs.csv", "reason": "source-unreadable"},)
 
 
 def test_dataset_scan_error_fails_closed_not_open(tmp_path, monkeypatch):
@@ -575,10 +634,10 @@ def test_client_first_call_creating_the_hardlink_gets_no_second_call(tmp_path, m
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "labs.csv").write_text("SUBJID\n1\n", encoding="utf-8")
     _write_pdf(source / "forms" / "consent.pdf", "Alpha consent")
-    dict_file = source / "data_dictionary" / "dict.csv"
+    dict_file = source / "dictionary_mapping" / "dict.csv"
     dict_file.write_text("VAR,DESC\n1,2\n", encoding="utf-8")
     preflight = inspect_intake_source(source)
 
@@ -603,6 +662,277 @@ def test_client_first_call_creating_the_hardlink_gets_no_second_call(tmp_path, m
     assert resolution.source == "generated"
     assert resolution.review_items == ({"path": "", "reason": "cross-component-hardlink", "blocking": True},)
 
+
+# --- item 4/5: fresh dataset descriptor/hash snapshot, real filesystem races --------------
+
+
+def test_dataset_mutation_before_pre_extraction_scan_yields_zero_model_calls(tmp_path, monkeypatch):
+    """Item 4's real-filesystem race: preflight admits a clean dataset
+    and a clean dictionary_mapping candidate; the DATASET is then
+    mutated for real (same byte length, mtime restored to the exact
+    preflight-recorded value, defeating open_verified_source's own
+    identity check alone) BEFORE resolve_intake_study is ever called --
+    landing exactly in the window between preflight and item 4's
+    pre-extraction dataset-verification scan, naming's very first read.
+    No scan/hash primitive is mocked; the mutation is a real overwrite
+    plus a real os.utime restoration."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
+    dataset_path = source / "datasets" / "labs.csv"
+    dataset_path.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("VAR,DESC\n1,2\n", encoding="utf-8")
+    preflight = inspect_intake_source(source)
+    dataset_candidate = next(c for c in preflight.candidates if c.relative_path == "datasets/labs.csv")
+    expected_mtime_ns = dataset_candidate.identity.mtime_ns
+
+    mutated = dataset_path.read_bytes().replace(b"1,40", b"9,99")
+    assert len(mutated) == dataset_candidate.identity.size
+    dataset_path.write_bytes(mutated)
+    os.utime(dataset_path, ns=(expected_mtime_ns, expected_mtime_ns))
+    post = os.stat(dataset_path)
+    assert post.st_ino == dataset_candidate.identity.inode
+    assert post.st_size == dataset_candidate.identity.size
+    assert post.st_mtime_ns == expected_mtime_ns  # identity alone would see this as unchanged
+
+    _forbid_client(monkeypatch)
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+
+    assert FakeHTTPConnection.requests == []
+    assert resolution.source == "generated"
+    assert resolution.review_items == ()
+    assert resolution.errors == ({"path": "datasets/labs.csv", "reason": "source-unreadable"},)
+
+
+def test_dataset_mutation_between_extraction_and_pre_dispatch_scan_yields_zero_model_calls(tmp_path, monkeypatch):
+    """Item 5's real-filesystem race: the SAME kind of real, restored-
+    mtime dataset mutation, but timed to land AFTER naming has already
+    collected and parsed clean support evidence (forms + dictionary_
+    mapping both pass the item-4 pre-extraction scan and are fully
+    extracted), and BEFORE the first pre-dispatch scan -- proving the
+    pre-dispatch recheck independently catches a race the pre-extraction
+    scan could not have seen (it hadn't happened yet). No scan/hash
+    primitive itself is mocked or replaced; only the call boundary
+    around the real _collect_evidence is used to land the real mutation
+    at the right moment, mirroring this suite's existing between-
+    checkpoint race convention (see
+    test_hardlink_recheck_before_dispatch_catches_a_race_after_collection)."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "forms").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
+    dataset_path = source / "datasets" / "labs.csv"
+    dataset_path.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    _write_pdf(source / "forms" / "consent.pdf", "Alpha consent")
+    (source / "dictionary_mapping" / "dict.csv").write_text("VAR,DESC\n1,2\n", encoding="utf-8")
+    preflight = inspect_intake_source(source)
+    dataset_candidate = next(c for c in preflight.candidates if c.relative_path == "datasets/labs.csv")
+    expected_mtime_ns = dataset_candidate.identity.mtime_ns
+
+    real_collect_evidence = naming._collect_evidence
+
+    def mutate_after_collection(src, admitted):
+        result = real_collect_evidence(src, admitted)
+        mutated = dataset_path.read_bytes().replace(b"1,40", b"9,99")
+        dataset_path.write_bytes(mutated)
+        os.utime(dataset_path, ns=(expected_mtime_ns, expected_mtime_ns))
+        return result
+
+    monkeypatch.setattr(naming, "_collect_evidence", mutate_after_collection)
+    _forbid_client(monkeypatch)
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+
+    post = os.stat(dataset_path)
+    assert post.st_ino == dataset_candidate.identity.inode
+    assert post.st_mtime_ns == expected_mtime_ns  # identity alone would see this as unchanged
+
+    assert FakeHTTPConnection.requests == []
+    assert resolution.source == "generated"
+    assert resolution.errors == ()
+    assert resolution.review_items == ({"path": "", "reason": "cross-component-hardlink", "blocking": True},)
+
+
+def test_dataset_byte_identical_support_copy_yields_zero_parser_calls_before_extraction(tmp_path, monkeypatch):
+    """Item 4's own independent, defense-in-depth exclusion: a support
+    candidate whose bytes are already byte-for-byte identical to a
+    verified dataset's bytes -- an independent lexical copy, not a
+    hardlink -- reaches zero PARSER calls (not merely zero dispatch),
+    even in the hypothetical where preflight's own phase-2 cross-
+    component-dataset-copy quarantine did not already downgrade it.
+    Simulated exactly like this suite's existing 'poisoned preflight'
+    pattern (see test_symlink_naming_candidate_is_rejected_before_read)
+    so naming's OWN check is what is actually exercised, never merely
+    relying on preflight having already caught it."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
+    dataset_bytes = "SUBJID,AGE\n1,40\n"
+    (source / "datasets" / "labs.csv").write_text(dataset_bytes, encoding="utf-8")
+    (source / "dictionary_mapping" / "copy.csv").write_text(dataset_bytes, encoding="utf-8")
+    preflight = inspect_intake_source(source)
+
+    dataset_candidate = next(c for c in preflight.candidates if c.relative_path == "datasets/labs.csv")
+    real_copy_candidate = next(c for c in preflight.candidates if c.relative_path == "dictionary_mapping/copy.csv")
+    # Confirms the fixture premise: preflight's own phase-2 quarantine
+    # already caught this byte-identical, non-hardlinked copy.
+    assert real_copy_candidate.component == "_unclassified"
+    assert real_copy_candidate.sha256 == dataset_candidate.sha256
+    assert real_copy_candidate.identity.inode != dataset_candidate.identity.inode  # a copy, not a hardlink
+
+    # Simulate the hypothetical where preflight's own quarantine did NOT
+    # already downgrade it -- naming's own independent SHA-based
+    # exclusion must still hold on its own.
+    reclassified = real_copy_candidate.__class__(
+        relative_path=real_copy_candidate.relative_path,
+        source_component=real_copy_candidate.source_component,
+        component="dictionary_mapping",
+        identity=real_copy_candidate.identity,
+        sha256=real_copy_candidate.sha256,
+        sheet_count=real_copy_candidate.sheet_count,
+    )
+    poisoned_preflight = IntakePreflight((dataset_candidate, reclassified), (), ())
+
+    extraction_calls = {"n": 0}
+    real_extract_csv = naming._extract_csv_rows
+
+    def counting_extract_csv(stream):
+        extraction_calls["n"] += 1
+        return real_extract_csv(stream)
+
+    monkeypatch.setattr(naming, "_extract_csv_rows", counting_extract_csv)
+    _forbid_client(monkeypatch)
+    resolution = naming.resolve_intake_study(
+        source, poisoned_preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+
+    assert extraction_calls["n"] == 0
+    assert resolution.source == "generated"
+    assert resolution.review_items == ()
+    assert resolution.errors == ()
+
+
+def test_support_candidate_content_swapped_to_dataset_bytes_before_dispatch_yields_zero_model_calls(
+    tmp_path, monkeypatch
+):
+    """Item 5's SHA-intersection re-check must compare a support
+    candidate's LIVE current bytes against a fresh dataset re-scan, not
+    just its static preflight-recorded ``candidate.sha256`` -- those two
+    are the same value at admission time by definition, so comparing a
+    fresh dataset hash against a STATIC support hash can never observe a
+    race that happens strictly AFTER admission. Here a clean, legitimate
+    dictionary_mapping candidate is admitted and fully extracted (real
+    evidence collected from its ORIGINAL bytes), then -- after
+    collection, before dispatch -- its on-disk bytes are overwritten to
+    be byte-for-byte identical to a dataset file's bytes, with size and
+    mtime restored to its own original identity (defeating
+    open_verified_source's identity check alone). Only a genuinely LIVE
+    re-hash of the support candidate's current bytes at dispatch time --
+    not a comparison against its stale preflight-recorded hash -- can
+    catch this."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
+    dataset_content = b"SUBJID,AGE\n1,40\n"
+    base_support = b"VAR,DESC\n1,2\n"
+    padding = len(dataset_content) - len(base_support)
+    assert padding > 0
+    support_original = base_support + b"\n" * padding
+    assert len(support_original) == len(dataset_content)
+
+    (source / "datasets" / "labs.csv").write_bytes(dataset_content)
+    support_path = source / "dictionary_mapping" / "legit.csv"
+    support_path.write_bytes(support_original)
+    preflight = inspect_intake_source(source)
+    support_candidate = next(c for c in preflight.candidates if c.relative_path == "dictionary_mapping/legit.csv")
+    assert support_candidate.component == "dictionary_mapping"  # not already excluded/quarantined
+    expected_mtime_ns = support_candidate.identity.mtime_ns
+
+    real_collect_evidence = naming._collect_evidence
+
+    def swap_support_content_after_collection(src, admitted):
+        result = real_collect_evidence(src, admitted)
+        support_path.write_bytes(dataset_content)  # now byte-identical to the dataset
+        os.utime(support_path, ns=(expected_mtime_ns, expected_mtime_ns))
+        return result
+
+    monkeypatch.setattr(naming, "_collect_evidence", swap_support_content_after_collection)
+    _forbid_client(monkeypatch)
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+
+    post = os.stat(support_path)
+    assert post.st_ino == support_candidate.identity.inode
+    assert post.st_size == support_candidate.identity.size
+    assert post.st_mtime_ns == expected_mtime_ns  # identity alone would see this as unchanged
+
+    assert FakeHTTPConnection.requests == []
+    assert resolution.source == "generated"
+    assert resolution.errors == ()
+    assert resolution.review_items == ({"path": "", "reason": "cross-component-hardlink", "blocking": True},)
+
+
+def test_dataset_scan_failure_after_earlier_dataset_already_verified_leaks_no_partial_state(tmp_path, monkeypatch):
+    """_verify_dataset_snapshot iterates every preflight-known
+    ``datasets/`` candidate in sequence; when a LATER file's hash has
+    drifted after an EARLIER file was already successfully opened and
+    hashed, the scan must still return the fixed empty-set failure
+    contract -- never leak the already-verified earlier file's
+    identity/hash into a caller-visible partial result. A spy on
+    ``open_verified_source`` proves BOTH dataset files were genuinely
+    opened, in order, before the scan failed -- so this is a real
+    mid-scan failure, not merely a first-file failure."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
+    (source / "datasets" / "a_labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    z_path = source / "datasets" / "z_vitals.csv"
+    z_path.write_text("SUBJID,BP\n1,120\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("VAR,DESC\n1,2\n", encoding="utf-8")
+    preflight = inspect_intake_source(source)
+    z_candidate = next(c for c in preflight.candidates if c.relative_path == "datasets/z_vitals.csv")
+    expected_mtime_ns = z_candidate.identity.mtime_ns
+
+    # TOCTOU: z_vitals.csv's content drifts after preflight, size and
+    # mtime restored to defeat open_verified_source's identity check
+    # alone -- only the fresh content hash inside _verify_dataset_snapshot
+    # can catch it.
+    mutated = z_path.read_bytes().replace(b"1,120", b"9,999")
+    assert len(mutated) == z_candidate.identity.size
+    z_path.write_bytes(mutated)
+    os.utime(z_path, ns=(expected_mtime_ns, expected_mtime_ns))
+
+    opened_paths: list[str] = []
+    real_open = naming.open_verified_source
+
+    def spying_open(src, rel_path, **kwargs):
+        opened_paths.append(rel_path)
+        return real_open(src, rel_path, **kwargs)
+
+    monkeypatch.setattr(naming, "open_verified_source", spying_open)
+    _forbid_client(monkeypatch)
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+
+    # Both dataset candidates were genuinely opened, a_labs.csv (which
+    # verifies cleanly) strictly before z_vitals.csv (which fails) --
+    # proving this is a real mid-scan failure, not a first-file-only one.
+    dataset_opens = [p for p in opened_paths if p.startswith("datasets/")]
+    assert dataset_opens.index("datasets/a_labs.csv") < dataset_opens.index("datasets/z_vitals.csv")
+    # dict.csv (the support candidate) was NEVER opened at all -- the
+    # item-4 scan aborts the whole attempt before any support evidence
+    # is ever read.
+    assert "dictionary_mapping/dict.csv" not in opened_paths
+
+    assert FakeHTTPConnection.requests == []
+    assert resolution.source == "generated"
+    assert resolution.errors == ({"path": "datasets/z_vitals.csv", "reason": "source-unreadable"},)
+    assert resolution.review_items == ()
 
 # --- identity/hash drift: candidate excluded, zero dispatch when it's the only one -------
 
@@ -655,15 +985,15 @@ def test_validation_completes_for_every_candidate_before_any_extraction_begins(t
     found only after earlier content was parsed'): validation is a
     complete pass over EVERY admitted candidate before extraction ever
     begins for ANY of them. A lexically-earlier, otherwise-clean
-    candidate (``data_dictionary/dict.csv``) must never be parsed just
+    candidate (``dictionary_mapping/dict.csv``) must never be parsed just
     because a lexically-later candidate's (``forms/z.pdf``) safety
     failure is only discovered afterward."""
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     _write_pdf(source / "forms" / "z.pdf", "hello")  # sorts AFTER dict.csv
-    (source / "data_dictionary" / "dict.csv").write_text("VAR\n1\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("VAR\n1\n", encoding="utf-8")
     preflight = inspect_intake_source(source)
     assert preflight.candidates[0].relative_path < preflight.candidates[1].relative_path
 
@@ -700,14 +1030,14 @@ def test_cross_component_hardlink_preflight_finding_aborts_naming_with_zero_read
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     dataset_file = source / "datasets" / "labs.csv"
     dataset_file.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
-    os.link(dataset_file, source / "data_dictionary" / "aliased.csv")
+    os.link(dataset_file, source / "dictionary_mapping" / "aliased.csv")
     _write_pdf(source / "forms" / "consent.pdf", "hello")
     preflight = inspect_intake_source(source)
     assert any(item["reason"] == "cross-component-hardlink" for item in preflight.review_items)
-    assert not any(c.component == "data_dictionary" for c in preflight.candidates)
+    assert not any(c.component == "dictionary_mapping" for c in preflight.candidates)
 
     monkeypatch.setattr(naming, "open_verified_source", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not open")))
     _forbid_client(monkeypatch)
@@ -733,11 +1063,11 @@ def test_preflight_trust_error_aborts_naming_with_zero_reads_and_zero_calls(tmp_
     preflight error for an unrelated path."""
     source = tmp_path / "source"
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     _write_pdf(source / "forms" / "consent.pdf", "hello")
-    _write_workbook(source / "data_dictionary" / "dict.xlsx", [["a", "b"]])
+    _write_workbook(source / "dictionary_mapping" / "dict.xlsx", [["a", "b"]])
     preflight = inspect_intake_source(source)
-    assert any(c.component == "data_dictionary" for c in preflight.candidates)
+    assert any(c.component == "dictionary_mapping" for c in preflight.candidates)
 
     poisoned_preflight = IntakePreflight(
         preflight.candidates,
@@ -759,20 +1089,20 @@ def test_preflight_trust_error_aborts_naming_with_zero_reads_and_zero_calls(tmp_
 def test_symlink_naming_candidate_is_rejected_before_read(tmp_path, monkeypatch):
     source = tmp_path / "source"
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
-    real = source / "data_dictionary" / "real.xlsx"
+    (source / "dictionary_mapping").mkdir(parents=True)
+    real = source / "dictionary_mapping" / "real.xlsx"
     _write_workbook(real, [["a", "b"]])
     _write_pdf(source / "forms" / "consent.pdf", "hello")
     preflight = inspect_intake_source(source)
     # Simulate a post-preflight symlink swap by handing naming a candidate
     # whose relative_path now points at a symlink placed after the fact.
-    link = source / "data_dictionary" / "swapped.xlsx"
+    link = source / "dictionary_mapping" / "swapped.xlsx"
     link.symlink_to(real)
-    candidate = next(c for c in preflight.candidates if c.component == "data_dictionary")
+    candidate = next(c for c in preflight.candidates if c.component == "dictionary_mapping")
     swapped = candidate.__class__(
-        relative_path="data_dictionary/swapped.xlsx",
-        source_component="data_dictionary",
-        component="data_dictionary",
+        relative_path="dictionary_mapping/swapped.xlsx",
+        source_component="dictionary_mapping",
+        component="dictionary_mapping",
         identity=candidate.identity,
         sha256=candidate.sha256,
         sheet_count=candidate.sheet_count,
@@ -824,11 +1154,11 @@ def test_oversized_candidate_with_late_hardlink_reports_hardlink_not_size_limit(
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "labs.csv").write_text("SUBJID\n1\n", encoding="utf-8")
     big = source / "forms" / "huge.pdf"
     big.write_bytes(b"0" * (naming._MAX_DOCUMENT_BYTES + 1))
-    (source / "data_dictionary" / "dict.csv").write_text("VAR,DESC\n1,2\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("VAR,DESC\n1,2\n", encoding="utf-8")
     preflight = inspect_intake_source(source)
     assert any(c.relative_path == "forms/huge.pdf" for c in preflight.candidates)
 
@@ -859,11 +1189,11 @@ def test_late_hardlink_on_oversized_noncontributing_candidate_yields_zero_dispat
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     (source / "datasets" / "labs.csv").write_text("SUBJID\n1\n", encoding="utf-8")
     huge = source / "forms" / "huge.pdf"
     huge.write_bytes(b"0" * 33)  # exceeds the reduced 32-byte cap
-    (source / "data_dictionary" / "dict.csv").write_text("VAR,DESC\n1,2\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("VAR,DESC\n1,2\n", encoding="utf-8")
     preflight = inspect_intake_source(source)
     assert any(c.relative_path == "forms/huge.pdf" for c in preflight.candidates)
 
@@ -931,16 +1261,16 @@ def test_between_pass_mutation_with_restored_identity_and_size_is_rejected(tmp_p
     open and at post-read context exit) pass cleanly. Only pass 2's own
     fresh SHA-256 recheck against ``candidate.sha256``, performed before
     any parser call, can catch it. Exact reproduction of the audited PoC:
-    a data_dictionary candidate is rewritten with same-length content
+    a dictionary_mapping candidate is rewritten with same-length content
     between pass 1 and pass 2."""
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
-    dict_path = source / "data_dictionary" / "dict.csv"
+    (source / "dictionary_mapping").mkdir(parents=True)
+    dict_path = source / "dictionary_mapping" / "dict.csv"
     dict_path.write_text("VAR,DESC\n1,SAFE\n", encoding="utf-8")
     preflight = inspect_intake_source(source)
     candidate = preflight.candidates[0]
-    assert candidate.relative_path == "data_dictionary/dict.csv"
+    assert candidate.relative_path == "dictionary_mapping/dict.csv"
     expected_mtime_ns = candidate.identity.mtime_ns
 
     real_validate = naming._validate_candidate
@@ -977,7 +1307,7 @@ def test_between_pass_mutation_with_restored_identity_and_size_is_rejected(tmp_p
     assert FakeHTTPConnection.requests == []
     assert resolution.source == "generated"
     assert resolution.review_items == ()
-    assert resolution.errors == ({"path": "data_dictionary/dict.csv", "reason": "source-unreadable"},)
+    assert resolution.errors == ({"path": "dictionary_mapping/dict.csv", "reason": "source-unreadable"},)
 
 
 # --- exact readers/order/canonical JSON (public behavior) ---------------------------------
@@ -1011,8 +1341,8 @@ def test_forms_evidence_is_ordered_bounded_and_canonical(tmp_path, monkeypatch):
 def test_dictionary_mapping_evidence_exact_canonical_snapshot(tmp_path, monkeypatch):
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
-    (source / "data_dictionary" / "dict.csv").write_text("VAR,DESC\nAGE,Age in years\n", encoding="utf-8")
+    (source / "dictionary_mapping").mkdir(parents=True)
+    (source / "dictionary_mapping" / "dict.csv").write_text("VAR,DESC\nAGE,Age in years\n", encoding="utf-8")
     preflight = inspect_intake_source(source)
 
     _install_fake_client(monkeypatch, _queue_dispatch(("StudyAlpha", _ACCEPT_CONF)))
@@ -1024,20 +1354,19 @@ def test_dictionary_mapping_evidence_exact_canonical_snapshot(tmp_path, monkeypa
     assert len(prompts) == 1
     assert prompts[0] == naming._PROMPT_PREFIX + (
         '{"component":"dictionary_mapping","documents":'
-        '[{"index":1,"kind":"data_dictionary","sheets":'
+        '[{"index":1,"sheets":'
         '[{"index":1,"rows":[["VAR","DESC"],["AGE","Age in years"]]}]}]}'
     )
     assert resolution.name == "StudyAlpha"
     assert resolution.source == "ai"
 
 
-def test_dictionary_mapping_evidence_mixes_csv_and_xlsx_with_kind(tmp_path, monkeypatch):
+def test_dictionary_mapping_evidence_mixes_csv_and_xlsx(tmp_path, monkeypatch):
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
-    (source / "mappings").mkdir(parents=True)
-    (source / "data_dictionary" / "dict.csv").write_text("VAR,DESC\nAGE,Age in years\n", encoding="utf-8")
-    _write_workbook(source / "mappings" / "map.xlsx", [["code", "label"], ["1", "male"]])
+    (source / "dictionary_mapping").mkdir(parents=True)
+    (source / "dictionary_mapping" / "a_dict.csv").write_text("VAR,DESC\nAGE,Age in years\n", encoding="utf-8")
+    _write_workbook(source / "dictionary_mapping" / "b_map.xlsx", [["code", "label"], ["1", "male"]])
     preflight = inspect_intake_source(source)
 
     _install_fake_client(monkeypatch, _queue_dispatch(("StudyAlpha", _ACCEPT_CONF)))
@@ -1049,8 +1378,7 @@ def test_dictionary_mapping_evidence_mixes_csv_and_xlsx_with_kind(tmp_path, monk
     assert len(prompts) == 1
     evidence = _evidence_from_prompt(prompts[0])
     assert evidence["component"] == "dictionary_mapping"
-    # POSIX candidate order: data_dictionary/ sorts before mappings/
-    assert [d["kind"] for d in evidence["documents"]] == ["data_dictionary", "mappings"]
+    # POSIX candidate order: a_dict.csv sorts before b_map.xlsx
     assert evidence["documents"][0]["sheets"][0]["rows"] == [["VAR", "DESC"], ["AGE", "Age in years"]]
     xlsx_rows = evidence["documents"][1]["sheets"][0]["rows"]
     assert [row[:2] for row in xlsx_rows] == [["code", "label"], ["1", "male"]]
@@ -1060,13 +1388,103 @@ def test_dictionary_mapping_evidence_mixes_csv_and_xlsx_with_kind(tmp_path, monk
     assert resolution.source == "ai"
 
 
+# --- .xls dictionary_mapping dispatch: real xlwt bytes through xls_isolation -------------
+
+
+def test_xls_dictionary_mapping_candidate_is_dispatched_through_xls_isolation(tmp_path, monkeypatch):
+    """Regression for the naming dispatch bug: prior to this fix, every
+    admitted dictionary_mapping candidate that was not ``.csv`` fell
+    through to ``_extract_xlsx_sheets`` (openpyxl) unconditionally --
+    including a real ``.xls`` (legacy BIFF) candidate, which openpyxl
+    cannot parse (a zip-format assumption ``.xls`` never satisfies),
+    silently collapsing to ``support-evidence-limit`` instead of ever
+    reaching the isolated ``xls_isolation`` worker boundary. This test
+    fails against the pre-fix dispatch (evidence never reaches the
+    prompt, review_items carries a spurious support-evidence-limit
+    entry) and passes once ``.xls`` is dispatched to
+    ``xls_isolation.extract_xls_naming`` like every other admitted
+    format."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
+    _write_xls(source / "dictionary_mapping" / "dict.xls", [["VAR", "DESC"], ["AGE", "Age in years"]])
+    preflight = inspect_intake_source(source)
+    assert any(
+        c.relative_path == "dictionary_mapping/dict.xls" and c.component == "dictionary_mapping"
+        for c in preflight.candidates
+    )
+
+    _install_fake_client(monkeypatch, _queue_dispatch(("StudyXls", _ACCEPT_CONF)))
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+
+    prompts = _prompts_sent()
+    assert len(prompts) == 1
+    evidence = _evidence_from_prompt(prompts[0])
+    assert evidence["component"] == "dictionary_mapping"
+    assert evidence["documents"][0]["sheets"][0]["rows"] == [["VAR", "DESC"], ["AGE", "Age in years"]]
+    assert resolution.name == "StudyXls"
+    assert resolution.review_items == ()
+
+
+def test_xls_worker_failure_collapses_to_support_evidence_limit(tmp_path, monkeypatch):
+    """``xls_isolation.XlsWorkerError``/``XlsIsolationError`` raised by
+    ``extract_xls_naming`` at naming time (for example a transient
+    isolation failure after preflight already validated the same bytes)
+    must collapse to the fixed ``support-evidence-limit`` code -- never a
+    raw XLS exception, its code, or its message escaping this module."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
+    _write_xls(source / "dictionary_mapping" / "dict.xls", [["VAR", "DESC"]])
+    preflight = inspect_intake_source(source)
+
+    def failing_extract(data, expected_sha256):
+        raise xls_isolation.XlsWorkerError("resource-limit")
+
+    monkeypatch.setattr(naming.xls_isolation, "extract_xls_naming", failing_extract)
+    _forbid_client(monkeypatch)
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+    assert resolution.review_items == (
+        {"path": "dictionary_mapping/dict.xls", "reason": "support-evidence-limit", "blocking": True},
+    )
+    assert resolution.source == "generated"
+
+
+def test_xls_isolation_error_also_collapses_to_support_evidence_limit(tmp_path, monkeypatch):
+    """Symmetric to the worker-error case: a parent-level
+    ``XlsIsolationError`` (e.g. ``isolation-unavailable``) must collapse
+    to the same fixed code, not leak its own distinct value."""
+    source = tmp_path / "source"
+    (source / "datasets").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
+    _write_xls(source / "dictionary_mapping" / "dict.xls", [["VAR", "DESC"]])
+    preflight = inspect_intake_source(source)
+
+    def failing_extract(data, expected_sha256):
+        raise xls_isolation.XlsIsolationError("isolation-unavailable")
+
+    monkeypatch.setattr(naming.xls_isolation, "extract_xls_naming", failing_extract)
+    _forbid_client(monkeypatch)
+    resolution = naming.resolve_intake_study(
+        source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
+    )
+    assert resolution.review_items == (
+        {"path": "dictionary_mapping/dict.xls", "reason": "support-evidence-limit", "blocking": True},
+    )
+    assert resolution.source == "generated"
+
+
 def test_combined_evidence_exact_canonical_snapshot_forms_first(tmp_path, monkeypatch):
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     _write_pdf(source / "forms" / "consent.pdf", "Alpha consent")
-    (source / "data_dictionary" / "dict.csv").write_text("VAR,DESC\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("VAR,DESC\n", encoding="utf-8")
     preflight = inspect_intake_source(source)
     _install_fake_client(
         monkeypatch, _queue_dispatch((None, _REJECT_CONF), (None, _REJECT_CONF), ("StudyCombined", _ACCEPT_CONF))
@@ -1079,7 +1497,7 @@ def test_combined_evidence_exact_canonical_snapshot_forms_first(tmp_path, monkey
     assert len(prompts) == 3
     assert prompts[2] == naming._PROMPT_PREFIX + (
         '{"component":"combined",'
-        '"dictionary_mapping":[{"index":1,"kind":"data_dictionary","sheets":[{"index":1,"rows":[["VAR","DESC"]]}]}],'
+        '"dictionary_mapping":[{"index":1,"sheets":[{"index":1,"rows":[["VAR","DESC"]]}]}],'
         '"forms":[{"index":1,"pages":["Alpha consent"]}]}'
     )
     assert resolution.name == "StudyCombined"
@@ -1142,7 +1560,7 @@ def test_pdf_reader_caps_at_two_pages_in_order():
         pdf.drawString(72, 720, text)
         pdf.showPage()
     pdf.save()
-    pages = naming._extract_pdf_pages(io.BytesIO(buf.getvalue()))
+    pages = naming._extract_pdf_pages(buf.getvalue())
     assert len(pages) == 2
     assert pages[0].strip().startswith("Page One")
     assert pages[1].strip().startswith("Page Two")
@@ -1283,7 +1701,7 @@ def test_hung_pdf_worker_is_terminated_or_killed_never_leaked(monkeypatch, respo
     monkeypatch.setattr(naming, "_PDF_WORKER_MAX_WALL_SECONDS", 0)
 
     with pytest.raises(naming._EvidenceLimitError):
-        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+        naming._extract_pdf_pages(b"%PDF-1.4 minimal")
 
     assert len(fake_context.processes) == 1
     process = fake_context.processes[0]
@@ -1545,7 +1963,7 @@ def test_extract_pdf_pages_rejects_malicious_worker_reply_end_to_end(monkeypatch
     accepting or partially trusting it."""
     monkeypatch.setattr(naming, "_PDF_WORKER_CONTEXT", _ImmediateReplyContext(payload))
     with pytest.raises(naming._EvidenceLimitError):
-        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+        naming._extract_pdf_pages(b"%PDF-1.4 minimal")
 
 
 # --- parent lifecycle: raw exceptions normalize; the wall deadline is single and shared ---
@@ -1645,7 +2063,7 @@ def test_worker_start_raw_exception_normalizes_with_zero_live_child(monkeypatch)
     monkeypatch.setattr(naming, "_PDF_WORKER_CONTEXT", ctx)
 
     with pytest.raises(naming._EvidenceLimitError):
-        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+        naming._extract_pdf_pages(b"%PDF-1.4 minimal")
 
     assert not process.is_alive()
     assert process.closed
@@ -1664,7 +2082,7 @@ def test_worker_poll_raw_exception_still_reaps_and_normalizes(monkeypatch):
     monkeypatch.setattr(naming, "_PDF_WORKER_CONTEXT", ctx)
 
     with pytest.raises(naming._EvidenceLimitError):
-        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+        naming._extract_pdf_pages(b"%PDF-1.4 minimal")
 
     assert process.terminate_called
     assert not process.is_alive()
@@ -1684,7 +2102,7 @@ def test_worker_terminate_raw_exception_still_escalates_to_kill(monkeypatch):
     monkeypatch.setattr(naming, "_PDF_WORKER_CONTEXT", ctx)
 
     with pytest.raises(naming._EvidenceLimitError):
-        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+        naming._extract_pdf_pages(b"%PDF-1.4 minimal")
 
     assert process.terminate_called
     assert process.kill_called
@@ -1703,7 +2121,7 @@ def test_worker_kill_raw_exception_never_crashes_the_parent(monkeypatch):
     monkeypatch.setattr(naming, "_PDF_WORKER_CONTEXT", ctx)
 
     with pytest.raises(naming._EvidenceLimitError):
-        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+        naming._extract_pdf_pages(b"%PDF-1.4 minimal")
 
     assert process.terminate_called
     assert process.kill_called
@@ -1728,7 +2146,7 @@ def test_wall_deadline_is_shared_between_poll_and_join_not_doubled(monkeypatch):
 
     started_at = time.monotonic()
     with pytest.raises(naming._EvidenceLimitError):
-        naming._extract_pdf_pages(io.BytesIO(b"%PDF-1.4 minimal"))
+        naming._extract_pdf_pages(b"%PDF-1.4 minimal")
     elapsed = time.monotonic() - started_at
 
     assert len(parent_conn.poll_calls) == 1
@@ -1755,7 +2173,7 @@ def test_fragment_codepoint_limit_rejects_rather_than_truncates():
     pdf.drawString(10, 750, long_text)
     pdf.save()
     with pytest.raises(naming._EvidenceLimitError):
-        naming._extract_pdf_pages(io.BytesIO(buf.getvalue()))
+        naming._extract_pdf_pages(buf.getvalue())
 
 
 def test_csv_field_byte_limit_is_enforced():
@@ -1916,11 +2334,11 @@ def test_xlsx_lazy_worksheet_iteration_failure_is_evidence_limit_not_a_leak():
 def test_malformed_xlsx_end_to_end_produces_fixed_review_not_a_crash(tmp_path, monkeypatch):
     """A malformed cell reference lives inside worksheet XML, which
     preflight's own workbook.xml-only sheet count never inspects -- this
-    candidate reaches naming as a clean-looking admitted data_dictionary
+    candidate reaches naming as a clean-looking admitted dictionary_mapping
     file, and only naming's fuller openpyxl load+iterate trips over it."""
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     content_types = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
@@ -1961,12 +2379,12 @@ def test_malformed_xlsx_end_to_end_produces_fixed_review_not_a_crash(tmp_path, m
         zf.writestr("xl/workbook.xml", workbook_xml)
         zf.writestr("xl/_rels/workbook.xml.rels", wbrels)
         zf.writestr("xl/worksheets/sheet1.xml", sheet1)
-    (source / "data_dictionary" / "malformed.xlsx").write_bytes(buf.getvalue())
+    (source / "dictionary_mapping" / "malformed.xlsx").write_bytes(buf.getvalue())
     preflight = inspect_intake_source(source)
     # Confirms the fixture premise: preflight's workbook.xml-only sheet
-    # count admits this as a clean data_dictionary candidate.
+    # count admits this as a clean dictionary_mapping candidate.
     assert any(
-        c.relative_path == "data_dictionary/malformed.xlsx" and c.component == "data_dictionary"
+        c.relative_path == "dictionary_mapping/malformed.xlsx" and c.component == "dictionary_mapping"
         for c in preflight.candidates
     )
 
@@ -1976,7 +2394,7 @@ def test_malformed_xlsx_end_to_end_produces_fixed_review_not_a_crash(tmp_path, m
     )
     assert resolution.source == "generated"
     assert resolution.review_items == (
-        {"path": "data_dictionary/malformed.xlsx", "reason": "support-evidence-limit", "blocking": True},
+        {"path": "dictionary_mapping/malformed.xlsx", "reason": "support-evidence-limit", "blocking": True},
     )
     dumped = json.dumps(resolution.review_items)
     assert "PHI123-45-6789" not in dumped
@@ -2015,11 +2433,11 @@ def test_forms_truncation_boundary_is_maximal_not_just_within_budget(tmp_path, m
 
 
 def test_dictionary_truncation_boundary_is_maximal(tmp_path, monkeypatch):
-    monkeypatch.setattr(naming, "_MAX_EVIDENCE_BYTES", 140)
+    monkeypatch.setattr(naming, "_MAX_EVIDENCE_BYTES", 130)
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
-    (source / "data_dictionary" / "a_dict.csv").write_text("AAAA,BBBB\n1111,2222\n3333,4444\n", encoding="utf-8")
+    (source / "dictionary_mapping").mkdir(parents=True)
+    (source / "dictionary_mapping" / "a_dict.csv").write_text("AAAA,BBBB\n1111,2222\n3333,4444\n", encoding="utf-8")
     preflight = inspect_intake_source(source)
     _install_fake_client(monkeypatch, _queue_dispatch((None, 0.0)))
     naming.resolve_intake_study(
@@ -2028,7 +2446,7 @@ def test_dictionary_truncation_boundary_is_maximal(tmp_path, monkeypatch):
     prompts = _prompts_sent()
     evidence = _evidence_from_prompt(prompts[0])
     encoded = prompts[0][len(naming._PROMPT_PREFIX) :].encode("utf-8")
-    assert len(encoded) <= 140
+    assert len(encoded) <= 130
     kept_rows = evidence["documents"][0]["sheets"][0]["rows"] if evidence["documents"] else []
     all_rows = [["AAAA", "BBBB"], ["1111", "2222"], ["3333", "4444"]]
     assert kept_rows == all_rows[: len(kept_rows)]
@@ -2036,9 +2454,9 @@ def test_dictionary_truncation_boundary_is_maximal(tmp_path, monkeypatch):
     trial_rows = kept_rows + [all_rows[len(kept_rows)]]
     trial_payload = {
         "component": "dictionary_mapping",
-        "documents": [{"index": 1, "kind": "data_dictionary", "sheets": [{"index": 1, "rows": trial_rows}]}],
+        "documents": [{"index": 1, "sheets": [{"index": 1, "rows": trial_rows}]}],
     }
-    assert len(json.dumps(trial_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > 140
+    assert len(json.dumps(trial_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > 130
 
 
 def test_combined_truncation_boundary_is_maximal_forms_then_dict(tmp_path, monkeypatch):
@@ -2046,9 +2464,9 @@ def test_combined_truncation_boundary_is_maximal_forms_then_dict(tmp_path, monke
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     _write_pdf(source / "forms" / "consent.pdf", "FORMSFORMSFORMS")
-    (source / "data_dictionary" / "dict.csv").write_text("DICTDICT,ROWROW\n1,2\n3,4\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("DICTDICT,ROWROW\n1,2\n3,4\n", encoding="utf-8")
     preflight = inspect_intake_source(source)
     _install_fake_client(monkeypatch, _queue_dispatch((None, 0.0), (None, 0.0), (None, 0.0)))
     naming.resolve_intake_study(
@@ -2069,7 +2487,7 @@ def test_combined_truncation_boundary_is_maximal_forms_then_dict(tmp_path, monke
     # Maximality: appending even the FIRST dict row would exceed the cap.
     trial = dict(evidence)
     trial["dictionary_mapping"] = [
-        {"index": 1, "kind": "data_dictionary", "sheets": [{"index": 1, "rows": [["DICTDICT", "ROWROW"]]}]}
+        {"index": 1, "sheets": [{"index": 1, "rows": [["DICTDICT", "ROWROW"]]}]}
     ]
     assert len(json.dumps(trial, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > 160
 
@@ -2082,10 +2500,10 @@ def test_descriptor_dup_failure_is_normalized_to_source_unreadable(tmp_path, mon
     _make_minimal_forms_source(source, "Alpha consent")
     preflight = inspect_intake_source(source)
 
-    def failing_dup(fd):
+    def failing_read(fd, n):
         raise OSError(24, "Too many open files")
 
-    monkeypatch.setattr(naming.os, "dup", failing_dup)
+    monkeypatch.setattr(naming.os, "read", failing_read)
     _forbid_client(monkeypatch)
     resolution = naming.resolve_intake_study(
         source, preflight, explicit_study=None, support_confirmed_no_phi=True, intake_root=tmp_path / "intake"
@@ -2100,7 +2518,7 @@ def test_descriptor_dup_failure_is_normalized_to_source_unreadable(tmp_path, mon
 
 
 def test_combined_payload_never_includes_dataset_component():
-    combined = naming._combined_payload_dict({1: ["form text"]}, {1: ("data_dictionary", {1: [["header"]]})})
+    combined = naming._combined_payload_dict({1: ["form text"]}, {1: {1: [["header"]]}})
     assert combined["component"] == "combined"
     assert set(combined) == {"component", "forms", "dictionary_mapping"}
     assert "datasets" not in json.dumps(combined)
@@ -2336,8 +2754,8 @@ def test_dictionary_only_accepted_is_used_symmetrically(tmp_path, monkeypatch):
     accepted and used as the final name with no forms evidence at all."""
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
-    (source / "data_dictionary" / "dict.csv").write_text("VAR,DESC\n", encoding="utf-8")
+    (source / "dictionary_mapping").mkdir(parents=True)
+    (source / "dictionary_mapping" / "dict.csv").write_text("VAR,DESC\n", encoding="utf-8")
     preflight = inspect_intake_source(source)
     _install_fake_client(monkeypatch, _queue_dispatch(("StudyDict", _ACCEPT_CONF)))
     resolution = naming.resolve_intake_study(
@@ -2352,9 +2770,9 @@ def test_matching_candidates_preserve_forms_spelling(tmp_path, monkeypatch):
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     _write_pdf(source / "forms" / "consent.pdf", "Alpha consent")
-    _write_workbook(source / "data_dictionary" / "dict.xlsx", [["dict"]])
+    _write_workbook(source / "dictionary_mapping" / "dict.xlsx", [["dict"]])
     preflight = inspect_intake_source(source)
     _install_fake_client(monkeypatch, _queue_dispatch(("StudyAlpha", _ACCEPT_CONF), ("STUDYALPHA", _ACCEPT_CONF)))
 
@@ -2370,9 +2788,9 @@ def test_conflicting_candidates_block_with_conflict_review_and_generated_fallbac
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     _write_pdf(source / "forms" / "consent.pdf", "Alpha consent")
-    _write_workbook(source / "data_dictionary" / "dict.xlsx", [["dict"]])
+    _write_workbook(source / "dictionary_mapping" / "dict.xlsx", [["dict"]])
     preflight = inspect_intake_source(source)
     _install_fake_client(monkeypatch, _queue_dispatch(("StudyAlpha", _ACCEPT_CONF), ("StudyBeta", _ACCEPT_CONF)))
 
@@ -2394,9 +2812,9 @@ def test_neither_accepted_falls_back_to_combined_query(tmp_path, monkeypatch):
     source = tmp_path / "source"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir(parents=True)
-    (source / "data_dictionary").mkdir(parents=True)
+    (source / "dictionary_mapping").mkdir(parents=True)
     _write_pdf(source / "forms" / "consent.pdf", "Alpha consent")
-    _write_workbook(source / "data_dictionary" / "dict.xlsx", [["dict"]])
+    _write_workbook(source / "dictionary_mapping" / "dict.xlsx", [["dict"]])
     preflight = inspect_intake_source(source)
     _install_fake_client(
         monkeypatch,
