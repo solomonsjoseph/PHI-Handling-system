@@ -3,8 +3,11 @@ import { useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { API, exportUrl, finalizeSession, getSession, streamUrl, submitReview } from '../lib/api';
 import { Btn, MonoProgress, Panel, Tag } from '../components/ui';
+import PhaseStepper from '../components/PhaseStepper';
+import LiveCounters from '../components/LiveCounters';
 
-const STATUS_ORDER = ['created','reading','classifying','detecting','awaiting_review','applying_review','anonymizing','complete'];
+const STATUS_ORDER = ['created','intake','reading','classifying','detecting','awaiting_review','applying_review','anonymizing','complete'];
+const ACTIVE_PHASES = new Set(['created','intake','reading','classifying','detecting','applying_review','anonymizing']);
 
 function statusPercent(status, events) {
   if (status === 'complete') return 100;
@@ -33,10 +36,9 @@ export default function SessionDetail() {
   useEffect(() => { refresh(); }, [sid]);
 
   useEffect(() => {
-    // Open SSE stream whenever the session is in an active phase
+    // Open SSE stream whenever the session is in an active phase; else short-poll as fallback.
     if (!session) return;
-    const activePhases = ['created','reading','classifying','detecting','applying_review','anonymizing'];
-    if (!activePhases.includes(session.status)) return;
+    if (!ACTIVE_PHASES.has(session.status)) return;
     if (esRef.current) esRef.current.close();
     const es = new EventSource(streamUrl(sid));
     esRef.current = es;
@@ -54,6 +56,14 @@ export default function SessionDetail() {
     };
     es.onerror = () => { es.close(); };
     return () => es.close();
+  }, [session?.status, sid]);
+
+  // Poll fallback: keep refreshing every 2s during active phases in case SSE misses events.
+  useEffect(() => {
+    if (!session) return;
+    if (!ACTIVE_PHASES.has(session.status)) return;
+    const t = setInterval(() => { refresh(); }, 2000);
+    return () => clearInterval(t);
   }, [session?.status, sid]);
 
   const setDecision = (span_id, action, extra = {}) => {
@@ -87,18 +97,40 @@ export default function SessionDetail() {
       <Panel title="Study" cite={session.id} testId="session-header"
         right={<Tag color={session.status === 'complete' ? 'accept' : session.status === 'failed' ? 'reject' : 'default'} testId="session-status">{session.status}</Tag>}
       >
-        <div className="flex items-center gap-4">
+        <PhaseStepper status={session.status} iteration={session.review_iteration} />
+        <div className="mt-3 flex items-center gap-4">
           <MonoProgress percent={pct} />
-          <span className="font-mono text-[10px] text-text-muted">iter {session.review_iteration}</span>
           <span className="font-mono text-[10px] text-text-muted">files {(session.files || []).length}</span>
           <span className="font-mono text-[10px] text-text-muted">spans {(session.spans || []).length}</span>
         </div>
+        <LiveCounters session={session} events={events} />
         {session.error && (
           <div className="mt-3 border border-reject text-reject px-3 py-2 font-mono text-xs" data-testid="session-error">
             {session.error}
           </div>
         )}
       </Panel>
+
+      {session.status === 'complete' && session.export_paths && Object.keys(session.export_paths).length > 0 && (
+        <Panel title="Export Ready" cite="45 CFR 164.514 tokens applied" testId="export-panel"
+          right={<Tag color="accept" testId="export-count">{Object.keys(session.export_paths).length} files</Tag>}
+        >
+          <div className="grid grid-cols-2 gap-3">
+            {(session.files || []).filter(f => session.export_paths[f.file_id]).map(f => (
+              <a
+                key={f.file_id}
+                href={exportUrl(sid, f.file_id)}
+                className="border border-accept p-3 hover:bg-accept hover:text-white transition-colors block"
+                data-testid={`export-card-${f.file_id}`}
+              >
+                <div className="font-mono text-[10px] uppercase tracking-widest text-text-muted mb-1">{f.component || f.kind}</div>
+                <div className="font-mono text-xs text-text-primary break-all">{f.original_name}</div>
+                <div className="font-mono text-[10px] mt-1 opacity-70">download &darr;</div>
+              </a>
+            ))}
+          </div>
+        </Panel>
+      )}
 
       {session.intake_status && session.intake_status !== 'none' && (
         <Panel title="Intake" cite="manifest-v3" testId="intake-panel"
@@ -193,9 +225,9 @@ export default function SessionDetail() {
           testId="review-panel"
           right={
             <div className="flex gap-2">
-              <Btn variant="default" onClick={() => submit(true)} testId="btn-continue-review" disabled={session.status === 'complete'}>Save + Iterate</Btn>
-              <Btn variant="primary" onClick={() => submit(false)} testId="btn-save-review" disabled={session.status === 'complete'}>Save Review</Btn>
-              <Btn variant="danger" onClick={finalize} testId="btn-finalize" disabled={session.status === 'complete' || session.status === 'awaiting_review' ? false : true}>Finalize + Export</Btn>
+              <Btn variant="default" onClick={() => submit(true)} testId="btn-continue-review" disabled={!['awaiting_review','applying_review'].includes(session.status)}>Save + Iterate</Btn>
+              <Btn variant="primary" onClick={() => submit(false)} testId="btn-save-review" disabled={!['awaiting_review','applying_review'].includes(session.status)}>Save Review</Btn>
+              <Btn variant="danger" onClick={finalize} testId="btn-finalize" disabled={!['awaiting_review','applying_review'].includes(session.status)}>Finalize + Export</Btn>
             </div>
           }
         >
