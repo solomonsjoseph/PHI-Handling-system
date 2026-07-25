@@ -84,7 +84,7 @@ export default function SessionDetail() {
 
   return (
     <div>
-      <Panel title="Session" cite={session.id} testId="session-header"
+      <Panel title="Study" cite={session.id} testId="session-header"
         right={<Tag color={session.status === 'complete' ? 'accept' : session.status === 'failed' ? 'reject' : 'default'} testId="session-status">{session.status}</Tag>}
       >
         <div className="flex items-center gap-4">
@@ -100,11 +100,37 @@ export default function SessionDetail() {
         )}
       </Panel>
 
+      {session.intake_status && session.intake_status !== 'none' && (
+        <Panel title="Intake" cite="manifest-v3" testId="intake-panel"
+          right={<Tag color={session.intake_status === 'ready' ? 'accept' : session.intake_status === 'review_required' ? 'phi' : 'reject'} testId="intake-status">{session.intake_status} (exit {session.intake_exit_code})</Tag>}
+        >
+          {(session.intake_missing || []).length > 0 && (
+            <div className="mb-3 border border-reject text-reject px-3 py-2 font-mono text-xs" data-testid="intake-missing-components">
+              Missing components: {session.intake_missing.join(', ')}
+            </div>
+          )}
+          {(session.intake_review || []).length > 0 && (
+            <div className="mb-3 border border-phi-border px-3 py-2 font-mono text-xs text-phi">
+              <div className="uppercase text-[10px] tracking-widest mb-1">Unclassified intake entries ({session.intake_review.length})</div>
+              {session.intake_review.slice(0, 20).map((e, i) => (
+                <div key={i} className="text-[11px]" data-testid={`intake-review-item-${i}`}>
+                  <span className="text-text-primary">{e.relpath}</span> - <span className="text-text-secondary">{e.reason}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {(session.intake_missing || []).length === 0 && (session.intake_review || []).length === 0 && (
+            <div className="font-mono text-xs text-text-secondary">All entries routed to components. Ready for classification.</div>
+          )}
+        </Panel>
+      )}
+
       <Panel title="Files" testId="files-panel">
         <table className="w-full text-xs font-mono border border-border">
           <thead className="bg-surface">
             <tr>
               <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Name</th>
+              <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Component</th>
               <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Kind</th>
               <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Size</th>
               <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">SHA-256</th>
@@ -116,7 +142,8 @@ export default function SessionDetail() {
             {(session.files || []).map(f => (
               <tr key={f.file_id} data-testid={`file-row-${f.file_id}`}>
                 <td className="px-3 py-2 border-b border-r border-border text-text-primary">{f.original_name}</td>
-                <td className="px-3 py-2 border-b border-r border-border"><Tag color={f.kind === 'dataset' ? 'info' : 'default'}>{f.kind} / {f.subtype}</Tag></td>
+                <td className="px-3 py-2 border-b border-r border-border"><Tag color={f.component === 'datasets' ? 'phi' : f.component === 'forms' ? 'info' : 'default'}>{f.component || '-'}</Tag></td>
+                <td className="px-3 py-2 border-b border-r border-border"><Tag>{f.kind} / {f.subtype}</Tag></td>
                 <td className="px-3 py-2 border-b border-r border-border text-text-secondary">{f.size_bytes} B</td>
                 <td className="px-3 py-2 border-b border-r border-border text-text-muted">{(f.sha256 || '').slice(0, 12)}</td>
                 <td className="px-3 py-2 border-b border-r border-border text-text-secondary max-w-md">

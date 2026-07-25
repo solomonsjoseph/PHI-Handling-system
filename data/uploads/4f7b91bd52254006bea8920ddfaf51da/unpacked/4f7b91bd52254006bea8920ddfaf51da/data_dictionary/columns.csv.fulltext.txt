@@ -1,0 +1,8 @@
+column_name,description,phi_flag
+patient_name,Full patient name,Y
+dob,Date of birth,Y
+ssn,Social security number,Y
+mrn,Medical record number,Y
+phone,Contact phone,Y
+email,Contact email,Y
+notes,Clinician notes,N

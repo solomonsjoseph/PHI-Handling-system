@@ -14,7 +14,7 @@ from .anonymizer import apply_to_dataset, apply_to_text
 from .detectors import detect_text, header_phi_columns
 from .file_readers import (
     classify_ext, iter_dataset_rows, read_narrative, sha256_of_file,
-    read_csv_columns, read_xlsx_columns, read_parquet_columns,
+    read_csv_columns, read_xlsx_columns, read_parquet_columns, read_txt,
 )
 from .llm_classifier import classify_dataset_headers, classify_narrative
 from .models import DetectedSpan, FileArtifact, ProgressEvent, ReviewDecision
@@ -30,8 +30,20 @@ EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 ProgressCb = Callable[[ProgressEvent], Any]
 
 
-async def ingest_file(session_id: str, upload_path: Path, original_name: str, on_progress: ProgressCb) -> FileArtifact:
-    kind, ext = classify_ext(original_name)
+async def ingest_file(session_id: str, upload_path: Path, original_name: str, on_progress: ProgressCb, component: str | None = None) -> FileArtifact:
+    kind_from_ext, ext = classify_ext(original_name)
+    # component-driven kind mapping (intake manifest v3):
+    #   datasets/ -> dataset (headers-only for LLM)
+    #   forms/ -> narrative (full read)
+    #   data_dictionary/ or mappings/ -> metadata (full read, no PHI expected but still scanned)
+    if component == "datasets":
+        kind = "dataset"
+    elif component == "forms":
+        kind = "narrative"
+    elif component in {"data_dictionary", "mappings"}:
+        kind = "metadata"
+    else:
+        kind = kind_from_ext
     size = upload_path.stat().st_size
     sha = sha256_of_file(upload_path)
     art = FileArtifact(
@@ -41,8 +53,9 @@ async def ingest_file(session_id: str, upload_path: Path, original_name: str, on
         kind=kind,
         subtype=ext,
         stored_path=str(upload_path),
+        component=component,
     )
-    await on_progress(ProgressEvent(phase="reading", message=f"Reading {original_name}", payload={"kind": kind, "subtype": ext}))
+    await on_progress(ProgressEvent(phase="reading", message=f"Reading {original_name}", payload={"kind": kind, "subtype": ext, "component": component}))
 
     if kind == "dataset":
         if ext in ("csv", "tsv"):
@@ -60,10 +73,25 @@ async def ingest_file(session_id: str, upload_path: Path, original_name: str, on
             message=f"Dataset parsed: {len(cols)} columns, {rows} rows. Row values withheld from LLM.",
             payload={"columns": cols, "row_count": rows},
         ))
+    elif kind == "metadata":
+        # Dictionary/mapping tables: read as CSV/XLSX but text-flatten for LLM (no PHI expected).
+        if ext in ("csv", "tsv"):
+            text = read_txt(upload_path)
+        elif ext in ("xlsx", "xls"):
+            cols, _ = read_xlsx_columns(upload_path)
+            text = "COLUMNS: " + ", ".join(cols)
+        else:
+            text = read_txt(upload_path)
+        art.text_preview = text[:2000]
+        cache = upload_path.with_suffix(upload_path.suffix + ".fulltext.txt")
+        cache.write_text(text, encoding="utf-8")
+        await on_progress(ProgressEvent(
+            phase="reading",
+            message=f"Metadata parsed: {len(text)} chars ({component})",
+        ))
     else:
         text = read_narrative(upload_path, ext)
         art.text_preview = text[:2000]
-        # Store full text alongside as .txt for later processing (temporary; still local disk only)
         cache = upload_path.with_suffix(upload_path.suffix + ".fulltext.txt")
         cache.write_text(text, encoding="utf-8")
         await on_progress(ProgressEvent(
@@ -75,10 +103,16 @@ async def ingest_file(session_id: str, upload_path: Path, original_name: str, on
 
 
 async def classify_file(art: FileArtifact, on_progress: ProgressCb) -> dict[str, Any]:
-    await on_progress(ProgressEvent(phase="classifying", message=f"LLM classifying {art.original_name}"))
+    await on_progress(ProgressEvent(phase="classifying", message=f"LLM classifying {art.original_name} ({art.component or art.kind})"))
     try:
         if art.kind == "dataset":
             result = await classify_dataset_headers(art.columns, art.original_name, art.row_count)
+        elif art.kind == "metadata":
+            fulltext_path = Path(art.stored_path).with_suffix(Path(art.stored_path).suffix + ".fulltext.txt")
+            text = fulltext_path.read_text(encoding="utf-8") if fulltext_path.exists() else art.text_preview
+            result = await classify_narrative(text, art.original_name)
+            result.setdefault("notes", "")
+            result["notes"] = f"[metadata:{art.component}] " + result.get("notes", "")
         else:
             fulltext_path = Path(art.stored_path).with_suffix(Path(art.stored_path).suffix + ".fulltext.txt")
             text = fulltext_path.read_text(encoding="utf-8") if fulltext_path.exists() else art.text_preview
@@ -91,6 +125,14 @@ async def classify_file(art: FileArtifact, on_progress: ProgressCb) -> dict[str,
 
 async def detect_file(art: FileArtifact, detectors: list[str], on_progress: ProgressCb) -> list[DetectedSpan]:
     all_spans: list[DetectedSpan] = []
+    if art.kind == "metadata":
+        # Dictionaries and mappings describe schema, not PHI. Skip detection but keep artifact.
+        await on_progress(ProgressEvent(
+            phase="detecting",
+            message=f"Metadata file {art.original_name} skipped for PHI scan ({art.component})",
+            percent=100.0,
+        ))
+        return []
     if art.kind == "dataset":
         # 1. header-based full-column PHI
         hits = header_phi_columns(art.columns)
@@ -176,13 +218,17 @@ def apply_reviews(spans: list[DetectedSpan], decisions: list[ReviewDecision]) ->
 
 async def anonymize_files(files: list[FileArtifact], spans: list[DetectedSpan], on_progress: ProgressCb) -> dict[str, str]:
     export_paths: dict[str, str] = {}
+    import shutil
     for art in files:
         await on_progress(ProgressEvent(phase="anonymizing", message=f"Anonymizing {art.original_name}"))
         src = Path(art.stored_path)
         dst = EXPORT_DIR / f"{art.file_id}__{art.original_name}"
-        file_spans = [s for s in spans if s.review_status in ("accepted", "reclassified")]
-        if art.kind == "dataset":
-            # header hint spans: full-column redaction
+        # Only spans tagged with this file
+        file_spans = [s for s in spans if s.review_status in ("accepted", "reclassified") and (s.file_id == art.file_id or s.file_id is None)]
+        if art.kind == "metadata":
+            # Metadata (dictionary/mappings) copied as-is to export.
+            shutil.copy2(src, dst)
+        elif art.kind == "dataset":
             full_col: dict[str, DetectedSpan] = {}
             cell_map: dict[tuple[int, str], list[DetectedSpan]] = {}
             for s in file_spans:

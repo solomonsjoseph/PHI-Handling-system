@@ -22,6 +22,7 @@ def _now() -> str:
 
 SessionStatus = Literal[
     "created",
+    "intake",
     "reading",
     "classifying",
     "detecting",
@@ -46,6 +47,7 @@ class GoldSpan(BaseModel):
 
 class DetectedSpan(BaseModel):
     span_id: str = Field(default_factory=_uid)
+    file_id: Optional[str] = None      # populated by the pipeline for anonymizer filtering
     start: int
     end: int
     value: str
@@ -67,12 +69,13 @@ class FileArtifact(BaseModel):
     original_name: str
     size_bytes: int
     sha256: str
-    kind: Literal["dataset", "narrative"]
+    kind: Literal["dataset", "narrative", "metadata"]
     subtype: str  # csv, xlsx, parquet, pdf, docx, txt, eml, md
     stored_path: str
+    component: Optional[str] = None  # datasets|forms|data_dictionary|mappings (from intake v3)
     columns: list[str] = []           # dataset only
     row_count: int = 0                # dataset only
-    text_preview: str = ""            # narrative only
+    text_preview: str = ""            # narrative/metadata only
     llm_classification: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -98,6 +101,10 @@ class Session(BaseModel):
     updated_at: str = Field(default_factory=_now)
     status: SessionStatus = "created"
     jurisdiction: str = "us"
+    intake_status: Literal["none", "ready", "review_required", "failed"] = "none"
+    intake_exit_code: int = 0
+    intake_review: list[dict[str, Any]] = []
+    intake_missing: list[str] = []
     files: list[FileArtifact] = []
     spans: list[DetectedSpan] = []
     progress: list[ProgressEvent] = []

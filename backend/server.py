@@ -38,6 +38,9 @@ from pydantic import BaseModel
 from phi_core.benchmark import run_benchmark
 from phi_core.db import get_db
 from phi_core.generators import corpus_hash, generate, HIPAA_CATEGORIES
+from phi_core.intake import (
+    COMPONENT_SUFFIXES, MANDATORY, ANY_OF, build_manifest,
+)
 from phi_core.models import (
     BenchmarkRequest, CorpusRecord, CorpusRequest, DetectedSpan,
     FileArtifact, ProgressEvent, ReviewDecision, Session,
@@ -216,6 +219,111 @@ async def session_upload(sid: str, file: UploadFile = File(...)):
     return {"file_id": art.file_id, "stored_path": str(dst), "size_bytes": art.size_bytes}
 
 
+@app.post("/api/sessions/{sid}/intake")
+async def session_intake(sid: str, file: UploadFile = File(...)):
+    """Default entry: upload a ZIP with intake-manifest/v3 structure.
+
+    ZIP must contain top-level `datasets/`, `forms/`, and one of
+    `data_dictionary/` or `mappings/`. Fails closed on missing components or
+    unsupported files.
+    """
+    db = get_db()
+    session = await db.sessions.find_one({"id": sid})
+    if not session:
+        raise HTTPException(404, "session not found")
+    if not (file.filename or "").lower().endswith(".zip"):
+        raise HTTPException(400, "intake requires a .zip archive")
+    session_dir = UPLOAD_DIR / sid
+    session_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = session_dir / "intake.zip"
+    with zip_path.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    manifest = build_manifest(sid, zip_path, session_dir / "unpacked")
+
+    # Convert accepted intake entries into FileArtifacts on the session.
+    accepted: list[FileArtifact] = []
+    for e in manifest.entries:
+        if e.component == "_unclassified":
+            continue
+        ext = Path(e.relpath).suffix.lstrip(".").lower()
+        if e.component == "datasets":
+            kind = "dataset"
+        elif e.component == "forms":
+            kind = "narrative"
+        else:
+            kind = "metadata"
+        accepted.append(FileArtifact(
+            original_name=Path(e.relpath).name,
+            size_bytes=e.size_bytes,
+            sha256="",
+            kind=kind,
+            subtype=ext,
+            stored_path=e.stored_path,
+            component=e.component,
+        ))
+
+    await db.sessions.update_one(
+        {"id": sid},
+        {"$set": {
+            "files": [f.model_dump() for f in accepted],
+            "intake_status": manifest.status,
+            "intake_exit_code": manifest.exit_code,
+            "intake_review": [
+                {"relpath": e.relpath, "reason": e.reason} for e in manifest.entries if e.component == "_unclassified"
+            ],
+            "intake_missing": manifest.missing_components,
+            "status": "intake",
+            "error": manifest.error,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+
+    return {
+        "study": sid,
+        "status": manifest.status,
+        "exit_code": manifest.exit_code,
+        "linked": manifest.linked,
+        "review": manifest.review,
+        "missing_components": manifest.missing_components,
+        "review_entries": [
+            {"relpath": e.relpath, "reason": e.reason} for e in manifest.entries if e.component == "_unclassified"
+        ],
+        "accepted_by_component": {
+            comp: [{"file_id": a.file_id, "name": a.original_name, "size": a.size_bytes} for a in accepted if a.component == comp]
+            for comp in COMPONENT_SUFFIXES
+        },
+        "error": manifest.error,
+    }
+
+
+@app.get("/api/intake/spec")
+async def intake_spec():
+    """Public spec for the intake-manifest/v3 ZIP structure."""
+    return {
+        "manifest_version": 3,
+        "components": {
+            k: {
+                "extensions": sorted(v),
+                "required": k in MANDATORY,
+                "one_of_group": "dictionary_or_mappings" if k in ANY_OF else None,
+            }
+            for k, v in COMPONENT_SUFFIXES.items()
+        },
+        "rules": [
+            "datasets and forms are mandatory",
+            "at least one of data_dictionary or mappings is required",
+            "dataset xlsx must be single-sheet",
+            ".json and .jsonl are NOT accepted as datasets",
+            "unsupported extensions land in the _unclassified review bucket and block the study",
+            "symlinks and absolute paths in the ZIP are rejected",
+            "per-file 200 MB cap",
+        ],
+        "exit_codes": {"0": "ready", "8": "review_required", "2": "failed"},
+        "authority": "45 CFR 164.514(b)(2)(i) headers-only for datasets; classification runs across all components",
+    }
+
+
 @app.post("/api/sessions/{sid}/run")
 async def session_run(sid: str):
     db = get_db()
@@ -228,11 +336,17 @@ async def session_run(sid: str):
 
     async def worker():
         try:
+            # Refuse to run if intake status is not ready when intake was attempted.
+            if session.get("intake_status") in ("failed", "review_required"):
+                await db.sessions.update_one({"id": sid}, {"$set": {"status": "failed", "error": f"intake_status={session.get('intake_status')} (exit={session.get('intake_exit_code')})"}})
+                await emit(ProgressEvent(phase="failed", message=f"cannot run: intake {session.get('intake_status')}"))
+                await emit(ProgressEvent(phase="__end__", message="stream end"))
+                return
             await db.sessions.update_one({"id": sid}, {"$set": {"status": "reading"}})
             fresh_files: list[FileArtifact] = []
             for raw in session.get("files", []):
                 path = Path(raw["stored_path"])
-                art = await ingest_file(sid, path, raw["original_name"], emit)
+                art = await ingest_file(sid, path, raw["original_name"], emit, component=raw.get("component"))
                 art.file_id = raw["file_id"]
                 fresh_files.append(art)
             await db.sessions.update_one(
@@ -252,6 +366,7 @@ async def session_run(sid: str):
             for art in fresh_files:
                 spans = await detect_file(art, ["presidio", "rule"], emit)
                 for s in spans:
+                    s.file_id = art.file_id
                     s.review_comment = ""
                     all_spans.append(s)
 

@@ -4,36 +4,64 @@
 
 ## Project
 
-Dual-jurisdiction PHI handling system: synthetic IRB-review-ready corpus + Presidio + rule detectors + human review + export. HIPAA 45 CFR 164.514 (US) first, DPDPA 2023 planned.
+USA-only HIPAA PHI handling system aligned with the `feat/v2-multi-jurisdiction`
+intake-manifest/v3 convention. Default flow: ZIP intake, headers-only classification
+for datasets, full-content classification for forms and metadata, human review,
+export. Corpus generation is experimental and optional.
 
 ## Structure
 
 ```
 /app
-  backend/           FastAPI service (server.py). Reads /app/authorities, imports phi_core.
-    phi_core/        Consolidated library (generators, detectors, readers, pipeline, benchmark, llm).
-    .env             MONGO_URL, DB_NAME, EMERGENT_LLM_KEY, DATA_DIR, CORPUS_SEED.
-  frontend/          React operator console (dark, brutalist, JetBrains Mono).
-  authorities/       Primary legal sources + AUTHORITY_MATRIX.md (single source of truth).
-  data/              corpus/, uploads/, benchmarks/ artifacts.
-  docs/              File-format authority notes.
+  backend/
+    server.py               FastAPI on :8001. Intake, sessions, corpus (exp), benchmark (exp).
+    phi_core/
+      intake.py             ZIP unpack + manifest v3 validator (datasets/, forms/, dict OR mappings/).
+      generators.py         US HIPAA A-R + quasi-identifier corpus (experimental).
+      detectors.py          Presidio + rule stack, cross-category merge policy.
+      file_readers.py       Dataset (headers only) vs narrative vs metadata.
+      llm_classifier.py     Claude Sonnet 4.5 via Emergent Universal Key.
+      anonymizer.py         Per-file span application with HIPAA-tagged tokens.
+      benchmark.py          Precision/recall/F1 per HIPAA category (experimental).
+      pipeline.py           Intake-aware orchestrator.
+      models.py             Pydantic models incl. Session with intake_status.
+      db.py                 Motor MongoDB access.
+    .env                    MONGO_URL, DB_NAME, EMERGENT_LLM_KEY, DATA_DIR.
+  frontend/                 React operator console on :3000.
+  authorities/              HIPAA 164.514 primary sources + AUTHORITY_MATRIX.md.
+  docs/file_formats/        DICOM PS3.15 + FHIR R4 notes.
+  data/uploads/<sid>/       intake.zip + unpacked/ (never leaves the pod).
+  data/exports/             anonymized outputs.
 ```
+
+## Intake manifest v3 (mandatory for default flow)
+
+Top-level components inside the ZIP:
+- `datasets/` (required) - `.csv`, `.xls`, `.xlsx` single-sheet. LLM sees column headers only.
+- `forms/` (required) - `.pdf` only. LLM reads full content.
+- `data_dictionary/` OR `mappings/` (one required) - `.csv`, `.xlsx`. Treated as metadata; classified but skipped for PHI scan.
+
+Fail-closed: unsupported extensions or missing components land in `_unclassified`
+and block the study. Exit codes: 0 ready, 8 review_required, 2 failed.
 
 ## Constraints
 
-1. Datasets (CSV, XLSX, Parquet) reveal ONLY column headers to LLM. Row values never leave the process for LLM inspection. All other files (PDF, DOCX, TXT, EML, MD) can be fully read.
-2. Every span carries an `authority_citation` traceable to AUTHORITY_MATRIX.md.
-3. Corpus generation is seeded and deterministic. Same seed produces identical output.
-4. No real PHI ever committed or logged.
-5. Every human review decision is recorded in the audit log with timestamp, user comment, and action.
+1. Datasets never expose row values to the LLM.
+2. Every span carries a 45 CFR 164.514 authority citation.
+3. Every human review decision is recorded with timestamp and comment.
+4. No real PHI committed or logged.
+5. Corpus generation is behind the `/experimental/*` routes only.
 
 ## Run
 
 ```
 sudo supervisorctl restart backend frontend
-# backend on :8001, frontend on :3000
+# backend  :8001
+# frontend :3000
 ```
 
-## Authority index
+## Alignment
 
-Start at `authorities/AUTHORITY_MATRIX.md`. Every generator, detector rule, and file-format handler must trace to a row.
+Structure mirrors `feat/v2-multi-jurisdiction` phi_engine intake conventions
+(datasets/forms/data_dictionary|mappings, single-sheet dataset, .json/.jsonl
+rejected, fail-closed on missing components, headers-only classification).
