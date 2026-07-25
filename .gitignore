@@ -61,3 +61,5 @@ logs/
 tmp/
 *.tmp
 .phi-local-*
+*.env
+.credentials
