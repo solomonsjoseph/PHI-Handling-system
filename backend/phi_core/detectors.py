@@ -142,7 +142,11 @@ def presidio_detect(text: str, language: str = "en") -> list[DetectedSpan]:
 
 
 def merge_spans(spans: list[DetectedSpan]) -> list[DetectedSpan]:
-    """Deduplicate overlapping spans. Prefer higher confidence, then rule > presidio."""
+    """Deduplicate overlapping spans. Prefer higher confidence, then rule > presidio.
+
+    Spans with different hipaa_category are allowed to coexist unless their
+    overlap exceeds 60 percent of the shorter span (in which case only one is kept).
+    """
     if not spans:
         return []
     ordered = sorted(spans, key=lambda s: (s.start, -s.end))
@@ -150,13 +154,19 @@ def merge_spans(spans: list[DetectedSpan]) -> list[DetectedSpan]:
     for s in ordered:
         overlap = None
         for r in result:
-            if s.start < r.end and s.end > r.start:
+            inter = max(0, min(s.end, r.end) - max(s.start, r.start))
+            if inter == 0:
+                continue
+            shorter = min(s.end - s.start, r.end - r.start) or 1
+            frac = inter / shorter
+            same_cat = (s.hipaa_category == r.hipaa_category)
+            # merge only when same category, or when overlap dominates the shorter span
+            if same_cat or frac >= 0.6:
                 overlap = r
                 break
         if overlap is None:
             result.append(s)
             continue
-        # decide winner
         prefer_s = (s.confidence, s.detector == "rule") > (overlap.confidence, overlap.detector == "rule")
         if prefer_s:
             result.remove(overlap)
