@@ -34,8 +34,9 @@ COMPONENT_SUFFIXES: dict[str, set[str]] = {
     "mappings":         {".csv", ".xlsx"},
 }
 COMPONENTS = tuple(COMPONENT_SUFFIXES)
-MANDATORY = {"datasets", "forms"}
-ANY_OF = {"data_dictionary", "mappings"}
+MANDATORY = {"datasets"}
+# At least one of these three must be present alongside datasets/.
+ANY_OF = {"forms", "data_dictionary", "mappings"}
 
 
 @dataclass
@@ -217,7 +218,7 @@ def scan_intake(root: Path) -> tuple[list[IntakeEntry], list[str]]:
         if comp not in seen_components:
             missing.append(comp)
     if not (seen_components & ANY_OF):
-        missing.append("data_dictionary_or_mappings")
+        missing.append("one_of_forms_dictionary_or_mappings")
 
     return entries, missing
 

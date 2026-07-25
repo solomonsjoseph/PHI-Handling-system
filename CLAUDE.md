@@ -37,9 +37,11 @@ export. Corpus generation is experimental and optional.
 ## Intake manifest v3 (mandatory for default flow)
 
 Top-level components inside the ZIP:
-- `datasets/` (required) - `.csv`, `.xls`, `.xlsx` single-sheet. LLM sees column headers only.
-- `forms/` (required) - `.pdf` only. LLM reads full content.
-- `data_dictionary/` OR `mappings/` (one required) - `.csv`, `.xlsx`. Treated as metadata; classified but skipped for PHI scan.
+- `datasets/` (mandatory) - `.csv`, `.xls`, `.xlsx` single-sheet. LLM sees column headers only.
+- At least ONE of the following must accompany `datasets/`:
+  - `forms/` - `.pdf`. LLM reads full content.
+  - `data_dictionary/` - `.csv`, `.xlsx`. Metadata; classified but skipped for PHI scan.
+  - `mappings/` - `.csv`, `.xlsx`. Metadata; classified but skipped for PHI scan.
 
 Fail-closed: unsupported extensions or missing components land in `_unclassified`
 and block the study. Exit codes: 0 ready, 8 review_required, 2 failed.

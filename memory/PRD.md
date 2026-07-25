@@ -13,8 +13,9 @@
 
 ## Alignment target
 
-`feat/v2-multi-jurisdiction` intake-manifest/v3 conventions (READMEd in that branch):
-- Mandatory top-level components in the ZIP: `datasets/` (`.csv/.xls/.xlsx` single-sheet), `forms/` (`.pdf`), one of `data_dictionary/` or `mappings/` (`.csv/.xlsx`).
+`feat/v2-multi-jurisdiction` intake-manifest/v3 conventions, plus Sir's clarification (2026-07-25):
+- `datasets/` is the only fully-mandatory component (`.csv/.xls/.xlsx` single-sheet).
+- Alongside `datasets/`, at least ONE of `forms/` (`.pdf`), `data_dictionary/`, or `mappings/` (`.csv/.xlsx`) must be present.
 - `.json`, `.jsonl` NOT accepted as datasets.
 - Unsupported suffix, multi-sheet xlsx dataset, or symlink lands in `_unclassified` and blocks the study.
 - Headers-only classification for datasets; full content for forms and metadata.

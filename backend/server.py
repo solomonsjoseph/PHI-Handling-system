@@ -306,13 +306,13 @@ async def intake_spec():
             k: {
                 "extensions": sorted(v),
                 "required": k in MANDATORY,
-                "one_of_group": "dictionary_or_mappings" if k in ANY_OF else None,
+                "one_of_group": "forms_or_dictionary_or_mappings" if k in ANY_OF else None,
             }
             for k, v in COMPONENT_SUFFIXES.items()
         },
         "rules": [
-            "datasets and forms are mandatory",
-            "at least one of data_dictionary or mappings is required",
+            "datasets is mandatory",
+            "at least one of forms, data_dictionary, or mappings is required",
             "dataset xlsx must be single-sheet",
             ".json and .jsonl are NOT accepted as datasets",
             "unsupported extensions land in the _unclassified review bucket and block the study",
