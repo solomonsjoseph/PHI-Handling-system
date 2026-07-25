@@ -1,0 +1,7 @@
+Progress Note — 2025-08-14
+
+Patient James Smith (DOB 03/15/1975) MRN-12345678 was seen today by Dr. Sarah Anderson. Contact number (415) 555-1234, email james.smith@example.com. SSN 123-45-6789 on file.
+
+Referral fax to (212) 555-9999. Patient portal at https://portal.example.org/patients/45678. Access from IP 192.168.1.100.
+
+Enrolled in clinical trial NCT12345678. Emergency contact: Mary Johnson (sister).

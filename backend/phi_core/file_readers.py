@@ -1,0 +1,166 @@
+"""File readers with strict dataset/narrative separation.
+
+Core PHI constraint: DATASETS expose column headers only to any LLM. Row values
+never leave process boundaries for LLM inspection. NARRATIVES may be read in
+full by the LLM.
+
+Kinds:
+  - dataset:   csv, xlsx, parquet
+  - narrative: pdf, docx, txt, md, eml
+"""
+from __future__ import annotations
+
+import csv
+import email
+import hashlib
+import io
+from pathlib import Path
+from typing import Iterator
+
+import openpyxl
+
+try:
+    import pyarrow.parquet as pq
+except Exception:  # pragma: no cover
+    pq = None
+
+try:
+    from docx import Document as DocxDocument
+except Exception:  # pragma: no cover
+    DocxDocument = None
+
+try:
+    from pypdf import PdfReader
+except Exception:  # pragma: no cover
+    PdfReader = None
+
+
+DATASET_EXTS = {"csv", "tsv", "xlsx", "xls", "parquet"}
+NARRATIVE_EXTS = {"pdf", "docx", "txt", "md", "eml", "html", "htm"}
+
+
+def classify_ext(name: str) -> tuple[str, str]:
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext in DATASET_EXTS:
+        return "dataset", ext
+    if ext in NARRATIVE_EXTS:
+        return "narrative", ext
+    return "narrative", ext or "txt"
+
+
+def sha256_of_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# --- Dataset readers -------------------------------------------------------
+
+def read_csv_columns(path: Path) -> tuple[list[str], int]:
+    """Returns (columns, row_count). Does not retain row values."""
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+        reader = csv.reader(f)
+        try:
+            columns = next(reader)
+        except StopIteration:
+            return [], 0
+        rows = sum(1 for _ in reader)
+    return [c.strip() for c in columns], rows
+
+
+def read_xlsx_columns(path: Path) -> tuple[list[str], int]:
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb[wb.sheetnames[0]]
+    columns: list[str] = []
+    for row in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+        columns = [str(c) if c is not None else "" for c in row]
+        break
+    row_count = max(0, (ws.max_row or 0) - 1)
+    wb.close()
+    return columns, row_count
+
+
+def read_parquet_columns(path: Path) -> tuple[list[str], int]:
+    if pq is None:
+        raise RuntimeError("pyarrow is not installed")
+    pf = pq.ParquetFile(path)
+    return list(pf.schema_arrow.names), pf.metadata.num_rows
+
+
+def iter_dataset_rows(path: Path, ext: str) -> Iterator[tuple[int, dict[str, str]]]:
+    """Yield (row_index, {column: value}). Consumer applies detection per cell."""
+    if ext in ("csv", "tsv"):
+        delim = "\t" if ext == "tsv" else ","
+        with path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+            reader = csv.DictReader(f, delimiter=delim)
+            for i, row in enumerate(reader):
+                yield i, {k: (v or "") for k, v in row.items()}
+    elif ext in ("xlsx", "xls"):
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb[wb.sheetnames[0]]
+        header: list[str] = []
+        for i, row in enumerate(ws.iter_rows(values_only=True)):
+            if i == 0:
+                header = [str(c) if c is not None else "" for c in row]
+                continue
+            yield i - 1, {header[j] if j < len(header) else f"col_{j}": ("" if v is None else str(v)) for j, v in enumerate(row)}
+        wb.close()
+    elif ext == "parquet":
+        if pq is None:
+            raise RuntimeError("pyarrow is not installed")
+        table = pq.read_table(path)
+        cols = table.column_names
+        rows = table.to_pylist()
+        for i, r in enumerate(rows):
+            yield i, {c: ("" if r.get(c) is None else str(r.get(c))) for c in cols}
+    else:
+        raise ValueError(f"unsupported dataset ext {ext!r}")
+
+
+# --- Narrative readers -----------------------------------------------------
+
+def read_txt(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def read_pdf(path: Path) -> str:
+    if PdfReader is None:
+        raise RuntimeError("pypdf is not installed")
+    reader = PdfReader(str(path))
+    return "\n\n".join((page.extract_text() or "") for page in reader.pages)
+
+
+def read_docx(path: Path) -> str:
+    if DocxDocument is None:
+        raise RuntimeError("python-docx is not installed")
+    d = DocxDocument(str(path))
+    return "\n".join(p.text for p in d.paragraphs)
+
+
+def read_eml(path: Path) -> str:
+    msg = email.message_from_bytes(path.read_bytes())
+    hdrs = "\n".join(f"{k}: {v}" for k, v in msg.items())
+    body_parts: list[str] = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                payload = part.get_payload(decode=True)
+                if payload:
+                    body_parts.append(payload.decode("utf-8", errors="replace"))
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            body_parts.append(payload.decode("utf-8", errors="replace"))
+    return hdrs + "\n\n" + "\n\n".join(body_parts)
+
+
+def read_narrative(path: Path, ext: str) -> str:
+    if ext == "pdf":
+        return read_pdf(path)
+    if ext == "docx":
+        return read_docx(path)
+    if ext == "eml":
+        return read_eml(path)
+    return read_txt(path)
