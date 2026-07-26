@@ -56,10 +56,10 @@ def _make_canonical_source(root: Path, *, sentinel: str) -> None:
     so redaction tests can prove it never reaches CLI output."""
     (root / "datasets").mkdir(parents=True)
     (root / "forms").mkdir(parents=True)
-    (root / "data_dictionary").mkdir(parents=True)
+    (root / "dictionary_mapping").mkdir(parents=True)
     (root / "datasets" / "labs.csv").write_text(f"SUBJID,NOTE\n1,{sentinel}\n", encoding="utf-8")
     (root / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%test\n")
-    (root / "data_dictionary" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
+    (root / "dictionary_mapping" / "dict.csv").write_text("var,label\nSUBJID,Subject\n", encoding="utf-8")
 
 
 def _run_cli(args: list[str], *, workspace: Path, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:

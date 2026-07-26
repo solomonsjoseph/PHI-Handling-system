@@ -37,8 +37,8 @@ imported, since that module resolves workspace/study paths at import time.
 ```bash
 # Symlink-ingest a source tree (never copies/modifies/deletes source bytes).
 # The source root MUST hold the mandatory intake-manifest/v3 component
-# package: datasets/ (required), forms/ (required), and at least one of
-# data_dictionary/ or mappings/.
+# package: datasets/ (always required), plus at least one of forms/ or
+# dictionary_mapping/ (an alternative group, not both mandatory).
 python -m phi_engine intake --study MyStudy --source /path/to/raw/data --workspace /path/to/workspace
 
 # --study is optional for intake ONLY. When omitted, intake resolves the
@@ -60,7 +60,7 @@ python -m phi_engine intake --source /path/to/raw/data --support-confirmed-no-ph
 
 # Accepted formats per component (intake_preflight._COMPONENT_SUFFIXES):
 #   datasets/ .csv .xls .xlsx (single-sheet)   forms/ .pdf only
-#   data_dictionary/ and mappings/ .csv .xlsx
+#   dictionary_mapping/ .csv .xlsx
 # .json/.jsonl are NOT accepted datasets; an unsupported suffix, invalid
 # workbook, multi-sheet dataset xlsx, cross-component hardlink, or source
 # symlink lands in an _unclassified review bucket recording only
@@ -114,8 +114,8 @@ See `python -m phi_engine --help` for the full argument reference, including
   symlink lands in an `_unclassified` review bucket with a `{path, reason,
   blocking}` record retaining filename, link name, and reason -- never row
   values, never silently dropped or silently parsed as garbage. A missing
-  or empty required component (`datasets/`, `forms/`, and one of
-  `data_dictionary/`/`mappings/`) also blocks. Any single blocking review
+  or empty `datasets/`, or a shortfall in the `forms/`/`dictionary_mapping/`
+  alternative group, also blocks. Any single blocking review
   item holds the whole study; a missing/malformed/v2 manifest fails with a
   fixed public code (clean v3 cutover, no legacy reader). An unavailable or
   weakened rulebook exits non-zero rather than running with a silently

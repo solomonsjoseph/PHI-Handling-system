@@ -13,15 +13,18 @@ import pytest
 import yaml
 
 from phi_engine.pipeline.dependencies import (
+    CODE_TABLE_VERSION,
     DependencyDecisionBasis,
     DependencyKind,
     DependencyLevel,
     DependencyReasonCode,
     DependencyRecommendation,
+    ORGANIZER_ROLE_VERSION,
     PrivateDependencyRecommendation,
     RoleSource,
     Sensitivity,
     load_dependency_decisions,
+    recommendation_identity,
     support_role_sha256,
     write_dependency_recommendations,
 )
@@ -43,7 +46,7 @@ class _Case:
     support_state: str
     role_source: RoleSource
     reason_code: DependencyReasonCode
-    organizer_role_version: int = 1
+    organizer_role_version: int = ORGANIZER_ROLE_VERSION
 
 
 def _artifact_id(token: str) -> str:
@@ -60,17 +63,27 @@ def _case(
     support_state: str = "parsed",
     role_source: RoleSource = RoleSource.INFERRED,
     reason_code: DependencyReasonCode = DependencyReasonCode.ONLY_INTERPRETATION,
-    organizer_role_version: int = 1,
+    organizer_role_version: int = ORGANIZER_ROLE_VERSION,
 ) -> _Case:
     support_id = None if support_state.startswith("missing") else _artifact_id(chr(ord(token) + 1))
     support_path = None
     if support_state == "missing_manifest":
-        support_path = f"data_dictionary/expected-{token}.csv"
-    elif support_id is not None:
-        support_path = f"data_dictionary/support-{token}.csv"
+        support_path = f"dictionary_mapping/expected-{token}.csv"
+        recommendation_id = recommendation_identity(
+            dataset_artifact_id=_artifact_id(token),
+            support_artifact_id=None,
+            kind=DependencyKind.DICTIONARY_MAPPING,
+            reason_code=DependencyReasonCode.MANIFEST_DECLARED,
+            header_ids=(),
+            transform_requirement_ids=(),
+        )
+    else:
+        recommendation_id = _recommendation_id(token)
+        if support_id is not None:
+            support_path = f"dictionary_mapping/support-{token}.csv"
     return _Case(
         dataset_id=_artifact_id(token),
-        recommendation_id=_recommendation_id(token),
+        recommendation_id=recommendation_id,
         dataset_path=f"datasets/dataset-{token}.csv",
         support_id=support_id,
         support_path=support_path,
@@ -150,7 +163,7 @@ def _install_state(
                     {
                         "artifact_id": case.support_id,
                         "source_sha256": support_sha,
-                        "kind": "dictionary",
+                        "kind": "dictionary_mapping",
                         "format": "csv",
                         "parse_status": parse_status,
                         "normalized_rows_sha256": normalized_sha,
@@ -168,7 +181,7 @@ def _install_state(
             recommendation_id=case.recommendation_id,
             dataset_artifact_id=case.dataset_id,
             support_artifact_id=case.support_id,
-            kind=DependencyKind.DICTIONARY,
+            kind=DependencyKind.DICTIONARY_MAPPING,
             role_source=case.role_source,
             organizer_role_version=case.organizer_role_version,
         )
@@ -178,14 +191,14 @@ def _install_state(
             support_role_sha256=role_hash,
         )
         recommendation = DependencyRecommendation(
-            schema_version="dependency-recommendation/v1",
+            schema_version="dependency-recommendation/v2",
             recommendation_id=case.recommendation_id,
             dataset_artifact_id=case.dataset_id,
             dataset_sha256=dataset_sha,
             support_artifact_id=case.support_id,
             support_sha256=support_sha,
             normalized_support_sha256=normalized_sha,
-            kind=DependencyKind.DICTIONARY,
+            kind=DependencyKind.DICTIONARY_MAPPING,
             suggested_level=DependencyLevel.REQUIRED,
             default_sensitivity=Sensitivity.CONFIDENTIAL,
             reason_code=case.reason_code,
@@ -195,7 +208,7 @@ def _install_state(
             basis=basis,
         )
         private = PrivateDependencyRecommendation(
-            schema_version="dependency-recommendation-private/v1",
+            schema_version="dependency-recommendation-private/v2",
             recommendation_id=case.recommendation_id,
             dataset_artifact_id=case.dataset_id,
             dataset_path=case.dataset_path,
@@ -213,19 +226,17 @@ def _install_state(
         if case.support_state == "missing_manifest":
             declared_missing[case.dataset_path] = [
                 {
-                    "dataset_artifact_id": case.dataset_id,
+                    "dataset_source_artifact_id": case.dataset_id,
                     "dataset_source_sha256": dataset_sha,
                     "support": case.support_path,
                     "support_artifact_id": None,
                     "support_source_sha256": None,
-                    "kind": "dictionary",
+                    "kind": "dictionary_mapping",
                     "level": "required",
                     "sensitivity": "confidential",
                     "reason_code": "manifest_declared",
-                    "recommendation_id": case.recommendation_id,
-                    "basis": basis.to_json(),
-                    "confirmed_by": "prior-reviewer",
-                    "confirmed_at": "2026-07-14T10:00:00Z",
+                    "declared_by": "prior-reviewer",
+                    "declared_at": "2026-07-14T10:00:00Z",
                 }
             ]
 
@@ -243,7 +254,7 @@ def _install_state(
                 "reject": [],
                 "date_locales": {},
                 "dataset_dependencies_schema": "dataset-dependencies/v1",
-                "dataset_dependencies_code_table_version": 1,
+                "dataset_dependencies_code_table_version": CODE_TABLE_VERSION,
                 "dataset_dependencies": declared_missing,
             },
             sort_keys=False,
@@ -402,7 +413,7 @@ def test_decision_revalidates_current_rulebook_scrub_and_role_version(
     import phi_engine.pipeline.review as review
 
     current = _case("1")
-    stale_role = _case("4", organizer_role_version=2)
+    stale_role = _case("4", organizer_role_version=ORGANIZER_ROLE_VERSION - 1)
     manifest_path, _ = _install_state(tmp_path, monkeypatch, (current, stale_role))
 
     monkeypatch.setattr(review, "_current_rulebook_sha256", lambda _study: "9" * 64)

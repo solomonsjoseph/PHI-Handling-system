@@ -18,10 +18,9 @@ def _read_jsonl(path: Path) -> list[dict]:
 def test_intake_rescans_stable_ids_aliases_and_removals(tmp_path: Path) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
-    (source / "data_dictionary").mkdir()
     (source / "forms").mkdir()
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
-    (source / "data_dictionary" / "labs_copy.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
+    (source / "datasets" / "labs_copy.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
@@ -30,18 +29,18 @@ def test_intake_rescans_stable_ids_aliases_and_removals(tmp_path: Path) -> None:
         first = intake_add(source, "Phase2Study")
         assert first["status"] == "ready", first["review_items"]
         entries_by_rel = {entry["relative_path"]: entry for entry in first["entries"].values()}
-        assert {"datasets/labs.csv", "data_dictionary/labs_copy.csv"} <= set(entries_by_rel)
-        assert entries_by_rel["datasets/labs.csv"]["artifact_id"] != entries_by_rel["data_dictionary/labs_copy.csv"]["artifact_id"]
-        assert entries_by_rel["datasets/labs.csv"]["sha256"] == entries_by_rel["data_dictionary/labs_copy.csv"]["sha256"]
+        assert {"datasets/labs.csv", "datasets/labs_copy.csv"} <= set(entries_by_rel)
+        assert entries_by_rel["datasets/labs.csv"]["artifact_id"] != entries_by_rel["datasets/labs_copy.csv"]["artifact_id"]
+        assert entries_by_rel["datasets/labs.csv"]["sha256"] == entries_by_rel["datasets/labs_copy.csv"]["sha256"]
 
         kept_id = entries_by_rel["datasets/labs.csv"]["artifact_id"]
         (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,41\n", encoding="utf-8")
-        (source / "data_dictionary" / "labs_copy.csv").unlink()
+        (source / "datasets" / "labs_copy.csv").unlink()
         second = intake_add(source, "Phase2Study")
         second_by_rel = {entry["relative_path"]: entry for entry in second["entries"].values()}
         assert second_by_rel["datasets/labs.csv"]["artifact_id"] == kept_id
         assert second_by_rel["datasets/labs.csv"]["sha256"] != entries_by_rel["datasets/labs.csv"]["sha256"]
-        assert second["removals"][-1]["relative_path"] == "data_dictionary/labs_copy.csv"
+        assert second["removals"][-1]["relative_path"] == "datasets/labs_copy.csv"
 
         manifest_path = workspace / "intake" / "Phase2Study" / "intake_manifest.json"
         tampered = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -56,10 +55,10 @@ def test_organize_uses_verified_descriptor_copy_and_header_ids(tmp_path: Path) -
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir()
-    (source / "data_dictionary").mkdir()
+    (source / "dictionary_mapping").mkdir()
     (source / "datasets" / "labs.csv").write_text("Subject ID,Age\n001,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
-    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
@@ -97,11 +96,11 @@ def test_organize_rejects_source_mutation_during_verified_copy(tmp_path: Path, m
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir()
-    (source / "mappings").mkdir()
+    (source / "dictionary_mapping").mkdir()
     data_file = source / "datasets" / "labs.csv"
     data_file.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
-    (source / "mappings" / "map.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "map.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
@@ -124,7 +123,7 @@ def test_forms_manifest_dataset_dependencies_validate_ids_hashes_and_paths(tmp_p
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
-    write_single_sheet_xlsx(source / "data_dictionary" / "labs.xlsx", ["variable", "label"], [["SUBJID", "Subject ID"]])
+    write_single_sheet_xlsx(source / "dictionary_mapping" / "labs.xlsx", ["variable", "label"], [["SUBJID", "Subject ID"]])
     write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
@@ -141,27 +140,21 @@ def test_forms_manifest_dataset_dependencies_validate_ids_hashes_and_paths(tmp_p
             yaml.safe_dump(
                 {
                     "dataset_dependencies_schema": "dataset-dependencies/v1",
-                    "dataset_dependencies_code_table_version": 1,
+                    "dataset_dependencies_code_table_version": 2,
                     "dataset_dependencies": {
                         "datasets/labs.csv": [
                             {
-                                "dataset_artifact_id": by_rel["datasets/labs.csv"]["artifact_id"],
+                                "dataset_source_artifact_id": by_rel["datasets/labs.csv"]["artifact_id"],
                                 "dataset_source_sha256": by_rel["datasets/labs.csv"]["sha256"],
-                                "support": "data_dictionary/labs.xlsx",
-                                "support_artifact_id": by_rel["data_dictionary/labs.xlsx"]["artifact_id"],
-                                "support_source_sha256": by_rel["data_dictionary/labs.xlsx"]["sha256"],
-                                "kind": "dictionary",
+                                "support": "dictionary_mapping/labs.xlsx",
+                                "support_artifact_id": by_rel["dictionary_mapping/labs.xlsx"]["artifact_id"],
+                                "support_source_sha256": by_rel["dictionary_mapping/labs.xlsx"]["sha256"],
+                                "kind": "dictionary_mapping",
                                 "level": "required",
                                 "sensitivity": "confidential",
                                 "reason_code": "only_interpretation",
-                                "recommendation_id": "dr_" + "1" * 32,
-                                "basis": {
-                                    "rulebook_sha256": "2" * 64,
-                                    "scrub_config_sha256": "3" * 64,
-                                    "support_role_sha256": "4" * 64,
-                                },
-                                "confirmed_by": "reviewer-id",
-                                "confirmed_at": "2026-07-14T00:00:00Z",
+                                "declared_by": "reviewer-id",
+                                "declared_at": "2026-07-14T00:00:00Z",
                             }
                         ]
                     },
@@ -170,7 +163,7 @@ def test_forms_manifest_dataset_dependencies_validate_ids_hashes_and_paths(tmp_p
             encoding="utf-8",
         )
         result = check_forms_manifest(source / "datasets")
-        assert result.dataset_dependencies["datasets/labs.csv"][0].support == "data_dictionary/labs.xlsx"
+        assert result.dataset_dependencies["datasets/labs.csv"][0].support == "dictionary_mapping/labs.xlsx"
 
         bad = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
         bad["dataset_dependencies"]["../escape.csv"] = []
@@ -188,7 +181,7 @@ def test_support_files_parse_normalized_rows_and_limits(tmp_path: Path) -> None:
     parsed = parse_support_artifact(
         artifact_id="a_" + "a" * 32,
         source_sha256="b" * 64,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         source_path=support,
         output_dir=tmp_path / "out",
     )
@@ -211,7 +204,7 @@ def test_support_files_parse_normalized_rows_and_limits(tmp_path: Path) -> None:
     too_large = parse_support_artifact(
         artifact_id="a_" + "c" * 32,
         source_sha256="d" * 64,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         source_path=support,
         output_dir=tmp_path / "out2",
         limits={"max_rows": 0},
@@ -226,8 +219,8 @@ def test_intake_load_rejects_duplicate_paths_broken_links_and_outside_targets(tm
     (source / "datasets").mkdir(parents=True)
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
-    (source / "data_dictionary" / "dict.csv").parent.mkdir(parents=True, exist_ok=True)
-    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nSUBJID,Subject\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").parent.mkdir(parents=True, exist_ok=True)
+    (source / "dictionary_mapping" / "dict.csv").write_text("variable,label\nSUBJID,Subject\n", encoding="utf-8")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         import phi_engine.pipeline.intake as intake_module
@@ -279,11 +272,10 @@ def test_intake_load_rejects_duplicate_paths_broken_links_and_outside_targets(tm
 def test_aliases_are_independently_organized_and_role_resolved(tmp_path: Path) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
-    (source / "data_dictionary").mkdir()
+    (source / "dictionary_mapping").mkdir()
     (source / "forms").mkdir()
-    content = "variable,label\nSUBJID,Subject ID\n"
-    (source / "datasets" / "labs.csv").write_text(content, encoding="utf-8")
-    (source / "data_dictionary" / "labs.csv").write_text(content, encoding="utf-8")
+    (source / "datasets" / "labs.csv").write_text("variable,label\nSUBJID,Subject ID\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "labs.csv").write_text("variable,label\nSUBJID,Subject Identifier\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
@@ -323,10 +315,10 @@ def test_unknown_top_level_directory_blocks_the_whole_study_review_required(tmp_
 def test_nested_canonical_directory_names_do_not_trigger_directory_role_fallback(tmp_path: Path) -> None:
     source = tmp_path / "src"
     (source / "misc" / "datasets").mkdir(parents=True)
-    (source / "uploads" / "data_dictionary").mkdir(parents=True)
+    (source / "uploads" / "dictionary_mapping").mkdir(parents=True)
     (source / "misc" / "forms").mkdir(parents=True)
     (source / "misc" / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
-    (source / "uploads" / "data_dictionary" / "foo.csv").write_text("variable,label\nSUBJID,Subject ID\n", encoding="utf-8")
+    (source / "uploads" / "dictionary_mapping" / "foo.csv").write_text("variable,label\nSUBJID,Subject ID\n", encoding="utf-8")
     (source / "misc" / "forms" / "labs.pdf").write_bytes(b"%PDF-1.4\n% nested forms fixture\n")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
@@ -347,11 +339,11 @@ def test_organize_rejects_source_hash_mismatch_and_in_root_symlink_swap(tmp_path
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir()
-    (source / "data_dictionary").mkdir()
+    (source / "dictionary_mapping").mkdir()
     data_file = source / "datasets" / "labs.csv"
     data_file.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
-    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
@@ -428,10 +420,10 @@ def test_organize_normalizes_injected_snapshot_copy_oserror(tmp_path: Path, monk
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir()
-    (source / "data_dictionary").mkdir()
+    (source / "dictionary_mapping").mkdir()
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
-    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
@@ -468,11 +460,11 @@ def test_verified_snapshot_removes_leftover_artifact_on_race_between_own_postche
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir()
-    (source / "mappings").mkdir()
+    (source / "dictionary_mapping").mkdir()
     target = source / "datasets" / "labs.csv"
     target.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
-    (source / "mappings" / "map.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "map.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
@@ -514,11 +506,11 @@ def test_organize_rejects_same_byte_different_inode_source_replacement(tmp_path:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir()
-    (source / "data_dictionary").mkdir()
+    (source / "dictionary_mapping").mkdir()
     data_file = source / "datasets" / "labs.csv"
     data_file.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
-    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
@@ -538,10 +530,10 @@ def test_organize_fails_closed_for_malformed_stale_forms_manifest(tmp_path: Path
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir()
-    (source / "data_dictionary").mkdir()
+    (source / "dictionary_mapping").mkdir()
     (source / "datasets" / "labs.csv").write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
-    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
@@ -562,8 +554,8 @@ def test_intake_removes_existing_path_that_becomes_broken_or_outside_symlink(tmp
     file_path = source / "datasets" / "labs.csv"
     file_path.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
-    (source / "data_dictionary" / "dict.csv").parent.mkdir(parents=True, exist_ok=True)
-    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nSUBJID,Subject\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").parent.mkdir(parents=True, exist_ok=True)
+    (source / "dictionary_mapping" / "dict.csv").write_text("variable,label\nSUBJID,Subject\n", encoding="utf-8")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add, load_intake_manifest
@@ -577,7 +569,7 @@ def test_intake_removes_existing_path_that_becomes_broken_or_outside_symlink(tmp
         # labs.csv itself is gone (its source-side symlink is rejected as
         # source-symlink-not-allowed, review-only, never an entries record
         # -- v3 has no accepted entry for it at all now), but the OTHER
-        # accepted content (forms/, data_dictionary/) is untouched.
+        # accepted content (forms/, dictionary_mapping/) is untouched.
         assert not any(e["relative_path"] == "datasets/labs.csv" for e in second["entries"].values())
         assert any(e["relative_path"] == "forms/consent.pdf" for e in second["entries"].values())
         assert second["removals"][-1]["artifact_id"] == first_id
@@ -613,11 +605,11 @@ def test_organize_rejects_real_symlink_escape_after_intake(tmp_path: Path) -> No
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
     (source / "forms").mkdir()
-    (source / "data_dictionary").mkdir()
+    (source / "dictionary_mapping").mkdir()
     file_path = source / "datasets" / "labs.csv"
     file_path.write_text("SUBJID,AGE\n1,40\n", encoding="utf-8")
     (source / "forms" / "consent.pdf").write_bytes(b"%PDF-1.4\n% minimal ready-package fixture\n")
-    (source / "data_dictionary" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "dict.csv").write_text("variable,label\nAGE,Age in years\n", encoding="utf-8")
 
     with hermetic_phi_workspace(tmp_path, "Phase2Study") as workspace:
         from phi_engine.pipeline.intake import intake_add
@@ -646,14 +638,14 @@ def test_organize_parses_support_from_extensionless_verified_snapshots_and_hides
 ) -> None:
     source = tmp_path / "src"
     (source / "datasets").mkdir(parents=True)
-    (source / "data_dictionary").mkdir()
+    (source / "dictionary_mapping").mkdir()
     (source / "forms").mkdir()
     (source / "datasets" / "labs.csv").write_text("Subject ID,Age\nA1,40\n", encoding="utf-8")
-    (source / "data_dictionary" / "labs.csv").write_text("variable,label\nSubject ID,Subject identifier\n", encoding="utf-8")
+    (source / "dictionary_mapping" / "labs.csv").write_text("variable,label\nSubject ID,Subject identifier\n", encoding="utf-8")
 
     pd = pytest.importorskip("pandas")
     pd.DataFrame([["variable", "label"], ["Age", "Age in years"]]).to_excel(
-        source / "data_dictionary" / "labs.xlsx", index=False, header=False
+        source / "dictionary_mapping" / "labs.xlsx", index=False, header=False
     )
 
     canvas_mod = pytest.importorskip("reportlab.pdfgen.canvas")
@@ -682,7 +674,7 @@ def test_organize_parses_support_from_extensionless_verified_snapshots_and_hides
         assert "labs.pdf" not in ordinary
 
         organized_root = workspace / "organized" / "Phase2Study"
-        for rel in ("data_dictionary/labs.csv", "data_dictionary/labs.xlsx", "forms/labs.pdf"):
+        for rel in ("dictionary_mapping/labs.csv", "dictionary_mapping/labs.xlsx", "forms/labs.pdf"):
             snapshot = organized_root / ".verified_sources" / by_rel[rel]["artifact_id"]
             assert snapshot.is_file()
             assert snapshot.suffix == ""

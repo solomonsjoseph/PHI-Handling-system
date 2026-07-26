@@ -211,10 +211,9 @@ def test_role_for_routes_solely_from_component_and_never_guesses_from_path(tmp_p
     )
     assert router._role_for({"relative_path": "datasets/x.csv", "component": "datasets"}) == "dataset"
     assert (
-        router._role_for({"relative_path": "data_dictionary/x.csv", "component": "data_dictionary"})
-        == "dictionary"
+        router._role_for({"relative_path": "dictionary_mapping/x.csv", "component": "dictionary_mapping"})
+        == "dictionary_mapping"
     )
-    assert router._role_for({"relative_path": "mappings/x.csv", "component": "mappings"}) == "mapping"
     assert router._role_for({"relative_path": "forms/x.pdf", "component": "forms"}) == "pdf"
     assert (
         router._role_for({"relative_path": "weird/x.dat", "component": "_unclassified"}) == "_unclassified"
@@ -312,11 +311,11 @@ def test_organize_ignores_confirmed_forms_manifest_dependency_component_is_sole_
             yaml.safe_dump(
                 {
                     "dataset_dependencies_schema": "dataset-dependencies/v1",
-                    "dataset_dependencies_code_table_version": 1,
+                    "dataset_dependencies_code_table_version": 2,
                     "dataset_dependencies": {
                         "datasets/labs.csv": [
                             {
-                                "dataset_artifact_id": dataset_entry["artifact_id"],
+                                "dataset_source_artifact_id": dataset_entry["artifact_id"],
                                 "dataset_source_sha256": dataset_entry["sha256"],
                                 "support": "forms/consent.pdf",
                                 "support_artifact_id": pdf_entry["artifact_id"],
@@ -325,14 +324,8 @@ def test_organize_ignores_confirmed_forms_manifest_dependency_component_is_sole_
                                 "level": "required",
                                 "sensitivity": "confidential",
                                 "reason_code": "only_interpretation",
-                                "recommendation_id": "dr_" + "1" * 32,
-                                "basis": {
-                                    "rulebook_sha256": "2" * 64,
-                                    "scrub_config_sha256": "3" * 64,
-                                    "support_role_sha256": "4" * 64,
-                                },
-                                "confirmed_by": "reviewer-id",
-                                "confirmed_at": "2026-07-14T00:00:00Z",
+                                "declared_by": "reviewer-id",
+                                "declared_at": "2026-07-14T00:00:00Z",
                             }
                         ]
                     },
@@ -388,15 +381,13 @@ def test_organize_end_to_end_ready_manifest_routes_solely_by_component(tmp_path:
 
         assert len(result["datasets"]) == 1
         assert result["datasets"][0]["output"] == "labs.jsonl"
-        # organize.py's own _COMPONENT_ROLES table (out of scope for this
-        # phase -- a later Naming Boundary/Downstream V2 phase renames it
-        # to DependencyKind.DICTIONARY_MAPPING per the approved plan) does
-        # not yet recognize the "dictionary_mapping" component intake now
-        # assigns, so a dictionary_mapping entry currently falls through
-        # to organize's existing "_unclassified" role and is never parsed
-        # as support content -- an expected, deferred inconsistency this
-        # phase does not introduce and does not fix.
-        assert result["support_artifacts"] == []
+        # organize.py's _COMPONENT_ROLES table now recognizes the unified
+        # "dictionary_mapping" component intake assigns (the dictionary-
+        # mapping-support-plan's Approach 4 cutover), so the dictionary_mapping
+        # file is parsed as a support artifact rather than falling through to
+        # "_unclassified".
+        assert len(result["support_artifacts"]) == 1
+        assert result["support_artifacts"][0]["kind"] == "dictionary_mapping"
         assert result["pdf_roles"]
         assert not Path(config.ANNOTATED_PDFS_DIR).exists()
 

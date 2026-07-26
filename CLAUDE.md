@@ -81,13 +81,15 @@ and zero code changes.
 
 ## Intake contract (intake-manifest/v3)
 
-- **Required package.** A source root MUST provide `datasets/` (required),
-  `forms/` (required), and at least one of `data_dictionary/` or
-  `mappings/`. Missing/empty required components are blocking review items.
+- **Required package.** A source root MUST provide `datasets/` (always
+  required), plus at least one of `forms/` or `dictionary_mapping/` (an
+  alternative group, not both mandatory). Missing/empty required
+  components -- or a shortfall in the alternative group -- are blocking
+  review items.
 - **Closed accepted-format matrix** (`intake_preflight._COMPONENT_SUFFIXES`):
   `datasets/` = `.csv`/`.xls`/`.xlsx` (dataset `.xlsx` must be single-sheet);
   `forms/` = `.pdf` only (annotated and non-annotated are not distinguished,
-  no `annotated_pdfs` alias); `data_dictionary/` and `mappings/` =
+  no `annotated_pdfs` alias); `dictionary_mapping/` =
   `.csv`/`.xlsx`. `.json`/`.jsonl` are NOT accepted datasets. Any
   unsupported suffix, invalid/multi-sheet workbook, or cross-component
   hardlink becomes an `_unclassified` review item. Nested subdirectories and

@@ -35,10 +35,10 @@ entry snapshot):
 - `forms/`: `consent_table.pdf` (an embedded extractable table) and
   `screening_form.pdf` (no extractable table). `forms/` holds PDFs only and
   never distinguishes annotated from non-annotated documents.
-- `data_dictionary/`: `dict.csv` and `labs_dup.csv` (a cross-component
-  duplicate with identical bytes to `datasets/labs.csv`, kept as its own
-  independent entry, never merged or deduplicated).
-- `mappings/`: `site_map.csv`.
+- `dictionary_mapping/`: `dict.csv`, `labs_dup.csv` (header-similar to
+  `datasets/labs.csv` but not byte-identical, so it stays a normal kept
+  entry rather than tripping the cross-component-dataset-copy quarantine),
+  and `site_map.csv`.
 
 Ten regular files total. A separate, deliberately-invalid package
 (`build_review_required_fixtures`, seed 43) exercises every fixed intake
@@ -101,8 +101,8 @@ organize exit=0
 `organize_manifest.json`: **6 datasets produced, 1 in the review bucket**.
 Organization is component-authoritative -- the organizer routes each entry
 purely by the `component` the intake manifest already assigned
-(`_COMPONENT_ROLES`: `datasets -> dataset`, `data_dictionary -> dictionary`,
-`mappings -> mapping`, `forms -> pdf`; `_unclassified` is never parsed). It
+(`_COMPONENT_ROLES`: `datasets -> dataset`, `dictionary_mapping ->
+dictionary_mapping`, `forms -> pdf`; `_unclassified` is never parsed). It
 does not re-guess a role from the file path or suffix.
 
 Datasets produced (nested and duplicate entries both survive as distinct
@@ -192,7 +192,7 @@ ALL PASS
 - `intake_symlink_invariant`: every entry under `<workspace>/intake/<study>/`
   is a symlink or the `intake_manifest.json` bookkeeping file, and the intake
   root, study directory, and each component directory
-  (`datasets`/`forms`/`data_dictionary`/`mappings`/`_unclassified`) are
+  (`datasets`/`forms`/`dictionary_mapping`/`_unclassified`) are
   `lstat`-checked and rejected if any is itself a symlink.
 - `llm_boundary_canary`: `llm.provider` default `none`; zero `get_llm_client()`
   calls outside the `llm_detector`/`phi_alignment` exemption under

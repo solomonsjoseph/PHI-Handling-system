@@ -278,8 +278,7 @@ def _verified_snapshot(entry: dict[str, Any], root_fd: int, verified_dir: Path) 
 
 _COMPONENT_ROLES: dict[str, str] = {
     "datasets": "dataset",
-    "data_dictionary": "dictionary",
-    "mappings": "mapping",
+    "dictionary_mapping": "dictionary_mapping",
     "forms": "pdf",
 }
 
@@ -607,10 +606,8 @@ def _organize_locked(study: str) -> dict[str, Any]:
             role = router._role_for(entry)
             if role == "dataset":
                 router.route_dataset(link_name, entry)
-            elif role == "dictionary":
-                router.route_support(link_name, entry, DependencyKind.DICTIONARY)
-            elif role == "mapping":
-                router.route_support(link_name, entry, DependencyKind.MAPPING)
+            elif role == "dictionary_mapping":
+                router.route_support(link_name, entry, DependencyKind.DICTIONARY_MAPPING)
             # role in {"pdf", "_unclassified"}: pdf routed in the second pass below;
             # _unclassified is never parsed.
         for link_name, entry in sorted(entries.items(), key=lambda item: item[1].get("relative_path", item[0])):

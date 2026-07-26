@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from phi_engine.pipeline.dependencies import (
+    CODE_TABLE_VERSION,
     append_dependency_decision,
     DependencyDecision,
     DependencyDecisionBasis,
@@ -23,6 +24,7 @@ from phi_engine.pipeline.dependencies import (
     ParsedSupportArtifact,
     PrivateDependencyRecommendation,
     RoleSource,
+    ORGANIZER_ROLE_VERSION,
     Sensitivity,
     StructuredTransformKind,
     SupportFailureCode,
@@ -57,14 +59,14 @@ def basis() -> DependencyDecisionBasis:
 
 def recommendation() -> DependencyRecommendation:
     return DependencyRecommendation(
-        schema_version="dependency-recommendation/v1",
+        schema_version="dependency-recommendation/v2",
         recommendation_id=DR,
         dataset_artifact_id=A,
         dataset_sha256=SHA1,
         support_artifact_id=B,
         support_sha256=SHA2,
         normalized_support_sha256=SHA3,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         suggested_level=DependencyLevel.REQUIRED,
         default_sensitivity=Sensitivity.CONFIDENTIAL,
         reason_code=DependencyReasonCode.ONLY_INTERPRETATION,
@@ -77,7 +79,7 @@ def recommendation() -> DependencyRecommendation:
 
 def decision() -> DependencyDecision:
     return DependencyDecision(
-        schema_version="dependency-decision/v1",
+        schema_version="dependency-decision/v2",
         decision_id=DD,
         recommendation_id=DR,
         dataset_artifact_id=A,
@@ -85,7 +87,7 @@ def decision() -> DependencyDecision:
         support_artifact_id=B,
         support_sha256=SHA2,
         normalized_support_sha256=SHA3,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         level=DependencyLevel.REQUIRED,
         sensitivity=Sensitivity.NON_CONFIDENTIAL,
         reason_code=DependencyReasonCode.ONLY_INTERPRETATION,
@@ -96,7 +98,7 @@ def decision() -> DependencyDecision:
 
 
 def test_authoritative_enum_tokens_are_exact() -> None:
-    assert {x.value for x in DependencyKind} == {"pdf", "dictionary", "mapping", "dictionary_mapping"}
+    assert {x.value for x in DependencyKind} == {"pdf", "dictionary_mapping"}
     assert {x.value for x in DependencyLevel} == {"required", "helpful", "ignored"}
     assert {x.value for x in Sensitivity} == {"confidential", "non_confidential"}
     assert {x.value for x in RoleSource} == {"manifest", "directory", "inferred"}
@@ -153,8 +155,8 @@ def test_recommendation_json_shape_is_exact_and_round_trips() -> None:
         "basis",
         "code_table_version",
     ]
-    assert payload["code_table_version"] == 1
-    assert payload["kind"] == "dictionary"
+    assert payload["code_table_version"] == 2
+    assert payload["kind"] == "dictionary_mapping"
     assert payload["suggested_level"] == "required"
     assert payload["default_sensitivity"] == "confidential"
     assert payload["header_ids"] == [H]
@@ -186,7 +188,7 @@ def test_decision_json_shape_is_exact_and_round_trips() -> None:
         "decided_at",
         "code_table_version",
     ]
-    assert payload["code_table_version"] == 1
+    assert payload["code_table_version"] == 2
     assert payload["level"] == "required"
     assert payload["sensitivity"] == "non_confidential"
     assert DependencyDecision.from_json(payload) == decision()
@@ -232,25 +234,57 @@ def test_from_json_rejects_missing_unknown_duplicate_code_version_and_unknown_co
     with pytest.raises(ValueError, match="keys mismatch"):
         DependencyRecommendation.from_json({**payload, "metadata": {}})
     with pytest.raises(ValueError, match="unsupported code_table_version"):
-        DependencyRecommendation.from_json({**payload, "code_table_version": 2})
+        DependencyRecommendation.from_json({**payload, "code_table_version": 1})
     with pytest.raises(ValueError):
         DependencyRecommendation.from_json({**payload, "kind": "spreadsheet"})
 
-    duplicate_json = '{"schema_version":"dependency-recommendation/v1",' + json.dumps(payload)[1:]
+    duplicate_json = '{"schema_version":"dependency-recommendation/v2",' + json.dumps(payload)[1:]
     with pytest.raises(ValueError, match="duplicate key"):
         DependencyRecommendation.from_json(duplicate_json)
 
 
+def test_v1_schema_version_and_code_table_records_fail_closed_across_the_wire_family() -> None:
+    rec_payload = recommendation().to_json()
+    with pytest.raises(ValueError, match="schema_version must be dependency-recommendation/v2"):
+        DependencyRecommendation.from_json({**rec_payload, "schema_version": "dependency-recommendation/v1"})
+
+    dec_payload = decision().to_json()
+    with pytest.raises(ValueError, match="schema_version must be dependency-decision/v2"):
+        DependencyDecision.from_json({**dec_payload, "schema_version": "dependency-decision/v1"})
+    with pytest.raises(ValueError, match="unsupported code_table_version"):
+        DependencyDecision.from_json({**dec_payload, "code_table_version": 1})
+
+    private = PrivateDependencyRecommendation(
+        schema_version="dependency-recommendation-private/v2",
+        recommendation_id=DR,
+        dataset_artifact_id=A,
+        dataset_path="datasets/labs.csv",
+        support_artifact_id=B,
+        support_path="dictionary_mapping/labs.csv",
+        raw_header_names=("Subject ID",),
+        role_source=RoleSource.INFERRED,
+        organizer_role_version=ORGANIZER_ROLE_VERSION,
+        basis=basis(),
+    )
+    private_payload = private.to_json()
+    with pytest.raises(ValueError, match="schema_version must be dependency-recommendation-private/v2"):
+        PrivateDependencyRecommendation.from_json(
+            {**private_payload, "schema_version": "dependency-recommendation-private/v1"}
+        )
+    with pytest.raises(ValueError, match="unsupported code_table_version"):
+        PrivateDependencyRecommendation.from_json({**private_payload, "code_table_version": 1})
+
+
 def test_missing_support_recommendation_shape_keeps_explicit_nulls() -> None:
     rec = DependencyRecommendation(
-        schema_version="dependency-recommendation/v1",
+        schema_version="dependency-recommendation/v2",
         recommendation_id=DR,
         dataset_artifact_id=A,
         dataset_sha256=SHA1,
         support_artifact_id=None,
         support_sha256=None,
         normalized_support_sha256=None,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         suggested_level=DependencyLevel.REQUIRED,
         default_sensitivity=Sensitivity.CONFIDENTIAL,
         reason_code=DependencyReasonCode.TRANSFORM_PARAMETERS_MISSING,
@@ -270,7 +304,7 @@ def test_support_parse_status_requires_exact_parsed_or_failed_identity(tmp_path:
     failed = ParsedSupportArtifact(
         artifact_id=B,
         source_sha256=SHA2,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         format="csv",
         parse_status=SupportParseStatus.FAILED,
         normalized_rows_path=None,
@@ -325,7 +359,7 @@ def _dataset(path: Path, header_name: str = "Subject ID") -> OrganizedDataset:
     )
 
 
-def _support(path: Path, *, artifact_id: str = B, kind: DependencyKind = DependencyKind.DICTIONARY) -> ParsedSupportArtifact:
+def _support(path: Path, *, artifact_id: str = B, kind: DependencyKind = DependencyKind.DICTIONARY_MAPPING) -> ParsedSupportArtifact:
     support_path = path / f"{artifact_id}.jsonl"
     _write_support_rows(support_path, "Subject ID")
     return ParsedSupportArtifact(
@@ -354,7 +388,7 @@ def test_structured_transform_requirement_contract_is_phase5_exact() -> None:
         kind=StructuredTransformKind.BAND,
         origin=TransformRequirementOrigin.RULE_CLASSIFICATION,
         origin_rule_id="rule-1",
-        required_support_kind=DependencyKind.DICTIONARY,
+        required_support_kind=DependencyKind.DICTIONARY_MAPPING,
     )
     assert req.classification_action is Action.GENERALIZE
     assert req.kind.value == "band"
@@ -452,11 +486,11 @@ def test_recommender_same_stem_pdf_and_confirmed_links_and_ignored_suppression(t
             support_artifact_id=B,
             kind=DependencyKind.PDF,
             role_source=RoleSource.INFERRED,
-            organizer_role_version=1,
+            organizer_role_version=ORGANIZER_ROLE_VERSION,
         ),
     )
     ignored = DependencyDecision(
-        schema_version="dependency-decision/v1",
+        schema_version="dependency-decision/v2",
         decision_id=DD,
         recommendation_id=ignored_recommendation_id,
         dataset_artifact_id=A,
@@ -519,7 +553,7 @@ def test_recommender_converges_persisted_inferred_decision_to_one_manifest_role(
 
     inferred_rec = inferred[0]
     inferred_decision = DependencyDecision(
-        schema_version="dependency-decision/v1",
+        schema_version="dependency-decision/v2",
         decision_id=DD,
         recommendation_id=inferred_rec.recommendation_id,
         dataset_artifact_id=inferred_rec.dataset_artifact_id,
@@ -575,7 +609,7 @@ def test_recommender_exact_manifest_non_confidential_suppresses_inferred_duplica
         transform_requirement_ids=(),
     )
     manifest_decision = DependencyDecision(
-        schema_version="dependency-decision/v1",
+        schema_version="dependency-decision/v2",
         decision_id=DD,
         recommendation_id=recommendation_id,
         dataset_artifact_id=A,
@@ -596,7 +630,7 @@ def test_recommender_exact_manifest_non_confidential_suppresses_inferred_duplica
                 support_artifact_id=B,
                 kind=DependencyKind.PDF,
                 role_source=RoleSource.MANIFEST,
-                organizer_role_version=1,
+                organizer_role_version=ORGANIZER_ROLE_VERSION,
             ),
         ),
         decided_by="reviewer",
@@ -632,7 +666,7 @@ def test_recommender_conservatively_merges_duplicate_manifest_roles(
         level: DependencyLevel,
     ) -> DependencyDecision:
         return DependencyDecision(
-            schema_version="dependency-decision/v1",
+            schema_version="dependency-decision/v2",
             decision_id=decision_id,
             recommendation_id=recommendation_id,
             dataset_artifact_id=A,
@@ -640,7 +674,7 @@ def test_recommender_conservatively_merges_duplicate_manifest_roles(
             support_artifact_id=B,
             support_sha256=SHA2,
             normalized_support_sha256=SHA3,
-            kind=DependencyKind.DICTIONARY,
+            kind=DependencyKind.DICTIONARY_MAPPING,
             level=level,
             sensitivity=Sensitivity.CONFIDENTIAL,
             reason_code=DependencyReasonCode.EXACT_HEADER_MATCH,
@@ -651,9 +685,9 @@ def test_recommender_conservatively_merges_duplicate_manifest_roles(
                     recommendation_id=recommendation_id,
                     dataset_artifact_id=A,
                     support_artifact_id=B,
-                    kind=DependencyKind.DICTIONARY,
+                    kind=DependencyKind.DICTIONARY_MAPPING,
                     role_source=RoleSource.INFERRED,
-                    organizer_role_version=1,
+                    organizer_role_version=ORGANIZER_ROLE_VERSION,
                 ),
             ),
             decided_by="reviewer",
@@ -802,7 +836,7 @@ def test_recommender_transform_requirement_missing_then_confirmed_support(tmp_pa
         kind=StructuredTransformKind.GENERALIZE,
         origin=TransformRequirementOrigin.EFFECTIVE_CONFIG,
         origin_rule_id="rule-transform",
-        required_support_kind=DependencyKind.DICTIONARY,
+        required_support_kind=DependencyKind.DICTIONARY_MAPPING,
     )
     missing = recommend_dependencies(
         datasets=(dataset,),
@@ -817,7 +851,7 @@ def test_recommender_transform_requirement_missing_then_confirmed_support(tmp_pa
     assert transform_rec.support_artifact_id is None
     assert transform_rec.reason_code is DependencyReasonCode.TRANSFORM_PARAMETERS_MISSING
     ignored_missing = DependencyDecision(
-        schema_version="dependency-decision/v1",
+        schema_version="dependency-decision/v2",
         decision_id="dd_" + "a" * 32,
         recommendation_id=transform_rec.recommendation_id,
         dataset_artifact_id=A,
@@ -825,7 +859,7 @@ def test_recommender_transform_requirement_missing_then_confirmed_support(tmp_pa
         support_artifact_id=None,
         support_sha256=None,
         normalized_support_sha256=None,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         level=DependencyLevel.IGNORED,
         sensitivity=Sensitivity.CONFIDENTIAL,
         reason_code=DependencyReasonCode.TRANSFORM_PARAMETERS_MISSING,
@@ -848,7 +882,7 @@ def test_recommender_transform_requirement_missing_then_confirmed_support(tmp_pa
     assert still_required.reason_code is DependencyReasonCode.TRANSFORM_PARAMETERS_MISSING
 
     current_decision = DependencyDecision(
-        schema_version="dependency-decision/v1",
+        schema_version="dependency-decision/v2",
         decision_id=DD,
         recommendation_id=DR,
         dataset_artifact_id=A,
@@ -856,7 +890,7 @@ def test_recommender_transform_requirement_missing_then_confirmed_support(tmp_pa
         support_artifact_id=B,
         support_sha256=SHA2,
         normalized_support_sha256=SHA3,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         level=DependencyLevel.REQUIRED,
         sensitivity=Sensitivity.CONFIDENTIAL,
         reason_code=DependencyReasonCode.MANIFEST_DECLARED,
@@ -867,9 +901,9 @@ def test_recommender_transform_requirement_missing_then_confirmed_support(tmp_pa
                 recommendation_id=DR,
                 dataset_artifact_id=A,
                 support_artifact_id=B,
-                kind=DependencyKind.DICTIONARY,
+                kind=DependencyKind.DICTIONARY_MAPPING,
                 role_source=RoleSource.MANIFEST,
-                organizer_role_version=1,
+                organizer_role_version=ORGANIZER_ROLE_VERSION,
             ),
         ),
         decided_by="reviewer",
@@ -912,13 +946,25 @@ def _decision_workflow_fixture(
     normalized_sha = hashlib.sha256(normalized_bytes).hexdigest()
     support_id = None if missing_support else B
     role_source = RoleSource.MANIFEST if missing_support else RoleSource.INFERRED
+    recommendation_id = (
+        depmod.recommendation_identity(
+            dataset_artifact_id=A,
+            support_artifact_id=None,
+            kind=DependencyKind.DICTIONARY_MAPPING,
+            reason_code=DependencyReasonCode.MANIFEST_DECLARED,
+            header_ids=(),
+            transform_requirement_ids=(),
+        )
+        if missing_support
+        else DR
+    )
     role_hash = depmod.support_role_sha256(
-        recommendation_id=DR,
+        recommendation_id=recommendation_id,
         dataset_artifact_id=A,
         support_artifact_id=support_id,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         role_source=role_source,
-        organizer_role_version=1,
+        organizer_role_version=ORGANIZER_ROLE_VERSION,
     )
     current_basis = DependencyDecisionBasis(
         rulebook_sha256=SHA1,
@@ -926,14 +972,14 @@ def _decision_workflow_fixture(
         support_role_sha256=role_hash,
     )
     rec = DependencyRecommendation(
-        schema_version="dependency-recommendation/v1",
-        recommendation_id=DR,
+        schema_version="dependency-recommendation/v2",
+        recommendation_id=recommendation_id,
         dataset_artifact_id=A,
         dataset_sha256=dataset_sha,
         support_artifact_id=support_id,
         support_sha256=None if missing_support else support_sha,
         normalized_support_sha256=None if missing_support else normalized_sha,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         suggested_level=DependencyLevel.REQUIRED,
         default_sensitivity=Sensitivity.CONFIDENTIAL,
         reason_code=DependencyReasonCode.MANIFEST_DECLARED if missing_support else DependencyReasonCode.ONLY_INTERPRETATION,
@@ -943,15 +989,15 @@ def _decision_workflow_fixture(
         basis=current_basis,
     )
     private = PrivateDependencyRecommendation(
-        schema_version="dependency-recommendation-private/v1",
-        recommendation_id=DR,
+        schema_version="dependency-recommendation-private/v2",
+        recommendation_id=recommendation_id,
         dataset_artifact_id=A,
         dataset_path="datasets/labs.csv",
         support_artifact_id=support_id,
-        support_path="data_dictionary/expected-labs.csv" if missing_support else "data_dictionary/labs.csv",
+        support_path="dictionary_mapping/expected-labs.csv" if missing_support else "dictionary_mapping/labs.csv",
         raw_header_names=("Subject ID",),
         role_source=role_source,
-        organizer_role_version=1,
+        organizer_role_version=ORGANIZER_ROLE_VERSION,
         basis=current_basis,
     )
     write_dependency_recommendations(
@@ -992,13 +1038,13 @@ def _decision_workflow_fixture(
                 {
                     "artifact_id": B,
                     "source_sha256": support_sha,
-                    "kind": "dictionary",
+                    "kind": "dictionary_mapping",
                     "format": "csv",
                     "parse_status": "parsed",
                     "normalized_rows_sha256": normalized_sha,
                     "failure_code": None,
                     "normalized_rows_path": str(normalized_path),
-                    "source_relative_path": "data_dictionary/labs.csv",
+                    "source_relative_path": "dictionary_mapping/labs.csv",
                     "normalized_source_stem": "labs",
                 }
             ),
@@ -1012,7 +1058,7 @@ def _decision_workflow_fixture(
     if missing_support:
         manifest_dependencies[private.dataset_path] = [
             {
-                "dataset_artifact_id": rec.dataset_artifact_id,
+                "dataset_source_artifact_id": rec.dataset_artifact_id,
                 "dataset_source_sha256": rec.dataset_sha256,
                 "support": private.support_path,
                 "support_artifact_id": None,
@@ -1021,10 +1067,8 @@ def _decision_workflow_fixture(
                 "level": "required",
                 "sensitivity": "confidential",
                 "reason_code": rec.reason_code.value,
-                "recommendation_id": rec.recommendation_id,
-                "basis": rec.basis.to_json(),
-                "confirmed_by": "prior-reviewer",
-                "confirmed_at": "2026-07-14T10:00:00Z",
+                "declared_by": "prior-reviewer",
+                "declared_at": "2026-07-14T10:00:00Z",
             }
         ]
     config_dir.mkdir(parents=True)
@@ -1037,7 +1081,7 @@ def _decision_workflow_fixture(
                 "reject": [],
                 "date_locales": {"VISIT_DT": "DMY"},
                 "dataset_dependencies_schema": "dataset-dependencies/v1",
-                "dataset_dependencies_code_table_version": 1,
+                "dataset_dependencies_code_table_version": CODE_TABLE_VERSION,
                 "dataset_dependencies": manifest_dependencies,
             },
             sort_keys=False,
@@ -1057,15 +1101,15 @@ def test_dependency_recommendation_writers_and_loaders_are_exact_private_and_mod
     tmp_path: Path,
 ) -> None:
     private = PrivateDependencyRecommendation(
-        schema_version="dependency-recommendation-private/v1",
+        schema_version="dependency-recommendation-private/v2",
         recommendation_id=DR,
         dataset_artifact_id=A,
         dataset_path="datasets/labs.csv",
         support_artifact_id=B,
-        support_path="data_dictionary/labs.csv",
+        support_path="dictionary_mapping/labs.csv",
         raw_header_names=("Subject ID",),
         role_source=RoleSource.INFERRED,
-        organizer_role_version=1,
+        organizer_role_version=ORGANIZER_ROLE_VERSION,
         basis=basis(),
     )
     ordinary_path, private_path = write_dependency_recommendations(
@@ -1113,16 +1157,16 @@ def test_decide_dependency_updates_only_manifest_dependency_fields_and_appends_e
     assert manifest["reject"] == []
     assert manifest["date_locales"] == {"VISIT_DT": "DMY"}
     assert manifest["dataset_dependencies_schema"] == "dataset-dependencies/v1"
-    assert manifest["dataset_dependencies_code_table_version"] == 1
+    assert manifest["dataset_dependencies_code_table_version"] == 2
     assert manifest["dataset_dependencies"]["datasets/other.csv"] == []
     assert manifest["dataset_dependencies"]["datasets/labs.csv"] == [
         {
             "dataset_artifact_id": A,
             "dataset_source_sha256": rec.dataset_sha256,
-            "support": "data_dictionary/labs.csv",
+            "support": "dictionary_mapping/labs.csv",
             "support_artifact_id": B,
             "support_source_sha256": rec.support_sha256,
-            "kind": "dictionary",
+            "kind": "dictionary_mapping",
             "level": "helpful",
             "sensitivity": "non_confidential",
             "reason_code": "only_interpretation",
@@ -1154,7 +1198,7 @@ def test_decide_dependency_accepts_omitted_support_only_for_manifest_declared_mi
     decision = reviewmod.decide_dependency(
         "DependencyStudy",
         dataset=A,
-        recommendation=DR,
+        recommendation=rec.recommendation_id,
         support=None,
         level="required",
         sensitivity="confidential",
@@ -1164,7 +1208,7 @@ def test_decide_dependency_accepts_omitted_support_only_for_manifest_declared_mi
     )
     assert decision.support_artifact_id is None
     dependency = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))["dataset_dependencies"]["datasets/labs.csv"][0]
-    assert dependency["support"] == "data_dictionary/expected-labs.csv"
+    assert dependency["support"] == "dictionary_mapping/expected-labs.csv"
     assert dependency["support_artifact_id"] is None
     assert dependency["support_source_sha256"] is None
     assert rec.support_sha256 is None

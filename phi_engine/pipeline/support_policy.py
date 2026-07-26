@@ -242,7 +242,7 @@ def build_transform_maps_from_support(
     candidates: dict[str, list[tuple[dict[str, str], SupportMapProvenance]]] = {}
 
     for recommendation in recommendations:
-        if recommendation.kind not in (DependencyKind.DICTIONARY, DependencyKind.MAPPING):
+        if recommendation.kind != DependencyKind.DICTIONARY_MAPPING:
             continue
         if recommendation.support_artifact_id is None or not recommendation.header_ids:
             continue

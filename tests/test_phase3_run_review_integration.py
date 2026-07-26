@@ -19,6 +19,7 @@ from phi_engine.pipeline.dependencies import (
     ParsedSupportArtifact,
     PrivateDependencyRecommendation,
     RoleSource,
+    ORGANIZER_ROLE_VERSION,
     Sensitivity,
     StructuredTransformKind,
     TransformRequirementOrigin,
@@ -120,7 +121,7 @@ def _organized_alias_fixture(tmp_path: Path) -> tuple[Path, dict[str, object], s
     support_public = {
         "artifact_id": support_id,
         "source_sha256": support_source_sha,
-        "kind": "dictionary",
+        "kind": "dictionary_mapping",
         "format": "csv",
         "parse_status": "parsed",
         "normalized_rows_sha256": _sha(support_rows),
@@ -131,7 +132,7 @@ def _organized_alias_fixture(tmp_path: Path) -> tuple[Path, dict[str, object], s
         {
             **support_public,
             "normalized_rows_path": str(support_rows_path),
-            "source_relative_path": "data_dictionary/private.csv",
+            "source_relative_path": "dictionary_mapping/private.csv",
             "normalized_source_stem": "private",
         },
     )
@@ -160,9 +161,9 @@ def _basis(
             recommendation_id=recommendation_id,
             dataset_artifact_id=dataset_id,
             support_artifact_id=support_id,
-            kind=DependencyKind.DICTIONARY,
+            kind=DependencyKind.DICTIONARY_MAPPING,
             role_source=role_source,
-            organizer_role_version=1,
+            organizer_role_version=ORGANIZER_ROLE_VERSION,
         ),
     )
 
@@ -179,14 +180,14 @@ def _recommendation(
     sensitivity: Sensitivity = Sensitivity.CONFIDENTIAL,
 ) -> DependencyRecommendation:
     return DependencyRecommendation(
-        schema_version="dependency-recommendation/v1",
+        schema_version="dependency-recommendation/v2",
         recommendation_id=recommendation_id,
         dataset_artifact_id=dataset_id,
         dataset_sha256=dataset_sha,
         support_artifact_id=support_id,
         support_sha256=support_sha,
         normalized_support_sha256=normalized_sha,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         suggested_level=level,
         default_sensitivity=sensitivity,
         reason_code=DependencyReasonCode.EXACT_HEADER_MATCH,
@@ -199,7 +200,7 @@ def _recommendation(
 
 def _decision(rec: DependencyRecommendation, *, level: DependencyLevel | None = None) -> DependencyDecision:
     return DependencyDecision(
-        schema_version="dependency-decision/v1",
+        schema_version="dependency-decision/v2",
         decision_id=_decision_id(rec.recommendation_id[-1]),
         recommendation_id=rec.recommendation_id,
         dataset_artifact_id=rec.dataset_artifact_id,
@@ -232,7 +233,7 @@ def test_hydrates_exact_alias_datasets_and_support_only_from_protected_0600_meta
         first_id: "datasets/alpha.csv",
         second_id: "datasets/beta.csv",
     }
-    assert hydrated.support_paths_by_id == {support_id: "data_dictionary/private.csv"}
+    assert hydrated.support_paths_by_id == {support_id: "dictionary_mapping/private.csv"}
 
     protected = organized / ".protected" / "headers" / f"{first_id}.json"
     protected.chmod(0o644)
@@ -410,10 +411,10 @@ def test_preliminary_inputs_use_opaque_header_ids_and_explicit_transforms_withou
     second_requirement = requirements[second_id][0]
     assert first_requirement.kind is StructuredTransformKind.CAP
     assert first_requirement.origin is TransformRequirementOrigin.RULE_CLASSIFICATION
-    assert first_requirement.required_support_kind is DependencyKind.DICTIONARY
+    assert first_requirement.required_support_kind is DependencyKind.DICTIONARY_MAPPING
     assert second_requirement.kind is StructuredTransformKind.GENERALIZE
     assert second_requirement.origin is TransformRequirementOrigin.RULE_CLASSIFICATION
-    assert second_requirement.required_support_kind is DependencyKind.MAPPING
+    assert second_requirement.required_support_kind is DependencyKind.DICTIONARY_MAPPING
     assert all(req.kind.value != "band" for values in requirements.values() for req in values)
     assert _build_preliminary_dependency_inputs(
         hydrated.datasets,
@@ -513,7 +514,7 @@ def test_effective_config_transforms_are_explicit_even_when_rules_classify_keep(
     )
     assert (
         missing_requirements[second_id][0].required_support_kind
-        is DependencyKind.MAPPING
+        is DependencyKind.DICTIONARY_MAPPING
     )
 
 
@@ -535,7 +536,7 @@ def _hydrate_dependency_inputs_for_test(
         ("support_sha256", "8" * 64),
         ("normalized_support_sha256", "7" * 64),
         ("normalized_support_sha256", None),
-        ("kind", DependencyKind.MAPPING),
+        ("kind", DependencyKind.PDF),
         ("sensitivity", Sensitivity.NON_CONFIDENTIAL),
         ("rulebook_sha256", "6" * 64),
         ("scrub_config_sha256", "5" * 64),
@@ -595,7 +596,7 @@ def test_required_holds_only_its_dataset_helpful_reviews_and_exact_ignored_suppr
     support = ParsedSupportArtifact(
         artifact_id=_id("3"),
         source_sha256="3" * 64,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         format="csv",
         parse_status=SupportParseStatus.PARSED,
         normalized_rows_path=Path("support.jsonl"),
@@ -639,14 +640,14 @@ def test_exact_required_decision_with_expected_support_still_missing_holds() -> 
     from phi_engine.pipeline.run import _evaluate_dependency_state
 
     recommendation = DependencyRecommendation(
-        schema_version="dependency-recommendation/v1",
+        schema_version="dependency-recommendation/v2",
         recommendation_id=_recommendation_id("8"),
         dataset_artifact_id=_id("1"),
         dataset_sha256="1" * 64,
         support_artifact_id=None,
         support_sha256=None,
         normalized_support_sha256=None,
-        kind=DependencyKind.MAPPING,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         suggested_level=DependencyLevel.REQUIRED,
         default_sensitivity=Sensitivity.CONFIDENTIAL,
         reason_code=DependencyReasonCode.TRANSFORM_PARAMETERS_MISSING,
@@ -660,9 +661,9 @@ def test_exact_required_decision_with_expected_support_still_missing_holds() -> 
                 recommendation_id=_recommendation_id("8"),
                 dataset_artifact_id=_id("1"),
                 support_artifact_id=None,
-                kind=DependencyKind.MAPPING,
+                kind=DependencyKind.DICTIONARY_MAPPING,
                 role_source=RoleSource.INFERRED,
-                organizer_role_version=1,
+                organizer_role_version=ORGANIZER_ROLE_VERSION,
             ),
         ),
     )
@@ -697,7 +698,7 @@ def test_helpful_failed_support_omits_evidence_without_holding_dataset() -> None
     failed = ParsedSupportArtifact(
         artifact_id=_id("3"),
         source_sha256="3" * 64,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         format="csv",
         parse_status=SupportParseStatus.FAILED,
         normalized_rows_path=None,
@@ -736,13 +737,13 @@ def test_support_byte_change_restores_confidential_default(
     recommendation_id = recommendation_identity(
         dataset_artifact_id=first_id,
         support_artifact_id=support_id,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         reason_code=DependencyReasonCode.MANIFEST_DECLARED,
         header_ids=(),
         transform_requirement_ids=(),
     )
     decision = DependencyDecision(
-        schema_version="dependency-decision/v1",
+        schema_version="dependency-decision/v2",
         decision_id=_decision_id("6"),
         recommendation_id=recommendation_id,
         dataset_artifact_id=first_id,
@@ -750,7 +751,7 @@ def test_support_byte_change_restores_confidential_default(
         support_artifact_id=support_id,
         support_sha256=support.source_sha256,
         normalized_support_sha256=support.normalized_rows_sha256,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         level=DependencyLevel.HELPFUL,
         sensitivity=Sensitivity.NON_CONFIDENTIAL,
         reason_code=DependencyReasonCode.MANIFEST_DECLARED,
@@ -761,9 +762,9 @@ def test_support_byte_change_restores_confidential_default(
                 recommendation_id=recommendation_id,
                 dataset_artifact_id=first_id,
                 support_artifact_id=support_id,
-                kind=DependencyKind.DICTIONARY,
+                kind=DependencyKind.DICTIONARY_MAPPING,
                 role_source=RoleSource.MANIFEST,
-                organizer_role_version=1,
+                organizer_role_version=ORGANIZER_ROLE_VERSION,
             ),
         ),
         decided_by="reviewer",
@@ -920,15 +921,15 @@ def test_private_context_canaries_never_enter_ordinary_records_or_review_list(
     private = _build_private_dependency_recommendations((rec,), hydrated)
     assert private == (
         PrivateDependencyRecommendation(
-            schema_version="dependency-recommendation-private/v1",
+            schema_version="dependency-recommendation-private/v2",
             recommendation_id=rec.recommendation_id,
             dataset_artifact_id=first_id,
             dataset_path="datasets/alpha.csv",
             support_artifact_id=support_id,
-            support_path="data_dictionary/private.csv",
+            support_path="dictionary_mapping/private.csv",
             raw_header_names=("PRIVATE-ALPHA",),
             role_source=RoleSource.INFERRED,
-            organizer_role_version=1,
+            organizer_role_version=ORGANIZER_ROLE_VERSION,
             basis=rec.basis,
         ),
     )

@@ -23,6 +23,7 @@ import yaml
 
 import phi_engine.config.config as config
 from phi_engine.pipeline.dependencies import (
+    ORGANIZER_ROLE_VERSION,
     DependencyDecision,
     DependencyDecisionBasis,
     DependencyKind,
@@ -82,7 +83,7 @@ def _parsed_support(
     parsed = parse_support_artifact(
         artifact_id=artifact_id,
         source_sha256=sha,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         source_path=src,
         output_dir=tmp_path / f"out_{artifact_id[-4:]}",
         limits=None,
@@ -100,7 +101,7 @@ def _recommendation(
     recommendation_id = recommendation_identity(
         dataset_artifact_id=_DS,
         support_artifact_id=support.artifact_id,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         reason_code=reason,
         header_ids=(header_id,),
         transform_requirement_ids=(),
@@ -112,20 +113,20 @@ def _recommendation(
             recommendation_id=recommendation_id,
             dataset_artifact_id=_DS,
             support_artifact_id=support.artifact_id,
-            kind=DependencyKind.DICTIONARY,
+            kind=DependencyKind.DICTIONARY_MAPPING,
             role_source=RoleSource.INFERRED,
-            organizer_role_version=1,
+            organizer_role_version=ORGANIZER_ROLE_VERSION,
         ),
     )
     return DependencyRecommendation(
-        schema_version="dependency-recommendation/v1",
+        schema_version="dependency-recommendation/v2",
         recommendation_id=recommendation_id,
         dataset_artifact_id=_DS,
         dataset_sha256=_DS_SHA,
         support_artifact_id=support.artifact_id,
         support_sha256=support.source_sha256,
         normalized_support_sha256=support.normalized_rows_sha256,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         suggested_level=level,
         default_sensitivity=Sensitivity.CONFIDENTIAL,
         reason_code=reason,
@@ -138,7 +139,7 @@ def _recommendation(
 
 def _decision(rec: DependencyRecommendation, level: DependencyLevel) -> DependencyDecision:
     return DependencyDecision(
-        schema_version="dependency-decision/v1",
+        schema_version="dependency-decision/v2",
         decision_id="dd_" + "3" * 32,
         recommendation_id=rec.recommendation_id,
         dataset_artifact_id=rec.dataset_artifact_id,

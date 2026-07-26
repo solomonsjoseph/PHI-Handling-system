@@ -98,7 +98,7 @@ def test_escalation_catches_phi_in_an_unexpectedly_named_column_end_to_end(tmp_p
     # creates a dependency recommendation) -- both would otherwise force
     # exit_code 8 and obscure this test's actual subject (the profiler).
     write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
-    write_csv(source / "data_dictionary" / "dict.csv", ["reference_code", "reference_label"], [["REF-01", "General study reference material"]])
+    write_csv(source / "dictionary_mapping" / "dict.csv", ["reference_code", "reference_label"], [["REF-01", "General study reference material"]])
 
     with hermetic_phi_workspace(tmp_path, study) as workspace:
         from phi_engine.pipeline.intake import intake_add

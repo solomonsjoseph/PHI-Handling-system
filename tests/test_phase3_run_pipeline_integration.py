@@ -12,6 +12,7 @@ import yaml
 import phi_engine.config.config as config
 import phi_engine.pipeline.run as pipeline_run
 from phi_engine.pipeline.dependencies import (
+    CODE_TABLE_VERSION,
     DatasetDependency,
     DependencyDecision,
     DependencyDecisionBasis,
@@ -19,8 +20,10 @@ from phi_engine.pipeline.dependencies import (
     DependencyLevel,
     DependencyReasonCode,
     DependencyRecommendation,
+    ORGANIZER_ROLE_VERSION,
     Sensitivity,
     load_dependency_recommendations,
+    recommendation_identity,
     support_role_sha256,
 )
 from phi_engine.security.phi_review import (
@@ -136,7 +139,7 @@ def _organized_two_dataset_fixture(
         support_public = {
             "artifact_id": _SUPPORT_ONE,
             "source_sha256": source_sha,
-            "kind": "dictionary",
+            "kind": "dictionary_mapping",
             "format": "csv",
             "parse_status": "parsed",
             "normalized_rows_sha256": _sha(normalized),
@@ -147,7 +150,7 @@ def _organized_two_dataset_fixture(
             {
                 **support_public,
                 "normalized_rows_path": str(normalized_path),
-                "source_relative_path": "data_dictionary/one.csv",
+                "source_relative_path": "dictionary_mapping/one.csv",
                 "normalized_source_stem": "one",
             },
         )
@@ -175,9 +178,9 @@ def _basis(*, support_id: str | None, role_sha: str | None = None) -> Dependency
             recommendation_id=_RECOMMENDATION,
             dataset_artifact_id=_DATASET_ONE,
             support_artifact_id=support_id,
-            kind=DependencyKind.DICTIONARY,
+            kind=DependencyKind.DICTIONARY_MAPPING,
             role_source=pipeline_run.RoleSource.MANIFEST,
-            organizer_role_version=1,
+            organizer_role_version=ORGANIZER_ROLE_VERSION,
         ),
     )
 
@@ -188,14 +191,14 @@ def _recommendation(
     level: DependencyLevel,
 ) -> DependencyRecommendation:
     return DependencyRecommendation(
-        schema_version="dependency-recommendation/v1",
+        schema_version="dependency-recommendation/v2",
         recommendation_id=_RECOMMENDATION,
         dataset_artifact_id=_DATASET_ONE,
         dataset_sha256=hashes[_DATASET_ONE],
         support_artifact_id=_SUPPORT_ONE,
         support_sha256=hashes[_SUPPORT_ONE],
         normalized_support_sha256=hashes["normalized_support"],
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         suggested_level=level,
         default_sensitivity=Sensitivity.CONFIDENTIAL,
         reason_code=DependencyReasonCode.MANIFEST_DECLARED,
@@ -221,7 +224,7 @@ def _decision(
             support_role_sha256=basis.support_role_sha256,
         )
     return DependencyDecision(
-        schema_version="dependency-decision/v1",
+        schema_version="dependency-decision/v2",
         decision_id=_DECISION,
         recommendation_id=recommendation.recommendation_id,
         dataset_artifact_id=recommendation.dataset_artifact_id,
@@ -248,10 +251,9 @@ def _relation(
 ) -> DependencyRelation:
     declared_support_id = None if declared_support_missing else _SUPPORT_ONE
     dependency = DatasetDependency(
-        dataset_path="datasets/alpha.csv",
-        dataset_artifact_id=_DATASET_ONE,
+        dataset_source_artifact_id=_DATASET_ONE,
         dataset_source_sha256=hashes[_DATASET_ONE],
-        support="data_dictionary/one.csv",
+        support="dictionary_mapping/one.csv",
         support_artifact_id=declared_support_id,
         support_source_sha256=(
             None
@@ -260,18 +262,12 @@ def _relation(
             if support_state is DependencyRelationState.CURRENT
             else _OLD_SHA
         ),
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         level=level,
         sensitivity=Sensitivity.CONFIDENTIAL,
         reason_code=DependencyReasonCode.MANIFEST_DECLARED,
-        recommendation_id=_RECOMMENDATION,
-        basis=DependencyDecisionBasis(
-            rulebook_sha256="d" * 64,
-            scrub_config_sha256="e" * 64,
-            support_role_sha256="f" * 64,
-        ),
-        confirmed_by="reviewer",
-        confirmed_at="2026-07-14T10:00:00Z",
+        declared_by="reviewer",
+        declared_at="2026-07-14T10:00:00Z",
     )
     return DependencyRelation(
         dependency=dependency,
@@ -540,27 +536,23 @@ def test_real_run_and_decision_flow_refreshes_declared_missing_support(
                 "reject": [],
                 "date_locales": {},
                 "dataset_dependencies_schema": "dataset-dependencies/v1",
-                "dataset_dependencies_code_table_version": 1,
+                "dataset_dependencies_code_table_version": CODE_TABLE_VERSION,
                 "dataset_dependencies": {
-                    missing_relation.dependency.dataset_path: [
+                    "datasets/alpha.csv": [
                         {
-                            "dataset_artifact_id": _DATASET_ONE,
+                            "dataset_source_artifact_id": _DATASET_ONE,
                             "dataset_source_sha256": hashes[_DATASET_ONE],
                             "support": missing_relation.dependency.support,
                             "support_artifact_id": None,
                             "support_source_sha256": None,
-                            "kind": DependencyKind.DICTIONARY.value,
+                            "kind": DependencyKind.DICTIONARY_MAPPING.value,
                             "level": level.value,
                             "sensitivity": Sensitivity.CONFIDENTIAL.value,
                             "reason_code": (
                                 DependencyReasonCode.MANIFEST_DECLARED.value
                             ),
-                            "recommendation_id": (
-                                missing_recommendation.recommendation_id
-                            ),
-                            "basis": missing_recommendation.basis.to_json(),
-                            "confirmed_by": "prior-reviewer",
-                            "confirmed_at": "2026-07-14T10:00:00Z",
+                            "declared_by": "prior-reviewer",
+                            "declared_at": "2026-07-14T10:00:00Z",
                         }
                     ]
                 },
@@ -663,7 +655,7 @@ def test_real_run_and_decision_flow_refreshes_declared_missing_support(
         manifest_path.read_text(encoding="utf-8")
     )
     stored_dependencies = stored_manifest["dataset_dependencies"][
-        missing_relation.dependency.dataset_path
+        "datasets/alpha.csv"
     ]
     assert len(stored_dependencies) == 1
     assert stored_dependencies[0]["recommendation_id"] == refreshed.recommendation_id
@@ -770,14 +762,14 @@ def test_real_run_pipeline_scopes_dependency_pending_stale_removed_and_byte_swap
             ),
         )
         missing_placeholder = DependencyRecommendation(
-            schema_version="dependency-recommendation/v1",
+            schema_version="dependency-recommendation/v2",
             recommendation_id=_RECOMMENDATION,
             dataset_artifact_id=_DATASET_ONE,
             dataset_sha256=hashes[_DATASET_ONE],
             support_artifact_id=None,
             support_sha256=None,
             normalized_support_sha256=None,
-            kind=DependencyKind.DICTIONARY,
+            kind=DependencyKind.DICTIONARY_MAPPING,
             suggested_level=recommendation_level,
             default_sensitivity=Sensitivity.CONFIDENTIAL,
             reason_code=DependencyReasonCode.MANIFEST_DECLARED,
@@ -823,16 +815,28 @@ def test_real_run_pipeline_scopes_dependency_pending_stale_removed_and_byte_swap
     pending_path = run_dir / "pending_dependency_recommendations.jsonl"
     assert stat.S_IMODE(pending_path.stat().st_mode) == 0o600
     pending = load_dependency_recommendations(pending_path)
-    assert tuple(item.recommendation_id for item in pending) == (_RECOMMENDATION,)
+    expected_recommendation_id = (
+        recommendation_identity(
+            dataset_artifact_id=_DATASET_ONE,
+            support_artifact_id=None,
+            kind=DependencyKind.DICTIONARY_MAPPING,
+            reason_code=DependencyReasonCode.MANIFEST_DECLARED,
+            header_ids=(),
+            transform_requirement_ids=(),
+        )
+        if condition == "removed"
+        else _RECOMMENDATION
+    )
+    assert tuple(item.recommendation_id for item in pending) == (expected_recommendation_id,)
     pending_text = pending_path.read_text(encoding="utf-8")
     assert "PRIVATE-ALPHA" not in pending_text
     assert "datasets/alpha.csv" not in pending_text
-    assert "data_dictionary/one.csv" not in pending_text
+    assert "dictionary_mapping/one.csv" not in pending_text
     if condition == "removed":
         private_text = (
             run_dir / ".protected" / "dependency_recommendations.jsonl"
         ).read_text(encoding="utf-8")
-        assert "data_dictionary/one.csv" in private_text
+        assert "dictionary_mapping/one.csv" in private_text
 
 
 def test_real_run_pipeline_suppresses_only_an_exact_current_ignored_decision(

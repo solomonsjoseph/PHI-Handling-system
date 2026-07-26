@@ -5,9 +5,9 @@ real data).
     python -m harness.make_stress_fixtures --out tmp/stress-source [--seed 42]
 
 Writes ``<out>/`` -- a complete mandatory-component package
-(``datasets/``, ``forms/``, ``data_dictionary/``, ``mappings/``) built
-entirely from accepted formats (``.csv``, single-sheet ``.xlsx``, ``.pdf``,
-plus a legacy ``.xls`` dataset) so ``intake_add`` reaches ``status ==
+(``datasets/``, ``forms/``, ``dictionary_mapping/``) built entirely from
+accepted formats (``.csv``, single-sheet ``.xlsx``, ``.pdf``, plus a legacy
+``.xls`` dataset) so ``intake_add`` reaches ``status ==
 "ready"`` and the whole tree organizes/runs -- and
 ``<out>.manifest/stress_manifest.json``: a complete per-entry filesystem
 snapshot (type, sha256, size, mode, mtime_ns, uid, gid, symlink target;
@@ -241,8 +241,8 @@ def _snapshot_tree(root: Path) -> dict[str, dict[str, Any]]:
 
 def build_stress_fixtures(out_dir: Path, *, seed: int = 42) -> dict[str, Any]:
     """Build the deterministic mandatory-component source tree at *out_dir*
-    (``datasets/`` + ``forms/`` + ``data_dictionary/`` + ``mappings/``, all
-    accepted formats) and its complete-entry-set immutability manifest.
+    (``datasets/`` + ``forms/`` + ``dictionary_mapping/``, all accepted
+    formats) and its complete-entry-set immutability manifest.
     Idempotent: wipes and rebuilds *out_dir* every call. Reaches
     intake-manifest/v3 ``status == "ready"`` and organizes/runs end to end."""
     fk = _fake(seed)
@@ -279,7 +279,7 @@ def build_stress_fixtures(out_dir: Path, *, seed: int = 42) -> dict[str, Any]:
     _write_pdf_with_table(out_dir / "forms" / "consent_table.pdf", fk)
     _write_plain_pdf(out_dir / "forms" / "screening_form.pdf", ["Screening Form", "Subject ID: ____________"])
 
-    # -- data_dictionary/ ---------------------------------------------------------------------
+    # -- dictionary_mapping/ -------------------------------------------------------------------
     dict_rows = [
         ["SUBJID", "Subject identifier"],
         ["VISITDAT", "Visit date"],
@@ -290,14 +290,15 @@ def build_stress_fixtures(out_dir: Path, *, seed: int = 42) -> dict[str, Any]:
         ["NOTES", "Free-text notes"],
         ["COMMENT", "Free-text comment"],
     ]
-    _write_csv(out_dir / "data_dictionary" / "dict.csv", ["variable", "label"], dict_rows)
-    # Cross-component duplicate: identical bytes to datasets/labs.csv, kept
-    # as its own independent entry (never merged/deduplicated).
-    _write_csv(out_dir / "data_dictionary" / "labs_dup.csv", labs_headers, labs_rows)
-
-    # -- mappings/ ------------------------------------------------------------------------------
+    _write_csv(out_dir / "dictionary_mapping" / "dict.csv", ["variable", "label"], dict_rows)
+    # Same-component-shaped duplicate: header-similar to datasets/labs.csv
+    # but not byte-identical (intake_preflight's cross-component quarantine
+    # blocks a dictionary_mapping/forms candidate whose SHA-256 matches a
+    # dataset candidate's), so this stays a normal, independently kept entry
+    # rather than tripping "cross-component-dataset-copy".
+    _write_csv(out_dir / "dictionary_mapping" / "labs_dup.csv", labs_headers, labs_rows + [["CSV-DUP", fk.date_between(start_date="-2y").isoformat(), fk.random_int(45, 95)]])
     _write_csv(
-        out_dir / "mappings" / "site_map.csv",
+        out_dir / "dictionary_mapping" / "site_map.csv",
         ["code", "label"],
         [[f"SITE-{i}", f"Study Site {i}"] for i in range(3)],
     )
@@ -318,7 +319,7 @@ def build_stress_fixtures(out_dir: Path, *, seed: int = 42) -> dict[str, Any]:
 def build_review_required_fixtures(out_dir: Path, *, seed: int = 43) -> dict[str, Any]:
     """Build a source tree that reaches intake-manifest/v3
     ``status == "review_required"``: mostly-valid ``datasets/``, ``forms/``,
-    and ``data_dictionary/`` content plus one file per fixed preflight
+    and ``dictionary_mapping/`` content plus one file per fixed preflight
     review reason (unsupported format -- including the JSON/JSONL cases
     that v3 explicitly demotes from an accepted dataset format to an
     ``_unclassified`` review item -- invalid xlsx workbook, multi-sheet
@@ -342,7 +343,7 @@ def build_review_required_fixtures(out_dir: Path, *, seed: int = 43) -> dict[str
     _write_jsonl(out_dir / "datasets" / "demographics.jsonl", [{"SUBJID": "JL-001", "AGE": 40}])
 
     _write_pdf_with_table(out_dir / "forms" / "consent.pdf", fk)
-    _write_csv(out_dir / "data_dictionary" / "dict.csv", ["variable", "label"], [["SUBJID", "Subject identifier"], ["AGE", "Age in years"]])
+    _write_csv(out_dir / "dictionary_mapping" / "dict.csv", ["variable", "label"], [["SUBJID", "Subject identifier"], ["AGE", "Age in years"]])
 
     return {
         "source_root": str(out_dir.resolve()),

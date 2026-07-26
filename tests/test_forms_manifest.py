@@ -17,7 +17,7 @@ def _write_source(tmp_path: Path) -> tuple[Path, dict[str, dict[str, Any]]]:
     source = tmp_path / "src"
     write_csv(source / "datasets" / "labs.csv", ["SUBJID", "AGE"], [["1", "40"]])
     write_csv(source / "datasets" / "extra.csv", ["SUBJID", "AGE"], [["2", "41"]])
-    write_csv(source / "data_dictionary" / "labs.csv", ["variable", "label"], [["SUBJID", "Subject"]])
+    write_csv(source / "dictionary_mapping" / "labs.csv", ["variable", "label"], [["SUBJID", "Subject"]])
     write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
     from phi_engine.pipeline.intake import intake_add
 
@@ -29,23 +29,17 @@ def _write_source(tmp_path: Path) -> tuple[Path, dict[str, dict[str, Any]]]:
 
 def _dep(by_rel: dict[str, dict[str, Any]], **overrides: Any) -> dict[str, Any]:
     value = {
-        "dataset_artifact_id": by_rel["datasets/labs.csv"]["artifact_id"],
+        "dataset_source_artifact_id": by_rel["datasets/labs.csv"]["artifact_id"],
         "dataset_source_sha256": by_rel["datasets/labs.csv"]["sha256"],
-        "support": "data_dictionary/labs.csv",
-        "support_artifact_id": by_rel["data_dictionary/labs.csv"]["artifact_id"],
-        "support_source_sha256": by_rel["data_dictionary/labs.csv"]["sha256"],
-        "kind": "dictionary",
+        "support": "dictionary_mapping/labs.csv",
+        "support_artifact_id": by_rel["dictionary_mapping/labs.csv"]["artifact_id"],
+        "support_source_sha256": by_rel["dictionary_mapping/labs.csv"]["sha256"],
+        "kind": "dictionary_mapping",
         "level": "required",
         "sensitivity": "confidential",
         "reason_code": "only_interpretation",
-        "recommendation_id": "dr_" + "1" * 32,
-        "basis": {
-            "rulebook_sha256": "2" * 64,
-            "scrub_config_sha256": "3" * 64,
-            "support_role_sha256": "4" * 64,
-        },
-        "confirmed_by": "reviewer-id",
-        "confirmed_at": "2026-07-14T00:00:00Z",
+        "declared_by": "reviewer-id",
+        "declared_at": "2026-07-14T00:00:00Z",
     }
     value.update(overrides)
     return value
@@ -70,7 +64,7 @@ def test_forms_manifest_preserves_additive_typed_schema(tmp_path: Path) -> None:
                 "reject": ["extra.csv"],
                 "date_locales": {"visit_dt": "DMY"},
                 "dataset_dependencies_schema": "dataset-dependencies/v1",
-                "dataset_dependencies_code_table_version": 1,
+                "dataset_dependencies_code_table_version": 2,
                 "dataset_dependencies": {"datasets/labs.csv": [_dep(by_rel)]},
             },
         )
@@ -85,9 +79,9 @@ def test_forms_manifest_preserves_additive_typed_schema(tmp_path: Path) -> None:
         assert result.rejected_files == frozenset({"extra.csv"})
         dep = result.dataset_dependencies["datasets/labs.csv"][0]
         relation = result.dependency_relations["datasets/labs.csv"][0]
-        assert dep.dataset_artifact_id == by_rel["datasets/labs.csv"]["artifact_id"]
-        assert dep.support_artifact_id == by_rel["data_dictionary/labs.csv"]["artifact_id"]
-        assert dep.kind.value == "dictionary"
+        assert dep.dataset_source_artifact_id == by_rel["datasets/labs.csv"]["artifact_id"]
+        assert dep.support_artifact_id == by_rel["dictionary_mapping/labs.csv"]["artifact_id"]
+        assert dep.kind.value == "dictionary_mapping"
         assert relation.dependency == dep
         assert relation.dataset_state.value == "current"
         assert relation.support_state.value == "current"
@@ -101,7 +95,7 @@ def test_forms_manifest_rejects_unknown_keys_enums_paths_ids_hashes_timestamps_a
             "optional": ["extra.csv"],
             "reject": [],
             "dataset_dependencies_schema": "dataset-dependencies/v1",
-            "dataset_dependencies_code_table_version": 1,
+            "dataset_dependencies_code_table_version": 2,
             "dataset_dependencies": {"datasets/labs.csv": [_dep(by_rel)]},
         }
         _write_manifest(workspace, dict(base, surprise=True))
@@ -115,9 +109,9 @@ def test_forms_manifest_rejects_unknown_keys_enums_paths_ids_hashes_timestamps_a
             ("old sensitivity enum", {"sensitivity": "restricted"}, "invalid sensitivity"),
             ("old reason enum", {"reason_code": "irrelevant"}, "invalid reason_code"),
             ("bad support path", {"support": "../escape.csv"}, "unsafe support"),
-            ("bad dataset id", {"dataset_artifact_id": "a_BAD"}, "invalid dataset artifact"),
+            ("bad dataset id", {"dataset_source_artifact_id": "a_BAD"}, "invalid dataset artifact"),
             ("bad support hash", {"support_source_sha256": "f" * 63}, "invalid support artifact"),
-            ("bad timestamp", {"confirmed_at": "2026-07-14T00:00:00+00:00"}, "confirmed_at"),
+            ("bad timestamp", {"declared_at": "2026-07-14T00:00:00+00:00"}, "declared_at"),
         ]
         for _name, override, pattern in bad_cases:
             payload = dict(base)
@@ -169,7 +163,7 @@ def test_forms_manifest_exposes_missing_and_stale_dependency_currency_without_gl
             "optional": ["extra.csv"],
             "reject": [],
             "dataset_dependencies_schema": "dataset-dependencies/v1",
-            "dataset_dependencies_code_table_version": 1,
+            "dataset_dependencies_code_table_version": 2,
         }
 
         missing_dataset = dict(base)
@@ -182,7 +176,7 @@ def test_forms_manifest_exposes_missing_and_stale_dependency_currency_without_gl
 
         missing_support = dict(base)
         missing_support["dataset_dependencies"] = {
-            "datasets/labs.csv": [_dep(by_rel, support="data_dictionary/missing.csv")]
+            "datasets/labs.csv": [_dep(by_rel, support="dictionary_mapping/missing.csv")]
         }
         _write_manifest(workspace, missing_support)
         result = check_forms_manifest(source / "datasets")
@@ -207,7 +201,7 @@ def test_forms_manifest_exposes_missing_and_stale_dependency_currency_without_gl
         )
 
         null_required = dict(base)
-        dep = _dep(by_rel, support="data_dictionary/not_yet.csv", support_artifact_id=None, support_source_sha256=None)
+        dep = _dep(by_rel, support="dictionary_mapping/not_yet.csv", support_artifact_id=None, support_source_sha256=None)
         null_required["dataset_dependencies"] = {"datasets/labs.csv": [dep]}
         _write_manifest(workspace, null_required)
         result = check_forms_manifest(source / "datasets")
@@ -218,7 +212,7 @@ def test_forms_manifest_exposes_missing_and_stale_dependency_currency_without_gl
         ignored_missing = dict(base)
         dep = _dep(
             by_rel,
-            support="data_dictionary/not_yet.csv",
+            support="dictionary_mapping/not_yet.csv",
             support_artifact_id=None,
             support_source_sha256=None,
             level="ignored",
@@ -239,7 +233,7 @@ def test_organizer_validates_manifest_structure_before_deleting_old_tree(tmp_pat
             "optional": ["extra.csv"],
             "reject": [],
             "dataset_dependencies_schema": "dataset-dependencies/v1",
-            "dataset_dependencies_code_table_version": 1,
+            "dataset_dependencies_code_table_version": 2,
             "dataset_dependencies": {
                 "../escape.csv": [_dep(by_rel)],
             },
@@ -262,7 +256,7 @@ def test_organizer_validates_manifest_structure_before_deleting_old_tree(tmp_pat
 def test_dependency_shared_enums_are_exact_authoritative_tokens() -> None:
     from phi_engine.pipeline.dependencies import DependencyKind, DependencyReasonCode, RoleSource, Sensitivity, SupportFailureCode
 
-    assert {item.value for item in DependencyKind} == {"pdf", "dictionary", "mapping", "dictionary_mapping"}
+    assert {item.value for item in DependencyKind} == {"pdf", "dictionary_mapping"}
     assert {item.value for item in Sensitivity} == {"confidential", "non_confidential"}
     assert {item.value for item in DependencyReasonCode} == {
         "manifest_declared",
@@ -296,3 +290,63 @@ def test_dependency_shared_enums_are_exact_authoritative_tokens() -> None:
         "reader_unavailable",
         "resource_limit",
     }
+
+
+def test_forms_manifest_dataset_dependency_old_v1_field_set_fails_closed(tmp_path: Path) -> None:
+    with _workspace(tmp_path) as workspace:
+        source, by_rel = _write_source(tmp_path)
+        old_shape_dep = {
+            "dataset_path": "datasets/labs.csv",
+            "dataset_artifact_id": by_rel["datasets/labs.csv"]["artifact_id"],
+            "dataset_source_sha256": by_rel["datasets/labs.csv"]["sha256"],
+            "support": "dictionary_mapping/labs.csv",
+            "support_artifact_id": by_rel["dictionary_mapping/labs.csv"]["artifact_id"],
+            "support_source_sha256": by_rel["dictionary_mapping/labs.csv"]["sha256"],
+            "kind": "dictionary",
+            "level": "required",
+            "sensitivity": "confidential",
+            "reason_code": "only_interpretation",
+            "recommendation_id": "dr_" + "1" * 32,
+            "basis": {
+                "rulebook_sha256": "2" * 64,
+                "scrub_config_sha256": "3" * 64,
+                "support_role_sha256": "4" * 64,
+            },
+            "confirmed_by": "reviewer-id",
+            "confirmed_at": "2026-07-14T00:00:00Z",
+        }
+        _write_manifest(
+            workspace,
+            {
+                "required": ["labs.csv"],
+                "optional": ["extra.csv"],
+                "reject": [],
+                "dataset_dependencies_schema": "dataset-dependencies/v1",
+                "dataset_dependencies_code_table_version": 2,
+                "dataset_dependencies": {"datasets/labs.csv": [old_shape_dep]},
+            },
+        )
+        from scripts.extraction.forms_manifest import ManifestMismatchError, check_forms_manifest
+
+        with pytest.raises(ManifestMismatchError, match="unknown dataset dependency keys"):
+            check_forms_manifest(source / "datasets")
+
+
+def test_forms_manifest_dataset_dependencies_code_table_version_1_fails_closed(tmp_path: Path) -> None:
+    with _workspace(tmp_path) as workspace:
+        source, by_rel = _write_source(tmp_path)
+        _write_manifest(
+            workspace,
+            {
+                "required": ["labs.csv"],
+                "optional": ["extra.csv"],
+                "reject": [],
+                "dataset_dependencies_schema": "dataset-dependencies/v1",
+                "dataset_dependencies_code_table_version": 1,
+                "dataset_dependencies": {"datasets/labs.csv": [_dep(by_rel)]},
+            },
+        )
+        from scripts.extraction.forms_manifest import ManifestMismatchError, check_forms_manifest
+
+        with pytest.raises(ManifestMismatchError, match="dataset_dependencies_code_table_version must be 2"):
+            check_forms_manifest(source / "datasets")

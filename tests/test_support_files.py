@@ -20,7 +20,7 @@ def _parse(path: Path, out: Path, **limits: int):
     return parse_support_artifact(
         artifact_id="a_" + "1" * 32,
         source_sha256="2" * 64,
-        kind=DependencyKind.DICTIONARY,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         source_path=path,
         output_dir=out,
         limits=limits or None,

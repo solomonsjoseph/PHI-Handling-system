@@ -281,7 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help=(
-            "Positive attestation that support files (forms/data_dictionary/mappings) "
+            "Positive attestation that support files (forms/dictionary_mapping) "
             "contain no PHI, permitting local-only AI study-name inference when --study "
             "is omitted. Absent by default: no naming-content extraction, no model calls."
         ),

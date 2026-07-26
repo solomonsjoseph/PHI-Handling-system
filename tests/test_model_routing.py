@@ -36,7 +36,7 @@ MODEL_SPEC = "qwen3:8b@sha256:" + "d" * 64
 RECOMMENDATION_ID = recommendation_identity(
     dataset_artifact_id=DATASET_ID,
     support_artifact_id=SUPPORT_ID,
-    kind=DependencyKind.MAPPING,
+    kind=DependencyKind.DICTIONARY_MAPPING,
     reason_code=DependencyReasonCode.EXACT_HEADER_MATCH,
     header_ids=(HEADER_ID,),
     transform_requirement_ids=(),
@@ -105,14 +105,14 @@ def _approved_decision(
     dataset_sha=SHA_A,
     support_sha=SHA_B,
     normalized_sha=SHA_C,
-    kind=DependencyKind.MAPPING,
+    kind=DependencyKind.DICTIONARY_MAPPING,
     level=DependencyLevel.HELPFUL,
     sensitivity=Sensitivity.NON_CONFIDENTIAL,
     reason_code=DependencyReasonCode.EXACT_HEADER_MATCH,
     basis=None,
 ):
     return DependencyDecision(
-        schema_version="dependency-decision/v1",
+        schema_version="dependency-decision/v2",
         decision_id="dd_" + "4" * 32,
         recommendation_id=recommendation_id,
         dataset_artifact_id=DATASET_ID,
@@ -180,7 +180,7 @@ def _verified_phase3_context(routing, tmp_path: Path):
     support = ParsedSupportArtifact(
         artifact_id=SUPPORT_ID,
         source_sha256=SHA_B,
-        kind=DependencyKind.MAPPING,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         format="xlsx",
         parse_status=SupportParseStatus.PARSED,
         normalized_rows_path=normalized_path,
@@ -188,14 +188,14 @@ def _verified_phase3_context(routing, tmp_path: Path):
         failure_code=None,
     )
     recommendation = DependencyRecommendation(
-        schema_version="dependency-recommendation/v1",
+        schema_version="dependency-recommendation/v2",
         recommendation_id=RECOMMENDATION_ID,
         dataset_artifact_id=DATASET_ID,
         dataset_sha256=SHA_A,
         support_artifact_id=SUPPORT_ID,
         support_sha256=SHA_B,
         normalized_support_sha256=normalized_sha,
-        kind=DependencyKind.MAPPING,
+        kind=DependencyKind.DICTIONARY_MAPPING,
         suggested_level=DependencyLevel.HELPFUL,
         default_sensitivity=Sensitivity.NON_CONFIDENTIAL,
         reason_code=DependencyReasonCode.EXACT_HEADER_MATCH,
@@ -896,7 +896,7 @@ def test_nonconfidential_support_requires_trusted_builder(routing, monkeypatch):
         lambda rec, dec: (replace(rec, dataset_sha256="6" * 64), dec),
         lambda rec, dec: (replace(rec, support_sha256="6" * 64), dec),
         lambda rec, dec: (replace(rec, normalized_support_sha256="6" * 64), dec),
-        lambda rec, dec: (replace(rec, kind=DependencyKind.DICTIONARY), dec),
+        lambda rec, dec: (replace(rec, kind=DependencyKind.PDF), dec),
         lambda rec, dec: (
             replace(rec, default_sensitivity=Sensitivity.CONFIDENTIAL),
             dec,

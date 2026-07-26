@@ -45,7 +45,7 @@ def _ensure_support_content(source: Path) -> None:
     bytes)."""
     write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
     _write_dataset_csv(
-        source / "data_dictionary" / "dict.csv",
+        source / "dictionary_mapping" / "dict.csv",
         [{"reference_code": "REF-01", "reference_label": "General study reference material"}],
     )
 
@@ -206,13 +206,15 @@ def test_override_cap_decision_caps_numeric_value_end_to_end(review_study: Revie
 
 def test_list_review_items_reports_organizer_bucket_and_decisions(review_study: ReviewStudy) -> None:
     _write_dataset_csv(review_study.source / "datasets" / "valid_form.csv", [{"SUBJID": "SUBJ001", "ANALYSIS_GROUP": "A"}])
-    # A mislabeled .xls: an intake-ACCEPTED suffix (datasets/ carries no
-    # .xls content check) that fails only at organizer parse time, landing
-    # in the organizer's own non-blocking review bucket -- unlike an
-    # unsupported suffix (e.g. .dat), which intake-preflight would reject
-    # as _unclassified and block the WHOLE study before organize() ever runs.
-    (review_study.source / "datasets" / "needs_review.xls").parent.mkdir(parents=True, exist_ok=True)
-    (review_study.source / "datasets" / "needs_review.xls").write_bytes(b"not a real xls workbook\n")
+    # A malformed .csv: intake-preflight performs zero CSV content
+    # validation (suffix-only classification), so this lands as a normal
+    # accepted dataset candidate and only fails when organize's own
+    # pd.read_csv() actually parses it -- landing in the organizer's own
+    # non-blocking review bucket. Unlike .xls/.xlsx, which intake-preflight
+    # now opens via the isolated xls_isolation worker to count sheets, so a
+    # corrupt workbook is rejected (blocking) before organize() ever runs.
+    (review_study.source / "datasets" / "needs_review.csv").parent.mkdir(parents=True, exist_ok=True)
+    (review_study.source / "datasets" / "needs_review.csv").write_text('"unterminated quote field\nmore,data,here\n', encoding="utf-8")
     _ensure_support_content(review_study.source)
 
     from phi_engine.pipeline.intake import intake_add
@@ -228,7 +230,7 @@ def test_list_review_items_reports_organizer_bucket_and_decisions(review_study: 
 
     assert review_items["study"] == review_study.study
     assert any(
-        item["file"] == "needs_review.xls" and item["reason"] in {"xls-reader-unavailable", "excel-open-error"}
+        item["file"] == "needs_review.csv" and item["reason"] == "csv-parse-error"
         for item in review_items["organizer_review_bucket"]
     )
     assert review_items["decisions_on_file"]["ANALYSIS_GROUP"]["decision"] == "drop"

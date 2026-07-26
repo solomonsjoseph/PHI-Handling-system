@@ -15,14 +15,13 @@ from typing import NamedTuple
 import yaml
 
 from phi_engine.pipeline.dependencies import (
+    CODE_TABLE_VERSION,
     DatasetDependency,
-    DatasetDependencyBasis,
     DependencyKind,
     DependencyLevel,
     DependencyReasonCode,
     Sensitivity,
     is_artifact_id,
-    is_recommendation_id,
     is_sha256,
     is_timestamp_z,
 )
@@ -39,7 +38,7 @@ _ALLOWED_TOP_KEYS = {
     "dataset_dependencies",
 }
 _ALLOWED_DEP_KEYS = {
-    "dataset_artifact_id",
+    "dataset_source_artifact_id",
     "dataset_source_sha256",
     "support",
     "support_artifact_id",
@@ -48,12 +47,9 @@ _ALLOWED_DEP_KEYS = {
     "level",
     "sensitivity",
     "reason_code",
-    "recommendation_id",
-    "basis",
-    "confirmed_by",
-    "confirmed_at",
+    "declared_by",
+    "declared_at",
 }
-_ALLOWED_BASIS_KEYS = {"rulebook_sha256", "scrub_config_sha256", "support_role_sha256"}
 
 
 class ManifestMismatchError(Exception):
@@ -151,8 +147,8 @@ def _validate_dependencies(
         return {}, {}
     if raw.get("dataset_dependencies_schema") != "dataset-dependencies/v1":
         raise ManifestMismatchError("dataset_dependencies_schema must be dataset-dependencies/v1")
-    if raw.get("dataset_dependencies_code_table_version") != 1:
-        raise ManifestMismatchError("dataset_dependencies_code_table_version must be 1")
+    if raw.get("dataset_dependencies_code_table_version") != CODE_TABLE_VERSION:
+        raise ManifestMismatchError(f"dataset_dependencies_code_table_version must be {CODE_TABLE_VERSION}")
     deps_raw = raw.get("dataset_dependencies")
     if not isinstance(deps_raw, dict):
         raise ManifestMismatchError("dataset_dependencies must be a mapping")
@@ -176,11 +172,11 @@ def _validate_dependencies(
             if missing:
                 raise ManifestMismatchError(f"missing dataset dependency keys: {sorted(missing)}")
             support = _safe_rel(dep["support"], field="support")
-            if not is_artifact_id(dep.get("dataset_artifact_id")) or not is_sha256(dep.get("dataset_source_sha256")):
+            if not is_artifact_id(dep.get("dataset_source_artifact_id")) or not is_sha256(dep.get("dataset_source_sha256")):
                 raise ManifestMismatchError("invalid dataset artifact id/hash")
             dataset_state = _relation_state(
                 dataset_entry,
-                artifact_id=dep["dataset_artifact_id"],
+                artifact_id=dep["dataset_source_artifact_id"],
                 source_sha256=dep["dataset_source_sha256"],
             )
             support_id = dep.get("support_artifact_id")
@@ -199,20 +195,12 @@ def _validate_dependencies(
                 artifact_id=support_id,
                 source_sha256=support_sha,
             )
-            basis_raw = dep.get("basis")
-            if not isinstance(basis_raw, dict) or set(basis_raw) != _ALLOWED_BASIS_KEYS:
-                raise ManifestMismatchError("invalid dependency basis")
-            if not all(is_sha256(basis_raw[k]) for k in _ALLOWED_BASIS_KEYS):
-                raise ManifestMismatchError("invalid dependency basis hashes")
-            if not is_recommendation_id(dep.get("recommendation_id")):
-                raise ManifestMismatchError("invalid recommendation_id")
-            if not isinstance(dep.get("confirmed_by"), str) or not dep.get("confirmed_by"):
-                raise ManifestMismatchError("confirmed_by is required")
-            if not is_timestamp_z(dep.get("confirmed_at")):
-                raise ManifestMismatchError("confirmed_at must be UTC second timestamp")
+            if not isinstance(dep.get("declared_by"), str) or not dep.get("declared_by"):
+                raise ManifestMismatchError("declared_by is required")
+            if not is_timestamp_z(dep.get("declared_at")):
+                raise ManifestMismatchError("declared_at must be UTC second timestamp")
             dependency = DatasetDependency(
-                dataset_path=dataset_path,
-                dataset_artifact_id=dep["dataset_artifact_id"],
+                dataset_source_artifact_id=dep["dataset_source_artifact_id"],
                 dataset_source_sha256=dep["dataset_source_sha256"],
                 support=support,
                 support_artifact_id=support_id,
@@ -221,14 +209,8 @@ def _validate_dependencies(
                 level=level,
                 sensitivity=_enum(Sensitivity, dep.get("sensitivity"), "sensitivity"),
                 reason_code=_enum(DependencyReasonCode, dep.get("reason_code"), "reason_code"),
-                recommendation_id=dep["recommendation_id"],
-                basis=DatasetDependencyBasis(
-                    rulebook_sha256=basis_raw["rulebook_sha256"],
-                    scrub_config_sha256=basis_raw["scrub_config_sha256"],
-                    support_role_sha256=basis_raw["support_role_sha256"],
-                ),
-                confirmed_by=dep["confirmed_by"],
-                confirmed_at=dep["confirmed_at"],
+                declared_by=dep["declared_by"],
+                declared_at=dep["declared_at"],
             )
             items.append(dependency)
             relation_items.append(

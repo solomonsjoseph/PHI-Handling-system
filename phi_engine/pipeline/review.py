@@ -71,6 +71,7 @@ from phi_engine.pipeline.dependencies import (
     load_dependency_decisions,
     load_dependency_recommendations,
     load_private_dependency_recommendations,
+    recommendation_identity,
     support_role_sha256,
     utc_now_z,
 )
@@ -99,7 +100,6 @@ PENDING_DEPENDENCY_RECOMMENDATIONS_FILENAME = (
 )
 _DATASET_DEPENDENCIES_SCHEMA = "dataset-dependencies/v1"
 _DECIDED_BY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
-_ORGANIZER_ROLE_VERSION = 1
 
 
 def DEFAULT_LLM_QUEUE_PATH() -> Path:  # noqa: N802 -- reads as a named constant at call sites
@@ -204,7 +204,7 @@ def _decide_dependency_locked(
         raise ValueError("support identity mismatch")
     if reason_code is not current.reason_code:
         raise ValueError("reason code mismatch")
-    if private.organizer_role_version != _ORGANIZER_ROLE_VERSION:
+    if private.organizer_role_version != dependency_contracts.ORGANIZER_ROLE_VERSION:
         raise ValueError("stale recommendation role")
 
     manifest_path = _decisions_dir(study) / "_forms_manifest.yaml"
@@ -253,7 +253,7 @@ def _decide_dependency_locked(
         raise ValueError("stale recommendation basis")
 
     decision = DependencyDecision(
-        schema_version="dependency-decision/v1",
+        schema_version="dependency-decision/v2",
         decision_id="dd_" + secrets.token_hex(16),
         recommendation_id=current.recommendation_id,
         dataset_artifact_id=current.dataset_artifact_id,
@@ -296,7 +296,7 @@ def _decide_dependency_locked(
     manifest["dataset_dependencies"] = dependencies
 
     private_decision_record = {
-        "schema_version": "dependency-decision-private/v1",
+        "schema_version": "dependency-decision-private/v2",
         "decision_id": decision.decision_id,
         "recommendation_id": decision.recommendation_id,
         "dataset_path": private.dataset_path,
@@ -410,14 +410,22 @@ def _is_manifest_declared_missing_support(
         return False
     return any(
         isinstance(record, dict)
-        and record.get("dataset_artifact_id")
+        and record.get("dataset_source_artifact_id")
         == recommendation.dataset_artifact_id
         and record.get("dataset_source_sha256") == recommendation.dataset_sha256
         and record.get("support") == private.support_path
         and record.get("kind") == recommendation.kind.value
         and record.get("reason_code")
         == DependencyReasonCode.MANIFEST_DECLARED.value
-        and record.get("recommendation_id")
+        and isinstance(record.get("dataset_source_artifact_id"), str)
+        and recommendation_identity(
+            dataset_artifact_id=record["dataset_source_artifact_id"],
+            support_artifact_id=None,
+            kind=recommendation.kind,
+            reason_code=DependencyReasonCode.MANIFEST_DECLARED,
+            header_ids=(),
+            transform_requirement_ids=(),
+        )
         == recommendation.recommendation_id
         for record in records
     )

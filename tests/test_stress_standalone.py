@@ -157,7 +157,7 @@ def test_organize_routes_every_format_correctly(tmp_path: Path):
             assert "SUBJID" not in json.dumps(entry)
 
         support_kinds = sorted((s["kind"], s.get("format")) for s in organize_manifest["support_artifacts"])
-        assert support_kinds == [("dictionary", "csv"), ("dictionary", "csv"), ("mapping", "csv")]
+        assert support_kinds == [("dictionary_mapping", "csv"), ("dictionary_mapping", "csv"), ("dictionary_mapping", "csv")]
 
         intake_entries = load_intake_manifest(study)["entries"]
         pdf_roles_by_file = {
@@ -619,7 +619,7 @@ def test_stale_staged_file_never_publishes_without_current_approval(tmp_path: Pa
         # recommendation -- both would otherwise force exit_code 8 and
         # obscure this test's actual subject (stale staging residue).
         write_pdf_table(source / "forms" / "consent.pdf", ["FIELD", "VALUE"], [["consent", "signed"]])
-        write_csv(source / "data_dictionary" / "dict.csv", ["reference_code", "reference_label"], [["REF-01", "General study reference material"]])
+        write_csv(source / "dictionary_mapping" / "dict.csv", ["reference_code", "reference_label"], [["REF-01", "General study reference material"]])
 
         intake_manifest = intake_add(source, study)
         assert intake_manifest["status"] == "ready"

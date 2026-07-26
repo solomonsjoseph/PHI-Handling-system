@@ -14,7 +14,8 @@ from typing import Any, Literal, Mapping
 from phi_engine.security.phi_review import Action, RuleBundle, normalize_header
 from phi_engine.sot.study_intake import leading_form_code
 
-CODE_TABLE_VERSION = 1
+CODE_TABLE_VERSION = 2
+ORGANIZER_ROLE_VERSION = 2
 DEPENDENCY_RECOMMENDATIONS_FILENAME = "dependency_recommendations.jsonl"
 PRIVATE_DEPENDENCY_RECOMMENDATIONS_RELATIVE_PATH = Path(".protected") / "dependency_recommendations.jsonl"
 DEPENDENCY_DECISIONS_FILENAME = "dependency_decisions.jsonl"
@@ -30,14 +31,10 @@ _DECIDED_BY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
 
 class DependencyKind(str, Enum):
     PDF = "pdf"
-    DICTIONARY = "dictionary"
-    MAPPING = "mapping"
     # Unified dictionary/mapping metadata kind for the XLS isolation
-    # boundary (phi_engine.pipeline.xls_isolation). Additive: DICTIONARY/
-    # MAPPING stay defined for now -- collapsing them into this single
-    # member, bumping CODE_TABLE_VERSION, and cutting every caller over is
-    # the dictionary-mapping-support-plan's Approach 4 (out of this
-    # module's Approach-1 scope), not done here.
+    # boundary (phi_engine.pipeline.xls_isolation). Supersedes the former
+    # separate DICTIONARY/MAPPING members as of CODE_TABLE_VERSION 2 (the
+    # dictionary-mapping-support-plan's Approach 4 cutover).
     DICTIONARY_MAPPING = "dictionary_mapping"
 
 
@@ -140,13 +137,15 @@ class DependencyDecisionBasis:
         )
 
 
-DatasetDependencyBasis = DependencyDecisionBasis
-
-
 @dataclass(frozen=True)
 class DatasetDependency:
-    dataset_path: str
-    dataset_artifact_id: str
+    """Site-supplied confirmed-dependency declaration read from a JSON/YAML
+    input file (e.g. a study's _forms_manifest.yaml dataset_dependencies
+    section) -- never a pipeline output. Distinct from
+    DependencyRecommendation/DependencyDecision, which are pipeline-produced
+    output records."""
+
+    dataset_source_artifact_id: str
     dataset_source_sha256: str
     support: str
     support_artifact_id: str | None
@@ -155,21 +154,19 @@ class DatasetDependency:
     level: DependencyLevel
     sensitivity: Sensitivity
     reason_code: DependencyReasonCode
-    recommendation_id: str
-    basis: DependencyDecisionBasis
-    confirmed_by: str
-    confirmed_at: str
+    declared_by: str
+    declared_at: str
 
     def __post_init__(self) -> None:
-        _require_artifact_id(self.dataset_artifact_id, "dataset_artifact_id")
+        _require_artifact_id(self.dataset_source_artifact_id, "dataset_source_artifact_id")
         _require_sha256(self.dataset_source_sha256, "dataset_source_sha256")
         if self.support_artifact_id is not None:
             _require_artifact_id(self.support_artifact_id, "support_artifact_id")
             _require_sha256(self.support_source_sha256, "support_source_sha256")
         elif self.support_source_sha256 is not None:
             raise ValueError("support artifact id/hash must both be null or both concrete")
-        _require_recommendation_id(self.recommendation_id, "recommendation_id")
-        _require_timestamp_z(self.confirmed_at, "confirmed_at")
+        _require_enum(self.kind, DependencyKind, "kind")
+        _require_timestamp_z(self.declared_at, "declared_at")
 
 
 @dataclass(frozen=True)
@@ -284,7 +281,7 @@ class TransformRequirement:
 
 @dataclass(frozen=True)
 class DependencyRecommendation:
-    schema_version: Literal["dependency-recommendation/v1"]
+    schema_version: Literal["dependency-recommendation/v2"]
     recommendation_id: str
     dataset_artifact_id: str
     dataset_sha256: str
@@ -301,8 +298,8 @@ class DependencyRecommendation:
     basis: DependencyDecisionBasis
 
     def __post_init__(self) -> None:
-        if self.schema_version != "dependency-recommendation/v1":
-            raise ValueError("schema_version must be dependency-recommendation/v1")
+        if self.schema_version != "dependency-recommendation/v2":
+            raise ValueError("schema_version must be dependency-recommendation/v2")
         _require_recommendation_id(self.recommendation_id, "recommendation_id")
         _require_artifact_id(self.dataset_artifact_id, "dataset_artifact_id")
         _require_sha256(self.dataset_sha256, "dataset_sha256")
@@ -342,7 +339,7 @@ class DependencyRecommendation:
         _require_exact_keys(data, _RECOMMENDATION_KEYS | {"code_table_version"}, "DependencyRecommendation")
         _require_code_table(data)
         return cls(
-            schema_version=_literal(data["schema_version"], "dependency-recommendation/v1", "schema_version"),
+            schema_version=_literal(data["schema_version"], "dependency-recommendation/v2", "schema_version"),
             recommendation_id=_str(data["recommendation_id"], "recommendation_id"),
             dataset_artifact_id=_str(data["dataset_artifact_id"], "dataset_artifact_id"),
             dataset_sha256=_str(data["dataset_sha256"], "dataset_sha256"),
@@ -362,7 +359,7 @@ class DependencyRecommendation:
 
 @dataclass(frozen=True)
 class PrivateDependencyRecommendation:
-    schema_version: Literal["dependency-recommendation-private/v1"]
+    schema_version: Literal["dependency-recommendation-private/v2"]
     recommendation_id: str
     dataset_artifact_id: str
     dataset_path: str
@@ -374,8 +371,8 @@ class PrivateDependencyRecommendation:
     basis: DependencyDecisionBasis
 
     def __post_init__(self) -> None:
-        if self.schema_version != "dependency-recommendation-private/v1":
-            raise ValueError("schema_version must be dependency-recommendation-private/v1")
+        if self.schema_version != "dependency-recommendation-private/v2":
+            raise ValueError("schema_version must be dependency-recommendation-private/v2")
         _require_recommendation_id(self.recommendation_id, "recommendation_id")
         _require_artifact_id(self.dataset_artifact_id, "dataset_artifact_id")
         _require_safe_relative_path(self.dataset_path, "dataset_path")
@@ -418,7 +415,7 @@ class PrivateDependencyRecommendation:
         return cls(
             schema_version=_literal(
                 data["schema_version"],
-                "dependency-recommendation-private/v1",
+                "dependency-recommendation-private/v2",
                 "schema_version",
             ),
             recommendation_id=_str(data["recommendation_id"], "recommendation_id"),
@@ -435,7 +432,7 @@ class PrivateDependencyRecommendation:
 
 @dataclass(frozen=True)
 class DependencyDecision:
-    schema_version: Literal["dependency-decision/v1"]
+    schema_version: Literal["dependency-decision/v2"]
     decision_id: str
     recommendation_id: str
     dataset_artifact_id: str
@@ -452,8 +449,8 @@ class DependencyDecision:
     decided_at: str
 
     def __post_init__(self) -> None:
-        if self.schema_version != "dependency-decision/v1":
-            raise ValueError("schema_version must be dependency-decision/v1")
+        if self.schema_version != "dependency-decision/v2":
+            raise ValueError("schema_version must be dependency-decision/v2")
         _require_decision_id(self.decision_id, "decision_id")
         _require_recommendation_id(self.recommendation_id, "recommendation_id")
         _require_artifact_id(self.dataset_artifact_id, "dataset_artifact_id")
@@ -501,7 +498,7 @@ class DependencyDecision:
         _require_exact_keys(data, _DECISION_KEYS | {"code_table_version"}, "DependencyDecision")
         _require_code_table(data)
         return cls(
-            schema_version=_literal(data["schema_version"], "dependency-decision/v1", "schema_version"),
+            schema_version=_literal(data["schema_version"], "dependency-decision/v2", "schema_version"),
             decision_id=_str(data["decision_id"], "decision_id"),
             recommendation_id=_str(data["recommendation_id"], "recommendation_id"),
             dataset_artifact_id=_str(data["dataset_artifact_id"], "dataset_artifact_id"),
@@ -927,11 +924,11 @@ def _build_recommendation(
             support_artifact_id=support_id,
             kind=kind,
             role_source=role_source,
-            organizer_role_version=1,
+            organizer_role_version=ORGANIZER_ROLE_VERSION,
         ),
     )
     return DependencyRecommendation(
-        schema_version="dependency-recommendation/v1",
+        schema_version="dependency-recommendation/v2",
         recommendation_id=recommendation_id,
         dataset_artifact_id=dataset.artifact_id,
         dataset_sha256=dataset.source_sha256,

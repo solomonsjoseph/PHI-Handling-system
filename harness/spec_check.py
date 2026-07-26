@@ -7,7 +7,7 @@ Runs, in order, and writes a per-check pass/fail report:
        (when present) is a symlink; zero regular files except
        ``intake_manifest.json``. The intake root, every study directory,
        and every component directory (``datasets``/``forms``/
-       ``data_dictionary``/``mappings``/``_unclassified``) are ``lstat``-ed
+       ``dictionary_mapping``/``_unclassified``) are ``lstat``-ed
        and rejected if any of them is itself a symlink.
     3. LLM-boundary canary --
        * ``config.yaml``'s ``llm.provider`` defaults to ``none``;
@@ -69,7 +69,7 @@ _OFFLINE_CLIENT_CLASS = "OfflineLocalLLMClient"
 _INTAKE_NAMING_FILENAME = "intake_naming.py"
 _INTAKE_NAMING_SANCTIONED_FUNCTIONS = frozenset({"resolve_intake_study", "_resolve_intake_study"})
 
-_INTAKE_COMPONENTS = ("datasets", "forms", "data_dictionary", "mappings", "_unclassified")
+_INTAKE_COMPONENTS = ("datasets", "forms", "dictionary_mapping", "_unclassified")
 
 # source_immutability comparison fields -- everything except atime.
 _IMMUTABILITY_FIELDS = ("type", "mode", "size", "mtime_ns", "uid", "gid", "sha256", "symlink_target")

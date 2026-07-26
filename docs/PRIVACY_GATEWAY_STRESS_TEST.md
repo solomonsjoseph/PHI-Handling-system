@@ -15,7 +15,7 @@ python -m harness.spec_check --skip-pytest --workspace $WS --study PrivacyGatewa
 
 | Stage | Measured outcome |
 |---|---|
-| intake | 10 accepted-format files symlink-linked, 0 review, 0 errors, `status=ready` (the mandatory `datasets/` + `forms/` + `data_dictionary/` + `mappings/` v3 package) |
+| intake | 10 accepted-format files symlink-linked, 0 review, 0 errors, `status=ready` (the mandatory `datasets/` + `forms/` + `dictionary_mapping/` v3 package) |
 | organize | 6 datasets produced, 1 routed to the review bucket (`screening_form.pdf`: `pdf-no-extractable-table`, filename/reason recorded, never row values) |
 | run | `exit_code=8` ("partial run -- held forms or a non-empty review queue"), `guard_ok=true`, `guard_failed=false`, `published_count=6`, `review_queue_size=17` (1 organizer review item + 16 dependency recommendations) |
 | spec_check | `ALL PASS` -- `intake_symlink_invariant`, `llm_boundary_canary`, `source_immutability` |

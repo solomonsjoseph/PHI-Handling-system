@@ -2,7 +2,7 @@
 
 Drives the REAL public entry points (``intake_add`` + ``run_pipeline``) on a
 mandatory-component v3 source package -- a CSV dataset with a coded ``CODE``
-column, a ``forms/`` PDF, and a ``data_dictionary`` mapping ``code -> label``
+column, a ``forms/`` PDF, and a ``dictionary_mapping/`` mapping ``code -> label``
 -- with a review-decision override that classifies ``CODE`` as GENERALIZE.
 Proves the full product story the cleanup restored: the dictionary is parsed
 as support, an EXACT_HEADER_MATCH link is inferred,
@@ -57,7 +57,7 @@ def test_dictionary_fills_generalize_map_and_publishes_labels(tmp_path):
         # column (that value match yields the EXACT_HEADER_MATCH link) plus
         # code + label columns.
         write_csv(
-            source / "data_dictionary" / "labs.csv",
+            source / "dictionary_mapping" / "labs.csv",
             ["variable", "code", "label"],
             [["CODE", "A", "Low"], ["CODE", "B", "Mid"], ["CODE", "C", "High"]],
         )

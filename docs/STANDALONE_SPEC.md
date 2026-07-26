@@ -40,16 +40,17 @@ below is checkable against the working tree with file:line evidence.
 
 ## 3. Required package and accepted-format matrix (intake-manifest/v3)
 
-- [ ] A ready intake source tree MUST provide the mandatory component
-      packages at the source root: `datasets/` (required), `forms/`
-      (required), and at least one of `data_dictionary/` or `mappings/`. A
+- [ ] A ready intake source tree MUST provide `datasets/` at the source
+      root (always required), plus at least one of `forms/` or
+      `dictionary_mapping/` (an alternative group, not both mandatory). A
       missing component directory or an empty one is a blocking review item
       (`missing-component-directory` / `missing-component-content`);
+      a shortfall in the alternative group is `missing-support-component`;
       `phi_engine/pipeline/intake_preflight.py::inspect_intake_source`.
 - [ ] Intake classifies each file by the exact per-component suffix matrix
       (`_COMPONENT_SUFFIXES`), never by guessing a role from the path:
       `datasets/` accepts `.csv`, `.xls`, `.xlsx`; `forms/` accepts `.pdf`
-      only; `data_dictionary/` and `mappings/` accept `.csv` and `.xlsx`. A
+      only; `dictionary_mapping/` accepts `.csv` and `.xlsx`. A
       dataset `.xlsx` MUST be single-sheet; a multi-sheet dataset workbook is
       a `dataset-xlsx-multiple-sheets` review item. `.json` and `.jsonl` are
       NOT accepted dataset formats: any file whose suffix is not allowed for
@@ -62,7 +63,7 @@ below is checkable against the working tree with file:line evidence.
       preserved as distinct intake entries -- never merged, deduplicated, or
       routed to review for being nested.
 - [ ] A file physically under `datasets/` that is hardlink-identical to a
-      file placed under `forms/`, `data_dictionary/`, or `mappings/` is a
+      file placed under `forms/` or `dictionary_mapping/` is a
       blocking `cross-component-hardlink` review item.
 - [ ] Any unrecognized suffix, invalid `.xlsx` workbook, over-limit support
       workbook, or unsupported component file lands in the review bucket as an

@@ -285,7 +285,6 @@ STUDY_OUTPUT_DIR = OUTPUT_DIR / STUDY_NAME
 # Raw study subdirectories (under data/raw/<study>/)
 DATASETS_DIR = STUDY_DATA_DIR / "datasets"
 ANNOTATED_PDFS_DIR = STUDY_DATA_DIR / "annotated_pdfs"
-DATA_DICTIONARY_DIR = STUDY_DATA_DIR / "data_dictionary"
 
 # Study config lives in phi_engine/config/<study>/ (underscore-prefixed YAML)
 # by default -- separate from raw data (Excel/CSV in data/raw/<study>/datasets/,
@@ -1187,45 +1186,3 @@ def ensure_run_directories(study: str | None = None, run_id: str | None = None) 
             path.chmod(0o700)
 
 
-# ----------------------------------------------------------------------------
-# VALIDATION
-# ----------------------------------------------------------------------------
-
-
-def validate_config() -> None:
-    # --- PATH VALIDATION ---
-    required_paths = [
-        RAW_DATA_DIR,
-        STUDY_DATA_DIR,
-        DATASETS_DIR,
-        DATA_DICTIONARY_DIR,
-    ]
-
-    for path in required_paths:
-        if not path.exists():
-            raise FileNotFoundError(f"Missing required path: {path}")
-
-    # PDF source is optional — the pipeline handles its absence gracefully
-    if not ANNOTATED_PDFS_DIR.exists():
-        logger.warning(
-            "Annotated PDFs directory not found: %s — PDF extraction will be skipped",
-            ANNOTATED_PDFS_DIR,
-        )
-
-    # Ensure the dictionary directory contains at least one file
-    if DATA_DICTIONARY_DIR.is_dir() and not any(DATA_DICTIONARY_DIR.iterdir()):
-        raise FileNotFoundError(f"Dictionary directory is empty: {DATA_DICTIONARY_DIR}")
-
-    # --- LOG FINAL STATE ---
-    logger.info(
-        "Config loaded | study=%s",
-        STUDY_NAME,
-    )
-
-    if production_mode_enabled():
-        if yaml_get("security", "encryption", "enabled", default=False) is not True:
-            raise RuntimeError("Production mode requires security.encryption.enabled=true")
-        if yaml_get("security", "rbac", "enabled", default=False) is not True:
-            raise RuntimeError("Production mode requires security.rbac.enabled=true")
-        if PHI_LLM_PROVIDER not in {"none", "ollama", "fake-local"} and not phi_llm_external_allowed():
-            raise RuntimeError("Production mode forbids external PHI LLM providers without PHI_ALLOW_EXTERNAL_LLM=true")

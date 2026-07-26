@@ -42,6 +42,7 @@ from phi_engine.pipeline.organize import _organize_locked
 from phi_engine.pipeline.profile import profile_column
 from phi_engine.pipeline.dependencies import (
     DependencyDecision,
+    ORGANIZER_ROLE_VERSION,
     DependencyDecisionBasis,
     DependencyKind,
     DependencyLevel,
@@ -564,7 +565,7 @@ def _build_preliminary_dependency_inputs(
                         kind = StructuredTransformKind.GENERALIZE
                         configured = True
                         if not getattr(generalize_rule, "mapping", None):
-                            required_support_kind = DependencyKind.MAPPING
+                            required_support_kind = DependencyKind.DICTIONARY_MAPPING
                     elif effective_config.band_rule_for(header.raw_name) is not None:
                         # Banding has no rulebook action or
                         # TransformRequirement kind. Its explicit config
@@ -580,10 +581,10 @@ def _build_preliminary_dependency_inputs(
                 action = classification.action
                 if action is Action.CAP:
                     kind = StructuredTransformKind.CAP
-                    required_support_kind = DependencyKind.DICTIONARY
+                    required_support_kind = DependencyKind.DICTIONARY_MAPPING
                 elif action is Action.GENERALIZE:
                     kind = StructuredTransformKind.GENERALIZE
-                    required_support_kind = DependencyKind.MAPPING
+                    required_support_kind = DependencyKind.DICTIONARY_MAPPING
                 elif (
                     action is Action.SUPPRESS
                     and effective_config is not None
@@ -705,17 +706,7 @@ def _evaluate_dependency_state(
     )
 
 
-def _build_unavailable_manifest_recommendations(
-    hydrated: _HydratedDependencyInputs,
-    dependency_relations: Mapping[str, tuple[DependencyRelation, ...]],
-    *,
-    rulebook_sha256: str,
-    scrub_config_sha256: str,
-) -> tuple[DependencyRecommendation, ...]:
-    datasets_by_path = {
-        hydrated.dataset_paths_by_id[dataset.artifact_id]: dataset
-        for dataset in hydrated.datasets
-    }
+def _support_by_path(hydrated: _HydratedDependencyInputs) -> dict[str, ParsedSupportArtifact]:
     support_by_id = {
         support.artifact_id: support
         for support in hydrated.support_artifacts
@@ -728,6 +719,45 @@ def _build_unavailable_manifest_recommendations(
         prior = support_by_path.setdefault(support_path, support)
         if prior.artifact_id != artifact_id:
             raise ValueError("protected support path identity conflict")
+    return support_by_path
+
+
+def _manifest_dependency_recommendation_id(
+    dependency: DatasetDependency, support_by_path: Mapping[str, ParsedSupportArtifact]
+) -> str:
+    """Recompute the deterministic recommendation id a manifest-declared
+    dependency would produce -- DatasetDependency carries no stored
+    recommendation_id (it is a raw site declaration, not a pipeline output),
+    so both builders below must derive it identically from the dependency's
+    identity plus whichever support artifact is CURRENTLY hydrated at its
+    declared path (None when that support is missing/never organized)."""
+    support = support_by_path.get(dependency.support)
+    return recommendation_identity(
+        dataset_artifact_id=dependency.dataset_source_artifact_id,
+        support_artifact_id=support.artifact_id if support is not None else None,
+        kind=dependency.kind,
+        reason_code=DependencyReasonCode.MANIFEST_DECLARED,
+        header_ids=(),
+        transform_requirement_ids=(),
+    )
+
+
+def _build_unavailable_manifest_recommendations(
+    hydrated: _HydratedDependencyInputs,
+    dependency_relations: Mapping[str, tuple[DependencyRelation, ...]],
+    *,
+    rulebook_sha256: str,
+    scrub_config_sha256: str,
+) -> tuple[DependencyRecommendation, ...]:
+    datasets_by_id = {
+        dataset.artifact_id: dataset
+        for dataset in hydrated.datasets
+    }
+    support_by_path = _support_by_path(hydrated)
+    support_by_id = {
+        support.artifact_id: support
+        for support in hydrated.support_artifacts
+    }
     support_ids = set(support_by_id)
     recommendations: dict[str, DependencyRecommendation] = {}
     for relations in dependency_relations.values():
@@ -745,22 +775,11 @@ def _build_unavailable_manifest_recommendations(
                 # Stale bytes that still organized produce an ordinary current
                 # recommendation through recommend_dependencies.
                 continue
-            dataset = datasets_by_path.get(dependency.dataset_path)
+            dataset = datasets_by_id.get(dependency.dataset_source_artifact_id)
             if dataset is None:
                 continue
+            recommendation_id = _manifest_dependency_recommendation_id(dependency, support_by_path)
             support = support_by_path.get(dependency.support)
-            recommendation_id = (
-                dependency.recommendation_id
-                if support is None
-                else recommendation_identity(
-                    dataset_artifact_id=dataset.artifact_id,
-                    support_artifact_id=support.artifact_id,
-                    kind=dependency.kind,
-                    reason_code=DependencyReasonCode.MANIFEST_DECLARED,
-                    header_ids=(),
-                    transform_requirement_ids=(),
-                )
-            )
             support_artifact_id = (
                 support.artifact_id if support is not None else None
             )
@@ -773,11 +792,11 @@ def _build_unavailable_manifest_recommendations(
                     support_artifact_id=support_artifact_id,
                     kind=dependency.kind,
                     role_source=RoleSource.MANIFEST,
-                    organizer_role_version=1,
+                    organizer_role_version=ORGANIZER_ROLE_VERSION,
                 ),
             )
             recommendation = DependencyRecommendation(
-                schema_version="dependency-recommendation/v1",
+                schema_version="dependency-recommendation/v2",
                 recommendation_id=recommendation_id,
                 dataset_artifact_id=dataset.artifact_id,
                 dataset_sha256=dataset.source_sha256,
@@ -829,7 +848,7 @@ def _recommendation_role_source(
             support_artifact_id=recommendation.support_artifact_id,
             kind=recommendation.kind,
             role_source=role_source,
-            organizer_role_version=1,
+            organizer_role_version=ORGANIZER_ROLE_VERSION,
         )
         == recommendation.basis.support_role_sha256
     ]
@@ -851,11 +870,12 @@ def _build_private_dependency_recommendations(
         for dataset in hydrated.datasets
     }
     expected_missing_support_paths: dict[str, str] = {}
+    support_by_path = _support_by_path(hydrated)
     for relations in (dependency_relations or {}).values():
         for relation in relations:
             if relation.support_state is DependencyRelationState.CURRENT:
                 continue
-            recommendation_id = relation.dependency.recommendation_id
+            recommendation_id = _manifest_dependency_recommendation_id(relation.dependency, support_by_path)
             support_path = relation.dependency.support
             prior = expected_missing_support_paths.setdefault(
                 recommendation_id,
@@ -897,7 +917,7 @@ def _build_private_dependency_recommendations(
             raise ValueError("recommendation support lacks protected path context")
         private_records.append(
             PrivateDependencyRecommendation(
-                schema_version="dependency-recommendation-private/v1",
+                schema_version="dependency-recommendation-private/v2",
                 recommendation_id=recommendation.recommendation_id,
                 dataset_artifact_id=recommendation.dataset_artifact_id,
                 dataset_path=dataset_path,
@@ -905,7 +925,7 @@ def _build_private_dependency_recommendations(
                 support_path=support_path,
                 raw_header_names=raw_names,
                 role_source=role_source,
-                organizer_role_version=1,
+                organizer_role_version=ORGANIZER_ROLE_VERSION,
                 basis=recommendation.basis,
             )
         )
