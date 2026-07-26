@@ -1,4 +1,0 @@
-interface:
-  display_name: "SoT Policy Generator"
-  short_description: "SoT policy from PDFs and headers"
-  default_prompt: "Use $sot-lean-generator to generate a SoT policy YAML from a clinical PDF and dataset row-1 headers only."

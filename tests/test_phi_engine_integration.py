@@ -41,14 +41,10 @@ class TestPhiEngineImport:
 
 class TestArchiveNotImportable:
     def test_archive_not_in_sys_path(self):
-        """archive/ directory must not be a Python package importable from phi_engine."""
+        """archive/ was removed entirely (fully superseded by phi_engine/);
+        it must not exist, let alone be importable."""
         archive_path = REPO_ROOT / "archive"
-        assert archive_path.exists(), "archive/ directory must exist"
-        # archive/ must not have an __init__.py (not a package)
-        init = archive_path / "__init__.py"
-        assert not init.exists(), (
-            "archive/__init__.py must not exist; archive must not be importable"
-        )
+        assert not archive_path.exists(), "archive/ must not exist; it was removed as superseded"
 
     def test_phi_engine_does_not_import_from_archive(self):
         """No .py file under phi_engine/ should import from 'archive' package."""
