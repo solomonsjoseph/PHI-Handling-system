@@ -117,10 +117,11 @@ export default function NewStudy() {
               )}
               {receipt.review_entries?.length > 0 && (
                 <div className="mb-3 border border-phi-border px-3 py-2 text-phi">
-                  <div className="uppercase text-[10px] tracking-widest mb-1">Unclassified entries</div>
+                  <div className="uppercase text-[10px] tracking-widest mb-1">Unclassified entries ({receipt.review_entries.length})</div>
                   {receipt.review_entries.map((e, i) => (
                     <div key={i} className="text-[11px]" data-testid={`intake-review-${i}`}>
                       <span className="text-text-primary">{e.relpath}</span> - <span className="text-text-secondary">{e.reason}</span>
+                      {e.blocking && <span className="ml-2 text-reject">[BLOCKING]</span>}
                     </div>
                   ))}
                 </div>
@@ -130,8 +131,13 @@ export default function NewStudy() {
                   <div key={comp} className="border border-border p-3" data-testid={`intake-comp-${comp}`}>
                     <div className="uppercase text-[10px] tracking-widest text-text-muted mb-1">{comp}</div>
                     <div className="text-2xl text-text-primary mb-2">{items.length}</div>
-                    <div className="text-[10px] text-text-secondary space-y-0.5">
-                      {items.slice(0, 5).map(it => <div key={it.file_id} className="truncate">{it.name}</div>)}
+                    <div className="text-[10px] text-text-secondary space-y-1">
+                      {items.slice(0, 5).map(it => (
+                        <div key={it.file_id} className="truncate" title={`${it.name} - sha256:${it.sha256}`}>
+                          <div className="text-text-primary">{it.name}</div>
+                          <div className="text-text-muted">{it.size} B &middot; <span className="text-phi">{it.sha256}</span></div>
+                        </div>
+                      ))}
                       {items.length > 5 && <div>+{items.length - 5} more</div>}
                     </div>
                   </div>

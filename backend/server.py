@@ -256,21 +256,27 @@ async def session_intake(sid: str, file: UploadFile = File(...)):
         accepted.append(FileArtifact(
             original_name=Path(e.relpath).name,
             size_bytes=e.size_bytes,
-            sha256="",
+            sha256=e.sha256,
             kind=kind,
             subtype=ext,
             stored_path=e.stored_path,
             component=e.component,
         ))
 
+    # Re-intake resets downstream state (files, spans, progress, exports).
     await db.sessions.update_one(
         {"id": sid},
         {"$set": {
             "files": [f.model_dump() for f in accepted],
+            "spans": [],
+            "progress": [],
+            "export_paths": {},
+            "review_iteration": 0,
             "intake_status": manifest.status,
             "intake_exit_code": manifest.exit_code,
             "intake_review": [
-                {"relpath": e.relpath, "reason": e.reason} for e in manifest.entries if e.component == "_unclassified"
+                {"relpath": e.relpath, "reason": e.reason, "blocking": e.blocking}
+                for e in manifest.entries if e.component == "_unclassified"
             ],
             "intake_missing": manifest.missing_components,
             "status": "intake",
@@ -285,15 +291,42 @@ async def session_intake(sid: str, file: UploadFile = File(...)):
         "exit_code": manifest.exit_code,
         "linked": manifest.linked,
         "review": manifest.review,
+        "errors": manifest.errors,
         "missing_components": manifest.missing_components,
         "review_entries": [
-            {"relpath": e.relpath, "reason": e.reason} for e in manifest.entries if e.component == "_unclassified"
+            {"relpath": e.relpath, "reason": e.reason, "blocking": e.blocking}
+            for e in manifest.entries if e.component == "_unclassified"
         ],
         "accepted_by_component": {
-            comp: [{"file_id": a.file_id, "name": a.original_name, "size": a.size_bytes} for a in accepted if a.component == comp]
+            comp: [
+                {"file_id": a.file_id, "name": a.original_name, "size": a.size_bytes, "sha256": a.sha256[:16]}
+                for a in accepted if a.component == comp
+            ]
             for comp in COMPONENT_SUFFIXES
         },
         "error": manifest.error,
+    }
+
+
+@app.get("/api/sessions/{sid}/intake/receipt")
+async def session_intake_receipt(sid: str):
+    """CLI-style redacted receipt (never leaks entry paths).
+
+    Mirrors the `phi_engine intake` stdout contract from
+    feat/v2-multi-jurisdiction: {study, status, linked, review, errors, manifest}.
+    """
+    db = get_db()
+    session = await db.sessions.find_one({"id": sid}, {"_id": 0})
+    if not session:
+        raise HTTPException(404, "session not found")
+    review = session.get("intake_review") or []
+    return {
+        "study": sid,
+        "status": session.get("intake_status", "none"),
+        "linked": len(session.get("files") or []),
+        "review": len(review),
+        "errors": 0,
+        "manifest": f"data/uploads/{sid}/unpacked/{sid}",
     }
 
 

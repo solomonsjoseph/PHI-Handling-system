@@ -1,23 +1,25 @@
 """Intake manifest v3: ZIP -> {datasets/, forms/, data_dictionary|mappings/}.
 
-Aligned with feat/v2-multi-jurisdiction convention. See CLAUDE.md.
+Aligned with feat/v2-multi-jurisdiction `phi_engine.pipeline.intake` conventions.
 
 Rules (fail-closed):
   - `datasets/` required. Extensions: .csv, .xls, .xlsx. Single sheet only for xlsx.
     .json / .jsonl NOT accepted here.
-  - `forms/` required. Extension: .pdf only.
-  - At least one of `data_dictionary/` OR `mappings/`. Extensions: .csv, .xlsx.
-  - Any unsupported suffix, multi-sheet xlsx dataset, cross-component nested
-    duplicate, or symlink -> `_unclassified` review bucket.
+  - At least one of `forms/` (.pdf), `data_dictionary/` (.csv/.xlsx), or
+    `mappings/` (.csv/.xlsx) must accompany `datasets/`.
+  - Any unsupported suffix, multi-sheet xlsx dataset, unreadable xls, empty
+    file, cross-component duplicate content, or symlink -> `_unclassified`
+    review bucket recording only `{path, reason, blocking}` (never row values).
   - Blocking review item holds the entire study.
 
-Public status codes (for CLI-style exit-code contract):
+Public status codes (CLI-style exit-code contract):
   0 -> "ready"           : classification may proceed
   8 -> "review_required" : at least one _unclassified bucket entry
   2 -> "failed"          : missing mandatory component or malformed ZIP
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import zipfile
 from dataclasses import dataclass, field
@@ -85,14 +87,58 @@ def _component_of(top: str) -> str | None:
     return None
 
 
-def _xlsx_is_single_sheet(path: Path) -> bool:
+def _xlsx_is_single_sheet(path: Path) -> tuple[bool, str]:
+    """Return (is_single_sheet, error_reason)."""
     try:
         wb = openpyxl.load_workbook(path, read_only=True)
         n = len(wb.sheetnames)
         wb.close()
-        return n == 1
-    except Exception:
-        return False
+        return (n == 1, "" if n == 1 else f"xlsx has {n} sheets, single-sheet required")
+    except Exception as e:
+        return (False, f"unreadable xlsx: {type(e).__name__}")
+
+
+def _csv_is_readable(path: Path) -> tuple[bool, str]:
+    """Best-effort CSV validation: file has at least a header line."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(4096)
+        if not head:
+            return False, "empty file"
+        # Reject files that decode as pure binary
+        try:
+            text = head.decode("utf-8-sig", errors="strict")
+        except UnicodeDecodeError:
+            try:
+                text = head.decode("latin-1")
+            except Exception:
+                return False, "not utf-8 or latin-1 decodable"
+        first_line = text.splitlines()[0] if text.splitlines() else ""
+        if not first_line.strip():
+            return False, "empty header line"
+        return True, ""
+    except Exception as e:
+        return False, f"unreadable csv: {type(e).__name__}"
+
+
+def _pdf_is_readable(path: Path) -> tuple[bool, str]:
+    """PDF magic-bytes check."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(5)
+        if head != b"%PDF-":
+            return False, "not a PDF (missing %PDF- magic)"
+        return True, ""
+    except Exception as e:
+        return False, f"unreadable pdf: {type(e).__name__}"
+
+
+def _sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def unpack_zip(zip_path: Path, dest_root: Path) -> tuple[list[str], str | None]:
@@ -158,6 +204,7 @@ def scan_intake(root: Path) -> tuple[list[IntakeEntry], list[str]]:
     """
     entries: list[IntakeEntry] = []
     seen_components: set[str] = set()
+    hash_to_component: dict[str, str] = {}  # for cross-component duplicate detection
 
     for path in sorted(root.rglob("*")):
         if path.is_dir():
@@ -195,21 +242,61 @@ def scan_intake(root: Path) -> tuple[list[IntakeEntry], list[str]]:
                 reason=f"extension {ext!r} not allowed in {component!r} (expected {sorted(allowed)})",
             ))
             continue
-        if component == "datasets" and ext == ".xlsx" and not _xlsx_is_single_sheet(path):
+        if size == 0:
             entries.append(IntakeEntry(
                 component="_unclassified",
                 relpath=str(rel),
                 stored_path=str(path),
-                size_bytes=size,
-                reason="dataset xlsx must be single-sheet",
+                size_bytes=0,
+                reason="empty file (0 bytes)",
             ))
             continue
+
+        # Format-specific validation
+        reason = ""
+        if component == "datasets" and ext == ".xlsx":
+            ok, reason = _xlsx_is_single_sheet(path)
+            if not ok:
+                entries.append(IntakeEntry(
+                    component="_unclassified", relpath=str(rel), stored_path=str(path),
+                    size_bytes=size, reason=reason,
+                ))
+                continue
+        elif ext == ".csv":
+            ok, reason = _csv_is_readable(path)
+            if not ok:
+                entries.append(IntakeEntry(
+                    component="_unclassified", relpath=str(rel), stored_path=str(path),
+                    size_bytes=size, reason=reason,
+                ))
+                continue
+        elif ext == ".pdf":
+            ok, reason = _pdf_is_readable(path)
+            if not ok:
+                entries.append(IntakeEntry(
+                    component="_unclassified", relpath=str(rel), stored_path=str(path),
+                    size_bytes=size, reason=reason,
+                ))
+                continue
+
+        # Hash + cross-component duplicate detection
+        sha = _sha256_of(path)
+        prior = hash_to_component.get(sha)
+        if prior and prior != component:
+            entries.append(IntakeEntry(
+                component="_unclassified", relpath=str(rel), stored_path=str(path),
+                size_bytes=size, sha256=sha,
+                reason=f"duplicate content across components ({prior} <-> {component})",
+            ))
+            continue
+        hash_to_component[sha] = component
 
         entries.append(IntakeEntry(
             component=component,
             relpath=str(rel),
             stored_path=str(path),
             size_bytes=size,
+            sha256=sha,
         ))
         seen_components.add(component)
 
@@ -226,6 +313,10 @@ def scan_intake(root: Path) -> tuple[list[IntakeEntry], list[str]]:
 def build_manifest(study_id: str, zip_path: Path, workspace_root: Path) -> IntakeManifest:
     """Full intake pipeline: unpack zip, scan tree, resolve status + exit code."""
     intake_root = workspace_root / study_id
+    # Re-intake: clean stale unpacked tree so residual entries don't linger.
+    if intake_root.exists():
+        import shutil
+        shutil.rmtree(intake_root, ignore_errors=True)
     m = IntakeManifest(study_id=study_id, root=str(intake_root))
     _, err = unpack_zip(zip_path, intake_root)
     if err:
@@ -237,6 +328,7 @@ def build_manifest(study_id: str, zip_path: Path, workspace_root: Path) -> Intak
     m.entries = entries
     m.linked = sum(1 for e in entries if e.component != "_unclassified")
     m.review = sum(1 for e in entries if e.component == "_unclassified")
+    m.errors = 0
     m.missing_components = missing
     if missing:
         m.status = "failed"
