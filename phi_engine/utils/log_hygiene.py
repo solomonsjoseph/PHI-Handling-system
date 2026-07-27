@@ -207,7 +207,7 @@ def install_phi_redactor_best_effort() -> None:
     should still produce logs rather than hard-fail on a missing key.
     Production services must not run with PHI-capable logging unredacted.
 
-    **How.** Calls :func:`scripts.security.phi_keystore.get_phi_key`; on
+    **How.** Calls :func:`phi_engine.security.phi_keystore.get_phi_key`; on
     :class:`PHIKeyMissingError` / :class:`PHIKeyPermissionError` /
     :class:`PHIScrubError`, logs a one-line warning and returns without
     installing unless production controls are enabled. Successful installs are
@@ -216,7 +216,7 @@ def install_phi_redactor_best_effort() -> None:
     Imports are deferred so importing this hygiene module never pulls in the
     heavy ``phi_keystore``/``phi_scrub`` chain at module load time.
     """
-    import config
+    import phi_engine.config.config as config
     from phi_engine.security.phi_keystore import get_phi_key
     from phi_engine.security.phi_scrub import (
         PHIKeyMissingError,
