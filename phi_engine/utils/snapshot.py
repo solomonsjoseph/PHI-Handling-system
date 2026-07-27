@@ -800,7 +800,7 @@ def commit_run_snapshot(
     if resume_held and not records:
         import getpass
         from datetime import datetime, timezone
-UTC = timezone.utc  # py3.9 compat
+        UTC = timezone.utc  # py3.9 compat
 
         try:
             who = getpass.getuser()
