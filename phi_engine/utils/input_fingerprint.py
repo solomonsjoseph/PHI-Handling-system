@@ -59,10 +59,10 @@ _YAML_EXTS = frozenset({".yaml", ".yml"})
 # pattern set or the clinical-date parser changes scrub output, so they must be in
 # the fingerprint.
 _SCRUB_AFFECTING_MODULES = (
-    "scripts.security.phi_scrub",
-    "scripts.security.phi_review",
-    "scripts.security.phi_patterns",
-    "scripts.extraction.io.clinical_dates",
+    "phi_engine.security.phi_scrub",
+    "phi_engine.security.phi_review",
+    "phi_engine.security.phi_patterns",
+    "phi_engine.utils._extraction_io.clinical_dates",
 )
 
 
