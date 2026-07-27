@@ -303,7 +303,7 @@ class WorkspaceCleanupReport:
 
 def _safe_rel(p: Path) -> str:
     """Path relative to BASE_DIR when possible (names only, never a value)."""
-    import config
+    import phi_engine.config.config as config
 
     try:
         return str(Path(p).resolve().relative_to(Path(config.BASE_DIR).resolve()))
@@ -317,8 +317,8 @@ def verify_workspace_cleanup(
     """Workspace purge check (Note 13 Phase 1 + Phase 2 + Phase 3).
 
     Phase 1 (must-be-gone): every temporary artifact — tmp/{STUDY} staging, SoT
-    intermediates (sot_source_pack_* and sot_render_* per-form /tmp dirs), the
-    header-extraction store, and the scrub/cleanup in-progress tokens — must be
+    intermediates (sot_source_pack_* and sot_render_* per-form /tmp dirs), and
+    the scrub/cleanup in-progress tokens — must be
     absent. Phase 2 (must-remain): every permanent path —
     llm_source/, audit/, snapshots/, config/{STUDY}/, data/raw/{STUDY}/ — must be
     present (a missing one is a possible data-loss event). Phase 3 (anomaly scan):
@@ -330,8 +330,7 @@ def verify_workspace_cleanup(
     cleanup.in_progress token during the walk (it deletes it only after a pass),
     so that token is not flagged while legitimately held.
     """
-    import config
-    from scripts.extraction.header_store import header_store_path
+    import phi_engine.config.config as config
 
     findings: list[WorkspacePathFinding] = []
 
@@ -342,9 +341,6 @@ def verify_workspace_cleanup(
         Path(config.STAGING_HEADERS_DIR),
         run_dir / "scrub.in_progress",
     ]
-    hs = header_store_path(run_dir)
-    if hs is not None:
-        must_gone.append(hs)
     if not expect_cleanup_token_present:
         must_gone.append(run_dir / "cleanup.in_progress")
     findings.extend(
