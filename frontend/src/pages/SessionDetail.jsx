@@ -1,123 +1,210 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { toast } from 'sonner';
-import { API, exportUrl, finalizeSession, getSession, streamUrl, submitReview } from '../lib/api';
-import { Btn, MonoProgress, Panel, Tag } from '../components/ui';
-import PhaseStepper from '../components/PhaseStepper';
-import LiveCounters from '../components/LiveCounters';
-import AgentSection from '../components/AgentSection';
+import axios from 'axios';
+import { API, exportUrl, getSession, streamUrl } from '../lib/api';
+import { Btn, Panel, Tag } from '../components/ui';
+import AgentPhaseStepper from '../components/AgentPhaseStepper';
 
-const STATUS_ORDER = ['created','intake','reading','classifying','detecting','awaiting_review','applying_review','anonymizing','complete'];
-const ACTIVE_PHASES = new Set(['created','intake','reading','classifying','detecting','applying_review','anonymizing']);
-
-function statusPercent(status, events) {
-  if (status === 'complete') return 100;
-  if (status === 'failed') return 100;
-  const idx = STATUS_ORDER.indexOf(status);
-  if (idx < 0) return 0;
-  const base = (idx / (STATUS_ORDER.length - 1)) * 100;
-  const last = events[events.length - 1];
-  const local = last && last.percent ? last.percent : 0;
-  return Math.min(100, Math.round(base + (local / (STATUS_ORDER.length - 1))));
-}
+const ACTION_OPTIONS = ['keep','drop','cap_age_90','year_only','zip3_truncate','hash','pseudonymize','scrub_text'];
+const ACTION_COLOR = {
+  keep: 'accept', drop: 'reject', cap_age_90: 'phi', year_only: 'phi',
+  zip3_truncate: 'phi', hash: 'phi', pseudonymize: 'phi', scrub_text: 'phi',
+  human_review: 'phi',
+};
 
 export default function SessionDetail() {
   const { sid } = useParams();
   const [session, setSession] = useState(null);
+  const [results, setResults] = useState(null);
+  const [trace, setTrace] = useState([]);
   const [events, setEvents] = useState([]);
-  const [reviewMap, setReviewMap] = useState({});
+  const [resolutions, setResolutions] = useState({});
+  const [devOpen, setDevOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
   const esRef = useRef(null);
 
   const refresh = async () => {
-    const s = await getSession(sid);
+    const [s, r, t] = await Promise.all([
+      getSession(sid),
+      axios.get(`${API}/sessions/${sid}/results`).then(r => r.data).catch(() => null),
+      axios.get(`${API}/sessions/${sid}/agent-trace?limit=500`).then(r => r.data.messages).catch(() => []),
+    ]);
     setSession(s);
+    setResults(r);
+    setTrace(t || []);
     setEvents(s.progress || []);
   };
 
   useEffect(() => { refresh(); }, [sid]);
 
   useEffect(() => {
-    // Open SSE stream whenever the session is in an active phase; else short-poll as fallback.
     if (!session) return;
-    if (!ACTIVE_PHASES.has(session.status)) return;
+    const active = ['created','intake','reading','classifying','applying_review','anonymizing'];
+    if (!active.includes(session.status)) return;
     if (esRef.current) esRef.current.close();
     const es = new EventSource(streamUrl(sid));
     esRef.current = es;
     es.onmessage = (m) => {
       try {
         const ev = JSON.parse(m.data);
-        if (ev.phase === '__end__') {
-          es.close();
-          refresh();
-          return;
-        }
+        if (ev.phase === '__end__') { es.close(); refresh(); return; }
         setEvents(prev => [...prev, ev]);
-        if (['awaiting_review','complete','failed'].includes(ev.phase)) refresh();
+        if (['awaiting_review','awaiting_human_review','complete','failed'].includes(ev.phase)) refresh();
       } catch (_) {}
     };
-    es.onerror = () => { es.close(); };
+    es.onerror = () => es.close();
     return () => es.close();
   }, [session?.status, sid]);
 
-  // Poll fallback: keep refreshing every 2s during active phases in case SSE misses events.
   useEffect(() => {
     if (!session) return;
-    if (!ACTIVE_PHASES.has(session.status)) return;
-    const t = setInterval(() => { refresh(); }, 2000);
+    const active = ['created','intake','reading','classifying','applying_review','anonymizing'];
+    if (!active.includes(session.status)) return;
+    const t = setInterval(refresh, 3000);
     return () => clearInterval(t);
   }, [session?.status, sid]);
 
-  const setDecision = (span_id, action, extra = {}) => {
-    setReviewMap(prev => ({ ...prev, [span_id]: { span_id, action, ...extra } }));
+  const startHandle = async () => {
+    setBusy(true);
+    try {
+      const r = await axios.post(`${API}/sessions/${sid}/handle`);
+      toast(`Agent pipeline started with ${r.data.llm.provider} ${r.data.llm.model}`);
+      await refresh();
+    } catch (e) {
+      toast(`start failed: ${e?.response?.data?.detail || e.message}`);
+    } finally { setBusy(false); }
   };
 
-  const submit = async (continueIter) => {
-    const decisions = Object.values(reviewMap);
-    if (decisions.length === 0 && !continueIter) {
-      toast('No decisions selected');
-      return;
-    }
-    await submitReview(sid, decisions, [], continueIter);
-    toast(continueIter ? 'Review submitted. Iteration continues.' : 'Review submitted. Ready to finalize.');
-    setReviewMap({});
-    await refresh();
-  };
-
-  const finalize = async () => {
-    await finalizeSession(sid);
-    toast('Anonymizing and preparing exports');
-    await refresh();
+  const submitReview = async () => {
+    const items = Object.entries(resolutions).map(([key, action]) => {
+      const [file_id, ...rest] = key.split('|');
+      return { file_id, column: rest.join('|'), action };
+    });
+    if (!items.length) { toast('Choose an action for each row first'); return; }
+    setBusy(true);
+    try {
+      const r = await axios.post(`${API}/sessions/${sid}/human-review`, { resolutions: items });
+      toast(`Review submitted (${r.data.status})`);
+      setResolutions({});
+      await refresh();
+    } catch (e) {
+      toast(`review failed: ${e?.response?.data?.detail || e.message}`);
+    } finally { setBusy(false); }
   };
 
   if (!session) return <div className="p-4 font-mono text-xs text-text-muted">loading...</div>;
 
-  const pct = statusPercent(session.status, events);
+  const decisions = results?.decisions || [];
+  const humanNeeded = results?.human_review_required;
+  const humanRows = decisions.filter(d => d.action === 'human_review');
+  const exports = session.export_paths || {};
+  const intakeReady = session.intake_status === 'ready';
+  const canStart = intakeReady && !['classifying','reading','anonymizing','applying_review'].includes(session.status);
+  const isComplete = session.status === 'complete';
+  const isFailed = session.status === 'failed';
 
   return (
-    <div>
-      <Panel title="Study" cite={session.id} testId="session-header"
-        right={<Tag color={session.status === 'complete' ? 'accept' : session.status === 'failed' ? 'reject' : 'default'} testId="session-status">{session.status}</Tag>}
-      >
-        <PhaseStepper status={session.status} iteration={session.review_iteration} />
-        <div className="mt-3 flex items-center gap-4">
-          <MonoProgress percent={pct} />
-          <span className="font-mono text-[10px] text-text-muted">files {(session.files || []).length}</span>
-          <span className="font-mono text-[10px] text-text-muted">spans {(session.spans || []).length}</span>
+    <div className="min-h-full">
+      {/* Hero: study identity + one CTA. */}
+      <section className="border-b border-border bg-bg p-6" data-testid="study-hero">
+        <div className="flex items-baseline gap-4">
+          <div className="font-mono text-[10px] uppercase tracking-widest text-text-muted">Study</div>
+          <div className="font-mono text-xs text-text-primary" data-testid="study-id">{sid}</div>
+          <Tag color={isComplete ? 'accept' : isFailed ? 'reject' : 'default'} testId="study-status">{session.status}</Tag>
+          <Tag color={intakeReady ? 'accept' : 'reject'} testId="intake-status">
+            intake: {session.intake_status || 'none'} (exit {session.intake_exit_code ?? '-'})
+          </Tag>
+          <div className="ml-auto flex gap-3">
+            {canStart && (
+              <Btn variant="primary" onClick={startHandle} disabled={busy} testId="btn-agent-handle">
+                {isComplete ? 'Restart pipeline' : 'Run PHI handling'}
+              </Btn>
+            )}
+            <button onClick={() => setDevOpen(o => !o)} className="h-9 px-4 border border-border font-mono text-[10px] uppercase tracking-widest text-text-muted hover:text-phi hover:border-phi" data-testid="btn-toggle-dev">
+              {devOpen ? 'Hide details' : 'Developer details'}
+            </button>
+          </div>
         </div>
-        <LiveCounters session={session} events={events} />
         {session.error && (
-          <div className="mt-3 border border-reject text-reject px-3 py-2 font-mono text-xs" data-testid="session-error">
+          <div className="mt-4 border border-reject text-reject px-3 py-2 font-mono text-xs" data-testid="hero-error">
             {session.error}
           </div>
         )}
-      </Panel>
+      </section>
 
-      {session.status === 'complete' && session.export_paths && Object.keys(session.export_paths).length > 0 && (
-        <Panel title="Export Ready" cite="45 CFR 164.514 tokens applied" testId="export-panel"
-          right={<Tag color="accept" testId="export-count">{Object.keys(session.export_paths).length} files</Tag>}
+      {/* Phase stepper */}
+      <div className="p-4">
+        <AgentPhaseStepper session={session} trace={trace} />
+      </div>
+
+      {/* Decisions */}
+      {decisions.length > 0 && (
+        <Panel title="Agent Decisions" cite={`${decisions.length} columns classified across ${(session.files || []).filter(f => f.kind === 'dataset').length} datasets`} testId="decisions-panel"
+          right={humanNeeded ? <Tag color="phi" testId="human-review-flag">HUMAN REVIEW REQUIRED</Tag> : isComplete ? <Tag color="accept">complete</Tag> : <Tag>in progress</Tag>}
         >
-          <div className="grid grid-cols-2 gap-3">
-            {(session.files || []).filter(f => session.export_paths[f.file_id]).map(f => (
+          <table className="w-full text-xs font-mono border border-border">
+            <thead className="bg-surface">
+              <tr>
+                <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Column</th>
+                <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Subject</th>
+                <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">HIPAA</th>
+                <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Action</th>
+                <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Reason</th>
+                <th className="text-left px-3 py-2 border-b border-border text-text-muted">Conf</th>
+              </tr>
+            </thead>
+            <tbody>
+              {decisions.map((d, i) => {
+                const key = `${d.file_id || ''}|${d.column || ''}`;
+                const isHR = d.action === 'human_review';
+                return (
+                  <tr key={i} data-testid={`decision-row-${i}`}>
+                    <td className="px-3 py-2 border-b border-r border-border text-text-primary">{d.column}</td>
+                    <td className="px-3 py-2 border-b border-r border-border text-text-secondary">{d.subject || '-'}</td>
+                    <td className="px-3 py-2 border-b border-r border-border text-phi">{d.phi_category || '-'}</td>
+                    <td className="px-3 py-2 border-b border-r border-border">
+                      {isHR && !isComplete ? (
+                        <select
+                          value={resolutions[key] || ''}
+                          onChange={e => setResolutions({ ...resolutions, [key]: e.target.value })}
+                          className="bg-surface border border-border px-2 h-6 text-[11px] text-text-primary"
+                          data-testid={`resolve-${i}`}
+                        >
+                          <option value="">choose...</option>
+                          {ACTION_OPTIONS.map(a => <option key={a}>{a}</option>)}
+                        </select>
+                      ) : (
+                        <Tag color={ACTION_COLOR[d.action] || 'default'} testId={`action-${i}`}>{d.action}</Tag>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 border-b border-r border-border text-text-secondary max-w-lg" title={d.reason}>
+                      <div className="truncate">{d.reason}</div>
+                    </td>
+                    <td className="px-3 py-2 border-b border-border text-text-muted">{Number(d.confidence || 0).toFixed(2)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {humanNeeded && humanRows.length > 0 && !isComplete && (
+            <div className="mt-3 flex items-center gap-3" data-testid="human-review-bar">
+              <div className="font-mono text-[10px] text-text-muted uppercase tracking-widest">Human decision required on {humanRows.length} column(s)</div>
+              <Btn variant="primary" onClick={submitReview} disabled={busy || Object.keys(resolutions).length === 0} testId="btn-submit-human-review">
+                Submit ({Object.keys(resolutions).length}/{humanRows.length})
+              </Btn>
+            </div>
+          )}
+        </Panel>
+      )}
+
+      {/* Exports */}
+      {isComplete && Object.keys(exports).length > 0 && (
+        <Panel title="Exports Ready" cite="PHI-handled outputs safe to share with any AI" testId="exports-panel"
+          right={<Tag color="accept" testId="exports-count">{Object.keys(exports).length} files</Tag>}
+        >
+          <div className="grid grid-cols-3 gap-3">
+            {(session.files || []).filter(f => exports[f.file_id]).map(f => (
               <a
                 key={f.file_id}
                 href={exportUrl(sid, f.file_id)}
@@ -133,178 +220,158 @@ export default function SessionDetail() {
         </Panel>
       )}
 
-      {session.intake_status && session.intake_status !== 'none' && (
-        <Panel title="Intake" cite="manifest-v3" testId="intake-panel"
-          right={<Tag color={session.intake_status === 'ready' ? 'accept' : session.intake_status === 'review_required' ? 'phi' : 'reject'} testId="intake-status">{session.intake_status} (exit {session.intake_exit_code})</Tag>}
+      {/* Auditor summary */}
+      {results?.audit && (
+        <Panel title="Auditor Report" cite="0% PHI leak enforcement" testId="audit-panel"
+          right={<Tag color={results.audit.verdict === 'clean' ? 'accept' : 'reject'} testId="audit-verdict">{results.audit.verdict}</Tag>}
         >
-          {(session.intake_missing || []).length > 0 && (
-            <div className="mb-3 border border-reject text-reject px-3 py-2 font-mono text-xs" data-testid="intake-missing-components">
-              Missing components: {session.intake_missing.join(', ')}
-            </div>
-          )}
-          {(session.intake_review || []).length > 0 && (
-            <div className="mb-3 border border-phi-border px-3 py-2 font-mono text-xs text-phi">
-              <div className="uppercase text-[10px] tracking-widest mb-1">Unclassified intake entries ({session.intake_review.length})</div>
-              {session.intake_review.slice(0, 20).map((e, i) => (
-                <div key={i} className="text-[11px]" data-testid={`intake-review-item-${i}`}>
-                  <span className="text-text-primary">{e.relpath}</span> - <span className="text-text-secondary">{e.reason}</span>
+          <div className="font-mono text-xs text-text-primary whitespace-pre-wrap">{results.audit.summary}</div>
+          {results.audit.metrics && (
+            <div className="mt-3 grid grid-cols-5 gap-2 font-mono text-xs">
+              {Object.entries(results.audit.metrics).map(([k, v]) => (
+                <div key={k} className="border border-border p-2">
+                  <div className="text-text-muted uppercase text-[10px] tracking-widest">{k.replace(/_/g, ' ')}</div>
+                  <div className="text-lg text-text-primary">{typeof v === 'number' ? v : String(v)}</div>
                 </div>
               ))}
             </div>
           )}
-          {(session.intake_missing || []).length === 0 && (session.intake_review || []).length === 0 && (
-            <div className="font-mono text-xs text-text-secondary">All entries routed to components. Ready for classification.</div>
+        </Panel>
+      )}
+
+      {/* Ledger */}
+      {results?.ledger && results.ledger.headline && (
+        <Panel title="Benchmark - Comparative Analysis (Ledger)" cite="headers-only advantage vs competitors" testId="ledger-panel">
+          <div className="font-mono text-sm text-text-primary mb-2">{results.ledger.headline}</div>
+          <div className="font-mono text-xs text-text-secondary whitespace-pre-wrap mb-3">{results.ledger.metrics_narrative}</div>
+          {(results.ledger.comparisons || []).length > 0 && (
+            <table className="w-full text-xs font-mono border border-border">
+              <thead className="bg-surface">
+                <tr>
+                  <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Competitor</th>
+                  <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Reads rows?</th>
+                  <th className="text-left px-3 py-2 border-b border-border text-text-muted">Delta</th>
+                </tr>
+              </thead>
+              <tbody>
+                {results.ledger.comparisons.map((c, i) => (
+                  <tr key={i} data-testid={`ledger-row-${i}`}>
+                    <td className="px-3 py-2 border-b border-r border-border text-text-primary">{c.competitor}</td>
+                    <td className="px-3 py-2 border-b border-r border-border">{c.reads_row_values ? <Tag color="reject">yes</Tag> : <Tag color="accept">no</Tag>}</td>
+                    <td className="px-3 py-2 border-b border-border text-text-secondary">{c.delta_notes}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </Panel>
       )}
 
-      <AgentSection sid={sid} session={session} onRefresh={refresh} />
-
-      <Panel title="Files" testId="files-panel">
-        <table className="w-full text-xs font-mono border border-border">
-          <thead className="bg-surface">
-            <tr>
-              <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Name</th>
-              <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Component</th>
-              <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Kind</th>
-              <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Size</th>
-              <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">SHA-256</th>
-              <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Columns / Preview</th>
-              <th className="text-left px-3 py-2 border-b border-border text-text-muted">Export</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(session.files || []).map(f => (
-              <tr key={f.file_id} data-testid={`file-row-${f.file_id}`}>
-                <td className="px-3 py-2 border-b border-r border-border text-text-primary">{f.original_name}</td>
-                <td className="px-3 py-2 border-b border-r border-border"><Tag color={f.component === 'datasets' ? 'phi' : f.component === 'forms' ? 'info' : 'default'}>{f.component || '-'}</Tag></td>
-                <td className="px-3 py-2 border-b border-r border-border"><Tag>{f.kind} / {f.subtype}</Tag></td>
-                <td className="px-3 py-2 border-b border-r border-border text-text-secondary">{f.size_bytes} B</td>
-                <td className="px-3 py-2 border-b border-r border-border text-text-muted">{(f.sha256 || '').slice(0, 12)}</td>
-                <td className="px-3 py-2 border-b border-r border-border text-text-secondary max-w-md">
-                  {f.kind === 'dataset' ? (
-                    <div><span className="text-text-muted">columns:</span> {(f.columns || []).slice(0, 12).join(', ')}{(f.columns || []).length > 12 ? ` +${f.columns.length - 12}` : ''}</div>
-                  ) : (
-                    <div className="truncate max-w-md" title={f.text_preview}>{(f.text_preview || '').slice(0, 120)}</div>
-                  )}
-                  {f.llm_classification && f.llm_classification.content_type && (
-                    <div className="mt-1"><Tag color="phi">llm: {f.llm_classification.content_type}</Tag> <span className="text-[10px] text-text-muted">{f.llm_classification.notes}</span></div>
-                  )}
-                </td>
-                <td className="px-3 py-2 border-b border-border">
-                  {session.status === 'complete' && session.export_paths && session.export_paths[f.file_id] ? (
-                    <a href={exportUrl(sid, f.file_id)} className="text-accept underline decoration-dotted font-mono text-[11px]" data-testid={`export-link-${f.file_id}`}>download</a>
-                  ) : (
-                    <span className="text-text-muted">pending</span>
-                  )}
-                </td>
-              </tr>
+      {/* Herald manuscript */}
+      {results?.herald && results.herald.title && (
+        <Panel title="Manuscript Draft (Herald)" cite={`target venue: ${results.herald.target_venue}`} testId="herald-panel">
+          <div className="max-w-3xl">
+            <div className="font-display text-2xl text-text-primary leading-tight mb-1" data-testid="herald-title">{results.herald.title}</div>
+            <div className="font-mono text-[11px] text-text-muted uppercase tracking-widest mb-4">Abstract</div>
+            <div className="font-mono text-xs text-text-secondary italic mb-6 leading-relaxed" data-testid="herald-abstract">{results.herald.abstract}</div>
+            {(results.herald.sections || []).map((s, i) => (
+              <div key={i} className="mb-5" data-testid={`herald-section-${i}`}>
+                <div className="font-mono text-[10px] uppercase tracking-widest text-phi mb-1">{s.heading}</div>
+                <div className="font-mono text-xs text-text-primary whitespace-pre-wrap leading-relaxed">{s.body}</div>
+              </div>
             ))}
-          </tbody>
-        </table>
-      </Panel>
-
-      <Panel title="Progress Log" cite={`${events.length} events`} testId="progress-panel">
-        <div className="max-h-64 overflow-auto border border-border">
-          <table className="w-full text-xs font-mono">
-            <tbody>
-              {events.slice(-40).reverse().map((e, i) => (
-                <tr key={i} className={`border-b border-border ${i % 2 === 0 ? '' : 'bg-white/[0.02]'}`} data-testid={`progress-event-${i}`}>
-                  <td className="px-3 py-1.5 border-r border-border text-text-muted whitespace-nowrap">{(e.ts || '').slice(11, 19)}</td>
-                  <td className="px-3 py-1.5 border-r border-border text-phi uppercase whitespace-nowrap">{e.phase}</td>
-                  <td className="px-3 py-1.5 text-text-primary">{e.message}</td>
-                </tr>
-              ))}
-              {events.length === 0 && <tr><td className="px-3 py-2 text-text-muted">no events yet</td></tr>}
-            </tbody>
-          </table>
-        </div>
-      </Panel>
-
-      {(session.spans || []).length > 0 && (
-        <Panel
-          title={`Human Review Checkpoint (${(session.spans || []).filter(s => s.review_status === 'pending').length} pending)`}
-          cite="164.514(b)(2)(ii) actual knowledge"
-          testId="review-panel"
-          right={
-            <div className="flex gap-2">
-              <Btn variant="default" onClick={() => submit(true)} testId="btn-continue-review" disabled={!['awaiting_review','applying_review'].includes(session.status)}>Save + Iterate</Btn>
-              <Btn variant="primary" onClick={() => submit(false)} testId="btn-save-review" disabled={!['awaiting_review','applying_review'].includes(session.status)}>Save Review</Btn>
-              <Btn variant="danger" onClick={finalize} testId="btn-finalize" disabled={!['awaiting_review','applying_review'].includes(session.status)}>Finalize + Export</Btn>
-            </div>
-          }
-        >
-          <div className="border border-border">
-            <table className="w-full text-xs font-mono">
-              <thead className="bg-surface">
-                <tr>
-                  <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Value</th>
-                  <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Category</th>
-                  <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Where</th>
-                  <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Detector</th>
-                  <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Conf.</th>
-                  <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Auth</th>
-                  <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Status</th>
-                  <th className="text-left px-3 py-2 border-b border-border text-text-muted">Decision</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(session.spans || []).map(s => {
-                  const dec = reviewMap[s.span_id];
-                  const chosen = dec?.action || null;
-                  return (
-                    <tr key={s.span_id} data-testid={`span-row-${s.span_id}`}>
-                      <td className="px-3 py-2 border-b border-r border-border">
-                        <span className="phi-highlight">{s.value.length > 80 ? s.value.slice(0, 80) + '...' : s.value}</span>
-                      </td>
-                      <td className="px-3 py-2 border-b border-r border-border">
-                        <Tag color="phi" testId={`cat-${s.span_id}`}>{s.hipaa_category || '-'} / {s.entity_type}</Tag>
-                      </td>
-                      <td className="px-3 py-2 border-b border-r border-border text-text-secondary">
-                        {s.column ? `col:${s.column}${s.row_index !== null && s.row_index !== undefined ? ` row:${s.row_index}` : ''}` : `pos:${s.start}-${s.end}`}
-                      </td>
-                      <td className="px-3 py-2 border-b border-r border-border text-text-muted uppercase">{s.detector}</td>
-                      <td className="px-3 py-2 border-b border-r border-border text-text-secondary">{Number(s.confidence).toFixed(2)}</td>
-                      <td className="px-3 py-2 border-b border-r border-border text-text-muted text-[10px]">{s.authority}</td>
-                      <td className="px-3 py-2 border-b border-r border-border">
-                        <Tag color={s.review_status === 'accepted' || s.review_status === 'reclassified' ? 'accept' : s.review_status === 'rejected' ? 'reject' : 'default'}>{s.review_status}</Tag>
-                      </td>
-                      <td className="px-3 py-2 border-b border-border">
-                        <div className="flex gap-1">
-                          <button
-                            onClick={() => setDecision(s.span_id, 'accept')}
-                            className={`h-6 px-2 border text-[10px] font-mono uppercase ${chosen === 'accept' ? 'bg-accept text-white border-accept' : 'border-accept text-accept hover:bg-accept hover:text-white'}`}
-                            data-testid={`btn-accept-${s.span_id}`}
-                          >
-                            accept
-                          </button>
-                          <button
-                            onClick={() => setDecision(s.span_id, 'reject')}
-                            className={`h-6 px-2 border text-[10px] font-mono uppercase ${chosen === 'reject' ? 'bg-reject text-white border-reject' : 'border-reject text-reject hover:bg-reject hover:text-white'}`}
-                            data-testid={`btn-reject-${s.span_id}`}
-                          >
-                            reject
-                          </button>
-                          <input
-                            placeholder="comment"
-                            className="h-6 px-2 bg-transparent border border-border text-[10px] w-32"
-                            defaultValue={s.review_comment || ''}
-                            onChange={(e) => setDecision(s.span_id, chosen || 'accept', { comment: e.target.value })}
-                            data-testid={`comment-${s.span_id}`}
-                          />
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <div className="mt-3 font-mono text-[10px] text-text-muted">
-            Rule: 164.514(b)(2)(ii) requires reviewer judgement on any residual re-identification risk.
-            Datasets: header values are shown; row-level cell values shown only when a detector matched.
+            {(results.herald.alt_venues || []).length > 0 && (
+              <div className="mt-6 border-t border-border pt-4">
+                <div className="font-mono text-[10px] uppercase tracking-widest text-text-muted mb-2">Alternative venues suggested by Herald</div>
+                {results.herald.alt_venues.map((v, i) => (
+                  <div key={i} className="font-mono text-[11px] text-text-secondary">
+                    <span className="text-text-primary">{v.venue}</span> - {v.rationale}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </Panel>
+      )}
+
+      {/* Developer details (collapsed by default) */}
+      {devOpen && (
+        <>
+          <Panel title="Intake Receipt" cite="manifest v3" testId="intake-panel">
+            {(session.intake_missing || []).length > 0 && (
+              <div className="mb-3 border border-reject text-reject px-3 py-2 font-mono text-xs">
+                Missing: {session.intake_missing.join(', ')}
+              </div>
+            )}
+            {(session.intake_review || []).length > 0 && (
+              <div className="mb-3 border border-phi-border px-3 py-2 font-mono text-xs text-phi">
+                <div className="uppercase text-[10px] tracking-widest mb-1">Unclassified ({session.intake_review.length})</div>
+                {session.intake_review.slice(0, 20).map((e, i) => (
+                  <div key={i} className="text-[11px]"><span className="text-text-primary">{e.relpath}</span> - <span className="text-text-secondary">{e.reason}</span></div>
+                ))}
+              </div>
+            )}
+            <table className="w-full text-xs font-mono border border-border">
+              <thead className="bg-surface"><tr>
+                <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Name</th>
+                <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Component</th>
+                <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Kind</th>
+                <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">Size</th>
+                <th className="text-left px-3 py-2 border-b border-r border-border text-text-muted">SHA</th>
+                <th className="text-left px-3 py-2 border-b border-border text-text-muted">Columns</th>
+              </tr></thead>
+              <tbody>
+                {(session.files || []).map(f => (
+                  <tr key={f.file_id} data-testid={`file-row-${f.file_id}`}>
+                    <td className="px-3 py-2 border-b border-r border-border text-text-primary">{f.original_name}</td>
+                    <td className="px-3 py-2 border-b border-r border-border"><Tag color={f.component === 'datasets' ? 'phi' : 'default'}>{f.component}</Tag></td>
+                    <td className="px-3 py-2 border-b border-r border-border text-text-secondary">{f.kind} / {f.subtype}</td>
+                    <td className="px-3 py-2 border-b border-r border-border text-text-muted">{f.size_bytes} B</td>
+                    <td className="px-3 py-2 border-b border-r border-border text-text-muted">{(f.sha256 || '').slice(0, 12)}</td>
+                    <td className="px-3 py-2 border-b border-border text-text-secondary max-w-md truncate" title={(f.columns || []).join(', ')}>
+                      {f.kind === 'dataset' ? (f.columns || []).slice(0, 6).join(', ') + ((f.columns || []).length > 6 ? ` +${f.columns.length - 6}` : '') : '-'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Panel>
+
+          <Panel title={`Agent Trace (${trace.length} messages)`} testId="agent-trace-panel">
+            <div className="max-h-96 overflow-auto border border-border">
+              <table className="w-full text-xs font-mono">
+                <tbody>
+                  {trace.map((m, i) => (
+                    <tr key={i} className="border-b border-border" data-testid={`trace-${i}`}>
+                      <td className="px-3 py-1.5 border-r border-border text-text-muted whitespace-nowrap">{(m.ts || '').slice(11, 19)}</td>
+                      <td className="px-3 py-1.5 border-r border-border text-phi whitespace-nowrap">{m.agent}</td>
+                      <td className="px-3 py-1.5 border-r border-border text-text-muted uppercase text-[10px]">{m.direction}</td>
+                      <td className="px-3 py-1.5 text-text-primary">{m.phase} {m.duration_ms ? <span className="text-text-muted">({Math.round(m.duration_ms)}ms)</span> : null}</td>
+                    </tr>
+                  ))}
+                  {trace.length === 0 && <tr><td className="px-3 py-2 text-text-muted">no agent messages yet</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </Panel>
+
+          <Panel title={`Progress Log (${events.length} events)`} testId="progress-panel">
+            <div className="max-h-64 overflow-auto border border-border">
+              <table className="w-full text-xs font-mono">
+                <tbody>
+                  {events.slice(-40).reverse().map((e, i) => (
+                    <tr key={i} className={`border-b border-border ${i % 2 === 0 ? '' : 'bg-white/[0.02]'}`}>
+                      <td className="px-3 py-1.5 border-r border-border text-text-muted whitespace-nowrap">{(e.ts || '').slice(11, 19)}</td>
+                      <td className="px-3 py-1.5 border-r border-border text-phi uppercase whitespace-nowrap text-[10px]">{e.phase}</td>
+                      <td className="px-3 py-1.5 text-text-primary">{e.message}</td>
+                    </tr>
+                  ))}
+                  {events.length === 0 && <tr><td className="px-3 py-2 text-text-muted">no events yet</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </Panel>
+        </>
       )}
     </div>
   );

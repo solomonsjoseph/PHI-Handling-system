@@ -24,9 +24,12 @@ ACTION_TYPES = {
     "year_only",      # date -> YYYY
     "zip3_truncate",  # ZIP -> first 3 digits, deny 17 codes
     "hash",           # deterministic hash for record linkage
-    "pseudonymize",   # random consistent replacement
+    "pseudonymize",   # random consistent replacement (cross-file linkage preserved on exact value match)
+    "scrub_text",     # free-text cell scrub via Presidio + regex, LLM never reads cell values
     "human_review",   # uncertain, block for human
 }
+
+SUBJECT_TYPES = {"participant", "staff", "specimen", "site", "study"}
 
 
 class Judge(Agent):
@@ -34,12 +37,28 @@ class Judge(Agent):
     PROMPT = (
         "You are Judge. Given (a) Schema column classifications, (b) Instrument PHI fields "
         "from forms, (c) Lexicon dictionary entries, and (d) Statute jurisdictional rules, "
-        "decide for EACH dataset column: whether to keep, drop, or transform, and if transform, "
-        "which technique (from cap_age_90, year_only, zip3_truncate, hash, pseudonymize). "
-        "Route to human_review whenever confidence < 0.60 or the column is a quasi-identifier. "
+        "decide for EACH dataset column: whether to keep, drop, or transform, and which "
+        "technique. Never see or infer row values.\n\n"
+        "ACTIONS (choose exactly one):\n"
+        "  keep           - non-PHI clinical or epidemiological value\n"
+        "  drop           - direct identifier that adds no research value\n"
+        "  cap_age_90     - integer age; values > 89 become '90+'\n"
+        "  year_only      - date -> YYYY (Safe Harbor)\n"
+        "  zip3_truncate  - US ZIP -> first 3 digits, 17-code deny list applied\n"
+        "  hash           - deterministic sha256 token for linkage\n"
+        "  pseudonymize   - stable replacement (SAME real value -> SAME pseudonym across the whole study)\n"
+        "  scrub_text     - free-text column whose header is safe but rows may contain PHI; "
+        "the Executor will run Presidio + regex over each cell (LLM never reads the cells)\n"
+        "  human_review   - uncertain; route to a human\n\n"
+        "SUBJECT tag (choose exactly one): participant | staff | specimen | site | study\n\n"
+        "Use scrub_text for columns like 'comments', 'notes', 'remarks', 'other_specify', "
+        "'reason', 'description' (any narrative free-text field on a study form).\n"
+        "Route to human_review whenever confidence < 0.60 or the column looks like a "
+        "true quasi-identifier requiring auditor judgement.\n\n"
         "Return JSON: "
         '{"decisions": [{"file_id": str, "column": str, "phi_category": str|null, '
-        '"action": "keep|drop|cap_age_90|year_only|zip3_truncate|hash|pseudonymize|human_review", '
+        '"subject": "participant|staff|specimen|site|study", '
+        '"action": "keep|drop|cap_age_90|year_only|zip3_truncate|hash|pseudonymize|scrub_text|human_review", '
         '"reason": str, "confidence": 0..1, "citation": str}]}. '
         "Preserve clinically-needed non-PHI (diagnoses, procedures, vitals, labs)."
     )
@@ -94,13 +113,17 @@ class Executor(Agent):
         for d in decisions:
             by_file.setdefault(d.get("file_id", ""), []).append(d)
 
+        # Study-scoped pseudonym registry: exact real-value -> same pseudonym across all files.
+        # Salted by session_id so pseudonyms cannot be joined across different studies.
+        registry = PseudonymRegistry(salt=self.session_id)
+
         for f in files:
             src = Path(f["stored_path"])
             dst = EXPORT_DIR / f"{f['file_id']}__{f['original_name']}"
             if f["kind"] == "metadata":
                 shutil.copy2(src, dst)
             elif f["kind"] == "dataset":
-                apply_column_actions_to_dataset(src, dst, f["subtype"], by_file.get(f["file_id"], []))
+                apply_column_actions_to_dataset(src, dst, f["subtype"], by_file.get(f["file_id"], []), registry)
             else:
                 dst = EXPORT_DIR / f"{f['file_id']}__{Path(f['original_name']).stem}.redacted.txt"
                 fulltext = src.with_suffix(src.suffix + ".fulltext.txt")
@@ -113,7 +136,9 @@ class Executor(Agent):
                 dst.write_text(apply_to_text(text, spans), encoding="utf-8")
             exports[f["file_id"]] = str(dst)
             await self._log("executor.wrote", "info", {"file_id": f["file_id"], "path": str(dst)})
-        return {"exports": exports}
+        # Persist the pseudonym map size so the auditor can report on linkage coverage.
+        await self._log("executor.pseudonym_registry", "info", {"unique_values_pseudonymized": len(registry._map)})
+        return {"exports": exports, "pseudonym_count": len(registry._map)}
 
 
 class Auditor(Agent):
@@ -160,11 +185,55 @@ import openpyxl as _openpyxl
 import re as _re
 import hashlib as _hashlib
 
+from ..detectors import detect_text as _detect_text
+
 
 _RESTRICTED_ZIP3 = {"036","059","063","102","203","556","692","790","821","823","830","831","878","879","884","890","893"}
 
 
-def _apply_action(value: str, action: str, column: str) -> str:
+class PseudonymRegistry:
+    """Study-scoped, exact-value pseudonym registry.
+
+    The SAME real value produces the SAME pseudonym across the entire study
+    (all files, all columns). Different values produce different pseudonyms
+    even if they occupy the same column role in different files.
+    """
+    def __init__(self, salt: str = ""):
+        self._map: dict[str, str] = {}
+        self._salt = salt
+
+    def get(self, value: str) -> str:
+        if not value:
+            return value
+        if value in self._map:
+            return self._map[value]
+        # deterministic 8-hex digest, salted per study so cross-study linkage is impossible
+        digest = _hashlib.sha256(f"{self._salt}:{value}".encode()).hexdigest()[:8]
+        token = f"P{digest}"
+        self._map[value] = token
+        return token
+
+
+def _scrub_text_cell(value: str) -> str:
+    """Run Presidio + regex against a free-text cell. LLM never sees this.
+
+    Replaces every detected PHI substring with a category token. Non-PHI
+    text is preserved so clinicians retain the sentence around the redaction.
+    """
+    if not value:
+        return value
+    spans = _detect_text(value, detectors=("presidio", "rule"))
+    if not spans:
+        return value
+    spans_sorted = sorted(spans, key=lambda s: s.start, reverse=True)
+    out = value
+    for s in spans_sorted:
+        cat = s.hipaa_category or "X"
+        out = out[: s.start] + f"[{cat}]" + out[s.end :]
+    return out
+
+
+def _apply_action(value: str, action: str, column: str, registry: "PseudonymRegistry | None" = None) -> str:
     if value is None or value == "":
         return value
     if action == "keep":
@@ -188,15 +257,20 @@ def _apply_action(value: str, action: str, column: str) -> str:
     if action == "hash":
         return _hashlib.sha256(f"{column}:{value}".encode()).hexdigest()[:16]
     if action == "pseudonymize":
+        if registry is not None:
+            return registry.get(value)
         h = _hashlib.sha256(f"{column}:{value}".encode()).hexdigest()[:8]
         return f"P{h}"
+    if action == "scrub_text":
+        return _scrub_text_cell(value)
     if action == "human_review":
         return "[HUMAN_REVIEW_PENDING]"
     return value
 
 
-def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: list[dict[str, Any]]) -> None:
-    """Apply per-column actions to CSV or XLSX."""
+def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: list[dict[str, Any]],
+                                    registry: "PseudonymRegistry | None" = None) -> None:
+    """Apply per-column actions to CSV or XLSX with an optional study-wide pseudonym registry."""
     action_by_col: dict[str, dict[str, Any]] = {d.get("column", ""): d for d in decisions}
 
     if ext in ("csv", "tsv"):
@@ -212,7 +286,7 @@ def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: l
                     d = action_by_col.get(col)
                     if not d:
                         continue
-                    row[col] = _apply_action(row.get(col) or "", d.get("action", "keep"), col)
+                    row[col] = _apply_action(row.get(col) or "", d.get("action", "keep"), col, registry)
                 writer.writerow(row)
     elif ext in ("xlsx", "xls"):
         wb = _openpyxl.load_workbook(src)
@@ -227,7 +301,8 @@ def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: l
                 if not d:
                     continue
                 cell = ws.cell(row=i, column=j)
-                cell.value = _apply_action(str(cell.value) if cell.value is not None else "", d.get("action", "keep"), col)
+                cell.value = _apply_action(str(cell.value) if cell.value is not None else "",
+                                           d.get("action", "keep"), col, registry)
         wb.save(dst)
     else:
         # Unknown extension - copy through
