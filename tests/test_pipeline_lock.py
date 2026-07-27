@@ -734,6 +734,7 @@ def test_locked_body_creates_run_and_resolves_rulebook_before_mutable_intake(
     monkeypatch.setattr(pipeline_run, "_organize_locked", record_organize)
     monkeypatch.setattr(config, "ORGANIZED_DIR", tmp_path / "organized")
     monkeypatch.setattr(config, "RAW_DATA_DIR", tmp_path / "raw")
+    monkeypatch.setattr(config, "STUDY_OUTPUT_DIR", tmp_path / "output")
 
     result = pipeline_run._run_pipeline_locked("call-order-study", "us")
 

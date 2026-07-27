@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import secrets
 import shutil
 import stat
 from dataclasses import asdict, dataclass, field
@@ -961,6 +963,62 @@ def _clear_stale_staging(staging_dir: Path, study_staging_dir: Path) -> None:
             f.unlink()
 
 
+def _publish_dataset_snapshot(staging_dir: Path, publish_dir: Path) -> int:
+    """Atomically replace ``publish_dir``'s full contents with EXACTLY the
+    ``*.jsonl`` files staged for THIS run, rather than only ever layering
+    this run's approved forms on top of whatever a PRIOR run last published.
+
+    Bug found in review (same class as :func:`_clear_stale_staging` above,
+    on the publish side rather than the staging side): the original publish
+    step only ever ``shutil.move``d the current run's staged files into
+    ``publish_dir`` -- it never removed a prior run's published file whose
+    form is no longer approved this run (deleted from intake, or newly held
+    for review/dependency reasons). Run N publishing three approved datasets
+    followed by run N+1 approving only one left the other two remaining
+    LLM-visible in ``publish_dir`` indefinitely, silently bypassing the
+    current run's classification/approval AND residual-PHI-guard decisions
+    for those two datasets entirely.
+
+    The new tree is built in a fresh sibling directory first, then swapped
+    into place with two plain directory renames (the old name vacated, the
+    new name installed) so ``publish_dir`` is never observed holding a mix
+    of this run's and a prior run's files. ``fresh_dir`` and ``publish_dir``
+    always share a parent, so each rename is a same-filesystem, single-
+    syscall directory rename; the narrow gap between the two steps is a
+    momentarily MISSING ``publish_dir``, never a mixed one. Any failure
+    after the old directory has been vacated is rolled back before
+    re-raising, so ``publish_dir`` always ends up either the old tree or
+    the fully-built new one -- never left absent or half-swapped.
+    """
+    publish_dir.parent.mkdir(parents=True, exist_ok=True)
+    unique = f"{os.getpid()}.{secrets.token_hex(8)}"
+    fresh_dir = publish_dir.parent / f".{publish_dir.name}.new.{unique}.tmp"
+    fresh_dir.mkdir(parents=True, exist_ok=False)
+    published_count = 0
+    try:
+        for jsonl_file in sorted(staging_dir.glob("*.jsonl")):
+            shutil.move(str(jsonl_file), str(fresh_dir / jsonl_file.name))
+            published_count += 1
+
+        stale_dir = publish_dir.parent / f".{publish_dir.name}.stale.{unique}.tmp"
+        vacated = False
+        if publish_dir.exists():
+            os.rename(publish_dir, stale_dir)
+            vacated = True
+        try:
+            os.rename(fresh_dir, publish_dir)
+        except BaseException:
+            if vacated:
+                os.rename(stale_dir, publish_dir)
+            raise
+        if vacated:
+            shutil.rmtree(stale_dir, ignore_errors=True)
+    except BaseException:
+        shutil.rmtree(fresh_dir, ignore_errors=True)
+        raise
+    return published_count
+
+
 def _write_held_note(form_name: str, approval: FormReviewApproval) -> None:
     note_path = review_paths.classification_review_path(
         Path(config.STUDY_AUDIT_DIR), Path(form_name).stem
@@ -991,6 +1049,33 @@ def _write_support_transform_provenance(run_dir: Path, result: Any) -> None:
     lines = [json.dumps(asdict(record), sort_keys=True) for record in result.provenance]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     path.chmod(0o600)
+
+
+def _mint_unique_run_id(runs_dir: Path) -> str:
+    """Mint a collision-free timestamp run id under *runs_dir*.
+
+    The base id is the current UTC instant at second resolution
+    (``%Y%m%dT%H%M%SZ``, e.g. ``20260615T143200Z``) -- the existing run-id
+    shape, preserved because audit trails and other code (``phi_scrub``,
+    ``review.py``, ``snapshot.py``) parse/sort it. Second resolution alone is
+    not collision-free: two sequential retries for the same study within the
+    same UTC second would otherwise mint an identical id and, since the
+    per-study lock only prevents *concurrent* runs (not back-to-back ones),
+    the second retry would silently reuse the first retry's ``run_dir`` --
+    overwriting ``phi_handling_approval.json``, dependency recommendation
+    files, and ``pipeline_result.json`` from the run being retried. Mirrors
+    :func:`phi_engine.utils.snapshot._mint_unique_snapshot_id`: if the base
+    id's directory already exists, append ``-2``, ``-3``, ... until a free
+    name is found. The human-readable timestamp label is unchanged; only
+    same-second collisions grow a numeric suffix.
+    """
+    base = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    candidate = base
+    suffix = 1
+    while (runs_dir / candidate).exists():
+        suffix += 1
+        candidate = f"{base}-{suffix}"
+    return candidate
 
 
 def run_pipeline(study: str, jurisdiction: str) -> PipelineResult:
@@ -1070,7 +1155,8 @@ def run_pipeline(study: str, jurisdiction: str) -> PipelineResult:
 def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
     """Execute the current pipeline state machine under its caller-owned lock."""
     jurisdiction_label = _JURISDICTION_LABELS[jurisdiction]
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    runs_dir = Path(config.STUDY_OUTPUT_DIR) / "runs"
+    run_id = _mint_unique_run_id(runs_dir)
 
     try:
         intake_manifest = load_intake_manifest(study)
@@ -1162,9 +1248,14 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
 
     datasets = organize_manifest.get("datasets", [])
     organizer_review_count = len(organize_manifest.get("review_bucket", []))
-    runs_dir = Path(config.STUDY_OUTPUT_DIR) / "runs"
     run_dir = runs_dir / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    # exist_ok=False (default): run_id is minted collision-free against this
+    # exact runs_dir (see _mint_unique_run_id) immediately before this study's
+    # lock was acquired further up, so an existing directory here means the
+    # mint/mkdir invariant was violated (e.g. an external writer, or a bug) --
+    # fail closed rather than silently reusing another run's directory and
+    # overwriting its phi_handling_approval.json / pipeline_result.json.
+    run_dir.mkdir(parents=True)
     if not datasets:
         write_dependency_recommendations(
             run_dir=run_dir,
@@ -1591,10 +1682,7 @@ def _run_pipeline_locked(study: str, jurisdiction: str) -> PipelineResult:
     published_count = 0
     if guard_ok:
         publish_dir = Path(config.STUDY_LLM_SOURCE_DIR) / "datasets"
-        publish_dir.mkdir(parents=True, exist_ok=True)
-        for jsonl_file in sorted(staging_dir.glob("*.jsonl")):
-            shutil.move(str(jsonl_file), str(publish_dir / jsonl_file.name))
-            published_count += 1
+        published_count = _publish_dataset_snapshot(staging_dir, publish_dir)
 
     exit_code = 0
     message = "clean run"
