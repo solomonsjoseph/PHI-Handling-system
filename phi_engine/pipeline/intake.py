@@ -610,16 +610,24 @@ def _verify_symlink_identity(expected_target: str, expected_identity: tuple[int,
     return _verify
 
 
-def _verify_regular_identity(expected_identity: tuple[int, int]) -> Callable[[int, str], bool]:
+def _verify_regular_identity(pinned_fd: int) -> Callable[[int, str], bool]:
     """Verification predicate for :func:`_quarantine_and_gate`: proves,
-    by DEVICE/INODE alone -- never by name or byte content, which a
-    different regular file could coincidentally match -- that the
-    quarantined object is exactly the regular file THIS attempt itself
-    wrote."""
+    by comparing against ``pinned_fd`` -- an OPEN file descriptor the
+    caller has held since the moment THIS attempt committed the file,
+    never a bare (device, inode) pair captured from a since-closed
+    descriptor -- that the quarantined object is exactly the regular
+    file this attempt itself wrote. This distinction is load-bearing:
+    a closed descriptor's (device, inode) can be handed by the kernel
+    to a completely unrelated file created later at the same name (the
+    classic unlink-then-recreate inode-reuse race), which would let a
+    hostile actor's replacement content pass a bare tuple comparison.
+    While ``pinned_fd`` stays open, that specific inode number can
+    never be recycled, so a real identity match here is unforgeable."""
+    expected = os.fstat(pinned_fd)
 
     def _verify(dir_fd: int, name: str) -> bool:
         info = os.lstat(name, dir_fd=dir_fd)
-        return stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) == expected_identity
+        return stat.S_ISREG(info.st_mode) and os.path.samestat(info, expected)
 
     return _verify
 
@@ -645,35 +653,55 @@ def _atomic_write_in_dir(
     payload: bytes,
     mode: int,
     *,
-    on_committed: Callable[[tuple[int, int]], None] | None = None,
+    on_committed: Callable[[int], None] | None = None,
 ) -> None:
     """Write-temp/fsync/rename-replace commit. ``on_committed``, when
-    given, is called with the (device, inode) identity of the file THIS
-    call just installed at ``filename`` -- captured immediately after
-    the commit rename, BEFORE the final directory fsync, so a caller
-    can journal exactly what this attempt wrote even if that later
-    fsync itself subsequently raises."""
+    given, is called -- immediately after the commit rename, BEFORE the
+    final directory fsync, so a caller can journal exactly what this
+    attempt wrote even if that later fsync itself subsequently raises
+    -- with an OPEN file descriptor to the file THIS call just
+    installed at ``filename``: the SAME descriptor this call wrote the
+    payload through, kept open across the commit rename rather than
+    closed and reopened by name afterward. A rename only relinks a
+    directory entry -- it never invalidates an already-open descriptor
+    on the underlying inode -- so reusing it here means there is no
+    window whatsoever, however small, between "the new content exists
+    at this name" and "we hold a reference to it" for a hostile actor
+    to race by swapping in a replacement between those two steps. The
+    caller MUST keep the descriptor open for as long as it needs to
+    later prove this exact file's identity (e.g. via
+    :func:`_verify_regular_identity`) and is responsible for closing it
+    once done; as long as it stays open, the kernel cannot hand this
+    inode's number to an unrelated file created later at the same name,
+    closing the unlink-then-recreate race a bare captured (device,
+    inode) pair would remain vulnerable to."""
     if os.rename not in os.supports_dir_fd or os.open not in os.supports_dir_fd:
         raise IntakeManifestError("intake-tree-unsafe")
     temp_name = f".{filename}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC
     fd = os.open(temp_name, flags, mode, dir_fd=dir_fd)
+    committed = False
     try:
-        try:
-            written = 0
-            while written < len(payload):
-                written += os.write(fd, payload[written:])
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        written = 0
+        while written < len(payload):
+            written += os.write(fd, payload[written:])
+        os.fsync(fd)
         os.rename(temp_name, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        committed = True
     except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(temp_name, dir_fd=dir_fd)
+        os.close(fd)
+        if not committed:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_name, dir_fd=dir_fd)
         raise
     if on_committed is not None:
-        info = os.lstat(filename, dir_fd=dir_fd)
-        on_committed((info.st_dev, info.st_ino))
+        try:
+            on_committed(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+    else:
+        os.close(fd)
     os.fsync(dir_fd)
 
 
@@ -798,29 +826,36 @@ def _restore_manifest_bytes(
     study_fd: int,
     quarantine_root_fd: int,
     prior_bytes: bytes | None,
-    attempt_identity: tuple[int, int] | None,
+    attempt_pin_fd: int | None,
 ) -> None:
     """Best-effort: never raises -- a rollback step failing must not
     mask the original error driving it. Never touches the current node
-    at ``_MANIFEST_FILENAME`` unless ``attempt_identity`` proves -- by
-    quarantined DEVICE/INODE, never by name or bytes alone -- that it
-    is exactly the manifest THIS failed attempt itself committed
-    (``attempt_identity`` is ``None`` when this attempt's own write
-    step never completed, in which case there is nothing of this
+    at ``_MANIFEST_FILENAME`` unless ``attempt_pin_fd`` proves -- by an
+    OPEN-DESCRIPTOR DEVICE/INODE comparison, never by name or bytes
+    alone -- that it is exactly the manifest THIS failed attempt itself
+    committed (``attempt_pin_fd`` is ``None`` when this attempt's own
+    write step never completed, in which case there is nothing of this
     attempt's to undo and the current node -- whatever it is -- is left
-    completely alone). A verified match is retained in the shared
-    quarantine directory (never unlinked by a mutable name after
-    verification); prior content, when there was any, is then installed
-    ONLY via an atomic no-replace rename into the now-freed name -- a
-    name reclaimed since quarantining simply does not get the prior
-    content written back, leaving the quarantine of this attempt's own
-    manifest retained instead of clobbering whatever reclaimed it."""
-    if attempt_identity is None:
+    completely alone). Comparing against a still-open descriptor rather
+    than a bare captured (device, inode) pair matters here: as long as
+    this call's caller keeps ``attempt_pin_fd`` open, the kernel cannot
+    have recycled that inode number onto an unrelated file created at
+    this name in the meantime, so a hostile actor cannot win the
+    verification by unlinking the real manifest and recreating one that
+    happens to reuse its freed inode number. A verified match is
+    retained in the shared quarantine directory (never unlinked by a
+    mutable name after verification); prior content, when there was
+    any, is then installed ONLY via an atomic no-replace rename into
+    the now-freed name -- a name reclaimed since quarantining simply
+    does not get the prior content written back, leaving the quarantine
+    of this attempt's own manifest retained instead of clobbering
+    whatever reclaimed it."""
+    if attempt_pin_fd is None:
         return
     with contextlib.suppress(Exception):
         outcome, _quarantine_name = _quarantine_and_gate(
             study_fd, quarantine_root_fd, _MANIFEST_FILENAME, "file",
-            _verify_regular_identity(attempt_identity),
+            _verify_regular_identity(attempt_pin_fd),
         )
         if outcome == "retained" and prior_bytes is not None:
             _atomic_write_in_dir_noreplace(study_fd, _MANIFEST_FILENAME, prior_bytes, 0o600)
@@ -2060,7 +2095,7 @@ def _review_note_text(manifest: dict[str, Any]) -> str:
 
 
 def _write_review_note(
-    study: str, manifest: dict[str, Any], created_dirs: list[tuple[str, int, int]], identity_box: list[tuple[int, int]]
+    study: str, manifest: dict[str, Any], created_dirs: list[tuple[str, int, int]], identity_box: list[int]
 ) -> None:
     """Writes the note ONLY when there is something to report (an empty
     ``review_items``/``errors`` manifest never touches the note tree at
@@ -2069,10 +2104,12 @@ def _write_review_note(
     appended to ``created_dirs`` (before the write that might fail), so
     a caller can identity-gate their removal again on rollback even if
     this call raises partway through. ``identity_box`` -- a caller-owned,
-    empty-until-now list -- receives the (device, inode) identity of the
-    note THIS call just committed, appended BEFORE the final directory
-    fsync, so the caller still has it even if this call goes on to raise
-    (including after the atomic rename but during that fsync)."""
+    empty-until-now list -- receives an OPEN file descriptor pinned to
+    the note THIS call just committed, appended BEFORE the final
+    directory fsync, so the caller still has it even if this call goes
+    on to raise (including after the atomic rename but during that
+    fsync). The caller owns closing that descriptor once it is done
+    proving this note's identity."""
     if not manifest["review_items"] and not manifest["errors"]:
         return
     output_fd = _open_workspace_root_creating(Path(config.OUTPUT_DIR))
@@ -2119,25 +2156,30 @@ def _restore_review_note(
     study: str,
     quarantine_root_fd: int,
     prior_bytes: bytes | None,
-    attempt_identity: tuple[int, int] | None,
+    attempt_pin_fd: int | None,
 ) -> None:
     """Best-effort: never raises -- a rollback step failing must not mask
     the original error driving it. Never touches the current node at
-    ``intake_review.md`` unless ``attempt_identity`` proves -- by
-    quarantined DEVICE/INODE, never by name or bytes alone -- that it is
-    exactly the note THIS failed attempt itself committed
-    (``attempt_identity`` is ``None`` when this attempt's own write step
-    never completed, in which case there is nothing of this attempt's to
-    undo and the current node -- whatever it is -- is left completely
-    alone). A verified match is retained in the shared quarantine
-    directory (never unlinked by a mutable name after verification).
-    Restoring to ABSENCE never creates a directory chain that did not
-    already exist. When there was prior content, it is installed ONLY
-    via an atomic no-replace rename into the now-freed name -- a
-    reclaimed name simply does not get the prior content written back,
-    leaving the quarantine of this attempt's own note retained instead
-    of clobbering whatever reclaimed it."""
-    if attempt_identity is None:
+    ``intake_review.md`` unless ``attempt_pin_fd`` proves -- by an
+    OPEN-DESCRIPTOR DEVICE/INODE comparison, never by name or bytes
+    alone -- that it is exactly the note THIS failed attempt itself
+    committed (``attempt_pin_fd`` is ``None`` when this attempt's own
+    write step never completed, in which case there is nothing of this
+    attempt's to undo and the current node -- whatever it is -- is left
+    completely alone). Comparing against a still-open descriptor rather
+    than a bare captured (device, inode) pair matters here: as long as
+    this call's caller keeps ``attempt_pin_fd`` open, the kernel cannot
+    have recycled that inode number onto an unrelated file a hostile
+    actor swaps in at this name in the meantime, so such a swap cannot
+    win the verification below. A verified match is retained in the
+    shared quarantine directory (never unlinked by a mutable name after
+    verification). Restoring to ABSENCE never creates a directory chain
+    that did not already exist. When there was prior content, it is
+    installed ONLY via an atomic no-replace rename into the now-freed
+    name -- a reclaimed name simply does not get the prior content
+    written back, leaving the quarantine of this attempt's own note
+    retained instead of clobbering whatever reclaimed it."""
+    if attempt_pin_fd is None:
         return
     with contextlib.suppress(Exception):
         if prior_bytes is None:
@@ -2151,7 +2193,7 @@ def _restore_review_note(
                 try:
                     _quarantine_and_gate(
                         note_dir_fd, quarantine_root_fd, "intake_review.md", "file",
-                        _verify_regular_identity(attempt_identity),
+                        _verify_regular_identity(attempt_pin_fd),
                     )
                 finally:
                     os.close(note_dir_fd)
@@ -2164,7 +2206,7 @@ def _restore_review_note(
                 try:
                     outcome, _quarantine_name = _quarantine_and_gate(
                         note_dir_fd, quarantine_root_fd, "intake_review.md", "file",
-                        _verify_regular_identity(attempt_identity),
+                        _verify_regular_identity(attempt_pin_fd),
                     )
                     if outcome == "retained":
                         _atomic_write_in_dir_noreplace(note_dir_fd, "intake_review.md", prior_bytes, 0o600)
@@ -2199,14 +2241,28 @@ def _reconcile_study_tree(
             if freshly_reserved:
                 reservation_info = os.fstat(study_fd)
                 study_dir_identity = (reservation_info.st_dev, reservation_info.st_ino)
+            # Each box holds at most one OPEN file descriptor pinned to the
+            # regular file this attempt itself committed (manifest / review
+            # note) -- see `_atomic_write_in_dir`'s `on_committed`. Holding
+            # the descriptor open for the rest of this transaction is not
+            # optional bookkeeping: as long as ANY reference (link or open
+            # fd) to that inode survives, the kernel cannot hand its
+            # device/inode number to an unrelated file created later at
+            # the same name, which is exactly what closes the
+            # unlink-then-recreate race a hostile actor would otherwise
+            # need to win to defeat `_verify_regular_identity`. Declared
+            # here (before anything in the surrounding `try` below can
+            # raise) and closed by the `finally` further down once this
+            # attempt is fully resolved either way -- so that `finally`
+            # can never see these names undefined.
+            note_identity_box: list[int] = []
+            manifest_identity_box: list[int] = []
             try:
                 journal = _ReconcileJournal()
                 prior_manifest_bytes = _read_manifest_bytes(study_fd)
                 note_touched = False
                 prior_note_bytes: bytes | None = None
                 note_created_dirs: list[tuple[str, int, int]] = []
-                note_identity_box: list[tuple[int, int]] = []
-                manifest_identity_box: list[tuple[int, int]] = []
                 try:
                     expected_prior_study = promote_from if promote_from is not None else study
                     existing = _load_existing_for_reconcile(
@@ -2289,13 +2345,13 @@ def _reconcile_study_tree(
                     # study directory so a retry gets a genuinely fresh
                     # reservation again.
                     _rollback_reconcile_mutations(study_fd, quarantine_root_fd, journal)
-                    manifest_written_identity = manifest_identity_box[0] if manifest_identity_box else None
+                    manifest_pin_fd = manifest_identity_box[0] if manifest_identity_box else None
                     _restore_manifest_bytes(
-                        study_fd, quarantine_root_fd, prior_manifest_bytes, manifest_written_identity
+                        study_fd, quarantine_root_fd, prior_manifest_bytes, manifest_pin_fd
                     )
                     if note_touched:
-                        note_written_identity = note_identity_box[0] if note_identity_box else None
-                        _restore_review_note(study, quarantine_root_fd, prior_note_bytes, note_written_identity)
+                        note_pin_fd = note_identity_box[0] if note_identity_box else None
+                        _restore_review_note(study, quarantine_root_fd, prior_note_bytes, note_pin_fd)
                         _rollback_output_dirs(quarantine_root_fd, note_created_dirs)
                     if freshly_reserved:
                         os.close(study_fd)
@@ -2316,6 +2372,10 @@ def _reconcile_study_tree(
                                         )
                     raise
             finally:
+                for pin_box in (manifest_identity_box, note_identity_box):
+                    if pin_box:
+                        with contextlib.suppress(OSError):
+                            os.close(pin_box[0])
                 if study_fd_open:
                     os.close(study_fd)
         finally:

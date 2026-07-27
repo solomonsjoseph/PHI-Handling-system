@@ -711,6 +711,48 @@ def test_atomic_write_failure_cleans_up_temp_file(tmp_path: Path) -> None:
         os.close(dir_fd)
 
 
+def test_atomic_write_on_committed_fd_survives_immediate_unlink_and_recreate(tmp_path: Path) -> None:
+    """`on_committed` MUST receive the same descriptor `_atomic_write_in_dir`
+    wrote the payload through, kept open across the commit rename, rather
+    than a bare (device, inode) pair reopened by name afterward. Proving
+    that is the whole point: as long as this call's caller holds that
+    descriptor open, POSIX guarantees the kernel cannot free its inode
+    number for reuse -- so even a hostile actor unlinking the committed
+    file and recreating an unrelated one at the same name immediately
+    afterward is provably assigned a DIFFERENT inode, never the pinned
+    one, closing the TOCTOU window a closed-then-reopened identity check
+    would remain exposed to."""
+    from phi_engine.pipeline import intake
+
+    study_dir = tmp_path / "study"
+    study_dir.mkdir()
+    study_dir.chmod(0o700)
+    dir_fd = os.open(study_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        pin_holder: list[int] = []
+        intake._atomic_write_in_dir(
+            dir_fd, "intake_manifest.json", b'{"a":1}', 0o600, on_committed=pin_holder.append
+        )
+        pin_fd = pin_holder[0]
+        try:
+            pinned_identity = os.fstat(pin_fd)
+            os.unlink("intake_manifest.json", dir_fd=dir_fd)
+            fd2 = os.open(
+                "intake_manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd
+            )
+            try:
+                os.write(fd2, b"UNRELATED")
+            finally:
+                os.close(fd2)
+            recreated_identity = os.stat("intake_manifest.json", dir_fd=dir_fd)
+            assert not os.path.samestat(pinned_identity, recreated_identity)
+        finally:
+            os.close(pin_fd)
+            os.unlink("intake_manifest.json", dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def test_initial_manifest_failure_leaves_no_study_artifacts(tmp_path: Path) -> None:
     """A fresh (never-before-existing) study whose manifest commit fails
     must leave NOTHING behind: not the manifest, not the newly created
@@ -883,7 +925,10 @@ def test_note_fsync_failure_after_rename_restores_absence(tmp_path: Path) -> Non
             # Reproduce the real write+fsync+rename sequence verbatim (the
             # note IS durably renamed into place), then fail exactly where
             # the real function's directory fsync would run next -- a
-            # failure point no write-only injection can reach.
+            # failure point no write-only injection can reach. Mirrors the
+            # real `_atomic_write_in_dir` contract: `on_committed` receives
+            # the SAME descriptor used to write the payload, kept open
+            # across the rename rather than reopened by name afterward.
             temp_name = f".{filename}.{os.getpid()}.fsynctest.tmp"
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
             fd = os.open(temp_name, flags, mode, dir_fd=dir_fd)
@@ -892,12 +937,18 @@ def test_note_fsync_failure_after_rename_restores_absence(tmp_path: Path) -> Non
                 while written < len(payload):
                     written += os.write(fd, payload[written:])
                 os.fsync(fd)
-            finally:
+                os.rename(temp_name, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            except BaseException:
                 os.close(fd)
-            os.rename(temp_name, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                raise
             if on_committed is not None:
-                info = os.lstat(filename, dir_fd=dir_fd)
-                on_committed((info.st_dev, info.st_ino))
+                try:
+                    on_committed(fd)
+                except BaseException:
+                    os.close(fd)
+                    raise
+            else:
+                os.close(fd)
             raise OSError("simulated fsync failure after note rename")
 
         intake_module._atomic_write_in_dir = write_rename_then_fail
