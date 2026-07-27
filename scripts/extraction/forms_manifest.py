@@ -101,6 +101,28 @@ def _string_list(raw: dict, field: str) -> list[str]:
     return value
 
 
+def _parse_date_locales(raw: dict) -> dict[str, str]:
+    """Extract and validate the ``date_locales:`` section of a forms manifest.
+
+    Shared by :func:`check_forms_manifest` (full required/optional/reject
+    file-presence gate) and :func:`load_date_locales` (date-locale lookup
+    only, no file-presence gate) so the two validation paths can never
+    drift apart on what counts as a well-formed ``date_locales:`` mapping.
+    """
+    date_raw = raw.get("date_locales", {})
+    if not isinstance(date_raw, dict):
+        raise ManifestMismatchError("date_locales must be a mapping")
+    date_locales: dict[str, str] = {}
+    for key, value in date_raw.items():
+        if not isinstance(key, str) or not key:
+            raise ManifestMismatchError("date_locales keys must be non-empty strings")
+        upper = key.upper()
+        if value not in {"DMY", "MDY"}:
+            raise ManifestMismatchError(f"invalid date locale for {upper}: {value!r}")
+        date_locales[upper] = value
+    return date_locales
+
+
 def _load_intake_by_rel(study_name: str) -> dict[str, dict]:
     try:
         from phi_engine.pipeline.intake import load_intake_manifest
@@ -274,17 +296,7 @@ def check_forms_manifest(
     required = _string_list(raw, "required")
     optional = _string_list(raw, "optional")
     reject = _string_list(raw, "reject")
-    date_raw = raw.get("date_locales", {})
-    if not isinstance(date_raw, dict):
-        raise ManifestMismatchError("date_locales must be a mapping")
-    date_locales: dict[str, str] = {}
-    for key, value in date_raw.items():
-        if not isinstance(key, str) or not key:
-            raise ManifestMismatchError("date_locales keys must be non-empty strings")
-        upper = key.upper()
-        if value not in {"DMY", "MDY"}:
-            raise ManifestMismatchError(f"invalid date locale for {upper}: {value!r}")
-        date_locales[upper] = value
+    date_locales: dict[str, str] = _parse_date_locales(raw)
     dataset_dependencies, dependency_relations = _validate_dependencies(raw, study_name)
 
     if actual_files is not None:
@@ -332,10 +344,50 @@ def check_forms_manifest(
     return ManifestCheckResult(required=tuple(required), optional=tuple(optional), reject=tuple(reject), date_locales=date_locales, rejected_files=frozenset(rejected), dataset_dependencies=dataset_dependencies, dependency_relations=dependency_relations)
 
 
+def load_date_locales(study: str | None = None) -> dict[str, str]:
+    """Read only the ``date_locales:`` section of a study's forms manifest.
+
+    Unlike :func:`check_forms_manifest`, this never scans a datasets
+    directory and never enforces the required:/optional:/reject: filename
+    gate -- it is for callers that need nothing from the manifest but the
+    per-column date-locale overrides.
+
+    The scrub leg is the motivating case: by the time
+    ``phi_scrub.run_scrub`` executes, ``organize()`` has already relinked
+    ``config.DATASETS_DIR`` to point at the derived ``*.jsonl`` outputs
+    (see ``organize.py``'s ``_Router._record_dataset``/``_relink``), not
+    the original ``.csv``/``.xlsx`` filenames the manifest's
+    ``required:``/``optional:``/``reject:`` lists describe. Re-running
+    ``check_forms_manifest`` against that relinked tree would scan for
+    ``SUPPORTED_EXTENSIONS`` (``.xlsx``/``.xls``/``.csv``) files that no
+    longer exist there, find zero matches, and raise
+    ``ManifestMismatchError`` for every ``required:`` entry -- turning an
+    otherwise-clean run into ``scrub_exception``. The filename-presence
+    gate already ran (and passed) upstream, inside
+    ``organize()``/``run_pipeline()``; it must not be re-run here against
+    the wrong directory tree.
+    """
+    from phi_engine.config import config
+
+    study_name = study if study is not None else config.STUDY_NAME
+    manifest_path = config.study_config_path("_forms_manifest.yaml", study=study_name)
+    if not manifest_path.exists():
+        return {}
+    with manifest_path.open(encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+    if not isinstance(raw, dict):
+        raise ManifestMismatchError("forms manifest must be a mapping")
+    unknown = set(raw) - _ALLOWED_TOP_KEYS
+    if unknown:
+        raise ManifestMismatchError(f"unknown forms manifest keys: {sorted(unknown)}")
+    return _parse_date_locales(raw)
+
+
 __all__ = [
     "DependencyRelation",
     "DependencyRelationState",
     "ManifestCheckResult",
     "ManifestMismatchError",
     "check_forms_manifest",
+    "load_date_locales",
 ]

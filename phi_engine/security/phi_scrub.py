@@ -2733,17 +2733,28 @@ def run_scrub(
     try:
         # Load per-column date locale overrides from the study's forms manifest.
         # Backward-compatible: returns {} when the manifest is absent or has no
-        # date_locales section.  The manifest lives next to the *raw* datasets dir,
-        # not the staging dir, so we read it from config.DATASETS_DIR.
+        # date_locales section.
         # Import from the shared forms_manifest module (stays in scripts/) rather
         # than dataset_pipeline: after Note-19 consolidation the latter lives in the
         # dataset-to-llm-source skill, so importing it here would be a forbidden
         # skill→skill edge. forms_manifest is the canonical shared gate.
-        from scripts.extraction.forms_manifest import check_forms_manifest
+        #
+        # Deliberately load_date_locales(), NOT check_forms_manifest(). By the
+        # time run_scrub() reaches this point, organize() has already relinked
+        # config.DATASETS_DIR to the derived *.jsonl outputs (see organize.py's
+        # _Router._record_dataset/_relink), not the original .csv/.xlsx
+        # filenames the manifest's required:/optional:/reject: lists describe.
+        # check_forms_manifest(config.DATASETS_DIR) would iterdir() that
+        # relinked tree looking for SUPPORTED_EXTENSIONS (.xlsx/.xls/.csv),
+        # find none, and raise ManifestMismatchError for every required:
+        # entry — turning an otherwise-valid run into scrub_exception even
+        # though the filename-presence gate already ran (and passed) upstream
+        # inside organize()/run_pipeline(). Reject-listed files are likewise
+        # already auto-skipped by the extraction leg, so the scrub leg only
+        # ever needs the date_locales mapping here — never the file gate.
+        from scripts.extraction.forms_manifest import load_date_locales
 
-        # Reject-listed files are auto-skipped by the extraction leg, so the
-        # scrub leg only needs the date_locales mapping here.
-        date_locales: dict[str, str] = check_forms_manifest(config.DATASETS_DIR).date_locales
+        date_locales: dict[str, str] = load_date_locales(study=study_name or config.STUDY_NAME)
 
         # Note 29: study-origin default date locale. A US-origin study
         # defaults ambiguous/undeclared date columns to month-first (MDY)
