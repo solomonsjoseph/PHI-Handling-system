@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phi-handling"
+version = "2.0.0.dev0"
+description = "Standalone PHI intake, classification, scrubbing, review, and publish pipeline"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+[project.scripts]
+phi-review     = "phi_engine.cli.phi_review:_main"
+phi-authority  = "phi_engine.tools.regulation_fetcher:_main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["phi_engine*", "harness*", "scripts*"]

@@ -1,0 +1,4 @@
+interface:
+  display_name: "PHI Rulebook"
+  short_description: "Resolve/inspect jurisdiction PHI rules + drift"
+  default_prompt: "Use $phi-rulebook to resolve the active PHI jurisdiction rulebook for a study, or inspect a committed seed rulebook — metadata only, never study data."

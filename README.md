@@ -1,212 +1,205 @@
-# PHI Handling — IRB-Approval-Ready Corpus and Benchmark
+# PHI Handling System
 
-**Repository status:** v1.0.0 (initial release, 2026-04-20)
-**License:** MIT (see LICENSE)
-**Maintainer:** See CONTRIBUTING.md for contact information
+A standalone PHI intake, classification, scrubbing, review, and publish
+pipeline (`phi_engine`). It plugs into any project's own data via
+`PHI_WORKSPACE` with zero code changes.
 
-This repository contains a dual-jurisdiction (HIPAA + DPDPA) PHI detection test corpus, validation harness, and benchmark framework designed to produce results suitable for IRB review.
+**License:** MIT (see `LICENSE`)
 
-## For IRB reviewers — read this first
+## Purpose and non-certification boundary
 
-1. Start with `authorities/AUTHORITY_MATRIX.md` — every identifier category, every generator, every edge case traces to a primary legal or research source.
-2. Continue to `docs/VALIDATION_PROTOCOL.md` — the clinician review protocol, counsel review checklist, and reproducibility attestation.
-3. The corpus itself is in `corpus/` with structural validation in `validators/`.
-4. Benchmark comparisons against Presidio, Amazon Comprehend Medical, and other published tools are in `benchmarks/`.
+This repository provides a fail-closed pipeline that symlink-ingests a
+source data tree, classifies headers against pinned USA/HIPAA rules,
+synthesizes and applies a per-study scrub configuration, runs a residual
+PHI guard before publish, and routes anything uncertain to human review.
 
-This document is structured so that a reviewer can verify corpus completeness by checking the matrix against the authorities cited, without needing to trust the maintainers' claims.
+This repository does not certify HIPAA or any other regulatory compliance.
+It does not substitute for counsel or clinician review. Jurisdiction
+coverage is USA/HIPAA only -- pinned regulation rules exist solely for USA
+(`phi_engine/security/phi_review.py`); see `authorities/01_hipaa_164_514_full.md`
+and `authorities/AUTHORITY_MATRIX.md` for the grounding authority text.
 
-## Scope and what this repository provides
-
-### What it does
-- Generates synthetic PHI test records covering HIPAA 18 Safe Harbor identifiers, DPDPA Rule 14 identifiers, SPDI Rules 2011 sensitive categories, and ICMR 2017 vulnerability classifications.
-- Provides three de-identification tiers: Safe Harbor de-identified, HIPAA Limited Data Set (LDS), and identifiable PHI.
-- Covers 13+ file formats: JSONL, JSON, CSV, XLSX, DOCX, PDF, EML, DICOM headers, HL7 FHIR R4, HL7 CDA, Parquet, EXIF-tagged images.
-- Runs baseline benchmarks against Microsoft Presidio, Amazon Comprehend Medical (optional, requires AWS credentials), and other tools.
-- Provides membership inference attack (MIA) shadow-model framework for privacy testing.
-
-### What it does NOT do
-- It does not contain any real PHI.
-- It does not contain any actual patient images (synthetic only).
-- It is NOT itself a de-identification tool — it is a test corpus and evaluation harness for such tools.
-- It does NOT claim to enumerate every possible PHI instance. Safe Harbor (b)(2)(ii) "no actual knowledge" remains a human judgment.
-- It does NOT substitute for counsel review. Sections marked `[COUNSEL REVIEW REQUIRED]` require legal sign-off before production use.
-- It does NOT substitute for clinician review. Sections marked `[CLINICIAN REVIEW REQUIRED]` require medical sign-off for clinical plausibility.
-
-## Jurisdictional scope
-
-This corpus covers two primary jurisdictions:
-
-1. **United States** — HIPAA Privacy Rule, HITECH, 2013 Omnibus Final Rule, Common Rule (45 CFR 46), FTC Act as applicable
-2. **India** — DPDPA 2023, DPDP Rules 2025, IT Act SPDI Rules 2011, ICMR 2017 National Ethical Guidelines, CDSCO New Drugs and Clinical Trials Rules 2019
-
-A universal/common layer covers identifiers that apply across jurisdictions (dates, email, phone in any format, person names) and is kept separate from country-specific layers. Country-specific layers are never mixed — an IN record never contains US-specific identifiers and vice versa, except in explicitly-tagged cross-border test cases.
-
-## Structure
-
-```
-PHI-Handling-IRB-approval-ready/
-├── LICENSE                          # MIT license
-├── CODE_OF_CONDUCT.md               # Contributor Covenant 2.1
-├── CONTRIBUTING.md                  # How to contribute
-├── SECURITY.md                      # Security disclosure policy
-├── README.md                        # This file
-├── CHANGELOG.md                     # Versioned changes
-├── MANIFEST.json                    # Corpus hash and provenance
-│
-├── authorities/                     # Primary legal/research sources
-│   ├── AUTHORITY_MATRIX.md          # The single source of truth for IRB reviewers
-│   ├── 01_hipaa_164_514_full.md     # HIPAA 45 CFR 164.514 analysis
-│   ├── 02_dpdp_rules_2025.md        # DPDP Rules 2025 analysis
-│   ├── 03_icmr_2017.md              # ICMR 2017 analysis
-│   ├── 04_spdi_rules_2011.md        # SPDI Rules 2011 analysis
-│   └── citations.bib                # BibTeX of all research citations
-│
-├── corpus/                          # Generated test corpus
-│   ├── universal/                   # Cross-jurisdiction tests
-│   ├── us/                          # US HIPAA-specific tests
-│   ├── in/                          # India DPDPA-specific tests
-│   ├── file_formats/                # File-format fixtures
-│   ├── limited_data_set/            # HIPAA LDS tier
-│   ├── fundraising/                 # 164.514(f) context tests
-│   ├── reidentification_codes/      # 164.514(c) tests
-│   ├── quasi_identifiers/           # k-anonymity tests
-│   ├── injection/                   # OWASP LLM01 prompt injection
-│   ├── membership_inference/        # Nature Sci Rep 2024 MIA
-│   └── statistical/                 # Statistical utility fixtures
-│
-├── generators/                      # Python code to generate corpus
-│   ├── README.md                    # How generators work
-│   ├── common.py                    # Shared utilities
-│   ├── hipaa_safe_harbor.py         # 18-category generators
-│   ├── hipaa_lds.py                 # Limited Data Set generator
-│   ├── dpdpa_second_schedule.py     # DPDPA research exemption
-│   ├── spdi_sensitive.py            # 8-category SPDI generator
-│   ├── indian_identifiers.py        # Aadhaar, PAN, ABHA, CTRI, etc.
-│   ├── file_formats/                # Per-format generators
-│   │   ├── xlsx_gen.py
-│   │   ├── csv_gen.py
-│   │   ├── pdf_gen.py
-│   │   ├── docx_gen.py
-│   │   ├── dicom_header_gen.py
-│   │   ├── fhir_gen.py
-│   │   ├── eml_gen.py
-│   │   └── exif_gen.py
-│   └── injection.py                 # Prompt injection fixtures
-│
-├── validators/                      # Corpus structural validation
-│   ├── offset_validator.py          # Verify every gold span
-│   ├── hash_validator.py            # Corpus integrity
-│   └── taxonomy_validator.py        # Taxonomy closure check
-│
-├── benchmarks/                      # Comparison with baseline tools
-│   ├── README.md                    # How to run benchmarks
-│   ├── presidio_adapter.py          # Presidio wrapper
-│   ├── comprehend_medical_adapter.py # AWS Comprehend Medical wrapper
-│   ├── azure_health_adapter.py      # Azure Health De-ID wrapper
-│   ├── metrics.py                   # Precision/recall/F1
-│   └── results/                     # Benchmark output
-│
-├── harness/                         # Integration test harness
-│   ├── run_all_validations.py       # Single-command validation
-│   ├── generate_corpus.py           # Rebuild corpus from generators
-│   └── mia_framework.py             # Membership inference attacks
-│
-├── tests/                           # Unit tests for generators/validators
-│   └── ...
-│
-├── docs/                            # Process documentation
-│   ├── VALIDATION_PROTOCOL.md       # Clinician + counsel review process
-│   ├── ATTESTATION_TEMPLATE.md      # Reproducibility template
-│   ├── COUNSEL_REVIEW_CHECKLIST.md  # Per-item legal sign-off
-│   ├── CLINICIAN_REVIEW_PROTOCOL.md # Medical plausibility review
-│   ├── THREAT_MODEL.md              # OWASP LLM Top 10 + MITRE ATLAS
-│   ├── REPRODUCIBILITY.md           # How to rebuild the corpus
-│   └── KNOWN_LIMITATIONS.md         # Everything this corpus does not cover
-│
-├── scripts/                         # Utility scripts
-│   └── ...
-│
-└── .github/
-    ├── workflows/
-    │   └── ci.yml                   # GitHub Actions CI
-    └── ISSUE_TEMPLATE/
-        ├── bug_report.md
-        ├── authority_citation.md
-        └── new_identifier.md
-```
-
-## Quick start
+## Installation
 
 ```bash
-git clone https://github.com/brucebanner010198-commits/PHI-Handling-IRB-approval-ready.git
-cd PHI-Handling-IRB-approval-ready
 python -m pip install -r requirements.txt
-
-# Regenerate the corpus from source (deterministic, seeded)
-python harness/generate_corpus.py --seed 20260420
-
-# Validate corpus integrity
-python harness/run_all_validations.py
-
-# Run Presidio benchmark
-python benchmarks/presidio_adapter.py --corpus corpus/ --output benchmarks/results/presidio_v1.0.json
-
-# Run Comprehend Medical benchmark (requires AWS credentials)
-python benchmarks/comprehend_medical_adapter.py --corpus corpus/ --aws-region us-east-1
 ```
 
-## What makes this IRB-approval-ready
+Requires Python 3.10+ (`pyproject.toml` `requires-python = ">=3.10"`).
 
-Five properties, each with a defensible mechanism:
+## CLI usage
 
-1. **Completeness** — Every HIPAA Safe Harbor identifier, every DPDPA Rule 14 identifier, every SPDI Rules 2011 category has at least one dedicated generator with test cases. Measured in Table A of `authorities/AUTHORITY_MATRIX.md`. Gap categories are explicitly documented in `docs/KNOWN_LIMITATIONS.md`.
+Every subcommand accepts `--workspace` (sets `PHI_WORKSPACE`). `--study`
+(sets `STUDY_NAME`) is REQUIRED for every subcommand except `intake`, where
+it is optional. Both env vars are set before `phi_engine.config.config` is
+imported, since that module resolves workspace/study paths at import time.
 
-2. **Provenance** — Every test case has an authority_citation field. Every claim in every document in this repository cites the primary source. No claim comes from summaries of summaries.
+```bash
+# Symlink-ingest a source tree (never copies/modifies/deletes source bytes).
+# The source root MUST hold the mandatory intake-manifest/v3 component
+# package: datasets/ (always required), plus at least one of forms/ or
+# dictionary_mapping/ (an alternative group, not both mandatory).
+python -m phi_engine intake --study MyStudy --source /path/to/raw/data --workspace /path/to/workspace
 
-3. **Reproducibility** — The corpus is generated from seeded generators. Given the same seed, the output is bitwise identical. `MANIFEST.json` records the hash. `docs/REPRODUCIBILITY.md` documents the exact process.
+# --study is optional for intake ONLY. When omitted, intake resolves the
+# study name itself: a local-only, support-content-only AI inference (a
+# loopback, attested, digest-pinned local client, never an external
+# provider), permitted only by the positive attestation
+# --support-confirmed-no-phi; otherwise, or when no name is inferred, intake
+# assigns a random study-<8hex> name and reuses/promotes it for the same
+# source on a later intake. There is no negative "may contain PHI" flag; with
+# neither --study nor --support-confirmed-no-phi, intake performs zero
+# naming-content extraction and zero model calls.
+python -m phi_engine intake --source /path/to/raw/data --support-confirmed-no-phi --workspace /path/to/workspace
 
-4. **Benchmark-comparability** — Baseline results for Presidio (open source, no credentials needed) and Amazon Comprehend Medical (optional, needs AWS) are reported. This means an IRB reviewer can compare our detector performance to published baselines without trusting our numbers.
+# intake prints ONLY a redacted receipt to stdout and maps its status to the
+# process exit code (ready -> 0, review_required -> 8, failed -> 2):
+#   {"study": <name>, "status": <status>, "linked": <N>, "review": <N>,
+#    "errors": <N>, "manifest": <protected-manifest-path>}
+# It never prints entry paths, review/error detail, or raw exception text.
 
-5. **Reviewer-friendly structure** — The README points reviewers at the authority matrix first, not at our code. The goal is that a reviewer can say "I believe this corpus is comprehensive" on the basis of evidence, not trust.
+# Accepted formats per component (intake_preflight._COMPONENT_SUFFIXES):
+#   datasets/ .csv .xls .xlsx (single-sheet)   forms/ .pdf only
+#   dictionary_mapping/ .csv .xlsx
+# .json/.jsonl are NOT accepted datasets; an unsupported suffix, invalid
+# workbook, multi-sheet dataset xlsx, cross-component hardlink, or source
+# symlink lands in an _unclassified review bucket recording only
+# filename/reason metadata (never row values). Nested subdirectories and
+# duplicate content are preserved as distinct entries.
 
-## Known limitations
+# Route intake into normalized dataset JSONL, purely by the component each
+# entry was assigned at intake (component-authoritative, no path re-guessing).
+# Runs automatically on `run` if skipped, but can be run standalone for
+# inspection. Refuses to organize an intake that is not `ready`, printing only
+# `intake_review_required` (exit 8) or `intake_failed` (exit 2).
+python -m phi_engine organize --study MyStudy --workspace /path/to/workspace
 
-This section exists because overclaiming is worse than underclaiming.
+# Full pipeline: organize (if stale) -> classify (pinned jurisdiction rules,
+# headers-only) -> synthesize the scrub config from the classification ->
+# scrub -> residual PHI guard -> publish. Exit codes: 0 clean, 8 partial
+# (held forms or a non-empty review queue), 5 guard failure, 1 scrub raised,
+# 2 config/input error. No source-of-truth tree is generated automatically;
+# standalone SoT remains available only to callers that explicitly maintain
+# its legacy annotated-PDF layout.
+python -m phi_engine run --study MyStudy --jurisdiction us --workspace /path/to/workspace
 
-1. **Language coverage:** Text generators are English and transliterated Hindi/Tamil/Bengali names only. Urdu, Kashmiri, Punjabi, Malayalam, Telugu, Odia, Assamese, Marathi, Gujarati, Kannada names are not covered at production density.
+# List everything awaiting human review (organizer bucket, held forms, LLM
+# uncertain queue, dependency recommendations) and record a decision. To
+# correct a held study, inspect the protected manifest, fix the package or
+# pass --study, and rerun; decisions apply on the NEXT run.
+python -m phi_engine review --study MyStudy --workspace /path/to/workspace list
+python -m phi_engine review --study MyStudy --workspace /path/to/workspace decide --header NOTES --decision override --action drop
+# --decision is one of keep|drop|override ([--action ...] required only for override;
+# action is one of cap|drop|jitter_date|pseudonymize|keep|suppress|generalize).
 
-2. **Image PHI:** Full-face photograph detection (HIPAA Q) requires image analysis that is out of scope for text-based corpus validation. See `docs/KNOWN_LIMITATIONS.md` for the rationale.
-
-3. **State-specific formats:** India has 29 states with independent ration card formats. Coverage is best-effort and may miss new formats. See the authority matrix.
-
-4. **Private DICOM tags:** Vendor-specific private DICOM tags cannot be enumerated generically. We cover common vendors (GE, Siemens, Philips, Canon) but claim no universal coverage.
-
-5. **Longitudinal linkability:** Re-identification via longitudinal data (same rare-disease patient visible across years) requires dataset-level analysis and is not fully covered in record-level test cases.
-
-6. **Newly enacted authorities:** DPDP Rules 2025 most substantive provisions do not commence until 2027-05-13. Applicability of our corpus to future rule interpretations cannot be guaranteed.
-
-7. **Benchmarks are baseline:** Presidio and Comprehend Medical can be enhanced with custom recognizers. Our baseline comparisons use each tool's default configuration. Tool performance will differ with customization.
-
-## Citation
-
-If you use this corpus in research, please cite:
-
+# Latest run status for a study.
+python -m phi_engine status --study MyStudy --workspace /path/to/workspace
 ```
-[Author]. (2026). PHI-Handling-IRB-approval-ready: A dual-jurisdiction synthetic 
-PHI test corpus for HIPAA and DPDPA compliance validation [Software]. 
-https://github.com/brucebanner010198-commits/PHI-Handling-IRB-approval-ready
+
+See `python -m phi_engine --help` for the full argument reference, including
+`review dependency-decide`.
+
+## Invariants
+
+- **Source immutability.** Intake links files into the workspace via
+  `os.symlink` only, never `shutil.copy*`; source bytes are never opened for
+  write and never deleted. The organizer reads normalized dataset content
+  only through intake symlinks and writes derived artifacts under
+  `<workspace>/organized/<study>/` -- never back into the source tree. It
+  also performs a direct metadata-only read of an optional forms manifest
+  from the external source root (`organize.py`), separate from the row-data
+  path.
+- **Fail-closed handling.** Any unsupported suffix, invalid or multi-sheet
+  dataset `.xlsx`, unreadable `.xls`, cross-component hardlink, or source
+  symlink lands in an `_unclassified` review bucket with a `{path, reason,
+  blocking}` record retaining filename, link name, and reason -- never row
+  values, never silently dropped or silently parsed as garbage. A missing
+  or empty `datasets/`, or a shortfall in the `forms/`/`dictionary_mapping/`
+  alternative group, also blocks. Any single blocking review
+  item holds the whole study; a missing/malformed/v2 manifest fails with a
+  fixed public code (clean v3 cutover, no legacy reader). An unavailable or
+  weakened rulebook exits non-zero rather than running with a silently
+  downgraded rule set.
+- **Publish guard, with a disclosed fallback gap.** The published
+  `llm_source/datasets/` tree passes the residual PHI guard gate
+  (`phi_guard_gate.run_phi_guard_gate`: Presidio AND a legacy regex
+  scanner) before publish when the gate runs cleanly. On a guard exception
+  (e.g. Presidio unavailable), the pipeline currently falls back to the
+  legacy regex scanner ALONE and can still publish on that scanner's
+  result -- a known, disclosed weak-fallback path, not yet closed (see
+  `docs/PRIVACY_GATEWAY_RECOMMENDATION.md` §"Weak points wrapped or
+  replaced"). Header classification prompts are headers-only, never a row
+  value, and `LLMClient.complete` runs a prompt egress gate
+  (`phi_gate_check`) before provider dispatch. A separate read-path wrapper
+  (`llm_tool_guard.validate_llm_read_path`) exists but currently has no
+  production caller -- it is available, not yet a wired chokepoint.
+
+## Directory layout
+
+```text
+PHI-Handling-system/
+|-- README.md
+|-- pyproject.toml
+|-- requirements.txt
+|
+|-- phi_engine/                 # Runtime PHI pipeline
+|   |-- cli/                    # `python -m phi_engine` entry point
+|   |-- pipeline/                # intake, organize, run, review, dependencies
+|   |-- security/                # classification, scrub, guard gates, patterns
+|   |-- config/                  # config.py, config.yaml, per-study _defaults/
+|   |-- audit/                   # audit-zone and snapshot-root read barriers
+|   |-- sot/                     # source-of-truth study intake helpers
+|   `-- tools/                   # regulation_fetcher (authority-document lookup)
+|
+|-- harness/                     # spec_check, stress/gateway fixture builders,
+|                                 # privacy-gateway research validator
+|-- authorities/                 # Primary legal source mapping (HIPAA 164.514)
+|-- docs/                        # Spec, threat model, and evidence/research reports
+|-- research/                    # Local exploratory notes (gitignored)
+`-- tests/
 ```
 
-## Relationship to RePORTaLiN
+## Configuration
 
-This repository is **separate from and not dependent on** the RePORTaLiN-RAG project. It was originally prompted by the need to validate RePORTaLiN-RAG's PHI handling, but the corpus and harness in this repository are general-purpose and can be used with any PHI detection system.
+- `--workspace` / `PHI_WORKSPACE`: workspace root. Relocates every
+  workspace-relative path (`intake/`, `organized/`, `data/raw/<study>/`,
+  `output/<study>/`, per-study `config/<study>/`). Running
+  `python -m phi_engine ...` from a different `cwd` with a different
+  `PHI_WORKSPACE`, against a foreign source tree, produces the same
+  behavior with no repo-root dependence for data paths.
+- `--study` / `STUDY_NAME`: study name (plain folder name), scoping intake,
+  organized output, and per-study configuration.
+
+See `docs/STANDALONE_SPEC.md` for the full portability/security checklist.
+
+## Verification
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider \
+  tests/test_phi_engine_integration.py \
+  tests/test_stress_standalone.py \
+  tests/test_phase3_run_pipeline_integration.py \
+  tests/test_phase3_run_review_integration.py \
+  tests/test_pipeline_lock.py \
+  tests/test_phi_llm_safety.py \
+  tests/test_llm_egress_gate.py \
+  tests/test_validate_privacy_research.py
+
+PYTHONDONTWRITEBYTECODE=1 python -m harness.validate_privacy_research
+
+PYTHONDONTWRITEBYTECODE=1 python -m phi_engine --help
+PYTHONDONTWRITEBYTECODE=1 python -c "from phi_engine.security.presidio_gate import analyze_text; assert analyze_text('SSN 123-45-6789')"
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
+```
 
 ## Security disclosure
 
-See `SECURITY.md`. Do not file security issues as public GitHub issues.
+Do not file suspected PHI or security leakage as a public GitHub issue. Use
+a private maintainer contact configured by the project owner; if none is
+configured, stop distribution and notify the repository owner out of band.
+See `SECURITY.md`.
 
 ## License
 
-MIT License. See `LICENSE` for full text.
-
-Notable exceptions: The authority matrix references statutory text which is in the public domain. Research citations in `authorities/citations.bib` are by reference only; their contents remain subject to their respective licenses (typically CC-BY for open access journals).
+MIT License. See `LICENSE` for full text. The authority documents under
+`authorities/` reference statutory text, which is in the public domain.
