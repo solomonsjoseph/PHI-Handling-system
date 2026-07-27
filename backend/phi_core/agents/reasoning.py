@@ -32,6 +32,86 @@ ACTION_TYPES = {
 SUBJECT_TYPES = {"participant", "staff", "specimen", "site", "study"}
 
 
+# --- Sentinel hard-rule table ---------------------------------------------
+#
+# Deterministic column-header -> allow-list mapping for known direct
+# identifiers. When Judge picks 'human_review' or an action outside the
+# allow-list for an obvious identifier, this rule forces the safest listed
+# action. This closes the accuracy gap where the LLM routes obvious PHI to
+# human review out of caution. Citations map to 45 CFR 164.514(b)(2)(i).
+_HARD_RULE_TABLE: list[tuple[str, list[str], str, str]] = [
+    # (regex, allow-list actions, default action, HIPAA citation)
+    (r"^(dob|date[_ ]?of[_ ]?birth|birth[_ ]?date|birthdate)$",
+     ["year_only", "drop"], "year_only", "164.514(b)(2)(i)(C)"),
+    (r"^(ssn|social[_ ]?security(?:[_ ]?number)?)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(G)"),
+    (r"^(mrn|medical[_ ]?record(?:[_ ]?number)?|record[_ ]?number)$",
+     ["pseudonymize", "hash", "drop"], "pseudonymize", "164.514(b)(2)(i)(H)"),
+    (r"^(phone|phone[_ ]?number|mobile|cell|telephone|tel)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(D)"),
+    (r"^(fax|fax[_ ]?number)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(E)"),
+    (r"^(email|e[_ ]?mail|email[_ ]?address)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(F)"),
+    (r"^(patient[_ ]?name|subject[_ ]?name|first[_ ]?name|last[_ ]?name|full[_ ]?name|name)$",
+     ["drop", "pseudonymize"], "drop", "164.514(b)(2)(i)(A)"),
+    (r"^(address|street|street[_ ]?address|mailing[_ ]?address)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(B)"),
+    (r"^(zip|zipcode|zip[_ ]?code|postal[_ ]?code|postcode)$",
+     ["zip3_truncate", "drop"], "zip3_truncate", "164.514(b)(2)(i)(B)"),
+    (r"^(age|age[_ ]?years|age[_ ]?in[_ ]?years)$",
+     ["cap_age_90", "keep", "drop"], "cap_age_90", "164.514(b)(2)(i)(C)"),
+    (r"^(url|web[_ ]?url|website)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(N)"),
+    (r"^(ip|ip[_ ]?address)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(O)"),
+]
+
+
+def apply_sentinel_hard_rules(decisions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Force obvious direct-identifier columns off 'human_review' into a safe action.
+
+    Returns (new_decisions, overrides) where overrides describes each change
+    applied. A decision is overridden ONLY when its column name matches a
+    hard-rule pattern AND its current action is either 'human_review' or not
+    in the rule's allow-list. Otherwise, Judge's choice is respected.
+    """
+    import re as _re_local
+    out: list[dict[str, Any]] = []
+    overrides: list[dict[str, Any]] = []
+    for d in decisions:
+        col = (d.get("column") or "").strip().lower()
+        norm = _re_local.sub(r"\s+", "_", col)
+        action = d.get("action", "human_review")
+        matched = False
+        for pattern, allow, default_action, citation in _HARD_RULE_TABLE:
+            if _re_local.match(pattern, norm):
+                matched = True
+                if action not in allow:
+                    new_d = dict(d)
+                    new_d["action"] = default_action
+                    new_d["reason"] = (
+                        f"Sentinel hard-rule: column '{d.get('column')}' is a known direct identifier "
+                        f"per 45 CFR {citation}. Forced from '{action}' to '{default_action}'."
+                    )
+                    new_d["citation"] = f"45 CFR {citation}"
+                    new_d["confidence"] = max(float(d.get("confidence") or 0), 0.95)
+                    overrides.append({
+                        "column": d.get("column"),
+                        "file_id": d.get("file_id"),
+                        "from": action,
+                        "to": default_action,
+                        "citation": citation,
+                    })
+                    out.append(new_d)
+                else:
+                    out.append(d)
+                break
+        if not matched:
+            out.append(d)
+    return out, overrides
+
+
 class Judge(Agent):
     NAME = "Judge"
     PROMPT = (

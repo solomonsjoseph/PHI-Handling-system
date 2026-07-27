@@ -40,7 +40,7 @@ Every agent is a Claude Sonnet 4.5 call (Emergent Universal Key by default; BYO-
 - `GET  /api/sessions/{sid}/agent-trace` - full agent audit log
 - `GET  /api/settings/llm` and `POST /api/settings/llm` - BYO LLM config
 
-## Verified behaviours (testing_agent iteration_3)
+## Verified behaviours (testing_agent iteration_3 + iteration_4 fork verification)
 
 - All 26 intake edge cases pass (regression clean).
 - Full /handle completes end-to-end: intake -> classifying -> awaiting_human_review -> resolutions -> anonymizing -> complete.
@@ -49,6 +49,15 @@ Every agent is a Claude Sonnet 4.5 call (Emergent Universal Key by default; BYO-
 - Agent trace shows messages from 10 of 12 agents (Herald optionally times out at 90s, acceptable).
 - All 12 agent tiles render on /studies/{sid} with the Run Agent Pipeline button.
 - Human review UX: unresolved decisions rendered with dropdown, submit resumes the tail.
+
+### iteration_4 (fork) additional live verification (session 27e9059741e64d05acd633ddd65b8e0c)
+
+- **scrub_text on free-text columns** works end to end: notes containing name/phone/email/SSN produced `[A] ... [D] ... [F] ... [G]` category tags while clinical content ("headache", "acetaminophen", "Blood pressure", "medication list", "UCSF") preserved.
+- **Cross-file pseudonym exact-match linkage** verified: same real patient_id `P001` produced identical pseudonym `P4f455ade` in both enrollment.csv AND visits.csv exports. Distinct real values produced distinct pseudonyms. Cross-study salt isolation confirmed.
+- **Subject tagging (participant/staff/specimen/site/study)** now populated on decisions and rendered in SessionDetail Subject column.
+- **Sentinel deterministic hard-rules** installed: known direct-identifier column names (dob, ssn, mrn, phone, email, fax, patient_name, address, zip, age, url, ip) are forced off `human_review` into safe HIPAA-cited actions before the LLM Sentinel runs.
+- **SessionDetail runtime crash fixed**: `getSession(sid)` now catches 404 and renders a clean "study not found" state instead of an uncaught Promise rejection.
+- **Regression suite added** at `/app/backend/tests/test_scrub_and_pseudonym.py` (7 tests) and `/app/backend/tests/test_sentinel_hard_rules.py` (10 tests). All 17 green.
 
 ## Minor items (from iteration_3, non-blocking)
 
@@ -63,13 +72,16 @@ Every agent is a Claude Sonnet 4.5 call (Emergent Universal Key by default; BYO-
 - India DPDPA jurisdiction pack.
 
 ### P1
-- Sentinel hard-rule for known direct identifiers (dob -> year_only, ssn -> drop) so LLM cannot escape into human_review for obvious cases.
 - Herald: split into abstract-first / sections-later two-call flow so a 90s timeout still gives Sir at least the abstract.
+- Publish guard on exports (residual PHI check via detectors before download URL is served).
 
 ### P2
-- Publish guard on exports (residual PHI check).
 - Signed attestation PDF per completed study.
-- Multi-provider settings UI page (currently only via API).
+- Additional jurisdictions after DPDPA: UK/GDPR-UK, EU/GDPR, Canada/PIPEDA, Brazil/LGPD.
+
+### Recently DONE (this fork)
+- Sentinel hard-rule table (dob->year_only, ssn->drop, mrn->pseudonymize, phone/email/fax->drop, name->drop, zip->zip3_truncate, age->cap_age_90, address/url/ip->drop). Runs deterministically before the LLM Sentinel.
+- Multi-provider settings UI page at /settings (BYO API key for Anthropic, OpenAI, Gemini, OpenRouter, OpenAI-compatible; Emergent Universal Key by default).
 
 ## Enhancement (would Sir like this next?)
 

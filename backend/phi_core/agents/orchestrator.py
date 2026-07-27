@@ -22,7 +22,7 @@ from .base import AgentMessage, ITERATION_CAP
 from .experts import Statute, Praxis
 from .llm import LlmConfig
 from .outward import Herald, Ledger, Scout
-from .reasoning import Auditor, Executor, Judge, Sentinel
+from .reasoning import Auditor, Executor, Judge, Sentinel, apply_sentinel_hard_rules
 from .specialists import Instrument, Lexicon, Schema
 
 
@@ -67,6 +67,13 @@ async def run_pipeline(
         j = await judge.run(schema=schema, instrument=instrument, lexicon=lexicon,
                             statute=statute, prior_feedback=prior_feedback)
         decisions = j.get("decisions", [])
+        # Sentinel deterministic hard-rules: force known direct identifiers off
+        # 'human_review' before invoking the LLM Sentinel. Closes the accuracy
+        # gap where Judge routes obvious PHI to human review out of caution.
+        decisions, overrides = apply_sentinel_hard_rules(decisions)
+        if overrides:
+            await on_phase(f"sentinel_hard_rules_iter_{iteration}",
+                           {"iteration": iteration, "overrides": overrides})
         await on_phase(f"sentinel_iter_{iteration}", {"iteration": iteration, "decision_count": len(decisions)})
         s = await sentinel.run(decisions=decisions, statute=statute, instrument=instrument)
         if s.get("verdict") == "approved":
