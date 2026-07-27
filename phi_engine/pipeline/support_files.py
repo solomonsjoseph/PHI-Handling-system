@@ -150,7 +150,17 @@ def _parse_excel(path: Path, artifact_id: str, source_sha256: str, limits: dict[
         table_total += len(tables)
         _check_count(table_total, limits["max_tables"], ValueError("table-limit"))
         for table_index, table in enumerate(tables):
-            promoted = promote_header(table).astype(object).where(pd.notnull(table), "")
+            header_promoted = promote_header(table)
+            # The null mask must be built AFTER promotion, against
+            # `header_promoted`'s own index/columns: `.where()` aligns its
+            # condition by label, and promote_header() relabels both axes
+            # (columns -> header strings, index -> a fresh 0-based
+            # RangeIndex after dropping banner/footer/null rows). A mask
+            # built from the pre-promotion `table` shares no row or column
+            # labels with the promoted frame, so every cell fails to align
+            # and silently blanks to "" -- destroying exact-header support
+            # evidence from otherwise-valid dictionaries.
+            promoted = header_promoted.astype(object).where(pd.notnull(header_promoted), "")
             for local_row_index, record in enumerate(promoted.to_numpy().tolist()):
                 _check_count(len(rows) + 1, limits["max_rows"], ValueError("row-limit"))
                 _check_count(len(record), limits["max_columns"], ValueError("column-limit"))
