@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "phi-handling"
@@ -15,4 +15,4 @@ phi-authority  = "phi_engine.tools.regulation_fetcher:_main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["phi_engine*", "harness*"]
+include = ["phi_engine*", "harness*", "scripts*"]
