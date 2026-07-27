@@ -9,10 +9,19 @@ locally). It is never wired to any LLM call and never constructs a prompt;
 Wired into ``run_pipeline``'s classification step as two rules:
 
 - **ESCALATION** (accuracy-protecting, always on): a header classified
-  ``keep`` by the name-rule engine but whose profile shows a blocking
-  pattern hit rate above :data:`ESCALATION_BLOCKING_RATE_THRESHOLD` of its
-  non-empty values is force-dropped with reason ``value-profile-conflict``
-  -- this is the "PHI planted in an unexpected/mislabeled column" backstop.
+  ``keep`` by the name-rule engine but whose profile shows EITHER a
+  blocking pattern hit rate OR a date-parse rate above
+  :data:`ESCALATION_BLOCKING_RATE_THRESHOLD` of its non-empty values is
+  force-dropped with reason ``value-profile-conflict`` -- this is the
+  "PHI planted in an unexpected/mislabeled column" backstop. The
+  date-parse leg exists because MDY-format dates (e.g. ``05/28/2014``)
+  only trip the low-confidence ``DATE_MDY`` WARN pattern, never a
+  BLOCKING one, so a mislabeled column full of them would otherwise
+  show a blocking hit rate of zero and sail through this check straight
+  to the LLM-visible raw output -- the residual publish-time scanners
+  (:mod:`phi_engine.security.llm_source_gate`,
+  :mod:`phi_engine.security.presidio_gate`) are also built from
+  ``BLOCKING_PATTERNS`` only, so nothing downstream would catch it either.
 - **AUTO-CLEAR** (review-reducing, conservative): a header already force-
   dropped pending human confirmation (a PHI-risky NAME with no SoT/decision
   confirming it benign) whose profile shows a CLOSED categorical set is
@@ -87,8 +96,32 @@ class ColumnProfile:
 
     @property
     def is_value_profile_conflict(self) -> bool:
+        """True when this KEEP-classified column's values are mostly PHI-shaped.
+
+        Either a high-confidence BLOCKING pattern hit rate (SSN, phone,
+        ISO/text dates, ...) or a date-parse rate above
+        :data:`ESCALATION_BLOCKING_RATE_THRESHOLD` alone triggers this --
+        the date-parse leg is required because MDY-format dates (e.g.
+        ``05/28/2014``) only match the low-confidence ``DATE_MDY`` WARN
+        pattern in :mod:`phi_engine.security.phi_patterns`, never a
+        BLOCKING one, so ``blocking_hit_rate`` alone would read 0.0 for a
+        column that is 100% MDY dates under a mislabeled header. Treating
+        that identically to a BLOCKING-pattern conflict is required for
+        this to actually be a backstop: neither the publish-time residual
+        scanners (:func:`phi_engine.security.llm_source_gate.scan_tree_for_phi`,
+        :func:`phi_engine.security.presidio_gate.scan_tree_with_presidio`)
+        nor ``phi_scrub``'s header-name-driven date jitter would catch it
+        downstream -- both scanners are built from ``BLOCKING_PATTERNS``
+        only, and the scrub engine's ``date_fields`` match is by header
+        NAME, not value shape.
+        """
+        if self.non_empty_count == 0:
+            return False
         rate = self.blocking_hit_rate
-        return rate is not None and rate > ESCALATION_BLOCKING_RATE_THRESHOLD
+        if rate is not None and rate > ESCALATION_BLOCKING_RATE_THRESHOLD:
+            return True
+        date_rate = self.date_parse_rate
+        return date_rate is not None and date_rate > ESCALATION_BLOCKING_RATE_THRESHOLD
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -100,6 +133,7 @@ class ColumnProfile:
             "numeric_count": self.numeric_count,
             "blocking_categories": list(self.blocking_categories),
             "blocking_hit_rate": self.blocking_hit_rate,
+            "date_parse_rate": self.date_parse_rate,
             "is_closed_categorical": self.is_closed_categorical,
             "is_value_profile_conflict": self.is_value_profile_conflict,
         }
