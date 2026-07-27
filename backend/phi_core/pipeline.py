@@ -40,7 +40,7 @@ async def ingest_file(session_id: str, upload_path: Path, original_name: str, on
         kind = "dataset"
     elif component == "forms":
         kind = "narrative"
-    elif component in {"data_dictionary", "mappings"}:
+    elif component == "dictionary":
         kind = "metadata"
     else:
         kind = kind_from_ext

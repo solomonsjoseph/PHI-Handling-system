@@ -1,12 +1,15 @@
-"""Intake manifest v3: ZIP -> {datasets/, forms/, data_dictionary|mappings/}.
+"""Intake manifest v3: ZIP -> {datasets/, forms/, dictionary/}.
 
-Aligned with feat/v2-multi-jurisdiction `phi_engine.pipeline.intake` conventions.
+Aligned with the goal at /app/memory/GOAL.md and Sir's clarification 2026-07-27:
+three data elements only, not four. `data_dictionary/`, `mappings/`, `dictionary/`,
+`mapping/`, and `codebook/` are all aliases for the same slot: the schema-defining
+workbook. Datasets is always mandatory; at least one of dictionary or forms must
+accompany it.
 
 Rules (fail-closed):
   - `datasets/` required. Extensions: .csv, .xls, .xlsx. Single sheet only for xlsx.
     .json / .jsonl NOT accepted here.
-  - At least one of `forms/` (.pdf), `data_dictionary/` (.csv/.xlsx), or
-    `mappings/` (.csv/.xlsx) must accompany `datasets/`.
+  - At least one of `forms/` (.pdf) or `dictionary/` (.csv, .xlsx) must accompany datasets.
   - Any unsupported suffix, multi-sheet xlsx dataset, unreadable xls, empty
     file, cross-component duplicate content, or symlink -> `_unclassified`
     review bucket recording only `{path, reason, blocking}` (never row values).
@@ -30,15 +33,14 @@ import openpyxl
 
 
 COMPONENT_SUFFIXES: dict[str, set[str]] = {
-    "datasets":         {".csv", ".xls", ".xlsx"},
-    "forms":            {".pdf"},
-    "data_dictionary":  {".csv", ".xlsx"},
-    "mappings":         {".csv", ".xlsx"},
+    "datasets":   {".csv", ".xls", ".xlsx"},
+    "forms":      {".pdf"},
+    "dictionary": {".csv", ".xlsx", ".xls"},
 }
 COMPONENTS = tuple(COMPONENT_SUFFIXES)
 MANDATORY = {"datasets"}
-# At least one of these three must be present alongside datasets/.
-ANY_OF = {"forms", "data_dictionary", "mappings"}
+# At least one of these must be present alongside datasets/.
+ANY_OF = {"forms", "dictionary"}
 
 
 @dataclass
@@ -80,10 +82,11 @@ def _component_of(top: str) -> str | None:
         return "datasets"
     if top == "form":
         return "forms"
-    if top in {"dictionary", "data-dictionary", "codebook"}:
-        return "data_dictionary"
-    if top in {"mapping", "map"}:
-        return "mappings"
+    # All of these are aliases for the single "dictionary" slot per Sir's spec 2026-07-27.
+    if top in {"data_dictionary", "data-dictionary", "codebook",
+               "mapping", "mappings", "map", "workbook",
+               "dictionary_mapping", "dictionary-mapping"}:
+        return "dictionary"
     return None
 
 
@@ -305,7 +308,7 @@ def scan_intake(root: Path) -> tuple[list[IntakeEntry], list[str]]:
         if comp not in seen_components:
             missing.append(comp)
     if not (seen_components & ANY_OF):
-        missing.append("one_of_forms_dictionary_or_mappings")
+        missing.append("one_of_forms_or_dictionary")
 
     return entries, missing
 
