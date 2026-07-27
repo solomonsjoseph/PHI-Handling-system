@@ -48,6 +48,7 @@ from phi_core.models import (
 from phi_core.pipeline import (
     UPLOAD_DIR, anonymize_files, apply_reviews, classify_file, detect_file, ingest_file,
 )
+from phi_core.agents import AgentMessage, LlmConfig, run_pipeline as run_agent_pipeline
 
 
 app = FastAPI(title="PHI Handling Console", version="2.0.0")
@@ -502,6 +503,187 @@ async def session_export(sid: str, file_id: str):
     if not path or not Path(path).exists():
         raise HTTPException(404, "export not ready")
     return FileResponse(path, filename=Path(path).name)
+
+
+# --- LLM settings (BYO-key) ----------------------------------------------
+
+class LlmSettings(BaseModel):
+    provider: str = "emergent"
+    model: str = "claude-sonnet-4-5-20250929"
+    api_key: str = ""
+    base_url: str = ""
+    temperature: float = 0.1
+    max_tokens: int = 2000
+
+
+@app.get("/api/settings/llm")
+async def get_llm_settings():
+    db = get_db()
+    doc = await db.settings.find_one({"_id": "llm"}, {"_id": 0})
+    if not doc:
+        return LlmSettings().model_dump() | {"providers": ["emergent","anthropic","openai","gemini","openrouter","openai_compatible"]}
+    # never leak the api_key back verbatim
+    if doc.get("api_key"):
+        doc["api_key_set"] = True
+        doc["api_key"] = ""
+    return doc | {"providers": ["emergent","anthropic","openai","gemini","openrouter","openai_compatible"]}
+
+
+@app.post("/api/settings/llm")
+async def set_llm_settings(body: LlmSettings):
+    db = get_db()
+    await db.settings.replace_one({"_id": "llm"}, {"_id": "llm", **body.model_dump()}, upsert=True)
+    return {"ok": True}
+
+
+async def _current_llm_cfg() -> LlmConfig:
+    db = get_db()
+    doc = await db.settings.find_one({"_id": "llm"}, {"_id": 0}) or {}
+    return LlmConfig.from_dict(doc)
+
+
+# --- Agent-driven PHI handling -------------------------------------------
+
+@app.post("/api/sessions/{sid}/handle")
+async def session_handle(sid: str):
+    """Run the full 12-agent PHI handling pipeline for this study."""
+    db = get_db()
+    session = await db.sessions.find_one({"id": sid})
+    if not session:
+        raise HTTPException(404, "session not found")
+    if session.get("intake_status") not in ("ready",):
+        raise HTTPException(400, f"intake not ready (status={session.get('intake_status')})")
+
+    async def emit_msg(msg: AgentMessage) -> None:
+        # Persist to session progress in a compact form for the SSE consumer.
+        ev = ProgressEvent(
+            phase=f"agent:{msg.agent}:{msg.direction}",
+            message=f"{msg.agent} {msg.phase}",
+            payload={"agent": msg.agent, "phase_key": msg.phase, "direction": msg.direction, "duration_ms": msg.duration_ms},
+        )
+        await _emit(sid, ev)
+
+    async def on_phase(phase: str, payload: dict):
+        await _emit(sid, ProgressEvent(phase=f"agent_phase:{phase}", message=phase, payload=payload))
+
+    cfg = await _current_llm_cfg()
+
+    async def worker():
+        try:
+            await db.sessions.update_one({"id": sid}, {"$set": {"status": "classifying"}})
+            result = await run_agent_pipeline(session, db, cfg, emit_msg, on_phase)
+            await _emit(sid, ProgressEvent(phase="complete", message=f"Pipeline done: {result.get('status')}", percent=100.0))
+        except Exception as e:
+            await db.sessions.update_one({"id": sid}, {"$set": {"status": "failed", "error": f"{type(e).__name__}: {e}"}})
+            await _emit(sid, ProgressEvent(phase="failed", message=f"pipeline error: {e}"))
+        finally:
+            await _emit(sid, ProgressEvent(phase="__end__", message="stream end"))
+
+    asyncio.create_task(worker())
+    return {"status": "started", "llm": {"provider": cfg.provider, "model": cfg.model}}
+
+
+class HumanReviewSubmit(BaseModel):
+    resolutions: list[dict]   # [{column, file_id, action, reason?, confidence?}]
+
+
+@app.post("/api/sessions/{sid}/human-review")
+async def session_human_review(sid: str, body: HumanReviewSubmit):
+    """Operator resolves human_review decisions and resumes the pipeline tail
+    (Executor -> Auditor -> Scout -> Ledger -> Herald)."""
+    from phi_core.agents.reasoning import Executor, Auditor
+    from phi_core.agents.outward import Scout, Ledger, Herald
+
+    db = get_db()
+    session = await db.sessions.find_one({"id": sid})
+    if not session:
+        raise HTTPException(404, "session not found")
+
+    decisions = list(session.get("agent_decisions", []))
+    by_key = {(r.get("file_id",""), r.get("column","")): r for r in body.resolutions}
+    for d in decisions:
+        k = (d.get("file_id",""), d.get("column",""))
+        if d.get("action") == "human_review" and k in by_key:
+            r = by_key[k]
+            d["action"] = r.get("action", "human_review")
+            d["reason"] = "human decision: " + (r.get("reason") or "")
+            d["confidence"] = 1.0
+            d["reviewer"] = "human"
+
+    # Any remaining unresolved?
+    unresolved = [d for d in decisions if d.get("action") == "human_review"]
+    if unresolved:
+        await db.sessions.update_one({"id": sid}, {"$set": {"agent_decisions": decisions}})
+        return {"status": "still_awaiting", "unresolved": len(unresolved)}
+
+    files = session.get("files", [])
+    cfg = await _current_llm_cfg()
+
+    async def emit_msg(msg: AgentMessage) -> None:
+        ev = ProgressEvent(
+            phase=f"agent:{msg.agent}:{msg.direction}",
+            message=f"{msg.agent} {msg.phase}",
+            payload={"agent": msg.agent, "phase_key": msg.phase, "direction": msg.direction},
+        )
+        await _emit(sid, ev)
+
+    async def worker():
+        try:
+            common = dict(session_id=sid, llm=cfg, db=db, emit=emit_msg)
+            await db.sessions.update_one({"id": sid}, {"$set": {"status": "anonymizing", "agent_decisions": decisions, "human_review_required": False}})
+            exec_out = await Executor(**common).run(files=files, decisions=decisions)
+            audit = await Auditor(**common).run(decisions=decisions, exports=exec_out["exports"], files=files)
+            scout = await Scout(**common).run()
+            ledger = await Ledger(**common).run(decisions=decisions, audit=audit, scout=scout, benchmark_result=None)
+            herald = await Herald(**common).run(ledger=ledger, audit=audit,
+                                                target_venue=session.get("target_venue") or "JAMIA Open")
+            await db.sessions.update_one(
+                {"id": sid},
+                {"$set": {
+                    "agent_audit": audit,
+                    "agent_ledger": ledger,
+                    "agent_herald": herald,
+                    "agent_scout": scout,
+                    "export_paths": exec_out["exports"],
+                    "status": "complete",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }},
+            )
+            await _emit(sid, ProgressEvent(phase="complete", message="pipeline complete after human review", percent=100.0))
+        except Exception as e:
+            await db.sessions.update_one({"id": sid}, {"$set": {"status": "failed", "error": f"{type(e).__name__}: {e}"}})
+            await _emit(sid, ProgressEvent(phase="failed", message=f"pipeline error: {e}"))
+        finally:
+            await _emit(sid, ProgressEvent(phase="__end__", message="stream end"))
+
+    asyncio.create_task(worker())
+    return {"status": "resuming"}
+
+
+@app.get("/api/sessions/{sid}/agent-trace")
+async def session_agent_trace(sid: str, limit: int = 200):
+    """Return the audit log of every agent message on this session."""
+    db = get_db()
+    cursor = db.agent_log.find({"session_id": sid}, {"_id": 0}).sort("ts", 1).limit(limit)
+    return {"messages": [m async for m in cursor]}
+
+
+@app.get("/api/sessions/{sid}/results")
+async def session_results(sid: str):
+    """Consolidated agent outputs (decisions, audit, ledger, herald)."""
+    db = get_db()
+    doc = await db.sessions.find_one({"id": sid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "session not found")
+    return {
+        "decisions": doc.get("agent_decisions", []),
+        "sentinel_last": doc.get("agent_sentinel_last"),
+        "audit": doc.get("agent_audit"),
+        "ledger": doc.get("agent_ledger"),
+        "herald": doc.get("agent_herald"),
+        "scout": doc.get("agent_scout"),
+        "human_review_required": doc.get("human_review_required", False),
+    }
 
 
 # Root health for quick check

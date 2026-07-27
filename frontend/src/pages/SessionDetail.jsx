@@ -5,6 +5,7 @@ import { API, exportUrl, finalizeSession, getSession, streamUrl, submitReview } 
 import { Btn, MonoProgress, Panel, Tag } from '../components/ui';
 import PhaseStepper from '../components/PhaseStepper';
 import LiveCounters from '../components/LiveCounters';
+import AgentSection from '../components/AgentSection';
 
 const STATUS_ORDER = ['created','intake','reading','classifying','detecting','awaiting_review','applying_review','anonymizing','complete'];
 const ACTIVE_PHASES = new Set(['created','intake','reading','classifying','detecting','applying_review','anonymizing']);
@@ -156,6 +157,8 @@ export default function SessionDetail() {
           )}
         </Panel>
       )}
+
+      <AgentSection sid={sid} session={session} onRefresh={refresh} />
 
       <Panel title="Files" testId="files-panel">
         <table className="w-full text-xs font-mono border border-border">

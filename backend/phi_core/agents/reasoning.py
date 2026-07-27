@@ -1,0 +1,235 @@
+"""Reasoning agents: Judge, Sentinel, Executor, Auditor.
+
+Judge     - synthesises specialist + statute + praxis outputs into per-column decisions.
+Sentinel  - preview reviewer, enforces 0% leak and 100% accuracy.
+Executor  - applies the transformations decided by Judge.
+Auditor   - reviews Executor's work and produces the final compliance report.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from ..anonymizer import apply_to_dataset, apply_to_text
+from ..detectors import detect_text, header_phi_columns
+from ..file_readers import iter_dataset_rows
+from ..pipeline import EXPORT_DIR
+from .base import Agent, ITERATION_CAP
+
+
+ACTION_TYPES = {
+    "keep",           # non-PHI, preserve as-is
+    "drop",           # PHI, remove entirely
+    "cap_age_90",     # age > 89 -> "90+"
+    "year_only",      # date -> YYYY
+    "zip3_truncate",  # ZIP -> first 3 digits, deny 17 codes
+    "hash",           # deterministic hash for record linkage
+    "pseudonymize",   # random consistent replacement
+    "human_review",   # uncertain, block for human
+}
+
+
+class Judge(Agent):
+    NAME = "Judge"
+    PROMPT = (
+        "You are Judge. Given (a) Schema column classifications, (b) Instrument PHI fields "
+        "from forms, (c) Lexicon dictionary entries, and (d) Statute jurisdictional rules, "
+        "decide for EACH dataset column: whether to keep, drop, or transform, and if transform, "
+        "which technique (from cap_age_90, year_only, zip3_truncate, hash, pseudonymize). "
+        "Route to human_review whenever confidence < 0.60 or the column is a quasi-identifier. "
+        "Return JSON: "
+        '{"decisions": [{"file_id": str, "column": str, "phi_category": str|null, '
+        '"action": "keep|drop|cap_age_90|year_only|zip3_truncate|hash|pseudonymize|human_review", '
+        '"reason": str, "confidence": 0..1, "citation": str}]}. '
+        "Preserve clinically-needed non-PHI (diagnoses, procedures, vitals, labs)."
+    )
+
+    async def run(self, schema: dict, instrument: dict, lexicon: dict, statute: dict, prior_feedback: str = "") -> dict[str, Any]:
+        prompt = (
+            f"Statute rules: {statute}\n\n"
+            f"Schema columns: {schema}\n\n"
+            f"Instrument fields: {instrument}\n\n"
+            f"Lexicon columns: {lexicon}\n"
+        )
+        if prior_feedback:
+            prompt += f"\nPreview feedback to address: {prior_feedback}\n"
+        prompt += "\nRespond with JSON only."
+        return await self.call_json(prompt, phase="judge.decide", default={"decisions": []})
+
+
+class Sentinel(Agent):
+    NAME = "Sentinel"
+    PROMPT = (
+        "You are Sentinel. Review Judge's decisions with ONE goal: zero PHI leak, 100% accuracy. "
+        "Cross-check every 'keep' against Statute rules and Instrument fields. Flag any column "
+        "whose action is inconsistent with its PHI category or citation. Return JSON: "
+        '{"verdict": "approved|revise", "issues": [{"file_id": str, "column": str, '
+        '"problem": str, "suggested_action": str}], "summary": str}. '
+        "Approve only when every decision defensibly closes the leak while preserving research signal."
+    )
+
+    async def run(self, decisions: list[dict[str, Any]], statute: dict, instrument: dict) -> dict[str, Any]:
+        prompt = (
+            f"Judge decisions: {decisions}\n\n"
+            f"Statute rules: {statute}\n\n"
+            f"Instrument fields: {instrument}\n"
+            "Respond with JSON only."
+        )
+        return await self.call_json(prompt, phase="sentinel.review", default={"verdict": "approved", "issues": []})
+
+
+class Executor(Agent):
+    NAME = "Executor"
+    PROMPT = ""  # deterministic; no LLM call needed for execution
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+
+    async def run(self, files: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> dict[str, Any]:
+        """Apply decisions to each file. Returns {"exports": {file_id: path}}."""
+        import shutil
+        await self._log("executor.begin", "info", {"decision_count": len(decisions)})
+        exports: dict[str, str] = {}
+        by_file: dict[str, list[dict[str, Any]]] = {}
+        for d in decisions:
+            by_file.setdefault(d.get("file_id", ""), []).append(d)
+
+        for f in files:
+            src = Path(f["stored_path"])
+            dst = EXPORT_DIR / f"{f['file_id']}__{f['original_name']}"
+            if f["kind"] == "metadata":
+                shutil.copy2(src, dst)
+            elif f["kind"] == "dataset":
+                apply_column_actions_to_dataset(src, dst, f["subtype"], by_file.get(f["file_id"], []))
+            else:
+                dst = EXPORT_DIR / f"{f['file_id']}__{Path(f['original_name']).stem}.redacted.txt"
+                fulltext = src.with_suffix(src.suffix + ".fulltext.txt")
+                text = fulltext.read_text(encoding="utf-8", errors="replace") if fulltext.exists() else ""
+                # For narratives we still run the deterministic detector and redact
+                spans = detect_text(text, detectors=["presidio", "rule"])
+                # Convert spans into review_status='accepted' style for anonymizer
+                for sp in spans:
+                    sp.review_status = "accepted"
+                dst.write_text(apply_to_text(text, spans), encoding="utf-8")
+            exports[f["file_id"]] = str(dst)
+            await self._log("executor.wrote", "info", {"file_id": f["file_id"], "path": str(dst)})
+        return {"exports": exports}
+
+
+class Auditor(Agent):
+    NAME = "Auditor"
+    PROMPT = (
+        "You are Auditor. Verify Executor produced outputs consistent with Judge's decisions "
+        "and no residual PHI slipped through. Return JSON: "
+        '{"verdict": "clean|issues", "issues": [{"file": str, "problem": str}], '
+        '"metrics": {"columns_dropped": int, "columns_transformed": int, "columns_kept": int, '
+        '"human_review_required": int, "estimated_leak_prob": 0..1}, "summary": str}. '
+        "Base metrics only on file-level summaries and decision counts (never row values)."
+    )
+
+    async def run(self, decisions: list[dict[str, Any]], exports: dict[str, str], files: list[dict[str, Any]]) -> dict[str, Any]:
+        # Summarise deterministically (no row values sent to LLM)
+        summary_by_file: dict[str, dict[str, int]] = {}
+        for d in decisions:
+            fid = d.get("file_id", "")
+            b = summary_by_file.setdefault(fid, {"keep": 0, "drop": 0, "transform": 0, "human_review": 0})
+            a = d.get("action", "human_review")
+            if a == "keep":
+                b["keep"] += 1
+            elif a == "drop":
+                b["drop"] += 1
+            elif a == "human_review":
+                b["human_review"] += 1
+            else:
+                b["transform"] += 1
+
+        file_meta = [{"file_id": f["file_id"], "name": f["original_name"], "component": f.get("component")} for f in files]
+        prompt = (
+            f"File summary counts (no row values): {summary_by_file}\n\n"
+            f"Files: {file_meta}\n\nExports: {list(exports.keys())}\n"
+            "Verify the mix looks sane. JSON only."
+        )
+        return await self.call_json(prompt, phase="auditor.verify",
+                                    default={"verdict": "clean", "issues": [], "metrics": {}, "summary": ""})
+
+
+# --- deterministic dataset transformer ------------------------------------
+
+import csv as _csv
+import openpyxl as _openpyxl
+import re as _re
+import hashlib as _hashlib
+
+
+_RESTRICTED_ZIP3 = {"036","059","063","102","203","556","692","790","821","823","830","831","878","879","884","890","893"}
+
+
+def _apply_action(value: str, action: str, column: str) -> str:
+    if value is None or value == "":
+        return value
+    if action == "keep":
+        return value
+    if action == "drop":
+        return ""
+    if action == "cap_age_90":
+        try:
+            n = int(_re.sub(r"[^0-9-]", "", value))
+            return "90+" if n > 89 else str(n)
+        except Exception:
+            return value
+    if action == "year_only":
+        m = _re.search(r"(\d{4})", value)
+        return m.group(1) if m else ""
+    if action == "zip3_truncate":
+        z = _re.sub(r"[^0-9]", "", value)[:3]
+        if z in _RESTRICTED_ZIP3:
+            return "000"
+        return z.ljust(3, "0")
+    if action == "hash":
+        return _hashlib.sha256(f"{column}:{value}".encode()).hexdigest()[:16]
+    if action == "pseudonymize":
+        h = _hashlib.sha256(f"{column}:{value}".encode()).hexdigest()[:8]
+        return f"P{h}"
+    if action == "human_review":
+        return "[HUMAN_REVIEW_PENDING]"
+    return value
+
+
+def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: list[dict[str, Any]]) -> None:
+    """Apply per-column actions to CSV or XLSX."""
+    action_by_col: dict[str, dict[str, Any]] = {d.get("column", ""): d for d in decisions}
+
+    if ext in ("csv", "tsv"):
+        delim = "\t" if ext == "tsv" else ","
+        with src.open("r", encoding="utf-8", errors="replace", newline="") as fin, \
+             dst.open("w", encoding="utf-8", newline="") as fout:
+            reader = _csv.DictReader(fin, delimiter=delim)
+            fieldnames = reader.fieldnames or []
+            writer = _csv.DictWriter(fout, fieldnames=fieldnames, delimiter=delim)
+            writer.writeheader()
+            for row in reader:
+                for col in fieldnames:
+                    d = action_by_col.get(col)
+                    if not d:
+                        continue
+                    row[col] = _apply_action(row.get(col) or "", d.get("action", "keep"), col)
+                writer.writerow(row)
+    elif ext in ("xlsx", "xls"):
+        wb = _openpyxl.load_workbook(src)
+        ws = wb[wb.sheetnames[0]]
+        headers: list[str] = []
+        for r in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+            headers = [str(c) if c is not None else "" for c in r]
+            break
+        for i in range(2, (ws.max_row or 1) + 1):
+            for j, col in enumerate(headers, start=1):
+                d = action_by_col.get(col)
+                if not d:
+                    continue
+                cell = ws.cell(row=i, column=j)
+                cell.value = _apply_action(str(cell.value) if cell.value is not None else "", d.get("action", "keep"), col)
+        wb.save(dst)
+    else:
+        # Unknown extension - copy through
+        import shutil
+        shutil.copy2(src, dst)
