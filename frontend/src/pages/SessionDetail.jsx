@@ -24,12 +24,15 @@ export default function SessionDetail() {
   const [busy, setBusy] = useState(false);
   const esRef = useRef(null);
 
+  const [notFound, setNotFound] = useState(false);
   const refresh = async () => {
     const [s, r, t] = await Promise.all([
-      getSession(sid),
+      getSession(sid).catch(() => null),
       axios.get(`${API}/sessions/${sid}/results`).then(r => r.data).catch(() => null),
       axios.get(`${API}/sessions/${sid}/agent-trace?limit=500`).then(r => r.data.messages).catch(() => []),
     ]);
+    if (!s) { setNotFound(true); return; }
+    setNotFound(false);
     setSession(s);
     setResults(r);
     setTrace(t || []);
@@ -93,6 +96,13 @@ export default function SessionDetail() {
     } finally { setBusy(false); }
   };
 
+  if (notFound) return (
+    <div className="p-6 font-mono text-xs" data-testid="session-not-found">
+      <div className="text-reject uppercase tracking-widest text-[10px] mb-2">Study not found</div>
+      <div className="text-text-secondary">No study exists with id <span className="text-text-primary">{sid}</span>.</div>
+      <div className="mt-3"><a href="/studies" className="text-phi underline">Back to studies</a></div>
+    </div>
+  );
   if (!session) return <div className="p-4 font-mono text-xs text-text-muted">loading...</div>;
 
   const decisions = results?.decisions || [];
