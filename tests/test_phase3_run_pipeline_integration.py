@@ -658,7 +658,7 @@ def test_real_run_and_decision_flow_refreshes_declared_missing_support(
         "datasets/alpha.csv"
     ]
     assert len(stored_dependencies) == 1
-    assert stored_dependencies[0]["recommendation_id"] == refreshed.recommendation_id
+    assert stored_dependencies[0]["dataset_source_artifact_id"] == _DATASET_ONE
     assert stored_dependencies[0]["support_artifact_id"] == _SUPPORT_ONE
     assert (
         dependency_review.load_study_dependency_decisions("Study")

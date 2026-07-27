@@ -1161,7 +1161,7 @@ def test_decide_dependency_updates_only_manifest_dependency_fields_and_appends_e
     assert manifest["dataset_dependencies"]["datasets/other.csv"] == []
     assert manifest["dataset_dependencies"]["datasets/labs.csv"] == [
         {
-            "dataset_artifact_id": A,
+            "dataset_source_artifact_id": A,
             "dataset_source_sha256": rec.dataset_sha256,
             "support": "dictionary_mapping/labs.csv",
             "support_artifact_id": B,
@@ -1170,10 +1170,8 @@ def test_decide_dependency_updates_only_manifest_dependency_fields_and_appends_e
             "level": "helpful",
             "sensitivity": "non_confidential",
             "reason_code": "only_interpretation",
-            "recommendation_id": DR,
-            "basis": rec.basis.to_json(),
-            "confirmed_by": "reviewer-id",
-            "confirmed_at": decision.decided_at,
+            "declared_by": "reviewer-id",
+            "declared_at": decision.decided_at,
         }
     ]
     decisions_path = manifest_path.parent / "dependency_decisions.jsonl"

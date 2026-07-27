@@ -626,8 +626,15 @@ def _manifest_dependency_record(
     private: PrivateDependencyRecommendation,
     decision: DependencyDecision,
 ) -> dict[str, Any]:
+    # Keys here MUST match scripts.extraction.forms_manifest._ALLOWED_DEP_KEYS
+    # exactly -- that module is the reader of this same _forms_manifest.yaml
+    # dataset_dependencies record and rejects any unknown/missing key with
+    # ManifestMismatchError on the very next organize/run. recommendation_id
+    # and basis are deliberately NOT included: both are already captured in
+    # full in dependency_decisions.jsonl (the audit trail), and including
+    # them here would add keys _ALLOWED_DEP_KEYS does not recognize.
     return {
-        "dataset_artifact_id": recommendation.dataset_artifact_id,
+        "dataset_source_artifact_id": recommendation.dataset_artifact_id,
         "dataset_source_sha256": recommendation.dataset_sha256,
         "support": private.support_path,
         "support_artifact_id": recommendation.support_artifact_id,
@@ -636,10 +643,8 @@ def _manifest_dependency_record(
         "level": decision.level.value,
         "sensitivity": decision.sensitivity.value,
         "reason_code": recommendation.reason_code.value,
-        "recommendation_id": recommendation.recommendation_id,
-        "basis": recommendation.basis.to_json(),
-        "confirmed_by": decision.decided_by,
-        "confirmed_at": decision.decided_at,
+        "declared_by": decision.decided_by,
+        "declared_at": decision.decided_at,
     }
 
 
