@@ -570,7 +570,31 @@ async def session_handle(sid: str):
 
     async def worker():
         try:
-            await db.sessions.update_one({"id": sid}, {"$set": {"status": "classifying"}})
+            await db.sessions.update_one({"id": sid}, {"$set": {"status": "reading"}})
+            # Populate dataset headers (LLM never sees rows). Persist onto session before pipeline runs.
+            from phi_core.file_readers import read_csv_columns, read_xlsx_columns, read_parquet_columns
+            files_hydrated = []
+            for f in session.get("files", []):
+                if f.get("kind") == "dataset" and not f.get("columns"):
+                    p = Path(f["stored_path"])
+                    ext = f.get("subtype", "").lower()
+                    try:
+                        if ext in ("csv", "tsv"):
+                            cols, rows = read_csv_columns(p)
+                        elif ext in ("xlsx", "xls"):
+                            cols, rows = read_xlsx_columns(p)
+                        elif ext == "parquet":
+                            cols, rows = read_parquet_columns(p)
+                        else:
+                            cols, rows = [], 0
+                        f["columns"] = cols
+                        f["row_count"] = rows
+                    except Exception as e:
+                        await _emit(sid, ProgressEvent(phase="reading", message=f"header extract failed for {f['original_name']}: {e}"))
+                files_hydrated.append(f)
+            session["files"] = files_hydrated
+            await db.sessions.update_one({"id": sid}, {"$set": {"files": files_hydrated, "status": "classifying"}})
+
             result = await run_agent_pipeline(session, db, cfg, emit_msg, on_phase)
             await _emit(sid, ProgressEvent(phase="complete", message=f"Pipeline done: {result.get('status')}", percent=100.0))
         except Exception as e:

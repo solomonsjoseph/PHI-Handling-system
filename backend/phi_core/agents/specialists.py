@@ -65,6 +65,11 @@ class Schema(Agent):
         lex_map = {c.get("name", "").lower(): c for c in lexicon_columns}
         for f in dataset_files:
             headers = f.get("columns", [])
+            if not headers:
+                # Fail loud instead of hallucinating - orchestrator must have populated columns before us.
+                await self._log(f"schema.error:{f['file_id']}", "info",
+                                {"error": "no headers provided", "file": f.get("original_name")})
+                continue
             # Enrich each header with any dictionary hint (no row values ever sent)
             enrichment = []
             for h in headers:

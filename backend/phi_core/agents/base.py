@@ -59,10 +59,18 @@ class Agent:
             await self.emit(msg)
 
     async def call(self, user_prompt: str, phase: str) -> str:
-        """LLM call with logging."""
+        """LLM call with logging and hard timeout."""
         await self._log(phase, "in", {"prompt_preview": user_prompt[:400]})
         t0 = time.perf_counter()
-        reply = await asyncio.to_thread(call_llm, self.PROMPT, user_prompt, self.llm)
+        try:
+            reply = await asyncio.wait_for(
+                asyncio.to_thread(call_llm, self.PROMPT, user_prompt, self.llm),
+                timeout=90.0,
+            )
+        except asyncio.TimeoutError:
+            dur = (time.perf_counter() - t0) * 1000
+            await self._log(phase, "out", {"error": "llm timeout after 90s"}, dur)
+            return ""
         dur = (time.perf_counter() - t0) * 1000
         await self._log(phase, "out", {"reply_preview": reply[:400]}, dur)
         return reply
