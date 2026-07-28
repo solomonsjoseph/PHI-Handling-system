@@ -79,6 +79,29 @@ Security audit returned FAIL with SEC-001..005. All fixed in this batch and cove
 - (d) Clinical / epidemiological signal preserved — HOLDS (age <=89 kept, year retained, non-PHI text preserved in scrub_text output).
 - (e) Cross-file pseudonym linkage on exact value match — HOLDS (verified live: `P001` -> same pseudonym in enrollment.csv AND visits.csv).
 
+### iteration_5 (fork) round-2 security audit residuals closed
+
+Second audit returned FAIL with 4 residuals + 1 new finding. All fixed in a second batch; testing_agent iteration_5 verdict: **fixed**.
+
+- **SEC-002 completion** — read endpoints now gated by `require_api_token` (no-op when `API_TOKEN` empty). `_scrub_session_document()` strips `stored_path` from every file record and blanks `export_paths` values while retaining keys for the UI. Applied to `GET /api/sessions`, `GET /api/sessions/{sid}`, `GET /api/sessions/{sid}/results`, `GET /api/sessions/{sid}/agent-trace`. Live verified: zero occurrences of `/app/data/exports` or `stored_path` in any response body.
+- **SEC-003 residual** — `validate_llm_base_url` now enforces a per-provider host allow-list (`PROVIDER_HOSTS` in `phi_core/security.py`): openai only accepts `api.openai.com`, anthropic only `api.anthropic.com`, gemini only `generativelanguage.googleapis.com`, openrouter `openrouter.ai`/`api.openrouter.ai`; emergent rejects any `base_url`. Attacker cannot silently repoint agents to a public exfiltration host. Live verified: POST `/api/settings/llm` with `provider=openai` + `base_url=https://evil.example.com/v1` returns HTTP 400.
+- **SEC-005 residual** — dropped the header-based `total_bytes` precheck (attackers can lie in the header). Sole authoritative aggregate cap is now `streamed_total` accumulated while decompressing, tripped at `INTAKE_MAX_TOTAL_BYTES` bytes actually written to disk. Header-based per-file precheck kept for early rejection; compression-ratio guard retained.
+- **SEC-006** — new finding. LLM was echoing raw patient names into `agent_decisions.reason` and `agent_log.payload.prompt_preview/reply_preview`, then read endpoints served them back. Fix in three layers:
+  1. `scrub_persisted_text()` in `phi_core/security.py` redacts names/phones/emails/SSNs to `[A]/[D]/[F]/[G]` placeholders.
+  2. `scrub_decision()` scrubs decision string fields.
+  3. `scrub_nested()` recursively walks dicts/lists/tuples so PHI hiding inside nested LLM payloads gets caught (fix for the failure iteration_4 flagged).
+  4. Applied at TWO points: (i) `orchestrator.py` scrubs `approved_decisions` and `sentinel` output BEFORE persisting; (ii) read endpoints scrub responses AFTER fetching, so even legacy sessions get scrubbed on the way out.
+
+**Testing evidence** — iteration_5 test report:
+- agent-trace body: 0 hits for "James Smith", 0 for phone, 0 for email, 0 for SSN; 26 messages still returned.
+- `/api/sessions/{sid}` body 49 KB: 0 PHI hits.
+- `/api/sessions/{sid}/results` body 31 KB: 0 PHI hits.
+- 60/60 unit tests green across all 6 security test files.
+
+**Frontend companion changes**:
+- `frontend/src/lib/api.js` `streamUrl` and `exportUrl` append `?token=` when localStorage has one, since `EventSource` and anchor-tag downloads cannot set headers.
+- Backend `require_api_token` dependency accepts either `X-API-Token` header or `?token=` query for these two paths.
+
 ## Minor items (from iteration_3, non-blocking)
 
 - Herald sometimes hits the 90s LLM timeout on the full manuscript draft. When it does, pipeline still completes; results.herald is empty and Sir can rerun.
