@@ -59,6 +59,26 @@ Every agent is a Claude Sonnet 4.5 call (Emergent Universal Key by default; BYO-
 - **SessionDetail runtime crash fixed**: `getSession(sid)` now catches 404 and renders a clean "study not found" state instead of an uncaught Promise rejection.
 - **Regression suite added** at `/app/backend/tests/test_scrub_and_pseudonym.py` (7 tests) and `/app/backend/tests/test_sentinel_hard_rules.py` (10 tests). All 17 green.
 
+### iteration_5 (fork) security audit findings closed
+
+Security audit returned FAIL with SEC-001..005. All fixed in this batch and covered by 47 green regression tests (`/app/backend/tests/test_security_*.py`).
+
+**Goal alignment for each fix** (per `/app/memory/GOAL.md`):
+
+- **SEC-001 (CRITICAL) closed** — serves "fail closed on unsafe input". Introduced `phi_core.paths.safe_join()` and `sanitise_filename()`. `/api/sessions/{sid}/upload` and `/api/sessions/{sid}/intake` now reject any filename that is absolute, contains a separator, resolves outside the session dir, or has NUL. Live curl with `../../../.env` filename returns HTTP 400.
+- **SEC-002 (HIGH) closed** — serves "the result can be shared without PHI leak". Mutating endpoints (`POST /api/sessions*`, `/upload`, `/intake`, `/handle`, `/run`, `/review`, `/finalize`, `/human-review`, `/corpus/generate`, `/benchmark/run`, `/settings/llm`) now require `X-API-Token: <API_TOKEN>` when the env var is set. Empty `API_TOKEN` keeps the preview open for local dev. Frontend attaches the token via axios interceptor sourced from `localStorage.phi_api_token`. `/api/sessions` list scrubbed of internal `stored_path`.
+- **SEC-003 (HIGH) closed** — serves "LLM never reads rows" (pipeline integrity). Default provider allow-list is `emergent | anthropic | openai | gemini | openrouter`. `openai_compatible` is only enabled when `ALLOWED_LLM_BASE_URL_HOSTS` is set explicitly, and `base_url` must be `https://` with a public IP (rejects loopback, RFC-1918, link-local, `169.254.169.254`, etc.). BYO API keys encrypted at rest via Fernet (`phi_core.crypto`) keyed by `APP_ENCRYPTION_KEY`.
+- **SEC-004 (HIGH) closed** — serves "zero PHI slips through, ever". Executor now runs the deterministic detector over `metadata` (dictionary/mapping) files instead of copying them verbatim; `apply_column_actions_to_dataset` fails closed by defaulting unmapped dataset columns to `drop` (or `scrub_text` when `PHI_UNMAPPED_COLUMN_ACTION=scrub_text`). Verified live: `columns.csv` export now contains `[A]`/`[D]`/`[X]` tags instead of raw "James Smith"/phone.
+- **SEC-005 (MED) closed** — serves "preview stays usable / fail closed on malformed ZIP". `unpack_zip` enforces total-uncompressed-size cap (`INTAKE_MAX_TOTAL_BYTES=1 GiB`), entry count cap (`INTAKE_MAX_ENTRIES=500`), per-entry compression-ratio cap (`INTAKE_MAX_RATIO=100`), and streams every entry through a 200 MB per-file cap. `/upload` and `/intake` bodies capped at `MAX_UPLOAD_BYTES=250 MB` via chunked streaming.
+- **Hardening**: `CORS_ALLOWED_ORIGINS` env pin (falls back to `*` for local dev only); BYO API key encrypted at rest with Fernet (`APP_ENCRYPTION_KEY` auto-generated on first save and persisted to `backend/.env`).
+
+**GOAL invariants after this batch** (`/app/memory/GOAL.md` cross-check):
+- (a) LLM never sees dataset row values — HOLDS (Schema headers-only + deterministic scrub_text + SEC-003 SSRF closure).
+- (b) Exports contain no residual raw PHI — HOLDS (SEC-004 fail-closed dictionary redaction + unmapped column default = drop).
+- (c) BYO API keys stored securely and never returned plaintext — HOLDS (SEC-003 Fernet encryption at rest; GET returns `api_key_set` boolean only).
+- (d) Clinical / epidemiological signal preserved — HOLDS (age <=89 kept, year retained, non-PHI text preserved in scrub_text output).
+- (e) Cross-file pseudonym linkage on exact value match — HOLDS (verified live: `P001` -> same pseudonym in enrollment.csv AND visits.csv).
+
 ## Minor items (from iteration_3, non-blocking)
 
 - Herald sometimes hits the 90s LLM timeout on the full manuscript draft. When it does, pipeline still completes; results.herald is empty and Sir can rerun.

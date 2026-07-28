@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import axios from 'axios';
-import { API } from '../lib/api';
+import { API, getApiToken, setApiToken } from '../lib/api';
 import { Btn, Panel, Tag } from '../components/ui';
 
 export default function Settings() {
@@ -9,6 +9,7 @@ export default function Settings() {
   const [providers, setProviders] = useState([]);
   const [apiKeySet, setApiKeySet] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [opToken, setOpToken] = useState(getApiToken());
 
   const load = async () => {
     const r = await axios.get(`${API}/settings/llm`).then(r => r.data);
@@ -18,6 +19,11 @@ export default function Settings() {
     setCfg(prev => ({ ...prev, ...rest }));
   };
   useEffect(() => { load(); }, []);
+
+  const saveOpToken = () => {
+    setApiToken(opToken);
+    toast(opToken ? 'Operator API token saved locally' : 'Operator API token cleared');
+  };
 
   const save = async () => {
     setBusy(true);
@@ -43,6 +49,31 @@ export default function Settings() {
 
   return (
     <div>
+      <Panel title="Operator API Token" cite="required only when the server sets API_TOKEN" testId="settings-token-panel">
+        <div className="grid grid-cols-2 gap-4">
+          <label className="block text-xs font-mono">
+            <div className="text-text-muted uppercase text-[10px] tracking-widest mb-1">
+              X-API-Token {opToken && <span className="text-accept">(set)</span>}
+            </div>
+            <input
+              type="password"
+              value={opToken}
+              onChange={e => setOpToken(e.target.value)}
+              placeholder="paste the server-side API_TOKEN value"
+              data-testid="settings-op-token"
+              className="w-full h-9 bg-surface border border-border px-2 text-text-primary"
+            />
+            <div className="text-[10px] text-text-muted mt-1">
+              Stored in browser localStorage only. Sent as <code>X-API-Token</code> on every mutating call.
+              Leave blank when the server has not configured <code>API_TOKEN</code>.
+            </div>
+          </label>
+          <div className="flex items-end">
+            <Btn variant="primary" onClick={saveOpToken} testId="btn-save-token">Save token</Btn>
+          </div>
+        </div>
+      </Panel>
+
       <Panel title="LLM Provider" cite="Every one of the 12 agents will use this model" testId="settings-llm-panel">
         <div className="grid grid-cols-2 gap-4">
           <label className="block text-xs font-mono">

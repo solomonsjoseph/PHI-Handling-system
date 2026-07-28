@@ -201,7 +201,11 @@ class Executor(Agent):
             src = Path(f["stored_path"])
             dst = EXPORT_DIR / f"{f['file_id']}__{f['original_name']}"
             if f["kind"] == "metadata":
-                shutil.copy2(src, dst)
+                # SEC-004 fail-closed: dictionary/mapping files can name PHI
+                # (column definitions, code labels) so we run the deterministic
+                # detector over them BEFORE they land in exports/. Never copy
+                # verbatim.
+                _redact_metadata_file(src, dst)
             elif f["kind"] == "dataset":
                 apply_column_actions_to_dataset(src, dst, f["subtype"], by_file.get(f["file_id"], []), registry)
             else:
@@ -350,8 +354,24 @@ def _apply_action(value: str, action: str, column: str, registry: "PseudonymRegi
 
 def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: list[dict[str, Any]],
                                     registry: "PseudonymRegistry | None" = None) -> None:
-    """Apply per-column actions to CSV or XLSX with an optional study-wide pseudonym registry."""
+    """Apply per-column actions to CSV or XLSX with an optional study-wide pseudonym registry.
+
+    SEC-004 fail-closed: any column present in the source but WITHOUT a
+    Judge/Sentinel decision is treated as ``drop`` (empty) rather than passed
+    through verbatim. Override via env ``PHI_UNMAPPED_COLUMN_ACTION`` to
+    ``scrub_text`` if the operator prefers redacted-in-place free-text.
+    """
+    import os as _os
     action_by_col: dict[str, dict[str, Any]] = {d.get("column", ""): d for d in decisions}
+    _default_action = _os.environ.get("PHI_UNMAPPED_COLUMN_ACTION", "drop").strip() or "drop"
+    if _default_action not in {"drop", "scrub_text"}:
+        _default_action = "drop"
+
+    def _decision_for(col: str) -> dict[str, Any]:
+        d = action_by_col.get(col)
+        if d is not None:
+            return d
+        return {"action": _default_action, "column": col, "reason": "SEC-004 fail-closed default"}
 
     if ext in ("csv", "tsv"):
         delim = "\t" if ext == "tsv" else ","
@@ -363,10 +383,8 @@ def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: l
             writer.writeheader()
             for row in reader:
                 for col in fieldnames:
-                    d = action_by_col.get(col)
-                    if not d:
-                        continue
-                    row[col] = _apply_action(row.get(col) or "", d.get("action", "keep"), col, registry)
+                    d = _decision_for(col)
+                    row[col] = _apply_action(row.get(col) or "", d.get("action", "drop"), col, registry)
                 writer.writerow(row)
     elif ext in ("xlsx", "xls"):
         wb = _openpyxl.load_workbook(src)
@@ -377,14 +395,49 @@ def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: l
             break
         for i in range(2, (ws.max_row or 1) + 1):
             for j, col in enumerate(headers, start=1):
-                d = action_by_col.get(col)
-                if not d:
-                    continue
+                d = _decision_for(col)
                 cell = ws.cell(row=i, column=j)
                 cell.value = _apply_action(str(cell.value) if cell.value is not None else "",
-                                           d.get("action", "keep"), col, registry)
+                                           d.get("action", "drop"), col, registry)
         wb.save(dst)
     else:
-        # Unknown extension - copy through
-        import shutil
-        shutil.copy2(src, dst)
+        # Unknown extension - SEC-004 fail closed: refuse to emit verbatim.
+        # Write a single-line marker file so the operator sees the block.
+        dst.write_text(
+            f"[REDACTED] source extension {ext!r} not supported by executor; "
+            f"content withheld to prevent PHI leak.\n",
+            encoding="utf-8",
+        )
+
+
+# --- SEC-004: deterministic metadata (dictionary) redaction ---------------
+
+def _redact_metadata_file(src: Path, dst: Path) -> None:
+    """Run Presidio + regex over every cell of a dictionary/mapping file and
+    write the redacted copy. Called by Executor for ``kind='metadata'``
+    artifacts because these files can name PHI in their code-label columns.
+    """
+    ext = src.suffix.lower().lstrip(".")
+    if ext in ("csv", "tsv"):
+        delim = "\t" if ext == "tsv" else ","
+        with src.open("r", encoding="utf-8", errors="replace", newline="") as fin, \
+             dst.open("w", encoding="utf-8", newline="") as fout:
+            reader = _csv.reader(fin, delimiter=delim)
+            writer = _csv.writer(fout, delimiter=delim)
+            for row in reader:
+                writer.writerow([_scrub_text_cell(c or "") for c in row])
+        return
+    if ext in ("xlsx", "xls"):
+        wb = _openpyxl.load_workbook(src)
+        ws = wb[wb.sheetnames[0]]
+        for row in ws.iter_rows(min_row=1):
+            for cell in row:
+                if cell.value is not None:
+                    cell.value = _scrub_text_cell(str(cell.value))
+        wb.save(dst)
+        return
+    # Unknown extension -> withhold entirely (fail closed).
+    dst.write_text(
+        f"[REDACTED] metadata extension {ext!r} not supported; withheld to prevent PHI leak.\n",
+        encoding="utf-8",
+    )

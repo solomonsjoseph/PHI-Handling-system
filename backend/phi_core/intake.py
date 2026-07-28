@@ -147,14 +147,26 @@ def _sha256_of(path: Path) -> str:
 def unpack_zip(zip_path: Path, dest_root: Path) -> tuple[list[str], str | None]:
     """Extract ZIP into dest_root. Returns (extracted_relpaths, error_or_None).
 
-    Rejects: absolute paths, path traversal, symlinks, files > 200 MB.
+    Rejects: absolute paths, path traversal, symlinks, individual files > 200 MB.
+    SEC-005 caps (env-overridable):
+      * total decompressed size <= INTAKE_MAX_TOTAL_BYTES (default 1 GiB)
+      * entry count <= INTAKE_MAX_ENTRIES (default 500)
+      * per-entry compression ratio <= INTAKE_MAX_RATIO (default 100x)
     Normalizes a single-root wrapper directory so top-level components are at dest_root.
     """
+    max_total = int(os.environ.get("INTAKE_MAX_TOTAL_BYTES", 1 << 30))          # 1 GiB
+    max_entries = int(os.environ.get("INTAKE_MAX_ENTRIES", 500))
+    max_ratio = int(os.environ.get("INTAKE_MAX_RATIO", 100))
+    per_file_cap = 200 * 1024 * 1024
+
     dest_root.mkdir(parents=True, exist_ok=True)
     extracted: list[str] = []
+    total_bytes = 0
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             infos = zf.infolist()
+            if len(infos) > max_entries:
+                return extracted, f"zip has {len(infos)} entries; cap is {max_entries}"
             # Detect single-root wrapper: every non-empty entry shares the same first-part.
             tops = set()
             for info in infos:
@@ -174,8 +186,17 @@ def unpack_zip(zip_path: Path, dest_root: Path) -> tuple[list[str], str | None]:
                     return extracted, f"unsafe path in zip: {name!r}"
                 if (info.external_attr >> 16) & 0xF000 == 0xA000:
                     return extracted, f"symlink in zip: {name!r}"
-                if info.file_size > 200 * 1024 * 1024:
+                if info.file_size > per_file_cap:
                     return extracted, f"file exceeds 200 MB: {name!r}"
+                # Compression-bomb guard: reject entries with an outrageous ratio.
+                if info.compress_size > 0 and info.file_size // max(info.compress_size, 1) > max_ratio:
+                    return extracted, (
+                        f"suspicious compression ratio for {name!r}: "
+                        f"{info.file_size}/{info.compress_size} (> {max_ratio}x)"
+                    )
+                total_bytes += info.file_size
+                if total_bytes > max_total:
+                    return extracted, f"total uncompressed size exceeds {max_total} bytes"
                 # strip single-root wrapper if applicable
                 rel_name = name
                 if strip_root:
@@ -186,11 +207,17 @@ def unpack_zip(zip_path: Path, dest_root: Path) -> tuple[list[str], str | None]:
                     continue
                 dst = dest_root / rel_name
                 dst.parent.mkdir(parents=True, exist_ok=True)
+                # Also enforce a streaming cap on decompressed bytes per file so
+                # a lying header (small file_size, huge stream) still trips.
+                written = 0
                 with zf.open(info) as src, dst.open("wb") as out:
                     while True:
                         chunk = src.read(1 << 20)
                         if not chunk:
                             break
+                        written += len(chunk)
+                        if written > per_file_cap:
+                            return extracted, f"streamed size exceeded 200 MB for {name!r}"
                         out.write(chunk)
                 extracted.append(rel_name)
     except zipfile.BadZipFile:

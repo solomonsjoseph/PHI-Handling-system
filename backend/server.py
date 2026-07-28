@@ -30,12 +30,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from phi_core.benchmark import run_benchmark
+from phi_core.crypto import decrypt_api_key, encrypt_api_key
 from phi_core.db import get_db
 from phi_core.generators import corpus_hash, generate, HIPAA_CATEGORIES
 from phi_core.intake import (
@@ -45,21 +46,50 @@ from phi_core.models import (
     BenchmarkRequest, CorpusRecord, CorpusRequest, DetectedSpan,
     FileArtifact, ProgressEvent, ReviewDecision, Session,
 )
+from phi_core.paths import UnsafePath, safe_join
 from phi_core.pipeline import (
     UPLOAD_DIR, anonymize_files, apply_reviews, classify_file, detect_file, ingest_file,
+)
+from phi_core.security import (
+    allowed_providers, require_api_token, validate_llm_base_url, validate_llm_provider,
 )
 from phi_core.agents import AgentMessage, LlmConfig, run_pipeline as run_agent_pipeline
 
 
 app = FastAPI(title="PHI Handling Console", version="2.0.0")
 
+_cors_env = os.environ.get("CORS_ALLOWED_ORIGINS", "").strip()
+_cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Hard cap on individual upload bytes (defense in depth alongside intake ZIP caps).
+_MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 250 * 1024 * 1024))
+
+
+async def _stream_to_disk(upload_file: UploadFile, dst_path: Path, max_bytes: int) -> int:
+    """Copy an UploadFile to disk with a hard byte cap. Returns bytes written."""
+    written = 0
+    with dst_path.open("wb") as out:
+        while True:
+            chunk = await upload_file.read(1 << 20)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > max_bytes:
+                out.close()
+                try:
+                    dst_path.unlink()
+                except OSError:
+                    pass
+                raise HTTPException(413, f"upload exceeds {max_bytes} byte limit")
+            out.write(chunk)
+    return written
 
 
 # --- In-memory progress queues per session (SSE) --------------------------
@@ -98,7 +128,7 @@ async def health():
 
 # --- Corpus ----------------------------------------------------------------
 
-@app.post("/api/corpus/generate")
+@app.post("/api/corpus/generate", dependencies=[Depends(require_api_token)])
 async def corpus_generate(req: CorpusRequest):
     records = generate(req.jurisdiction, req.seed, req.count_per_category, req.include_quasi_identifiers)
     corpus_id = f"corpus_{req.jurisdiction}_{req.seed}_{req.count_per_category}"
@@ -139,7 +169,7 @@ async def corpus_get(corpus_id: str, limit: int = 20):
 
 # --- Benchmark -------------------------------------------------------------
 
-@app.post("/api/benchmark/run")
+@app.post("/api/benchmark/run", dependencies=[Depends(require_api_token)])
 async def benchmark_run(req: BenchmarkRequest):
     db = get_db()
     corpus = await db.corpora.find_one({"id": req.corpus_id}, {"_id": 0})
@@ -173,7 +203,7 @@ class SessionCreate(BaseModel):
     jurisdiction: str = "us"
 
 
-@app.post("/api/sessions")
+@app.post("/api/sessions", dependencies=[Depends(require_api_token)])
 async def session_create(body: SessionCreate):
     s = Session(jurisdiction=body.jurisdiction)
     await get_db().sessions.insert_one(s.model_dump())
@@ -191,10 +221,16 @@ async def session_get(sid: str):
 @app.get("/api/sessions")
 async def session_list():
     cursor = get_db().sessions.find({}, {"_id": 0, "spans": 0, "progress": 0}).sort("created_at", -1).limit(50)
-    return {"sessions": [s async for s in cursor]}
+    out = []
+    async for s in cursor:
+        # SEC-002 hardening: never leak internal filesystem paths in list responses.
+        for f in s.get("files", []) or []:
+            f.pop("stored_path", None)
+        out.append(s)
+    return {"sessions": out}
 
 
-@app.post("/api/sessions/{sid}/upload")
+@app.post("/api/sessions/{sid}/upload", dependencies=[Depends(require_api_token)])
 async def session_upload(sid: str, file: UploadFile = File(...)):
     db = get_db()
     session = await db.sessions.find_one({"id": sid})
@@ -202,12 +238,14 @@ async def session_upload(sid: str, file: UploadFile = File(...)):
         raise HTTPException(404, "session not found")
     session_dir = UPLOAD_DIR / sid
     session_dir.mkdir(parents=True, exist_ok=True)
-    dst = session_dir / (file.filename or "upload.bin")
-    with dst.open("wb") as f:
-        shutil.copyfileobj(file.file, f)
+    try:
+        dst = safe_join(session_dir, file.filename, fallback="upload.bin")
+    except UnsafePath as e:
+        raise HTTPException(400, f"unsafe filename: {e}")
+    written = await _stream_to_disk(file, dst, _MAX_UPLOAD_BYTES)
     art = FileArtifact(
-        original_name=file.filename or "upload.bin",
-        size_bytes=dst.stat().st_size,
+        original_name=dst.name,
+        size_bytes=written,
         sha256="",
         kind="narrative",
         subtype="txt",
@@ -220,7 +258,7 @@ async def session_upload(sid: str, file: UploadFile = File(...)):
     return {"file_id": art.file_id, "stored_path": str(dst), "size_bytes": art.size_bytes}
 
 
-@app.post("/api/sessions/{sid}/intake")
+@app.post("/api/sessions/{sid}/intake", dependencies=[Depends(require_api_token)])
 async def session_intake(sid: str, file: UploadFile = File(...)):
     """Default entry: upload a ZIP with intake-manifest/v3 structure.
 
@@ -236,9 +274,9 @@ async def session_intake(sid: str, file: UploadFile = File(...)):
         raise HTTPException(400, "intake requires a .zip archive")
     session_dir = UPLOAD_DIR / sid
     session_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = session_dir / "intake.zip"
-    with zip_path.open("wb") as f:
-        shutil.copyfileobj(file.file, f)
+    # Filename is fixed server-side to close SEC-001; stream with a hard cap.
+    zip_path = safe_join(session_dir, "intake.zip", fallback="intake.zip")
+    await _stream_to_disk(file, zip_path, _MAX_UPLOAD_BYTES)
 
     manifest = build_manifest(sid, zip_path, session_dir / "unpacked")
 
@@ -359,7 +397,7 @@ async def intake_spec():
     }
 
 
-@app.post("/api/sessions/{sid}/run")
+@app.post("/api/sessions/{sid}/run", dependencies=[Depends(require_api_token)])
 async def session_run(sid: str):
     db = get_db()
     session = await db.sessions.find_one({"id": sid})
@@ -446,7 +484,7 @@ class ReviewSubmit(BaseModel):
     continue_iteration: bool = False
 
 
-@app.post("/api/sessions/{sid}/review")
+@app.post("/api/sessions/{sid}/review", dependencies=[Depends(require_api_token)])
 async def session_review(sid: str, body: ReviewSubmit):
     db = get_db()
     session = await db.sessions.find_one({"id": sid})
@@ -472,7 +510,7 @@ async def session_review(sid: str, body: ReviewSubmit):
     return {"status": new_status, "iteration": iteration, "span_count": len(spans)}
 
 
-@app.post("/api/sessions/{sid}/finalize")
+@app.post("/api/sessions/{sid}/finalize", dependencies=[Depends(require_api_token)])
 async def session_finalize(sid: str):
     db = get_db()
     session = await db.sessions.find_one({"id": sid})
@@ -508,8 +546,11 @@ async def session_export(sid: str, file_id: str):
 
 # --- LLM settings (BYO-key) ----------------------------------------------
 
+from typing import Literal
+
+
 class LlmSettings(BaseModel):
-    provider: str = "emergent"
+    provider: Literal["emergent", "anthropic", "openai", "gemini", "openrouter", "openai_compatible"] = "emergent"
     model: str = "claude-sonnet-4-5-20250929"
     api_key: str = ""
     base_url: str = ""
@@ -522,30 +563,41 @@ async def get_llm_settings():
     db = get_db()
     doc = await db.settings.find_one({"_id": "llm"}, {"_id": 0})
     if not doc:
-        return LlmSettings().model_dump() | {"providers": ["emergent","anthropic","openai","gemini","openrouter","openai_compatible"]}
+        return LlmSettings().model_dump() | {"providers": sorted(allowed_providers())}
     # never leak the api_key back verbatim
     if doc.get("api_key"):
         doc["api_key_set"] = True
         doc["api_key"] = ""
-    return doc | {"providers": ["emergent","anthropic","openai","gemini","openrouter","openai_compatible"]}
+    return doc | {"providers": sorted(allowed_providers())}
 
 
-@app.post("/api/settings/llm")
+@app.post("/api/settings/llm", dependencies=[Depends(require_api_token)])
 async def set_llm_settings(body: LlmSettings):
+    validate_llm_provider(body.provider)
+    validate_llm_base_url(body.base_url, body.provider)
     db = get_db()
-    await db.settings.replace_one({"_id": "llm"}, {"_id": "llm", **body.model_dump()}, upsert=True)
+    payload = body.model_dump()
+    # Encrypt at rest (SEC-003). Empty string means "keep existing".
+    existing = await db.settings.find_one({"_id": "llm"}, {"_id": 0}) or {}
+    if payload.get("api_key"):
+        payload["api_key"] = encrypt_api_key(payload["api_key"])
+    else:
+        payload["api_key"] = existing.get("api_key", "")
+    await db.settings.replace_one({"_id": "llm"}, {"_id": "llm", **payload}, upsert=True)
     return {"ok": True}
 
 
 async def _current_llm_cfg() -> LlmConfig:
     db = get_db()
     doc = await db.settings.find_one({"_id": "llm"}, {"_id": 0}) or {}
+    if doc.get("api_key"):
+        doc["api_key"] = decrypt_api_key(doc["api_key"])
     return LlmConfig.from_dict(doc)
 
 
 # --- Agent-driven PHI handling -------------------------------------------
 
-@app.post("/api/sessions/{sid}/handle")
+@app.post("/api/sessions/{sid}/handle", dependencies=[Depends(require_api_token)])
 async def session_handle(sid: str):
     """Run the full 12-agent PHI handling pipeline for this study."""
     db = get_db()
@@ -612,7 +664,7 @@ class HumanReviewSubmit(BaseModel):
     resolutions: list[dict]   # [{column, file_id, action, reason?, confidence?}]
 
 
-@app.post("/api/sessions/{sid}/human-review")
+@app.post("/api/sessions/{sid}/human-review", dependencies=[Depends(require_api_token)])
 async def session_human_review(sid: str, body: HumanReviewSubmit):
     """Operator resolves human_review decisions and resumes the pipeline tail
     (Executor -> Auditor -> Scout -> Ledger -> Herald)."""
