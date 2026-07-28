@@ -123,6 +123,15 @@ async def run_pipeline(
     await on_phase("executor", {"decision_count": len(approved_decisions)})
     exec_out = await Executor(**common).run(files=files, decisions=approved_decisions)
 
+    # 5b. Publish Guard: deterministic last-mile PHI scan on emitted exports.
+    # GOAL invariant: exports are only 'ready to share publicly' after this
+    # boundary check clears. Runs synchronously; downloads are 403 until clean.
+    from ..publish_guard import scan_all_exports as _scan_all_exports
+    guard_report = _scan_all_exports(exec_out["exports"]).to_dict()
+    await on_phase("publish_guard", {"status": guard_report["status"],
+                                     "scanned": guard_report["scanned"],
+                                     "blocked": guard_report["blocked"]})
+
     # 6. Auditor
     await on_phase("auditor", {})
     audit = await Auditor(**common).run(decisions=approved_decisions, exports=exec_out["exports"], files=files)
@@ -148,6 +157,7 @@ async def run_pipeline(
         "ledger": ledger,
         "herald": herald,
         "exports": exec_out["exports"],
+        "guard": guard_report,
     }
     await db.sessions.update_one(
         {"id": sid},
@@ -156,6 +166,7 @@ async def run_pipeline(
             "agent_ledger": ledger,
             "agent_herald": herald,
             "agent_scout": scout,
+            "guard_report": guard_report,
             "export_paths": exec_out["exports"],
             "status": "complete",
             "updated_at": datetime.now(timezone.utc).isoformat(),

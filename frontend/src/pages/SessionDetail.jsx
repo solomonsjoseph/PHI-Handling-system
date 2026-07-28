@@ -79,17 +79,27 @@ export default function SessionDetail() {
     } finally { setBusy(false); }
   };
 
+  const [reviewer, setReviewer] = useState(() => {
+    try { return window.localStorage.getItem('phi_reviewer_id') || ''; } catch (_) { return ''; }
+  });
+  const [reviewComment, setReviewComment] = useState('');
+
   const submitReview = async () => {
     const items = Object.entries(resolutions).map(([key, action]) => {
       const [file_id, ...rest] = key.split('|');
       return { file_id, column: rest.join('|'), action };
     });
     if (!items.length) { toast('Choose an action for each row first'); return; }
+    if (!reviewer.trim()) { toast('Reviewer id is required'); return; }
+    try { window.localStorage.setItem('phi_reviewer_id', reviewer.trim()); } catch (_) {}
     setBusy(true);
     try {
-      const r = await axios.post(`${API}/sessions/${sid}/human-review`, { resolutions: items });
+      const r = await axios.post(`${API}/sessions/${sid}/human-review`, {
+        resolutions: items, reviewer: reviewer.trim(), comment: reviewComment,
+      });
       toast(`Review submitted (${r.data.status})`);
       setResolutions({});
+      setReviewComment('');
       await refresh();
     } catch (e) {
       toast(`review failed: ${e?.response?.data?.detail || e.message}`);
@@ -198,34 +208,113 @@ export default function SessionDetail() {
             </tbody>
           </table>
           {humanNeeded && humanRows.length > 0 && !isComplete && (
-            <div className="mt-3 flex items-center gap-3" data-testid="human-review-bar">
-              <div className="font-mono text-[10px] text-text-muted uppercase tracking-widest">Human decision required on {humanRows.length} column(s)</div>
-              <Btn variant="primary" onClick={submitReview} disabled={busy || Object.keys(resolutions).length === 0} testId="btn-submit-human-review">
-                Submit ({Object.keys(resolutions).length}/{humanRows.length})
-              </Btn>
+            <div className="mt-3 space-y-2" data-testid="human-review-bar">
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  data-testid="reviewer-id"
+                  placeholder="Reviewer id (required)"
+                  value={reviewer}
+                  onChange={e => setReviewer(e.target.value)}
+                  className="h-8 bg-surface border border-border px-2 font-mono text-xs text-text-primary"
+                />
+                <input
+                  data-testid="reviewer-comment"
+                  placeholder="Comment (optional)"
+                  value={reviewComment}
+                  onChange={e => setReviewComment(e.target.value)}
+                  className="h-8 bg-surface border border-border px-2 font-mono text-xs text-text-primary"
+                />
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="font-mono text-[10px] text-text-muted uppercase tracking-widest">Human decision required on {humanRows.length} column(s)</div>
+                <Btn variant="primary" onClick={submitReview} disabled={busy || Object.keys(resolutions).length === 0 || !reviewer.trim()} testId="btn-submit-human-review">
+                  Submit ({Object.keys(resolutions).length}/{humanRows.length})
+                </Btn>
+              </div>
             </div>
           )}
         </Panel>
       )}
 
       {/* Exports */}
+      {/* Publish Guard: last-mile deterministic PHI scan on emitted exports */}
+      {isComplete && results?.guard && (
+        <Panel
+          title="Publish Guard"
+          cite="Deterministic residual-PHI scan on emitted exports — GOAL boundary"
+          testId="publish-guard-panel"
+          right={
+            <Tag
+              color={results.guard.status === 'clean' ? 'accept' : 'reject'}
+              testId="publish-guard-status"
+            >
+              {results.guard.status === 'clean' ? 'PHI-HANDLED ✓ SAFE TO SHARE' : 'BLOCKED'}
+            </Tag>
+          }
+        >
+          <div className="font-mono text-xs text-text-primary">
+            Scanned {results.guard.scanned} file(s); blocked {results.guard.blocked}.
+          </div>
+          {results.guard.blocked > 0 && (
+            <div className="mt-3 space-y-2">
+              {(results.guard.results || []).filter(r => r.status === 'blocked').map((r, i) => (
+                <div key={i} className="border border-reject p-2 font-mono text-xs" data-testid={`guard-block-${i}`}>
+                  <div className="text-reject uppercase text-[10px] tracking-widest mb-1">
+                    {r.file_path.split('/').pop()} — {(r.findings || []).length} finding(s)
+                  </div>
+                  {(r.findings || []).slice(0, 5).map((f, j) => (
+                    <div key={j} className="text-text-secondary">
+                      L{f.line} • {f.pattern_id} • cat {f.hipaa_category} • sample {f.sample}
+                    </div>
+                  ))}
+                  {(r.findings || []).length > 5 && (
+                    <div className="text-text-muted">…{(r.findings || []).length - 5} more</div>
+                  )}
+                </div>
+              ))}
+              <div className="text-[10px] text-text-muted">
+                Downloads are blocked until the pipeline handles these columns. Add a rule, tighten a decision, and re-run.
+              </div>
+            </div>
+          )}
+        </Panel>
+      )}
+
       {isComplete && Object.keys(exports).length > 0 && (
         <Panel title="Exports Ready" cite="PHI-handled outputs safe to share with any AI" testId="exports-panel"
           right={<Tag color="accept" testId="exports-count">{Object.keys(exports).length} files</Tag>}
         >
           <div className="grid grid-cols-3 gap-3">
-            {(session.files || []).filter(f => exports[f.file_id]).map(f => (
-              <a
-                key={f.file_id}
-                href={exportUrl(sid, f.file_id)}
-                className="border border-accept p-3 hover:bg-accept hover:text-white transition-colors block"
-                data-testid={`export-card-${f.file_id}`}
-              >
-                <div className="font-mono text-[10px] uppercase tracking-widest text-text-muted mb-1">{f.component || f.kind}</div>
-                <div className="font-mono text-xs text-text-primary break-all">{f.original_name}</div>
-                <div className="font-mono text-[10px] mt-1 opacity-70">download &darr;</div>
-              </a>
-            ))}
+            {(session.files || []).filter(f => exports[f.file_id]).map(f => {
+              const guardResult = (results?.guard?.results || []).find(r => r.file_id === f.file_id);
+              const blocked = guardResult && guardResult.status === 'blocked';
+              const cls = blocked
+                ? 'border border-reject p-3 opacity-60 cursor-not-allowed block'
+                : 'border border-accept p-3 hover:bg-accept hover:text-white transition-colors block';
+              const inner = (
+                <>
+                  <div className="font-mono text-[10px] uppercase tracking-widest text-text-muted mb-1">{f.component || f.kind}</div>
+                  <div className="font-mono text-xs text-text-primary break-all">{f.original_name}</div>
+                  <div className="font-mono text-[10px] mt-1 opacity-70">
+                    {blocked ? 'blocked by publish guard' : 'download ↓'}
+                  </div>
+                </>
+              );
+              return blocked ? (
+                <div key={f.file_id} className={cls} data-testid={`export-blocked-${f.file_id}`} title="Publish Guard blocked this file">
+                  {inner}
+                </div>
+              ) : (
+                <a
+                  key={f.file_id}
+                  href={exportUrl(sid, f.file_id)}
+                  className={cls}
+                  data-testid={`export-card-${f.file_id}`}
+                >
+                  {inner}
+                </a>
+              );
+            })}
           </div>
         </Panel>
       )}

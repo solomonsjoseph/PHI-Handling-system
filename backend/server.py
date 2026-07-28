@@ -557,7 +557,15 @@ async def session_finalize(sid: str):
 
 
 @app.get("/api/sessions/{sid}/export/{file_id}", dependencies=[Depends(require_api_token)])
-async def session_export(sid: str, file_id: str):
+async def session_export(sid: str, file_id: str, force: bool = False):
+    """Download the PHI-handled export.
+
+    GOAL boundary: this is the point where 'input PHI data' becomes 'output
+    ready to share publicly'. Refuse the download unless the Publish Guard
+    marked this specific file 'clean' or 'skipped'. Set ``?force=true`` to
+    override (recorded on the session document; use only after the operator
+    has manually reviewed the findings).
+    """
     db = get_db()
     session = await db.sessions.find_one({"id": sid}, {"_id": 0})
     if not session:
@@ -565,6 +573,14 @@ async def session_export(sid: str, file_id: str):
     path = (session.get("export_paths") or {}).get(file_id)
     if not path or not Path(path).exists():
         raise HTTPException(404, "export not ready")
+    guard = session.get("guard_report") or {}
+    per_file = next((r for r in (guard.get("results") or []) if r.get("file_id") == file_id), None)
+    status = (per_file or {}).get("status") if per_file else guard.get("status")
+    if status == "blocked" and not force:
+        raise HTTPException(403, {
+            "detail": "Publish Guard blocked this export: residual PHI detected.",
+            "guard": per_file,
+        })
     return FileResponse(path, filename=Path(path).name)
 
 
@@ -686,14 +702,24 @@ async def session_handle(sid: str):
 
 class HumanReviewSubmit(BaseModel):
     resolutions: list[dict]   # [{column, file_id, action, reason?, confidence?}]
+    reviewer: str = ""        # required: identity of the reviewer (email / initials / handle)
+    comment: str = ""         # optional narrative for the audit trail
 
 
 @app.post("/api/sessions/{sid}/human-review", dependencies=[Depends(require_api_token)])
 async def session_human_review(sid: str, body: HumanReviewSubmit):
     """Operator resolves human_review decisions and resumes the pipeline tail
-    (Executor -> Auditor -> Scout -> Ledger -> Herald)."""
+    (Executor -> Auditor -> Scout -> Ledger -> Herald).
+
+    Per GOAL "human review invariant": every human decision must carry
+    reviewer id + comment + timestamp. `reviewer` is required non-empty.
+    """
     from phi_core.agents.reasoning import Executor, Auditor
     from phi_core.agents.outward import Scout, Ledger, Herald
+
+    reviewer = (body.reviewer or "").strip()
+    if not reviewer:
+        raise HTTPException(400, "reviewer identity is required (GOAL human review invariant)")
 
     db = get_db()
     session = await db.sessions.find_one({"id": sid})
@@ -701,15 +727,30 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
         raise HTTPException(404, "session not found")
 
     decisions = list(session.get("agent_decisions", []))
+    ts = datetime.now(timezone.utc).isoformat()
     by_key = {(r.get("file_id",""), r.get("column","")): r for r in body.resolutions}
+    per_decision_reviewed = False
     for d in decisions:
         k = (d.get("file_id",""), d.get("column",""))
         if d.get("action") == "human_review" and k in by_key:
             r = by_key[k]
             d["action"] = r.get("action", "human_review")
-            d["reason"] = "human decision: " + (r.get("reason") or "")
+            d["reason"] = f"human decision by {reviewer}: " + (r.get("reason") or body.comment or "")
             d["confidence"] = 1.0
-            d["reviewer"] = "human"
+            d["reviewer"] = reviewer
+            d["reviewer_comment"] = body.comment
+            d["reviewed_at"] = ts
+            per_decision_reviewed = True
+
+    # GOAL human review invariant: capture reviewer + comment + timestamp on
+    # the session even when the operator accepted Sentinel-flagged decisions
+    # globally without changing any individual action.
+    session_review = {
+        "reviewer": reviewer,
+        "comment": body.comment,
+        "reviewed_at": ts,
+        "changed_decisions": per_decision_reviewed,
+    }
 
     # Any remaining unresolved?
     unresolved = [d for d in decisions if d.get("action") == "human_review"]
@@ -733,6 +774,9 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
             common = dict(session_id=sid, llm=cfg, db=db, emit=emit_msg)
             await db.sessions.update_one({"id": sid}, {"$set": {"status": "anonymizing", "agent_decisions": decisions, "human_review_required": False}})
             exec_out = await Executor(**common).run(files=files, decisions=decisions)
+            # Publish Guard on the fresh exports before we mark complete.
+            from phi_core.publish_guard import scan_all_exports as _scan_all_exports
+            guard_report = _scan_all_exports(exec_out["exports"]).to_dict()
             audit = await Auditor(**common).run(decisions=decisions, exports=exec_out["exports"], files=files)
             scout = await Scout(**common).run()
             ledger = await Ledger(**common).run(decisions=decisions, audit=audit, scout=scout, benchmark_result=None)
@@ -745,6 +789,8 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
                     "agent_ledger": ledger,
                     "agent_herald": herald,
                     "agent_scout": scout,
+                    "guard_report": guard_report,
+                    "session_review": session_review,
                     "export_paths": exec_out["exports"],
                     "status": "complete",
                     "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -791,6 +837,8 @@ async def session_results(sid: str):
         "ledger": scrubbed.get("agent_ledger"),
         "herald": scrubbed.get("agent_herald"),
         "scout": scrubbed.get("agent_scout"),
+        "guard": scrubbed.get("guard_report"),
+        "session_review": scrubbed.get("session_review"),
         "human_review_required": scrubbed.get("human_review_required", False),
     }
 

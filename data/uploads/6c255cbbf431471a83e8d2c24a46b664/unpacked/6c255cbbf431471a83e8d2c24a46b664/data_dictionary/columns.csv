@@ -1,0 +1,5 @@
+column_name,description,phi_flag
+patient_id,Study-assigned identifier (real value linked to James Smith),Y
+patient_name,Full patient name,Y
+dob,Date of birth,Y
+notes,Free-text clinician notes possibly containing PHI 415-555-1234 example,N
