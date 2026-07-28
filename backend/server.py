@@ -215,38 +215,25 @@ def _scrub_session_document(doc: dict) -> dict:
 
     SEC-002 completion + SEC-006: read endpoints must never leak internal
     layout (`stored_path`, `export_paths`) or raw PHI substrings the LLM may
-    have echoed into agent notes.
+    have echoed into agent notes. Uses recursive `scrub_nested` so PHI
+    hiding in nested dicts/lists is caught too.
     """
-    from phi_core.security import scrub_persisted_text as _scrub  # local import to avoid cycles at load
+    from phi_core.security import scrub_nested as _scrub_nested
     if not doc:
         return doc
     for f in doc.get("files", []) or []:
         f.pop("stored_path", None)
     if "export_paths" in doc:
-        # Convert absolute paths to opaque file-ids so the export route still works.
+        # Convert absolute paths to opaque blank strings; keys retained so
+        # the UI still shows which file_ids are downloadable.
         doc["export_paths"] = {k: "" for k in (doc.get("export_paths") or {})}
-    for k in ("agent_decisions",):
-        vals = doc.get(k) or []
-        if isinstance(vals, list):
-            new = []
-            for d in vals:
-                if isinstance(d, dict):
-                    dd = dict(d)
-                    for field in ("reason", "citation", "notes", "evidence"):
-                        if isinstance(dd.get(field), str):
-                            dd[field] = _scrub(dd[field])
-                    new.append(dd)
-                else:
-                    new.append(d)
-            doc[k] = new
-    for k in ("agent_herald", "agent_ledger", "agent_scout", "agent_audit", "agent_sentinel_last"):
-        v = doc.get(k)
-        if isinstance(v, dict):
-            for field, fv in list(v.items()):
-                if isinstance(fv, str):
-                    v[field] = _scrub(fv)
-                elif isinstance(fv, list):
-                    v[field] = [_scrub(x) if isinstance(x, str) else x for x in fv]
+    for k in (
+        "agent_decisions", "agent_herald", "agent_ledger",
+        "agent_scout", "agent_audit", "agent_sentinel_last",
+        "agent_specialists", "agent_statute",
+    ):
+        if k in doc:
+            doc[k] = _scrub_nested(doc[k])
     return doc
 
 
@@ -777,16 +764,15 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
 @app.get("/api/sessions/{sid}/agent-trace", dependencies=[Depends(require_api_token)])
 async def session_agent_trace(sid: str, limit: int = 200):
     """Return the audit log of every agent message on this session."""
-    from phi_core.security import scrub_persisted_text as _scrub
+    from phi_core.security import scrub_nested as _scrub_nested
     db = get_db()
     cursor = db.agent_log.find({"session_id": sid}, {"_id": 0}).sort("ts", 1).limit(limit)
     msgs: list[dict] = []
     async for m in cursor:
-        # SEC-006: agent-trace stores LLM payloads that may echo dictionary/form PHI.
-        for key in ("payload", "message", "reason", "detail"):
-            if isinstance(m.get(key), str):
-                m[key] = _scrub(m[key])
-        msgs.append(m)
+        # SEC-006: agent-trace payloads are nested dicts (`prompt_preview`,
+        # `reply_preview`) that echo dictionary/form PHI. Scrub every
+        # string leaf recursively rather than only top-level string fields.
+        msgs.append(_scrub_nested(m))
     return {"messages": msgs}
 
 

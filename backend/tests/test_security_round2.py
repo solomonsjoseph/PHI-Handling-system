@@ -153,7 +153,79 @@ def test_session_get_scrubs_stored_path_and_export_paths():
 
 
 @pytestmark_live
+def test_agent_trace_recursively_scrubs_nested_payload():
+    """Reported by iteration_4 testing_agent: `payload` dict sub-keys
+    (`prompt_preview`, `reply_preview`) previously bypassed the isinstance-str
+    guard and leaked raw names/phones. Verify the recursive scrubber closes it.
+    """
+    import re as _re
+    phone = _re.compile(r"\b\d{3}[\s\-.]?\d{3}[\s\-.]?\d{4}\b")
+    email = _re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[A-Za-z]{2,}\b")
+    ssn = _re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+    r = requests.get(f"{BASE_URL}/api/sessions", timeout=10)
+    sessions = r.json().get("sessions", [])
+    if not sessions:
+        pytest.skip("no sessions available")
+    checked = 0
+    for s in sessions[:15]:
+        rr = requests.get(f"{BASE_URL}/api/sessions/{s['id']}/agent-trace?limit=200", timeout=15)
+        if rr.status_code != 200:
+            continue
+        txt = rr.text
+        assert not phone.search(txt), f"phone in agent-trace of {s['id']!r}"
+        assert not email.search(txt), f"email in agent-trace of {s['id']!r}"
+        assert not ssn.search(txt), f"SSN in agent-trace of {s['id']!r}"
+        assert "James Smith" not in txt, f"raw name in agent-trace of {s['id']!r}"
+        checked += 1
+    if checked == 0:
+        pytest.skip("no agent-trace payloads to inspect")
+
+
+def test_scrub_nested_walks_dicts_and_lists():
+    from phi_core.security import scrub_nested
+    payload = {
+        "prompt_preview": "James Smith called 415-555-1234 today.",
+        "reply_preview": "Contact: james@example.edu, SSN 111-22-3333.",
+        "meta": {"session": "abc", "notes": ["Mary Johnson", "call 212-555-9876"]},
+    }
+    out = scrub_nested(payload)
+    flat = str(out)
+    assert "James Smith" not in flat
+    assert "415-555-1234" not in flat
+    assert "james@example.edu" not in flat
+    assert "111-22-3333" not in flat
+    assert "Mary Johnson" not in flat
+    assert "212-555-9876" not in flat
+    # non-PHI fields survive
+    assert out["meta"]["session"] == "abc"
+
+
+@pytestmark_live
 def test_results_scrubs_reasons():
+    """No obvious PHI substrings should appear in decision reasons/citations."""
+    import re as _re
+    phone = _re.compile(r"\b\d{3}[\s\-.]?\d{3}[\s\-.]?\d{4}\b")
+    ssn = _re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+    email = _re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[A-Za-z]{2,}\b")
+    r = requests.get(f"{BASE_URL}/api/sessions", timeout=10)
+    sessions = r.json().get("sessions", [])
+    if not sessions:
+        pytest.skip("no sessions on this deployment")
+    checked = 0
+    for s in sessions[:20]:
+        rr = requests.get(f"{BASE_URL}/api/sessions/{s['id']}/results", timeout=10)
+        if rr.status_code != 200:
+            continue
+        for d in rr.json().get("decisions", []) or []:
+            for field in ("reason", "citation"):
+                v = d.get(field)
+                if isinstance(v, str):
+                    assert not phone.search(v), f"phone leaked: {v!r}"
+                    assert not ssn.search(v), f"SSN leaked: {v!r}"
+                    assert not email.search(v), f"email leaked: {v!r}"
+                    checked += 1
+    if checked == 0:
+        pytest.skip("no decisions with reason/citation available")
     """No obvious PHI substrings should appear in decision reasons/citations."""
     import re as _re
     phone = _re.compile(r"\b\d{3}[\s\-.]?\d{3}[\s\-.]?\d{4}\b")

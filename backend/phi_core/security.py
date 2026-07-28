@@ -167,6 +167,25 @@ def scrub_persisted_text(text: str) -> str:
     return out
 
 
+def scrub_nested(value: Any) -> Any:
+    """Recursively scrub PHI from any string leaf inside a dict/list/scalar.
+
+    Used by read endpoints that return LLM-authored blobs where PHI may
+    hide inside arbitrarily nested payloads (e.g. agent-trace messages
+    where ``payload`` is a dict of ``prompt_preview``/``reply_preview``
+    strings).
+    """
+    if isinstance(value, str):
+        return scrub_persisted_text(value)
+    if isinstance(value, dict):
+        return {k: scrub_nested(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [scrub_nested(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(scrub_nested(v) for v in value)
+    return value
+
+
 def scrub_decision(decision: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of ``decision`` with any free-text fields scrubbed."""
     out = dict(decision)
