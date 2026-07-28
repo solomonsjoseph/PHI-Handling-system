@@ -158,6 +158,19 @@ def _attestation_payload(session: dict[str, Any], file_hashes: dict[str, str]) -
     """Machine-readable attestation. All values plain JSON."""
     review = session.get("session_review") or {}
     guard = session.get("guard_report") or {}
+    # Reviewer trail: prefer session_review; fall back to the most recent
+    # per-decision reviewer for older sessions run before the session-level
+    # invariant landed.
+    reviewer = review.get("reviewer") or None
+    reviewer_comment = review.get("comment") or None
+    reviewed_at = review.get("reviewed_at") or None
+    if not reviewer:
+        for d in reversed(session.get("agent_decisions") or []):
+            if isinstance(d, dict) and d.get("reviewer"):
+                reviewer = d.get("reviewer")
+                reviewer_comment = d.get("reviewer_comment") or reviewer_comment
+                reviewed_at = d.get("reviewed_at") or reviewed_at
+                break
     return {
         "attestation_version": BUNDLE_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -170,9 +183,9 @@ def _attestation_payload(session: dict[str, Any], file_hashes: dict[str, str]) -
             "scanned": guard.get("scanned", 0),
             "blocked": guard.get("blocked", 0),
         },
-        "reviewer": review.get("reviewer") or None,
-        "reviewer_comment": review.get("comment") or None,
-        "reviewed_at": review.get("reviewed_at") or None,
+        "reviewer": reviewer,
+        "reviewer_comment": reviewer_comment,
+        "reviewed_at": reviewed_at,
         "files": file_hashes,
         "system": {
             "name": "PHI Console",

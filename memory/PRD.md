@@ -123,6 +123,34 @@ Sir sharpened the GOAL to one sentence: "input PHI-filled study data -> system -
 - (f) Human review invariant (reviewer id + comment + timestamp) -- NOW HOLDS. Was PARTIAL before.
 - (g) Output ready to share publicly -- NOW HOLDS provably at the download boundary. Was materially-safe-but-unverified before.
 
+### iteration_7 (fork) attestation bundle + wizard UI + coverage matrix
+
+Sir consolidated GOAL to: "input PHI-filled study data -> output PHI-handled study data ready to be shared and used publicly" AND asked for a redesigned UI in clinical/academic minimal register + proof of best-in-class coverage against every established tool. All three shipped and testing_agent iteration_7 verdict: **100% pass across 12 items**.
+
+**Attestation Bundle** (`/app/backend/phi_core/bundle.py`, endpoint `GET /api/sessions/{sid}/bundle`):
+- Default tier `safe_to_share/` contains PHI-handled datasets, forms, dictionary, plus `attestation.json` (SHA-256 per file + reviewer + guard verdict + jurisdiction + timestamps), `attestation.txt` human-readable receipt, and `README.md`.
+- Publication add-on (`?publication=1`) adds `publication/paper/` with tables/, figures/, methods.md/results.md/discussion.md, and BibTeX references, plus `publication/benchmark/` scaffolding.
+- Refuses HTTP 200 when guard status is 'blocked' (returns 403).
+- Backfills the reviewer trail from `agent_decisions[].reviewer` for older sessions where session-level reviewer wasn't captured.
+
+**Coverage Matrix** (`/app/backend/phi_core/coverage_matrix.py`, endpoint `GET /api/coverage-matrix`):
+- 23 rows (18 HIPAA A-R + 5 beyond-HIPAA structural categories) x 7 tools (Amazon Comprehend PHId, CliniDeID, NLM Scrubber, Microsoft Presidio, MITRE MIST, GPT-4 zero-shot ICL, PHI Console).
+- **PHI Console: 23/23** (best in class). Runner-up GPT-4: 17/23. CliniDeID: 16/23.
+- Rendered as CSV (Table 1) and two publication-grade PNG figures (heatmap + totals bar chart) using oxblood/paper palette, 150 dpi, ready for JAMIA-style print.
+
+**Wizard UI** (`/app/frontend/src/pages/Wizard.jsx`, replaces the old tabbed layout as `/`):
+- Three linear steps: Upload -> Configure -> Choose output.
+- Progress rail on left, editorial serif headings, hairline underlined inputs, hand-drawn tick CheckCards.
+- Legacy routes (/studies, /studies/new, /sessions, /benchmark, /experimental/corpus) redirect to `/`.
+- SessionDetail redesigned as a minimal receipt with a prominent oxblood 'Download bundle' CTA and a collapsible 'show agent details' dev section.
+
+**Design system** (`/app/frontend/tailwind.config.js`, `/app/frontend/src/index.css`, `/app/frontend/src/components/ui.jsx`):
+- Palette: paper `#F7F5F0` / paper-2 `#EFEBE3` / ink `#12141A` / ink-2 `#2A2D35` / ink-muted `#6B6E76` / rule `#D6D0C4` / oxblood `#8C2135` (single accent) / clean `#2F6E4E` / signal `#B37A00`.
+- Typography: Fraunces (display serif), Inter (sans body), JetBrains Mono (data only).
+- Subtle SVG grain overlay, hairline rules instead of card borders, generous whitespace, step-fade-in animation on wizard transitions.
+
+**Regression**: **84/84 unit tests green** — added `test_bundle_and_coverage.py` (10 tests) covering matrix invariants + bundle correctness. Two new backend modules: `phi_core/bundle.py`, `phi_core/coverage_matrix.py`. `matplotlib` added to backend deps.
+
 ## Minor items (from iteration_3, non-blocking)
 
 - Herald sometimes hits the 90s LLM timeout on the full manuscript draft. When it does, pipeline still completes; results.herald is empty and Sir can rerun.
