@@ -1,0 +1,30 @@
+PHI CONSOLE — ATTESTATION OF DE-IDENTIFICATION
+======================================================
+
+Session id       : d36e4593276a41e799be6738e496c1e3
+Generated at     : 2026-07-28T13:14:41.041529+00:00
+Jurisdiction     : us
+Method           : Safe Harbor + deterministic Publish Guard
+Regulation cite  : HIPAA Privacy Rule 45 CFR 164.514(b)(2)(i)
+
+Publish Guard    : clean  (4 file(s) scanned, 0 blocked)
+
+Reviewer         : (none)
+Reviewer comment : (none)
+Reviewed at      : (none)
+
+Files included in this bundle (SHA-256):
+  sha256:535060de40de1198493d3f7dc74b7130e31d4822c37d7130df1ba30885d68982  safe_to_share/dictionary/columns.csv
+  sha256:27821bbb83b24836bf63e796fd2407bc9577483c6f429eed2066dc4d9443c6f7  safe_to_share/datasets/enrollment.csv
+  sha256:5e128081c390a039b1e1c15784578fd6a92bf2e038d329561c8a729a05b8df32  safe_to_share/datasets/visits.csv
+  sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  safe_to_share/forms/consent.pdf
+
+This attestation is a machine-checkable receipt. Consumers of this bundle
+may re-hash every file and match against `attestation.json` to verify.
+
+GOAL invariants for this bundle:
+  (a) The LLM never read dataset row values — headers only.
+  (b) Every emitted file passed the deterministic Publish Guard.
+  (c) BYO API keys used during processing are Fernet-encrypted at rest.
+  (d) Clinical / epidemiological signal preserved by Safe Harbor transforms.
+  (e) Cross-file pseudonym linkage is exact-match, salted per study.

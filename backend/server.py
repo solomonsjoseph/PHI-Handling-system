@@ -32,7 +32,7 @@ load_dotenv()
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from phi_core.benchmark import run_benchmark
@@ -554,6 +554,40 @@ async def session_finalize(sid: str):
     await emit(ProgressEvent(phase="complete", message="All files anonymized and ready to export", percent=100.0))
     await emit(ProgressEvent(phase="__end__", message="stream end"))
     return {"status": "complete", "exports": exports}
+
+
+@app.get("/api/coverage-matrix")
+async def coverage_matrix_endpoint():
+    """Static coverage matrix used by the wizard result page and the bundle."""
+    from phi_core.coverage_matrix import COVERAGE, TOOLS, coverage_counts
+    return {"rows": COVERAGE, "tools": TOOLS, "counts": coverage_counts()}
+
+
+@app.get("/api/sessions/{sid}/bundle", dependencies=[Depends(require_api_token)])
+async def session_bundle(sid: str, publication: bool = False, attestation_pdf: bool = False):
+    """Assemble and stream the shareable bundle.
+
+    Query params:
+      - publication=1 : include the publication/ folder (coverage tables +
+        figures + paper drafts + benchmark scaffold).
+      - attestation_pdf=1 : reserved for signed PDF attestation.
+    """
+    from phi_core.bundle import BundleOptions, build_bundle
+    db = get_db()
+    session = await db.sessions.find_one({"id": sid}, {"_id": 0})
+    if not session:
+        raise HTTPException(404, "session not found")
+    guard = session.get("guard_report") or {}
+    if guard.get("status") == "blocked":
+        raise HTTPException(403, "Publish Guard blocked one or more files; fix the pipeline first.")
+    data, filename = build_bundle(session, BundleOptions(
+        include_publication=publication, include_attestation_pdf=attestation_pdf,
+    ))
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/sessions/{sid}/export/{file_id}", dependencies=[Depends(require_api_token)])

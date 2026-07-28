@@ -1,0 +1,32 @@
+{
+  "summary": "Iteration 7: Wizard UI + Attestation Bundle + Coverage Matrix. All 12 review items PASS. 83 passed + 1 skipped (env-conditional) across the 9 required unit-test files (= 84 total). Backend E2E on preview URL: GET /api/coverage-matrix -> 23 rows, 7 tools, counts EXACTLY {amazon_comprehend:12, clinideid:16, nlm_scrubber:10, presidio:9, mist:15, gpt4_icl:17, phi_console:23}, every row has phi_console=true. GET /api/sessions/d36e4593.../bundle -> HTTP 200 ZIP with safe_to_share/{README.md, attestation.json, attestation.txt}, datasets/{enrollment.csv, visits.csv}, dictionary/columns.csv, forms/consent.pdf. attestation.json has session_id, jurisdiction='us', publish_guard.status='clean', reviewer=null, files map with 4 entries all 'sha256:'+64hex. ?publication=1 adds publication/paper/{tables/table_1_category_coverage.csv, figures/fig1_category_coverage.png (183762 B), figures/fig2_category_totals.png (52620 B), methods.md, results.md, discussion.md, references.bib} and publication/benchmark/README.md. Table CSV: 24 lines, header includes 'phi_console' at index 9, all 23 data rows have '1'. Both figures > 5KB. Blocked path (cloned session 27d354a7... with guard_report.status='blocked') -> HTTP 403 body {\"detail\":\"Publish Guard blocked one or more files; fix the pipeline first.\"}. Frontend: / renders Wizard (data-testid upload-dropzone + wizard-rail with STEP ONE/TWO/THREE labels). Upload xfstudy.zip enables btn-next-step-2. Step 2 shows config-jurisdiction/provider/reviewer/comment; btn-next-step-3 disabled until reviewer filled, enables after. Step 3 shows check-safe (locked/always included), check-publication, check-pdf, btn-run-pipeline. /studies and /studies/new redirect to / (Wizard). /studies/{sid} renders SessionDetail with kicker 'RUN RECEIPT', Fraunces 'Handled.' headline, chip 'complete', btn-download-bundle enabled, publish-guard-panel with badge 'PHI-HANDLED · SAFE TO SHARE'.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_bundle_and_coverage.py",
+    "/app/backend/tests/test_publish_guard.py",
+    "/app/backend/tests/test_human_review_invariant.py",
+    "/app/backend/tests/test_security_round2.py",
+    "/app/backend/tests/test_security_paths.py",
+    "/app/backend/tests/test_security_llm_and_auth.py",
+    "/app/backend/tests/test_security_exports_and_zip.py",
+    "/app/backend/tests/test_sentinel_hard_rules.py",
+    "/app/backend/tests/test_scrub_and_pseudonym.py",
+    "/app/test_reports/pytest/iteration_7.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Attestation.json 'reviewer' is null for the clean d36e4593 session because the run happened before the reviewer-identity invariant landed. New runs will populate it, but consider a one-shot backfill from session.session_review.reviewer at bundle-build time so historical sessions surface the reviewer in the attestation as well.",
+    "bundle.py._render_coverage_png hardcodes matplotlib defaults; consider set_dpi/figsize consistency across fig1/fig2 so both PNGs render at the same DPI (fig1=183KB vs fig2=52KB — probably OK, but confirm both are 300 dpi for print).",
+    "Wizard 'Step ONE/TWO/THREE' labels are uppercased via CSS text-transform; test spec used mixed-case matching. Not a bug, but worth documenting in the a11y section (screen readers still read 'Step one/two/three').",
+    "Legacy redirects /studies and /studies/new go to Wizard (correct). Confirm SEO / bookmark handling in a follow-up (maybe 301 vs client-side redirect); currently done via <Navigate replace/> which is fine for SPA."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "N/A (API_TOKEN empty in preview)",
+  "seed_data_creation": "Cloned d36e4593... session as 27d354a71f194da2a4c8f6f8f3290638 with guard_report.status='blocked' to verify HTTP 403 on /bundle. Cleaned up after test.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "For blocked-bundle testing, clone a complete session and mutate guard_report.status='blocked' in Mongo (db.sessions). Preview URL: https://quality-enhance-9.preview.emergentagent.com. Session d36e4593276a41e799be6738e496c1e3 remains available (clean, guard=clean). Bundle default is ~few KB; publication bundle unzipped confirms table_1 columns order: hipaa_letter, category, group, amazon_comprehend, clinideid, nlm_scrubber, presidio, mist, gpt4_icl, phi_console.",
+  "rca of the issue": "N/A — no failures."
+}

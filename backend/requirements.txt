@@ -13,3 +13,4 @@ python-docx==1.1.2
 pypdf==5.0.1
 pyarrow==18.0.0
 emergentintegrations
+matplotlib==3.11.1

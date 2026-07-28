@@ -1,0 +1,24 @@
+hipaa_letter,category,group,amazon_comprehend,clinideid,nlm_scrubber,presidio,mist,gpt4_icl,phi_console
+A,Names,shared,1,1,1,1,1,1,1
+B,"Geographic subdivisions < state (address, city, county, ZIP)",shared,1,1,1,1,1,1,1
+C,Dates (except year) + ages > 89,specialty,0,1,1,1,1,1,1
+D,Telephone numbers,shared,1,1,1,1,1,1,1
+E,Fax numbers,shared,1,1,1,1,1,1,1
+F,Email addresses,specialty,1,1,0,1,1,1,1
+G,Social Security numbers,shared,1,1,1,1,1,1,1
+H,Medical record numbers,shared,1,1,1,0,1,1,1
+I,Health plan beneficiary numbers,shared,1,1,1,0,1,1,1
+J,Account numbers,shared,1,1,1,0,1,1,1
+K,Certificate / licence numbers,shared,1,1,1,0,1,1,1
+L,Vehicle identifiers / licence plates,specialty,0,1,0,0,1,1,1
+M,Device identifiers / serial numbers,specialty,0,1,0,0,1,1,1
+N,URLs,specialty,1,1,0,1,1,1,1
+O,IP addresses,specialty,1,1,0,1,1,1,1
+P,"Biometric identifiers (fingerprint, voice)",specialty,0,0,0,0,0,1,1
+Q,Full-face photographs / comparable images,specialty,0,0,0,0,0,0,1
+R,Any other unique identifying number / characteristic / code,specialty,0,1,0,0,0,1,1
+-,Structured dataset column classification (LLM headers-only),structured,0,0,0,0,0,0,1
+-,Data-dictionary / codebook cell scrubbing,structured,0,0,0,0,0,0,1
+-,"Cross-file exact-match pseudonym linkage (study-scoped, salted)",structured,0,0,0,0,0,0,1
+-,Fail-closed Publish Guard at download boundary,structured,0,0,0,0,0,0,1
+-,Human review invariant (reviewer id + comment + timestamp),structured,0,0,0,0,0,0,1

@@ -24,14 +24,13 @@ export default function Settings() {
     setApiToken(opToken);
     toast(opToken ? 'Operator API token saved locally' : 'Operator API token cleared');
   };
-
   const save = async () => {
     setBusy(true);
     try {
       await axios.post(`${API}/settings/llm`, cfg);
-      toast('LLM settings saved');
+      toast.success('LLM settings saved');
       await load();
-    } catch (e) { toast(`save failed: ${e?.response?.data?.detail || e.message}`); }
+    } catch (e) { toast.error(`save failed: ${e?.response?.data?.detail || e.message}`); }
     finally { setBusy(false); }
   };
 
@@ -47,131 +46,81 @@ export default function Settings() {
   const NEEDS_KEY = cfg.provider !== 'emergent';
   const NEEDS_BASE = cfg.provider === 'openai_compatible';
 
-  return (
+  const Field = ({ label, children, hint, required }) => (
     <div>
-      <Panel title="Operator API Token" cite="required only when the server sets API_TOKEN" testId="settings-token-panel">
-        <div className="grid grid-cols-2 gap-4">
-          <label className="block text-xs font-mono">
-            <div className="text-text-muted uppercase text-[10px] tracking-widest mb-1">
-              X-API-Token {opToken && <span className="text-accept">(set)</span>}
-            </div>
-            <input
-              type="password"
-              value={opToken}
-              onChange={e => setOpToken(e.target.value)}
-              placeholder="paste the server-side API_TOKEN value"
-              data-testid="settings-op-token"
-              className="w-full h-9 bg-surface border border-border px-2 text-text-primary"
-            />
-            <div className="text-[10px] text-text-muted mt-1">
-              Stored in browser localStorage only. Sent as <code>X-API-Token</code> on every mutating call.
-              Leave blank when the server has not configured <code>API_TOKEN</code>.
-            </div>
-          </label>
+      <div className="kicker">{label} {required && <span className="text-oxblood">(required)</span>}</div>
+      <div className="mt-2">{children}</div>
+      {hint && <div className="text-[12px] text-ink-muted mt-1.5">{hint}</div>}
+    </div>
+  );
+  const input = 'w-full h-11 bg-transparent border-b border-ink text-ink text-[15px] focus:border-oxblood';
+
+  return (
+    <div className="max-w-4xl mx-auto px-10 py-16">
+      <div className="kicker">Configuration</div>
+      <h1 className="font-display text-display-lg text-ink mt-2">Settings</h1>
+      <p className="text-body text-ink-2 mt-4 max-w-2xl">
+        The LLM model chosen here is used by every one of the twelve agents. The operator
+        token gates every mutating call when the server sets <span className="font-mono text-[13px]">API_TOKEN</span>.
+      </p>
+
+      <Panel title="Operator token" cite="only required when API_TOKEN is set on the server" testId="settings-token-panel">
+        <div className="grid grid-cols-2 gap-x-16 gap-y-6">
+          <Field label={<>X-API-Token {opToken && <Tag color="accept">set</Tag>}</>}
+                 hint="Stored in browser localStorage. Sent with every mutating call.">
+            <input type="password" value={opToken} onChange={e => setOpToken(e.target.value)}
+                   placeholder="paste the server-side API_TOKEN"
+                   data-testid="settings-op-token" className={input}/>
+          </Field>
           <div className="flex items-end">
             <Btn variant="primary" onClick={saveOpToken} testId="btn-save-token">Save token</Btn>
           </div>
         </div>
       </Panel>
 
-      <Panel title="LLM Provider" cite="Every one of the 12 agents will use this model" testId="settings-llm-panel">
-        <div className="grid grid-cols-2 gap-4">
-          <label className="block text-xs font-mono">
-            <div className="text-text-muted uppercase text-[10px] tracking-widest mb-1">Provider</div>
-            <select
-              value={cfg.provider}
-              onChange={e => setCfg({ ...cfg, provider: e.target.value })}
-              data-testid="settings-provider"
-              className="w-full h-9 bg-surface border border-border px-2 text-text-primary"
-            >
+      <Panel title="LLM provider" cite="every agent uses this model" testId="settings-llm-panel">
+        <div className="grid grid-cols-2 gap-x-16 gap-y-10">
+          <Field label="Provider" hint={cfg.provider === 'emergent' ? 'Uses the Emergent Universal Key. Zero-setup.' : 'Bring your own key. Stored Fernet-encrypted.'}>
+            <select value={cfg.provider} onChange={e => setCfg({ ...cfg, provider: e.target.value })}
+                    data-testid="settings-provider" className={input}>
               {providers.map(p => <option key={p} value={p}>{p}</option>)}
             </select>
-            <div className="text-[10px] text-text-muted mt-1">
-              {cfg.provider === 'emergent' && 'Uses the Emergent Universal Key already configured on the server. No user API key needed.'}
-              {cfg.provider !== 'emergent' && 'Bring your own API key. Stored in the local database.'}
-            </div>
-          </label>
-
-          <label className="block text-xs font-mono">
-            <div className="text-text-muted uppercase text-[10px] tracking-widest mb-1">Model</div>
-            <input
-              value={cfg.model}
-              onChange={e => setCfg({ ...cfg, model: e.target.value })}
-              data-testid="settings-model"
-              className="w-full h-9 bg-surface border border-border px-2 text-text-primary"
-            />
-            <div className="text-[10px] text-text-muted mt-1">{MODEL_HINT}</div>
-          </label>
-
+          </Field>
+          <Field label="Model" hint={MODEL_HINT}>
+            <input value={cfg.model} onChange={e => setCfg({ ...cfg, model: e.target.value })}
+                   data-testid="settings-model" className={input}/>
+          </Field>
           {NEEDS_KEY && (
-            <label className="block text-xs font-mono">
-              <div className="text-text-muted uppercase text-[10px] tracking-widest mb-1">
-                API Key {apiKeySet && <span className="text-accept">(currently set)</span>}
-              </div>
-              <input
-                type="password"
-                value={cfg.api_key}
-                onChange={e => setCfg({ ...cfg, api_key: e.target.value })}
-                placeholder={apiKeySet ? 'leave blank to keep existing' : 'paste your api key'}
-                data-testid="settings-api-key"
-                className="w-full h-9 bg-surface border border-border px-2 text-text-primary"
-              />
-            </label>
+            <Field label={<>API key {apiKeySet && <Tag color="accept">set</Tag>}</>}
+                   hint="Encrypted at rest. Leave blank to keep existing.">
+              <input type="password" value={cfg.api_key} onChange={e => setCfg({ ...cfg, api_key: e.target.value })}
+                     placeholder={apiKeySet ? 'leave blank to keep existing' : 'paste your key'}
+                     data-testid="settings-api-key" className={input}/>
+            </Field>
           )}
-
           {NEEDS_BASE && (
-            <label className="block text-xs font-mono">
-              <div className="text-text-muted uppercase text-[10px] tracking-widest mb-1">Base URL</div>
-              <input
-                value={cfg.base_url}
-                onChange={e => setCfg({ ...cfg, base_url: e.target.value })}
-                placeholder="https://your-endpoint.example.com/v1"
-                data-testid="settings-base-url"
-                className="w-full h-9 bg-surface border border-border px-2 text-text-primary"
-              />
-            </label>
+            <Field label="Base URL" hint="Only https and admin-allow-listed hosts accepted (SEC-003).">
+              <input value={cfg.base_url} onChange={e => setCfg({ ...cfg, base_url: e.target.value })}
+                     placeholder="https://your-endpoint.example.com/v1"
+                     data-testid="settings-base-url" className={input}/>
+            </Field>
           )}
-
-          <label className="block text-xs font-mono">
-            <div className="text-text-muted uppercase text-[10px] tracking-widest mb-1">Temperature</div>
-            <input
-              type="number" min={0} max={2} step={0.05}
-              value={cfg.temperature}
-              onChange={e => setCfg({ ...cfg, temperature: Number(e.target.value) })}
-              data-testid="settings-temperature"
-              className="w-full h-9 bg-surface border border-border px-2 text-text-primary"
-            />
-          </label>
-
-          <label className="block text-xs font-mono">
-            <div className="text-text-muted uppercase text-[10px] tracking-widest mb-1">Max tokens</div>
-            <input
-              type="number" min={200} max={16000} step={100}
-              value={cfg.max_tokens}
-              onChange={e => setCfg({ ...cfg, max_tokens: Number(e.target.value) })}
-              data-testid="settings-max-tokens"
-              className="w-full h-9 bg-surface border border-border px-2 text-text-primary"
-            />
-          </label>
+          <Field label="Temperature">
+            <input type="number" min={0} max={2} step={0.05}
+                   value={cfg.temperature} onChange={e => setCfg({ ...cfg, temperature: Number(e.target.value) })}
+                   data-testid="settings-temperature" className={input}/>
+          </Field>
+          <Field label="Max tokens">
+            <input type="number" min={200} max={16000} step={100}
+                   value={cfg.max_tokens} onChange={e => setCfg({ ...cfg, max_tokens: Number(e.target.value) })}
+                   data-testid="settings-max-tokens" className={input}/>
+          </Field>
         </div>
-
-        <div className="mt-6 flex gap-3">
+        <div className="mt-10 flex items-center gap-4">
           <Btn variant="primary" onClick={save} disabled={busy} testId="btn-save-settings">
-            {busy ? 'Saving...' : 'Save Settings'}
+            {busy ? 'Saving…' : 'Save settings'}
           </Btn>
-          <Tag color="phi" testId="settings-provider-current">{cfg.provider} - {cfg.model.split('/').slice(-1)[0]}</Tag>
-        </div>
-      </Panel>
-
-      <Panel title="Notes" testId="settings-notes-panel">
-        <div className="font-mono text-xs text-text-secondary space-y-2">
-          <div><span className="text-phi">Emergent</span>: uses the local EMERGENT_LLM_KEY. Zero setup for Sir on this server.</div>
-          <div><span className="text-phi">Anthropic</span>: direct Anthropic keys. Best latency on Claude models.</div>
-          <div><span className="text-phi">OpenAI</span>: direct OpenAI keys.</div>
-          <div><span className="text-phi">Gemini</span>: direct Google AI keys.</div>
-          <div><span className="text-phi">OpenRouter</span>: routes to almost any provider through openrouter.ai. Set model as `openrouter/&lt;model&gt;`.</div>
-          <div><span className="text-phi">OpenAI-compatible</span>: for local models (vLLM, LM Studio, Ollama) exposing an OpenAI-style API. Set Base URL to your endpoint.</div>
-          <div className="pt-3 text-text-muted">The chosen model is called by every one of the 12 agents. Cheaper models save cost but may reduce accuracy of Judge, Sentinel, Auditor, and Herald.</div>
+          <Tag color="accent">{cfg.provider} · {cfg.model.split('/').slice(-1)[0]}</Tag>
         </div>
       </Panel>
     </div>
