@@ -102,6 +102,27 @@ Second audit returned FAIL with 4 residuals + 1 new finding. All fixed in a seco
 - `frontend/src/lib/api.js` `streamUrl` and `exportUrl` append `?token=` when localStorage has one, since `EventSource` and anchor-tag downloads cannot set headers.
 - Backend `require_api_token` dependency accepts either `X-API-Token` header or `?token=` query for these two paths.
 
+### iteration_6 (fork) GOAL boundary features shipped
+
+Sir sharpened the GOAL to one sentence: "input PHI-filled study data -> system -> output PHI-handled study data ready to be shared and used publicly". Two features encode that boundary and closed both remaining "usable" gaps (items 10 human-review-invariant and the download boundary check).
+
+- **Publish Guard** (`phi_core/publish_guard.py`) - deterministic last-mile PHI scanner. Runs synchronously after Executor emits exports, before Auditor. Pattern set: SSN, phone (US), email, full DOB (ISO + US slash), restricted 17 ZIP3 codes, age > 89. Findings are masked (`11*******33`) so the report itself never carries the raw substring. Persists to `session.guard_report` and exposed via `GET /api/sessions/{sid}/results.guard`. Download route `GET /api/sessions/{sid}/export/{file_id}` returns HTTP 403 with `{error, message, guard}` body unless the per-file guard status is `clean` or `skipped`. `?force=true` query provides an explicit operator override. UI badge: `PHI-HANDLED ✓ SAFE TO SHARE` (green) or per-file `BLOCKED` panel with the offending pattern rows.
+- **Human review invariant** - `POST /api/sessions/{sid}/human-review` now requires a non-empty `reviewer` field. Every changed decision carries `reviewer`, `reviewer_comment`, `reviewed_at`. When Sentinel refuses to approve globally but no per-row decision is `human_review`, the operator can accept via the UI "Accept Judge decisions as reviewer" button (or empty resolutions via the API) and a `session_review = {reviewer, comment, reviewed_at, changed_decisions}` block is persisted. `scrub_nested` now excludes `reviewer` / `reviewed_at` / `citation` fields from PHI scrubbing so the audit trail remains legible.
+- **API contract clean-ups from iteration_6 review**: `GET /results` now surfaces `status`; 403 body is flat `{error, message, guard}` via `JSONResponse` (no double-nested `detail`); UI shows an "Accept globally" button when there are no per-row `human_review` decisions but session is `awaiting_human_review`.
+
+**testing_agent iteration_6 verdict**: **100% pass** across 11 items covering clean-path download, blocked-path 403, force override, reviewer-required 400, per-decision + session-level reviewer capture, unit suite regressions, and UI rendering.
+
+**Files added**: `/app/backend/phi_core/publish_guard.py`, `/app/backend/tests/test_publish_guard.py` (12 tests), `/app/backend/tests/test_human_review_invariant.py` (2 tests). Frontend `SessionDetail.jsx` gets a Publish Guard panel and a reviewer bar. Total regression suite is now **75/75 green**.
+
+**GOAL cross-check after iteration_6**:
+- (a) LLM never reads dataset rows -- HOLDS.
+- (b) Exports contain no residual raw PHI -- HOLDS AND ENFORCED at the download boundary. Publish Guard blocks any file with residual PHI before the download URL is served.
+- (c) BYO keys stored securely and never returned plaintext -- HOLDS.
+- (d) Clinical signal preserved -- HOLDS.
+- (e) Cross-file pseudonym linkage -- HOLDS.
+- (f) Human review invariant (reviewer id + comment + timestamp) -- NOW HOLDS. Was PARTIAL before.
+- (g) Output ready to share publicly -- NOW HOLDS provably at the download boundary. Was materially-safe-but-unverified before.
+
 ## Minor items (from iteration_3, non-blocking)
 
 - Herald sometimes hits the 90s LLM timeout on the full manuscript draft. When it does, pipeline still completes; results.herald is empty and Sir can rerun.

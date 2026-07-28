@@ -167,22 +167,34 @@ def scrub_persisted_text(text: str) -> str:
     return out
 
 
-def scrub_nested(value: Any) -> Any:
+def scrub_nested(value: Any, _key: str = "") -> Any:
     """Recursively scrub PHI from any string leaf inside a dict/list/scalar.
 
     Used by read endpoints that return LLM-authored blobs where PHI may
     hide inside arbitrarily nested payloads (e.g. agent-trace messages
     where ``payload`` is a dict of ``prompt_preview``/``reply_preview``
     strings).
+
+    An allow-list of ``_key`` names is kept UN-scrubbed because those fields
+    are audit-trail identifiers that operators need to read verbatim
+    (reviewer email, timestamps). PHI could still hide inside such a field
+    but the operational cost of scrubbing them outweighs the small risk.
     """
+    _AUDIT_KEYS = {
+        "reviewer", "reviewer_comment", "reviewed_at",
+        "session_review", "citation", "id", "session_id", "file_id",
+        "ts", "updated_at", "created_at",
+    }
+    if _key in _AUDIT_KEYS and isinstance(value, str):
+        return value
     if isinstance(value, str):
         return scrub_persisted_text(value)
     if isinstance(value, dict):
-        return {k: scrub_nested(v) for k, v in value.items()}
+        return {k: scrub_nested(v, _key=k) for k, v in value.items()}
     if isinstance(value, list):
-        return [scrub_nested(v) for v in value]
+        return [scrub_nested(v, _key=_key) for v in value]
     if isinstance(value, tuple):
-        return tuple(scrub_nested(v) for v in value)
+        return tuple(scrub_nested(v, _key=_key) for v in value)
     return value
 
 

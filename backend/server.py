@@ -32,7 +32,7 @@ load_dotenv()
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from phi_core.benchmark import run_benchmark
@@ -577,8 +577,10 @@ async def session_export(sid: str, file_id: str, force: bool = False):
     per_file = next((r for r in (guard.get("results") or []) if r.get("file_id") == file_id), None)
     status = (per_file or {}).get("status") if per_file else guard.get("status")
     if status == "blocked" and not force:
-        raise HTTPException(403, {
-            "detail": "Publish Guard blocked this export: residual PHI detected.",
+        # Use a JSONResponse so the body is not double-nested inside `detail`.
+        return JSONResponse(status_code=403, content={
+            "error": "publish_guard_blocked",
+            "message": "Publish Guard blocked this export: residual PHI detected.",
             "guard": per_file,
         })
     return FileResponse(path, filename=Path(path).name)
@@ -831,6 +833,7 @@ async def session_results(sid: str):
         raise HTTPException(404, "session not found")
     scrubbed = _scrub_session_document(doc)
     return {
+        "status": scrubbed.get("status"),
         "decisions": scrubbed.get("agent_decisions", []),
         "sentinel_last": scrubbed.get("agent_sentinel_last"),
         "audit": scrubbed.get("agent_audit"),

@@ -89,8 +89,9 @@ export default function SessionDetail() {
       const [file_id, ...rest] = key.split('|');
       return { file_id, column: rest.join('|'), action };
     });
-    if (!items.length) { toast('Choose an action for each row first'); return; }
     if (!reviewer.trim()) { toast('Reviewer id is required'); return; }
+    // items may be empty for the session-level "accept globally" flow when
+    // Sentinel flagged the session but no per-row human_review decision.
     try { window.localStorage.setItem('phi_reviewer_id', reviewer.trim()); } catch (_) {}
     setBusy(true);
     try {
@@ -207,7 +208,7 @@ export default function SessionDetail() {
               })}
             </tbody>
           </table>
-          {humanNeeded && humanRows.length > 0 && !isComplete && (
+          {humanNeeded && !isComplete && (
             <div className="mt-3 space-y-2" data-testid="human-review-bar">
               <div className="grid grid-cols-2 gap-2">
                 <input
@@ -225,12 +226,23 @@ export default function SessionDetail() {
                   className="h-8 bg-surface border border-border px-2 font-mono text-xs text-text-primary"
                 />
               </div>
-              <div className="flex items-center gap-3">
-                <div className="font-mono text-[10px] text-text-muted uppercase tracking-widest">Human decision required on {humanRows.length} column(s)</div>
-                <Btn variant="primary" onClick={submitReview} disabled={busy || Object.keys(resolutions).length === 0 || !reviewer.trim()} testId="btn-submit-human-review">
-                  Submit ({Object.keys(resolutions).length}/{humanRows.length})
-                </Btn>
-              </div>
+              {humanRows.length > 0 ? (
+                <div className="flex items-center gap-3">
+                  <div className="font-mono text-[10px] text-text-muted uppercase tracking-widest">Human decision required on {humanRows.length} column(s)</div>
+                  <Btn variant="primary" onClick={submitReview} disabled={busy || Object.keys(resolutions).length === 0 || !reviewer.trim()} testId="btn-submit-human-review">
+                    Submit ({Object.keys(resolutions).length}/{humanRows.length})
+                  </Btn>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3">
+                  <div className="font-mono text-[10px] text-text-muted uppercase tracking-widest">
+                    Sentinel flagged this session for global review. No per-column overrides required.
+                  </div>
+                  <Btn variant="primary" onClick={submitReview} disabled={busy || !reviewer.trim()} testId="btn-accept-globally">
+                    Accept Judge decisions as reviewer
+                  </Btn>
+                </div>
+              )}
             </div>
           )}
         </Panel>
