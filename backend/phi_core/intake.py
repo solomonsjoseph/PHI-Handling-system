@@ -161,7 +161,7 @@ def unpack_zip(zip_path: Path, dest_root: Path) -> tuple[list[str], str | None]:
 
     dest_root.mkdir(parents=True, exist_ok=True)
     extracted: list[str] = []
-    total_bytes = 0
+    streamed_total = 0
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             infos = zf.infolist()
@@ -194,9 +194,10 @@ def unpack_zip(zip_path: Path, dest_root: Path) -> tuple[list[str], str | None]:
                         f"suspicious compression ratio for {name!r}: "
                         f"{info.file_size}/{info.compress_size} (> {max_ratio}x)"
                     )
-                total_bytes += info.file_size
-                if total_bytes > max_total:
-                    return extracted, f"total uncompressed size exceeds {max_total} bytes"
+                # NOTE: we intentionally do NOT precompute a total from
+                # `info.file_size` because the ZIP header can lie. The
+                # authoritative aggregate cap is enforced by streamed_total
+                # below.
                 # strip single-root wrapper if applicable
                 rel_name = name
                 if strip_root:
@@ -209,6 +210,9 @@ def unpack_zip(zip_path: Path, dest_root: Path) -> tuple[list[str], str | None]:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 # Also enforce a streaming cap on decompressed bytes per file so
                 # a lying header (small file_size, huge stream) still trips.
+                # SEC-005 residual: track ACTUAL streamed bytes across all
+                # entries and abort at INTAKE_MAX_TOTAL_BYTES regardless of
+                # what the ZIP header claims.
                 written = 0
                 with zf.open(info) as src, dst.open("wb") as out:
                     while True:
@@ -216,8 +220,14 @@ def unpack_zip(zip_path: Path, dest_root: Path) -> tuple[list[str], str | None]:
                         if not chunk:
                             break
                         written += len(chunk)
+                        streamed_total += len(chunk)
                         if written > per_file_cap:
                             return extracted, f"streamed size exceeded 200 MB for {name!r}"
+                        if streamed_total > max_total:
+                            return extracted, (
+                                f"aggregate streamed size exceeded {max_total} bytes "
+                                "(header may have misreported sizes)"
+                            )
                         out.write(chunk)
                 extracted.append(rel_name)
     except zipfile.BadZipFile:

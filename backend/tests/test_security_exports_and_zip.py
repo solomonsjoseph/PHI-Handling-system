@@ -107,4 +107,4 @@ def test_intake_rejects_total_size(tmp_path: Path, monkeypatch):
     with zipfile.ZipFile(z, "w") as zf:
         zf.writestr("datasets/a.csv", b"x" * 2048)
     _, err = unpack_zip(z, tmp_path / "out")
-    assert err and "total uncompressed size" in err
+    assert err and "aggregate streamed size" in err

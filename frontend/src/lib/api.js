@@ -51,6 +51,18 @@ export const runSession = (sid) => api.post(`/sessions/${sid}/run`).then(r => r.
 export const submitReview = (sid, decisions, add_manual_spans=[], continue_iteration=false) =>
   api.post(`/sessions/${sid}/review`, { decisions, add_manual_spans, continue_iteration }).then(r => r.data);
 export const finalizeSession = (sid) => api.post(`/sessions/${sid}/finalize`).then(r => r.data);
-export const exportUrl = (sid, fileId) => `${API}/sessions/${sid}/export/${fileId}`;
+export const exportUrl = (sid, fileId) => {
+  // `<a href>` download link can't send headers either; use ?token= fallback.
+  let t = '';
+  try { t = window.localStorage.getItem('phi_api_token') || ''; } catch (_) {}
+  const qs = t ? `?token=${encodeURIComponent(t)}` : '';
+  return `${API}/sessions/${sid}/export/${fileId}${qs}`;
+};
 
-export const streamUrl = (sid) => `${API}/sessions/${sid}/stream`;
+export const streamUrl = (sid) => {
+  // EventSource can't send headers, so pass the operator token as query when set.
+  let t = '';
+  try { t = window.localStorage.getItem('phi_api_token') || ''; } catch (_) {}
+  const qs = t ? `?token=${encodeURIComponent(t)}` : '';
+  return `${API}/sessions/${sid}/stream${qs}`;
+};

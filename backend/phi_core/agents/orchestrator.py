@@ -23,6 +23,7 @@ from .experts import Statute, Praxis
 from .llm import LlmConfig
 from .outward import Herald, Ledger, Scout
 from .reasoning import Auditor, Executor, Judge, Sentinel, apply_sentinel_hard_rules
+from ..security import scrub_decision, scrub_persisted_text
 from .specialists import Instrument, Lexicon, Schema
 
 
@@ -84,6 +85,17 @@ async def run_pipeline(
 
     if not approved_decisions:
         approved_decisions = []
+    # SEC-006: scrub any PHI substrings the LLM may have echoed into the
+    # `reason`/`citation` fields before we persist. The audit found a real
+    # patient name in a stored decision reason on the live deployment.
+    approved_decisions = [scrub_decision(d) for d in approved_decisions]
+    if isinstance(s, dict):
+        s = dict(s)
+        if isinstance(s.get("issues"), list):
+            s["issues"] = [scrub_persisted_text(x) if isinstance(x, str) else x for x in s["issues"]]
+        for k in ("summary", "reason", "notes"):
+            if isinstance(s.get(k), str):
+                s[k] = scrub_persisted_text(s[k])
     human_needed = any(d.get("action") == "human_review" for d in approved_decisions)
     if s.get("verdict") != "approved":
         human_needed = True

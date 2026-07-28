@@ -210,23 +210,60 @@ async def session_create(body: SessionCreate):
     return s.model_dump()
 
 
-@app.get("/api/sessions/{sid}")
+def _scrub_session_document(doc: dict) -> dict:
+    """Strip internal filesystem paths and scrub free-text fields before serving.
+
+    SEC-002 completion + SEC-006: read endpoints must never leak internal
+    layout (`stored_path`, `export_paths`) or raw PHI substrings the LLM may
+    have echoed into agent notes.
+    """
+    from phi_core.security import scrub_persisted_text as _scrub  # local import to avoid cycles at load
+    if not doc:
+        return doc
+    for f in doc.get("files", []) or []:
+        f.pop("stored_path", None)
+    if "export_paths" in doc:
+        # Convert absolute paths to opaque file-ids so the export route still works.
+        doc["export_paths"] = {k: "" for k in (doc.get("export_paths") or {})}
+    for k in ("agent_decisions",):
+        vals = doc.get(k) or []
+        if isinstance(vals, list):
+            new = []
+            for d in vals:
+                if isinstance(d, dict):
+                    dd = dict(d)
+                    for field in ("reason", "citation", "notes", "evidence"):
+                        if isinstance(dd.get(field), str):
+                            dd[field] = _scrub(dd[field])
+                    new.append(dd)
+                else:
+                    new.append(d)
+            doc[k] = new
+    for k in ("agent_herald", "agent_ledger", "agent_scout", "agent_audit", "agent_sentinel_last"):
+        v = doc.get(k)
+        if isinstance(v, dict):
+            for field, fv in list(v.items()):
+                if isinstance(fv, str):
+                    v[field] = _scrub(fv)
+                elif isinstance(fv, list):
+                    v[field] = [_scrub(x) if isinstance(x, str) else x for x in fv]
+    return doc
+
+
+@app.get("/api/sessions/{sid}", dependencies=[Depends(require_api_token)])
 async def session_get(sid: str):
     doc = await get_db().sessions.find_one({"id": sid}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "session not found")
-    return doc
+    return _scrub_session_document(doc)
 
 
-@app.get("/api/sessions")
+@app.get("/api/sessions", dependencies=[Depends(require_api_token)])
 async def session_list():
     cursor = get_db().sessions.find({}, {"_id": 0, "spans": 0, "progress": 0}).sort("created_at", -1).limit(50)
     out = []
     async for s in cursor:
-        # SEC-002 hardening: never leak internal filesystem paths in list responses.
-        for f in s.get("files", []) or []:
-            f.pop("stored_path", None)
-        out.append(s)
+        out.append(_scrub_session_document(s))
     return {"sessions": out}
 
 
@@ -255,7 +292,7 @@ async def session_upload(sid: str, file: UploadFile = File(...)):
         {"id": sid},
         {"$push": {"files": art.model_dump()}, "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
     )
-    return {"file_id": art.file_id, "stored_path": str(dst), "size_bytes": art.size_bytes}
+    return {"file_id": art.file_id, "size_bytes": art.size_bytes}
 
 
 @app.post("/api/sessions/{sid}/intake", dependencies=[Depends(require_api_token)])
@@ -347,7 +384,7 @@ async def session_intake(sid: str, file: UploadFile = File(...)):
     }
 
 
-@app.get("/api/sessions/{sid}/intake/receipt")
+@app.get("/api/sessions/{sid}/intake/receipt", dependencies=[Depends(require_api_token)])
 async def session_intake_receipt(sid: str):
     """CLI-style redacted receipt (never leaks entry paths).
 
@@ -461,7 +498,7 @@ async def session_run(sid: str):
     return {"status": "started"}
 
 
-@app.get("/api/sessions/{sid}/stream")
+@app.get("/api/sessions/{sid}/stream", dependencies=[Depends(require_api_token)])
 async def session_stream(sid: str):
     async def gen():
         q = _queue_for(sid)
@@ -532,7 +569,7 @@ async def session_finalize(sid: str):
     return {"status": "complete", "exports": exports}
 
 
-@app.get("/api/sessions/{sid}/export/{file_id}")
+@app.get("/api/sessions/{sid}/export/{file_id}", dependencies=[Depends(require_api_token)])
 async def session_export(sid: str, file_id: str):
     db = get_db()
     session = await db.sessions.find_one({"id": sid}, {"_id": 0})
@@ -737,33 +774,42 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
     return {"status": "resuming"}
 
 
-@app.get("/api/sessions/{sid}/agent-trace")
+@app.get("/api/sessions/{sid}/agent-trace", dependencies=[Depends(require_api_token)])
 async def session_agent_trace(sid: str, limit: int = 200):
     """Return the audit log of every agent message on this session."""
+    from phi_core.security import scrub_persisted_text as _scrub
     db = get_db()
     cursor = db.agent_log.find({"session_id": sid}, {"_id": 0}).sort("ts", 1).limit(limit)
-    return {"messages": [m async for m in cursor]}
+    msgs: list[dict] = []
+    async for m in cursor:
+        # SEC-006: agent-trace stores LLM payloads that may echo dictionary/form PHI.
+        for key in ("payload", "message", "reason", "detail"):
+            if isinstance(m.get(key), str):
+                m[key] = _scrub(m[key])
+        msgs.append(m)
+    return {"messages": msgs}
 
 
-@app.get("/api/sessions/{sid}/results")
+@app.get("/api/sessions/{sid}/results", dependencies=[Depends(require_api_token)])
 async def session_results(sid: str):
     """Consolidated agent outputs (decisions, audit, ledger, herald)."""
     db = get_db()
     doc = await db.sessions.find_one({"id": sid}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "session not found")
+    scrubbed = _scrub_session_document(doc)
     return {
-        "decisions": doc.get("agent_decisions", []),
-        "sentinel_last": doc.get("agent_sentinel_last"),
-        "audit": doc.get("agent_audit"),
-        "ledger": doc.get("agent_ledger"),
-        "herald": doc.get("agent_herald"),
-        "scout": doc.get("agent_scout"),
-        "human_review_required": doc.get("human_review_required", False),
+        "decisions": scrubbed.get("agent_decisions", []),
+        "sentinel_last": scrubbed.get("agent_sentinel_last"),
+        "audit": scrubbed.get("agent_audit"),
+        "ledger": scrubbed.get("agent_ledger"),
+        "herald": scrubbed.get("agent_herald"),
+        "scout": scrubbed.get("agent_scout"),
+        "human_review_required": scrubbed.get("human_review_required", False),
     }
 
 
 # Root health for quick check
 @app.get("/")
 async def root():
-    return {"service": "phi-handling-console", "docs": "/docs"}
+    return {"service": "phi-handling-console", "version": app.version}
