@@ -44,6 +44,9 @@ export default function SessionDetail() {
     try { return window.localStorage.getItem('phi_reviewer_id') || ''; } catch (_) { return ''; }
   });
   const [reviewComment, setReviewComment] = useState('');
+  const [actualKnowledgeAck, setActualKnowledgeAck] = useState(false);
+  const [spotCheckAck, setSpotCheckAck] = useState(false);
+  const [preview, setPreview] = useState(null);
   const [devOpen, setDevOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notFound, setNotFound] = useState(false);
@@ -60,6 +63,12 @@ export default function SessionDetail() {
     setSession(s);
     setResults(r);
     setTrace(t || []);
+    // Fetch row-level preview only for awaiting_human_review sessions
+    if (s.status === 'awaiting_human_review') {
+      axios.get(`${API}/sessions/${sid}/preview?samples=5`)
+        .then(pr => setPreview(pr.data))
+        .catch(() => setPreview(null));
+    }
   };
 
   useEffect(() => {
@@ -78,6 +87,10 @@ export default function SessionDetail() {
   const guard = results?.guard || session?.guard_report;
   const decisions = results?.decisions || [];
   const humanRows = decisions.filter(d => d.action === 'human_review');
+  // Row-level preview is only required when there ARE dataset samples to spot-check.
+  const previewHasSamples = !!(preview && (preview.files || []).some(f => (f.samples || []).length > 0));
+  const spotCheckRequired = previewHasSamples;
+  const spotCheckSatisfied = !spotCheckRequired || spotCheckAck;
 
   const downloadBundle = async () => {
     setBusy(true);
@@ -95,6 +108,14 @@ export default function SessionDetail() {
 
   const submitReview = async () => {
     if (!reviewer.trim()) { toast.error('Reviewer id is required'); return; }
+    if (!spotCheckSatisfied) {
+      toast.error('You must review the row-level sample before submitting');
+      return;
+    }
+    if (!actualKnowledgeAck) {
+      toast.error('You must acknowledge the actual-knowledge attestation (45 CFR 164.514(b)(2)(ii)) before submitting');
+      return;
+    }
     const items = Object.entries(resolutions).map(([key, action]) => {
       const [file_id, ...rest] = key.split('|');
       return { file_id, column: rest.join('|'), action };
@@ -104,9 +125,11 @@ export default function SessionDetail() {
     try {
       const r = await axios.post(`${API}/sessions/${sid}/human-review`, {
         resolutions: items, reviewer: reviewer.trim(), comment: reviewComment,
+        actual_knowledge_ack: true,
       });
       toast.success(`Review submitted (${r.data.status})`);
       setResolutions({}); setReviewComment('');
+      setActualKnowledgeAck(false); setSpotCheckAck(false);
       await refresh();
     } catch (e) {
       toast.error(`review failed: ${e?.response?.data?.detail || e.message}`);
@@ -200,6 +223,49 @@ export default function SessionDetail() {
                      className="mt-2 w-full h-10 bg-transparent border-b border-ink text-ink focus:border-oxblood"/>
             </div>
           </div>
+
+          {/* Row-level spot-check strip (Phase D) */}
+          {preview && (preview.files || []).length > 0 && (
+            <div className="rule-top pt-5 mb-6" data-testid="spot-check-panel">
+              <div className="kicker mb-3">Row-level spot-check <span className="text-oxblood">(required)</span></div>
+              <div className="text-[12px] text-ink-muted mb-3">
+                Sample cells from each dataset. Originals are partial-masked so this panel itself carries no PHI.
+              </div>
+              <div className="space-y-4">
+                {preview.files.map((f, fi) => (
+                  <div key={f.file_id || fi} className="data-cell" data-testid={`spot-check-file-${fi}`}>
+                    <div className="font-mono text-[12px] text-ink-2 mb-2">{f.file_name}</div>
+                    <div className="grid grid-cols-3 gap-2 text-[11px] font-mono">
+                      <div className="text-ink-muted uppercase tracking-wider">column · action</div>
+                      <div className="text-ink-muted uppercase tracking-wider">original (masked)</div>
+                      <div className="text-ink-muted uppercase tracking-wider">redacted</div>
+                      {(f.samples || []).map((s, si) => (
+                        <React.Fragment key={si}>
+                          <div className="text-ink" data-testid={`spot-check-col-${fi}-${si}`}>
+                            {s.column} · <span className="text-oxblood">{s.action}</span>
+                          </div>
+                          <div className="phi-mask" data-testid={`spot-check-orig-${fi}-${si}`}>{s.original_masked}</div>
+                          <div className="text-ink" data-testid={`spot-check-red-${fi}-${si}`}>
+                            {s.redacted === '' ? <span className="text-ink-muted">(dropped)</span> : s.redacted}
+                          </div>
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <label className="mt-4 flex items-start gap-3 cursor-pointer" data-testid="spot-check-ack-label">
+                <input type="checkbox" checked={spotCheckAck}
+                       onChange={e => setSpotCheckAck(e.target.checked)}
+                       data-testid="spot-check-ack"
+                       className="mt-[3px] h-4 w-4 accent-oxblood"/>
+                <span className="text-[12px] text-ink-2 leading-5">
+                  I have reviewed the row-level sample above and confirm the per-column decisions are appropriate.
+                </span>
+              </label>
+            </div>
+          )}
+
           {humanRows.length > 0 ? (
             <div className="space-y-4">
               {humanRows.map(d => {
@@ -216,22 +282,48 @@ export default function SessionDetail() {
                   </div>
                 );
               })}
+              <label className="mt-6 flex items-start gap-3 rule-top pt-4 cursor-pointer" data-testid="actual-knowledge-ack-label">
+                <input type="checkbox" checked={actualKnowledgeAck}
+                       onChange={e => setActualKnowledgeAck(e.target.checked)}
+                       data-testid="actual-knowledge-ack"
+                       className="mt-[3px] h-4 w-4 accent-oxblood"/>
+                <span className="text-[12px] text-ink-2 leading-5">
+                  <span className="font-mono text-oxblood">Required · 45 CFR 164.514(b)(2)(ii).</span>{' '}
+                  I have no actual knowledge that the remaining information alone or in combination
+                  with other reasonably available information could be used to identify an individual.
+                </span>
+              </label>
               <div className="pt-4 flex justify-end">
                 <Btn variant="primary" onClick={submitReview}
-                     disabled={busy || Object.keys(resolutions).length === 0 || !reviewer.trim()}
+                     disabled={busy || Object.keys(resolutions).length === 0 || !reviewer.trim() || !actualKnowledgeAck || !spotCheckSatisfied}
                      testId="btn-submit-human-review">
                   Submit ({Object.keys(resolutions).length}/{humanRows.length}) →
                 </Btn>
               </div>
             </div>
           ) : (
-            <div className="flex items-center justify-between">
+            <div className="space-y-4">
               <div className="text-[12px] text-ink-muted">
                 Sentinel flagged this session globally. No per-column overrides required.
               </div>
-              <Btn variant="primary" onClick={submitReview} disabled={busy || !reviewer.trim()} testId="btn-accept-globally">
-                Accept Judge decisions →
-              </Btn>
+              <label className="flex items-start gap-3 rule-top pt-4 cursor-pointer" data-testid="actual-knowledge-ack-label-global">
+                <input type="checkbox" checked={actualKnowledgeAck}
+                       onChange={e => setActualKnowledgeAck(e.target.checked)}
+                       data-testid="actual-knowledge-ack-global"
+                       className="mt-[3px] h-4 w-4 accent-oxblood"/>
+                <span className="text-[12px] text-ink-2 leading-5">
+                  <span className="font-mono text-oxblood">Required · 45 CFR 164.514(b)(2)(ii).</span>{' '}
+                  I have no actual knowledge that the remaining information alone or in combination
+                  with other reasonably available information could be used to identify an individual.
+                </span>
+              </label>
+              <div className="flex justify-end">
+                <Btn variant="primary" onClick={submitReview}
+                     disabled={busy || !reviewer.trim() || !actualKnowledgeAck || !spotCheckSatisfied}
+                     testId="btn-accept-globally">
+                  Accept Judge decisions →
+                </Btn>
+              </div>
             </div>
           )}
         </Panel>

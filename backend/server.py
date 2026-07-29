@@ -756,6 +756,9 @@ class HumanReviewSubmit(BaseModel):
     resolutions: list[dict]   # [{column, file_id, action, reason?, confidence?}]
     reviewer: str = ""        # required: identity of the reviewer (email / initials / handle)
     comment: str = ""         # optional narrative for the audit trail
+    # HHS §164.514(b)(2)(ii) "actual knowledge" attestation. IRB-required
+    # procedural step separate from the technical Safe Harbor method.
+    actual_knowledge_ack: bool = False
 
 
 @app.post("/api/sessions/{sid}/human-review", dependencies=[Depends(require_api_token)])
@@ -765,6 +768,9 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
 
     Per GOAL "human review invariant": every human decision must carry
     reviewer id + comment + timestamp. `reviewer` is required non-empty.
+    Per HHS §164.514(b)(2)(ii): the reviewer must attest actual-knowledge
+    that the remaining information alone or in combination cannot identify
+    an individual. `actual_knowledge_ack` must be true.
     """
     from phi_core.agents.reasoning import Executor, Auditor
     from phi_core.agents.outward import Scout, Ledger, Herald
@@ -772,6 +778,13 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
     reviewer = (body.reviewer or "").strip()
     if not reviewer:
         raise HTTPException(400, "reviewer identity is required (GOAL human review invariant)")
+    if not body.actual_knowledge_ack:
+        raise HTTPException(
+            400,
+            "actual-knowledge attestation is required (HHS 45 CFR 164.514(b)(2)(ii)): "
+            "reviewer must confirm no actual knowledge that the remaining information "
+            "alone or in combination could identify an individual.",
+        )
 
     db = get_db()
     session = await db.sessions.find_one({"id": sid})
@@ -792,6 +805,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
             d["reviewer"] = reviewer
             d["reviewer_comment"] = body.comment
             d["reviewed_at"] = ts
+            d["actual_knowledge_ack"] = True  # HHS 164.514(b)(2)(ii) — gated at endpoint
             per_decision_reviewed = True
 
     # GOAL human review invariant: capture reviewer + comment + timestamp on
@@ -802,6 +816,8 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
         "comment": body.comment,
         "reviewed_at": ts,
         "changed_decisions": per_decision_reviewed,
+        "actual_knowledge_ack": True,  # gated at endpoint entry above
+        "actual_knowledge_cite": "45 CFR 164.514(b)(2)(ii)",
     }
 
     # Any remaining unresolved?
@@ -872,6 +888,25 @@ async def session_agent_trace(sid: str, limit: int = 200):
         # string leaf recursively rather than only top-level string fields.
         msgs.append(_scrub_nested(m))
     return {"messages": msgs}
+
+
+@app.get("/api/sessions/{sid}/preview", dependencies=[Depends(require_api_token)])
+async def session_preview(sid: str, samples: int = 5):
+    """Row-level review preview (Phase D).
+
+    Returns up to ``samples`` (original-masked, redacted) cell pairs per
+    dataset file so the reviewer can spot-check that the pipeline's
+    per-column decisions are actually applied correctly. Original values
+    are partial-masked; only the redacted column carries the string that
+    will be written to the export.
+    """
+    from phi_core.preview import build_preview, MAX_SAMPLES_PER_FILE
+    db = get_db()
+    doc = await db.sessions.find_one({"id": sid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "session not found")
+    n = max(1, min(int(samples or MAX_SAMPLES_PER_FILE), 20))
+    return build_preview(doc, max_samples_per_file=n)
 
 
 @app.get("/api/sessions/{sid}/results", dependencies=[Depends(require_api_token)])

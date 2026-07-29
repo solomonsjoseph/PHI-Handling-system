@@ -164,12 +164,15 @@ def _attestation_payload(session: dict[str, Any], file_hashes: dict[str, str]) -
     reviewer = review.get("reviewer") or None
     reviewer_comment = review.get("comment") or None
     reviewed_at = review.get("reviewed_at") or None
+    actual_knowledge_ack = bool(review.get("actual_knowledge_ack", False))
     if not reviewer:
         for d in reversed(session.get("agent_decisions") or []):
             if isinstance(d, dict) and d.get("reviewer"):
                 reviewer = d.get("reviewer")
                 reviewer_comment = d.get("reviewer_comment") or reviewer_comment
                 reviewed_at = d.get("reviewed_at") or reviewed_at
+                if d.get("actual_knowledge_ack") is True:
+                    actual_knowledge_ack = True
                 break
     return {
         "attestation_version": BUNDLE_VERSION,
@@ -186,6 +189,13 @@ def _attestation_payload(session: dict[str, Any], file_hashes: dict[str, str]) -
         "reviewer": reviewer,
         "reviewer_comment": reviewer_comment,
         "reviewed_at": reviewed_at,
+        "actual_knowledge_ack": actual_knowledge_ack,
+        "actual_knowledge_cite": "45 CFR 164.514(b)(2)(ii)",
+        "actual_knowledge_statement": (
+            "The reviewer has attested that they have no actual knowledge that "
+            "the remaining information alone or in combination with other reasonably "
+            "available information could be used to identify an individual."
+        ),
         "files": file_hashes,
         "system": {
             "name": "PHI Console",
@@ -200,6 +210,7 @@ def _attestation_payload(session: dict[str, Any], file_hashes: dict[str, str]) -
 
 
 def _attestation_text(att: dict[str, Any]) -> str:
+    ak_ack = "YES" if att.get("actual_knowledge_ack") else "NO"
     lines = [
         "PHI CONSOLE — ATTESTATION OF DE-IDENTIFICATION",
         "=" * 54,
@@ -216,6 +227,9 @@ def _attestation_text(att: dict[str, Any]) -> str:
         "Reviewer         : {}".format(att["reviewer"] or "(none)"),
         "Reviewer comment : {}".format(att["reviewer_comment"] or "(none)"),
         "Reviewed at      : {}".format(att["reviewed_at"] or "(none)"),
+        "",
+        f"Actual-knowledge attestation ({att.get('actual_knowledge_cite','45 CFR 164.514(b)(2)(ii)')}): {ak_ack}",
+        f"  Statement: {att.get('actual_knowledge_statement','')}",
         "",
         "Files included in this bundle (SHA-256):",
     ]

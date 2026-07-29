@@ -37,10 +37,28 @@ def test_human_review_requires_reviewer():
     assert "reviewer" in r.text.lower()
 
 
+def test_human_review_requires_actual_knowledge_ack():
+    """HHS §164.514(b)(2)(ii): endpoint must reject when reviewer omits or
+    denies actual-knowledge attestation, even with a valid reviewer id."""
+    fake_sid = uuid.uuid4().hex
+    r = requests.post(
+        f"{BASE_URL}/api/sessions/{fake_sid}/human-review",
+        json={
+            "resolutions": [],
+            "reviewer": "jane.doe@lab.edu",
+            "comment": "test",
+            "actual_knowledge_ack": False,
+        },
+        timeout=10,
+    )
+    assert r.status_code == 400, r.text
+    assert "actual" in r.text.lower() and "knowledge" in r.text.lower()
+
+
 def test_human_review_captures_session_review_when_provided():
-    """Sending reviewer + comment on an awaiting-review session must persist
-    reviewer id, timestamp, and comment on the session document even when no
-    individual decision was flagged human_review."""
+    """Sending reviewer + comment + actual_knowledge_ack on an awaiting-review
+    session must persist reviewer id, timestamp, comment, and the
+    actual-knowledge attestation on the session document."""
     r = requests.get(f"{BASE_URL}/api/sessions", timeout=10)
     sessions = r.json().get("sessions", [])
     awaiting = [s for s in sessions if s.get("status") == "awaiting_human_review"]
@@ -53,6 +71,7 @@ def test_human_review_captures_session_review_when_provided():
             "resolutions": [],
             "reviewer": "test-reviewer@example.org",
             "comment": "accepted per QA plan v1",
+            "actual_knowledge_ack": True,
         },
         timeout=10,
     )

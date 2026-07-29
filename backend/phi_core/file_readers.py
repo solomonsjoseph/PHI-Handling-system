@@ -34,6 +34,19 @@ try:
 except Exception:  # pragma: no cover
     PdfReader = None
 
+try:
+    import pytesseract  # type: ignore
+    from pdf2image import convert_from_path  # type: ignore
+except Exception:  # pragma: no cover
+    pytesseract = None
+    convert_from_path = None
+
+
+# Phase C: threshold below which we treat a PDF as image-only and run OCR.
+# Real-world scanned CRFs / consent forms yield near-zero text via `pypdf`.
+OCR_TEXT_THRESHOLD = 50
+OCR_MAX_PAGES = 100  # bounded so a giant scan can't wedge the pipeline
+
 
 DATASET_EXTS = {"csv", "tsv", "xlsx", "xls", "parquet"}
 NARRATIVE_EXTS = {"pdf", "docx", "txt", "md", "eml", "html", "htm"}
@@ -126,10 +139,37 @@ def read_txt(path: Path) -> str:
 
 
 def read_pdf(path: Path) -> str:
+    """Extract text from a PDF.
+
+    Phase C: if the digital text-layer is missing or nearly empty
+    (e.g. scanned CRFs, image-only consent forms) we fall back to OCR
+    via ``pytesseract`` on rasterised pages. OCR output is then fed
+    through the same PHI scrubbing pipeline as any narrative text.
+    """
     if PdfReader is None:
         raise RuntimeError("pypdf is not installed")
     reader = PdfReader(str(path))
-    return "\n\n".join((page.extract_text() or "") for page in reader.pages)
+    text = "\n\n".join((page.extract_text() or "") for page in reader.pages)
+    # If we got real digital text, use it as-is.
+    if len(text.strip()) >= OCR_TEXT_THRESHOLD:
+        return text
+    # Otherwise: image-only PDF -> OCR every page.
+    if pytesseract is None or convert_from_path is None:
+        # OCR stack unavailable at runtime; return whatever we had.
+        return text
+    try:
+        ocr_pages: list[str] = []
+        images = convert_from_path(str(path), dpi=200, last_page=OCR_MAX_PAGES)
+        for img in images:
+            ocr_pages.append(pytesseract.image_to_string(img) or "")
+        ocr_text = "\n\n".join(ocr_pages).strip()
+        if ocr_text:
+            return ocr_text
+    except Exception:
+        # Best-effort: never crash the pipeline; fall through with digital text
+        # (which is what a purely-image PDF would have been anyway).
+        pass
+    return text
 
 
 def read_docx(path: Path) -> str:
