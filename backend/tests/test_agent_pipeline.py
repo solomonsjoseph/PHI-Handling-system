@@ -201,7 +201,12 @@ def test_human_review_and_export(api, session_id):
         pending = [d for d in res["decisions"] if d.get("action") == "human_review"]
         resolutions = [{"file_id": d["file_id"], "column": d["column"], "action": "drop"} for d in pending]
         r = api.post(f"{BASE_URL}/api/sessions/{session_id}/human-review",
-                     json={"resolutions": resolutions}, timeout=TIMEOUT)
+                     json={
+                         "resolutions": resolutions,
+                         "reviewer": "test-suite@phi-console.local",
+                         "comment": "automated regression test",
+                         "actual_knowledge_ack": True,
+                     }, timeout=TIMEOUT)
         assert r.status_code == 200, r.text
         _poll_until(api, session_id, {"complete", "failed"})
 

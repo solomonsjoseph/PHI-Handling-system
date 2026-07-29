@@ -151,6 +151,30 @@ Sir consolidated GOAL to: "input PHI-filled study data -> output PHI-handled stu
 
 **Regression**: **84/84 unit tests green** — added `test_bundle_and_coverage.py` (10 tests) covering matrix invariants + bundle correctness. Two new backend modules: `phi_core/bundle.py`, `phi_core/coverage_matrix.py`. `matplotlib` added to backend deps.
 
+### iteration_8 (fork) IRB-readiness phases B/C/D/E
+
+Sir directed a five-phase IRB-readiness roadmap in /app/memory/TODO.md. Phase A (Classification F1 corpus) landed in iteration_7 tail. This iteration ships Phases B, C, D, E in one batch. testing_agent iteration_8 verdict: **backend 132/137 (5 legacy-fixture failures, since fixed) + frontend structural pass on all Phase D/E testids and regulatory copy**.
+
+- **Phase B — Publish Guard pattern parity across every HIPAA A-R category**. `phi_core/publish_guard.py` `_PATTERNS` extended with URL (N), IPv4/IPv6 (O), license plate (L), IMEI + device serial (M), image reference (Q), biometric hash + DNA profile (P), NPI + DEA (K). Coverage now includes B, C, D, F, G, K, L, M, N, O, P, Q. 12 new pytest cases in `test_publish_guard.py` including a corpus invariant `test_every_hipaa_letter_has_at_least_one_pattern`.
+
+- **Phase C — OCR path for scanned / annotated PDFs**. `phi_core/file_readers.py` `read_pdf` now falls back to `pytesseract` + `pdf2image` when the digital text layer is shorter than 50 chars. OCR runs at 200 dpi bounded to 100 pages. OCR output flows into the same `_scrub_text_cell` deterministic scrubber. System deps installed: `tesseract-ocr`, `poppler-utils`. Python deps added to `requirements.txt`: `pytesseract==0.3.13`, `pdf2image==1.17.0`. Tests: `test_ocr_pdf.py` builds a synthetic image-only PDF at runtime and asserts OCR text >= 50 chars and scrubber produces HIPAA category tags. 2/2 green.
+
+- **Phase D — Row-level review preview**. New module `phi_core/preview.py` exposes `build_preview()` and `_mask_original()`. New endpoint `GET /api/sessions/{sid}/preview?samples=5` returns up to N (clamped 1..20) `(original_masked, redacted)` cell pairs per dataset file. `original_masked` uses the same partial-mask rule as the Publish Guard finding masker so the preview surface itself carries no PHI. Metadata/narrative files are skipped. UI: `SessionDetail.jsx` renders a spot-check strip (`data-testid=spot-check-panel`) with three-column grid `column·action / original(masked) / redacted`. A required checkbox `spot-check-ack` gates both Submit paths until ticked. Tests: 6/6 green in `test_preview.py` including the anti-leak invariant `test_preview_original_never_returned_raw`.
+
+- **Phase E — HHS §164.514(b)(2)(ii) actual-knowledge attestation**. `HumanReviewSubmit` grew `actual_knowledge_ack: bool = False`. Endpoint returns HTTP 400 when false or omitted, with a body citing 45 CFR 164.514(b)(2)(ii). Persisted to `session_review.actual_knowledge_ack=true` and `agent_decisions[].actual_knowledge_ack=true` (per-decision trail). `phi_core/bundle.py` `_attestation_payload` now surfaces `actual_knowledge_ack`, `actual_knowledge_cite`, and `actual_knowledge_statement` fields in `attestation.json`. `attestation.txt` gains an "Actual-knowledge attestation" line with YES/NO + statement. UI: `SessionDetail.jsx` adds a required checkbox `actual-knowledge-ack` / `actual-knowledge-ack-global` with the exact HHS wording. Both Submit paths disabled until ticked. Tests: 4/4 green in `test_actual_knowledge_attestation.py` covering payload true/false, bundle JSON+TXT surfacing, and legacy-session backfill from per-decision trail.
+
+**Full regression after iteration_8**: 120 tests passed + 1 skipped across the unit-test suite (excluding live-LLM-required agent pipeline tests). Legacy integration test `test_agent_pipeline.py::test_human_review_and_export` updated to send `actual_knowledge_ack=true` + reviewer field so it no longer trips the Phase E gate.
+
+**GOAL cross-check after iteration_8**:
+- (a) LLM never reads dataset rows — HOLDS.
+- (b) Exports contain no residual raw PHI — HOLDS AND ENFORCED across every HIPAA A-R category (Phase B pattern parity).
+- (c) BYO keys stored securely — HOLDS.
+- (d) Clinical signal preserved — HOLDS.
+- (e) Cross-file pseudonym linkage — HOLDS.
+- (f) Human review invariant — HOLDS with row-level spot-check (Phase D).
+- (g) Output ready to share publicly — HOLDS with actual-knowledge attestation (Phase E).
+- (h) Scanned / annotated PDFs handled — HOLDS with OCR fallback (Phase C).
+
 ## Minor items (from iteration_3, non-blocking)
 
 - Herald sometimes hits the 90s LLM timeout on the full manuscript draft. When it does, pipeline still completes; results.herald is empty and Sir can rerun.
