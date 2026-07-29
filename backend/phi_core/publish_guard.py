@@ -78,6 +78,63 @@ _PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
 ]
 
 
+# --- Conditional patterns -------------------------------------------------
+#
+# HIPAA Safe Harbor identifies TYPES of information, not shapes. Three of our
+# guard patterns have shapes that overlap with legitimate clinical data:
+#
+#   * AGE_OVER_89  overlaps with vitals/lab values 90-99 (HR, BP, glucose)
+#   * LICENSE_PLATE overlaps with study arm/site codes ("ARM 001", "HB 120")
+#   * IMEI overlaps with long barcodes / study identifiers
+#
+# For these three we fire ONLY when the column's HIPAA category from the
+# pipeline decision matches the identifier type (defensible: the classifier
+# already decided this column carries that identifier and an action must have
+# emitted it), OR when the cell text carries an anchor token that names the
+# identifier explicitly (defensible: catches free-text leaks the classifier
+# never saw). Every other pattern remains unconditional because its shape is
+# unique enough that a false-positive is implausible in a de-identified study
+# export.
+_CONDITIONAL: dict[str, dict[str, Any]] = {
+    "AGE_OVER_89": {
+        "column_cats": {"C"},
+        "anchors": re.compile(
+            r"\b(?:age[sd]?|y/?o|yrs?|years?\s+old|elderly)\b", re.IGNORECASE
+        ),
+    },
+    "LICENSE_PLATE": {
+        "column_cats": {"L"},
+        "anchors": re.compile(r"\b(?:plate|license|licence|tag|vehicle)\b", re.IGNORECASE),
+    },
+    "IMEI": {
+        "column_cats": {"M"},
+        "anchors": re.compile(r"\b(?:imei|device[_ ]?id|handset)\b", re.IGNORECASE),
+    },
+}
+
+
+def _should_fire(
+    pid: str,
+    cell_text: str,
+    column_category: str | None,
+) -> bool:
+    """Decide whether a conditional pattern should fire in this cell.
+
+    Non-conditional patterns always fire (returns True immediately).
+    Conditional patterns fire only when the column's HIPAA category matches
+    the identifier type OR the cell text contains an anchor token that
+    explicitly names the identifier.
+    """
+    rule = _CONDITIONAL.get(pid)
+    if rule is None:
+        return True  # unconditional pattern
+    if column_category and column_category in rule["column_cats"]:
+        return True
+    if rule["anchors"].search(cell_text):
+        return True
+    return False
+
+
 @dataclass
 class Finding:
     """One residual-PHI hit in an exported file."""
@@ -115,8 +172,13 @@ class GuardReport:
 
 # --- Core scanners --------------------------------------------------------
 
-def _scan_text(text: str, file_id: str, path: str) -> list[Finding]:
-    """Run every pattern over ``text`` and return findings (deduped by pattern)."""
+def _scan_text(text: str, file_id: str, path: str,
+               column_categories: dict[str, str] | None = None) -> list[Finding]:
+    """Run every pattern over ``text`` and return findings (deduped by pattern).
+
+    Non-CSV text (narrative, TXT/MD) has no column context; conditional
+    patterns rely purely on in-cell anchors here.
+    """
     findings: list[Finding] = []
     seen: set[tuple[str, str]] = set()
     lines = text.splitlines() or [text]
@@ -124,6 +186,8 @@ def _scan_text(text: str, file_id: str, path: str) -> list[Finding]:
         for pid, cat, rx in _PATTERNS:
             m = rx.search(line)
             if not m:
+                continue
+            if not _should_fire(pid, line, None):
                 continue
             key = (pid, m.group(0))
             if key in seen:
