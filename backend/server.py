@@ -563,6 +563,22 @@ async def coverage_matrix_endpoint():
     return {"rows": COVERAGE, "tools": TOOLS, "counts": coverage_counts()}
 
 
+@app.get("/api/classification-accuracy")
+async def classification_accuracy_endpoint(details: bool = False):
+    """Run the deterministic hard-rule layer over the shipped labelled corpus
+    and return per-category precision/recall/F1 + method-appropriateness.
+
+    Query params:
+      - details=1 : include per-column predictions (useful for regression debugging).
+    """
+    from phi_core.validation import run_validation
+    rep = run_validation()
+    body = rep.to_dict()
+    if not details:
+        body.pop("predictions", None)
+    return body
+
+
 @app.get("/api/sessions/{sid}/bundle", dependencies=[Depends(require_api_token)])
 async def session_bundle(sid: str, publication: bool = False, attestation_pdf: bool = False):
     """Assemble and stream the shareable bundle.

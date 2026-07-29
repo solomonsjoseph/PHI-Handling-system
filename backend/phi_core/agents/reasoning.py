@@ -41,30 +41,72 @@ SUBJECT_TYPES = {"participant", "staff", "specimen", "site", "study"}
 # human review out of caution. Citations map to 45 CFR 164.514(b)(2)(i).
 _HARD_RULE_TABLE: list[tuple[str, list[str], str, str]] = [
     # (regex, allow-list actions, default action, HIPAA citation)
-    (r"^(dob|date[_ ]?of[_ ]?birth|birth[_ ]?date|birthdate)$",
-     ["year_only", "drop"], "year_only", "164.514(b)(2)(i)(C)"),
-    (r"^(ssn|social[_ ]?security(?:[_ ]?number)?)$",
-     ["drop"], "drop", "164.514(b)(2)(i)(G)"),
-    (r"^(mrn|medical[_ ]?record(?:[_ ]?number)?|record[_ ]?number)$",
-     ["pseudonymize", "hash", "drop"], "pseudonymize", "164.514(b)(2)(i)(H)"),
-    (r"^(phone|phone[_ ]?number|mobile|cell|telephone|tel)$",
-     ["drop"], "drop", "164.514(b)(2)(i)(D)"),
-    (r"^(fax|fax[_ ]?number)$",
-     ["drop"], "drop", "164.514(b)(2)(i)(E)"),
-    (r"^(email|e[_ ]?mail|email[_ ]?address)$",
-     ["drop"], "drop", "164.514(b)(2)(i)(F)"),
-    (r"^(patient[_ ]?name|subject[_ ]?name|first[_ ]?name|last[_ ]?name|full[_ ]?name|name)$",
+    # (A) Names
+    (r"^(patient[_ ]?name|subject[_ ]?name|first[_ ]?name|last[_ ]?name|full[_ ]?name|name|given[_ ]?name|family[_ ]?name|surname|middle[_ ]?name|maiden[_ ]?name|provider[_ ]?name|physician[_ ]?name|attending[_ ]?name|clinician[_ ]?name)$",
      ["drop", "pseudonymize"], "drop", "164.514(b)(2)(i)(A)"),
-    (r"^(address|street|street[_ ]?address|mailing[_ ]?address)$",
+    # (B) Geography - address / street / city / county / precinct
+    (r"^(address|street|street[_ ]?address|mailing[_ ]?address|home[_ ]?address|city|county|precinct)$",
      ["drop"], "drop", "164.514(b)(2)(i)(B)"),
+    # (B) Geography - ZIP: keep 3-digit truncation
     (r"^(zip|zipcode|zip[_ ]?code|postal[_ ]?code|postcode)$",
      ["zip3_truncate", "drop"], "zip3_truncate", "164.514(b)(2)(i)(B)"),
-    (r"^(age|age[_ ]?years|age[_ ]?in[_ ]?years)$",
+    # (C) Dates - directly related to individual
+    (r"^(dob|date[_ ]?of[_ ]?birth|birth[_ ]?date|birthdate|admission[_ ]?date|discharge[_ ]?date|death[_ ]?date|visit[_ ]?date|encounter[_ ]?date|service[_ ]?date|onset[_ ]?date|diagnosis[_ ]?date)$",
+     ["year_only", "drop"], "year_only", "164.514(b)(2)(i)(C)"),
+    # (C) Ages - cap at 90+
+    (r"^(age|age[_ ]?years|age[_ ]?in[_ ]?years|age[_ ]?at[_ ]?enrolment|age[_ ]?at[_ ]?enrollment|age[_ ]?at[_ ]?screening)$",
      ["cap_age_90", "keep", "drop"], "cap_age_90", "164.514(b)(2)(i)(C)"),
-    (r"^(url|web[_ ]?url|website)$",
+    # (D) Telephone
+    (r"^(phone|phone[_ ]?number|mobile|cell|telephone|tel|home[_ ]?phone|work[_ ]?phone|contact[_ ]?phone|cell[_ ]?phone)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(D)"),
+    # (E) Fax
+    (r"^(fax|fax[_ ]?number|office[_ ]?fax)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(E)"),
+    # (F) Email
+    (r"^(email|e[_ ]?mail|email[_ ]?address|contact[_ ]?email|study[_ ]?email)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(F)"),
+    # (G) SSN
+    (r"^(ssn|social[_ ]?security(?:[_ ]?number)?|ss[_ ]?number|ss[_ ]?no)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(G)"),
+    # (H) Medical record number
+    (r"^(mrn|medical[_ ]?record(?:[_ ]?number)?|record[_ ]?number|chart[_ ]?number|chart[_ ]?id|patient[_ ]?record[_ ]?id)$",
+     ["pseudonymize", "hash", "drop"], "pseudonymize", "164.514(b)(2)(i)(H)"),
+    # (I) Health-plan beneficiary
+    (r"^(insurance[_ ]?id|member[_ ]?id|health[_ ]?plan[_ ]?number|subscriber[_ ]?id|hpid|policy[_ ]?number)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(I)"),
+    # (J) Account number
+    (r"^(account[_ ]?number|billing[_ ]?account|invoice[_ ]?number|patient[_ ]?account)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(J)"),
+    # (K) Certificate / licence
+    (r"^(license[_ ]?number|licence[_ ]?number|driver[_ ]?license|driver[_ ]?licence|certificate[_ ]?id|certification[_ ]?id|dea[_ ]?number|npi|npi[_ ]?number|provider[_ ]?npi)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(K)"),
+    # (L) Vehicle identifiers
+    (r"^(vehicle[_ ]?id|vehicle[_ ]?number|license[_ ]?plate|plate[_ ]?number|vin)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(L)"),
+    # (M) Device identifiers / serial numbers
+    (r"^(device[_ ]?id|device[_ ]?serial|serial[_ ]?number|imei|device[_ ]?uuid|hardware[_ ]?id)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(M)"),
+    # (N) URL
+    (r"^(url|web[_ ]?url|website|homepage|personal[_ ]?url)$",
      ["drop"], "drop", "164.514(b)(2)(i)(N)"),
-    (r"^(ip|ip[_ ]?address)$",
+    # (O) IP
+    (r"^(ip|ip[_ ]?address|ipv4|ipv6|client[_ ]?ip)$",
      ["drop"], "drop", "164.514(b)(2)(i)(O)"),
+    # (P) Biometric identifiers
+    (r"^(fingerprint|iris[_ ]?scan|biometric[_ ]?hash|voice[_ ]?print|dna[_ ]?profile|retinal[_ ]?scan|palm[_ ]?print)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(P)"),
+    # (Q) Photographs / comparable images
+    (r"^(face[_ ]?photo|patient[_ ]?photo|portrait|portrait[_ ]?url|headshot|patient[_ ]?image|face[_ ]?image)$",
+     ["drop"], "drop", "164.514(b)(2)(i)(Q)"),
+    # (R) Any other unique identifying number / characteristic / code
+    (r"^(patient[_ ]?uuid|subject[_ ]?uuid|unique[_ ]?id|tracking[_ ]?code|study[_ ]?code|linkage[_ ]?id)$",
+     ["pseudonymize", "hash", "drop"], "pseudonymize", "164.514(b)(2)(i)(R)"),
+    # Free-text (non-listed but must be scrubbed cell-by-cell)
+    (r"^(notes|visit[_ ]?notes|clinician[_ ]?notes|provider[_ ]?notes|comments|remarks|observations|free[_ ]?text|note|comment)$",
+     ["scrub_text", "drop"], "scrub_text", "164.514(b)(1) — free-text scrub"),
+    # Explicit non-PHI keepers — clinical measurements and stratifiers
+    (r"^(hemoglobin|bmi|systolic[_ ]?bp|diastolic[_ ]?bp|heart[_ ]?rate|temperature|glucose|wbc[_ ]?count|hgb[_ ]?a1c|ldl|hdl|creatinine|spo2|dose|dose[_ ]?mg|sex|gender|race|ethnicity|study[_ ]?arm|treatment[_ ]?group|visit[_ ]?number|state|country)$",
+     ["keep"], "keep", "clinical / stratifier"),
 ]
 
 

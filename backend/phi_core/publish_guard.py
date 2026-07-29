@@ -48,21 +48,33 @@ _PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     ("SSN", "G", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
     ("PHONE_US", "D", re.compile(r"\b(?:\+?1[\s\-.]?)?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}\b")),
     ("EMAIL", "F", re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[A-Za-z]{2,}\b")),
-    # Full DOB anywhere in an export is a Safe Harbor violation. The
-    # pipeline should have converted these to year-only; if any slip through
-    # the guard catches them.
     ("DATE_FULL_ISO", "C", re.compile(r"\b(19|20)\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")),
     ("DATE_FULL_US", "C", re.compile(r"\b(0[1-9]|1[0-2])/(0[1-9]|[12]\d|3[01])/(19|20)\d{2}\b")),
-    # 5-digit ZIP anywhere in an export means the truncate step was skipped.
-    # We allow 3-digit ZIPs, but any 5-digit run in a column that is not
-    # already numeric-looking is suspicious. To keep noise down we only fire
-    # on the 17 restricted ZIP3 codes fully written out (036xx etc.) since
-    # those are the ones Safe Harbor prohibits explicitly.
     ("RESTRICTED_ZIP3", "B", re.compile(
         r"\b(036|059|063|102|203|556|692|790|821|823|830|831|878|879|884|890|893)\d{2}\b"
     )),
-    # Age > 89 as a raw integer (should have been aggregated to "90+")
     ("AGE_OVER_89", "C", re.compile(r"(?<![\d.])9[0-9](?![\d+])")),
+    # --- Phase B parity for categories L / M / N / O / P / Q / R -----------
+    ("URL", "N", re.compile(r"\bhttps?://[^\s,\"']{3,}", re.IGNORECASE)),
+    ("IPV4", "O", re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")),
+    ("IPV6", "O", re.compile(r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b")),
+    # US-style license plate (2-3 letters + 3-4 digits, common state formats)
+    ("LICENSE_PLATE", "L", re.compile(r"\b[A-Z]{2,3}[- ]?\d{3,4}\b")),
+    # 15-digit IMEI (loose but standalone)
+    ("IMEI", "M", re.compile(r"(?<!\d)\d{15}(?!\d)")),
+    # Device serial: 8+ alphanumerics with at least one digit AND one letter,
+    # matching common "SN12345678", "SN-ABCD-1234" shapes.
+    ("DEVICE_SERIAL", "M", re.compile(r"\b[Ss][Nn][:\- ]*[A-Z0-9\-]{6,}\b")),
+    # Image file reference in a cell value (photograph / face capture)
+    ("IMAGE_REF", "Q", re.compile(r"\b[A-Za-z0-9_\-/.]+\.(?:jpe?g|png|bmp|tiff|heic|heif)\b", re.IGNORECASE)),
+    # Biometric hash / fingerprint reference (label + long hex)
+    ("BIOMETRIC_HASH", "P", re.compile(r"\b(?:fingerprint|iris|biometric|voice[_ ]?print)[:=\s]*[A-Fa-f0-9]{16,}\b", re.IGNORECASE)),
+    # DNA / genetic identifiers
+    ("DNA_PROFILE", "P", re.compile(r"\b(?:dna|str)[_ ]?(?:profile|locus)[:=\s]*[A-Z0-9\-]{8,}\b", re.IGNORECASE)),
+    # NPI (10-digit provider id) - K
+    ("NPI", "K", re.compile(r"\bNPI[:\- ]*\d{10}\b")),
+    # DEA number (2 letters + 7 digits) - K
+    ("DEA", "K", re.compile(r"\bDEA[:\- ]*[A-Z]{2}\d{7}\b")),
 ]
 
 

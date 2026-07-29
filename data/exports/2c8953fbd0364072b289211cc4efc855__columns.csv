@@ -1,0 +1,4 @@
+column_name,description,[A]
+patient_name,Full patient name,Y
+dob,Date of birth,Y
+notes,Clinician notes,N

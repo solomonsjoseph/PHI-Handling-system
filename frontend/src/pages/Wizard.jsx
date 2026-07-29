@@ -95,6 +95,8 @@ function StepUpload({ onNext, setSid, sid }) {
         <span className="text-oxblood"> dictionary/</span>. Intake fails closed on missing components.
       </p>
 
+      <AccuracyStrip />
+
       <div
         className={`mt-12 border-2 border-dashed transition-all duration-200 py-16 px-10 text-center
           ${dragging ? 'border-oxblood bg-paper-2' : 'border-rule'}
@@ -288,6 +290,37 @@ function StepOutput({ onBack, onRun, output, setOutput, busy }) {
     </div>
   );
 }
+
+// ---------- Accuracy strip (wizard hero) ----------------------------------
+
+function AccuracyStrip() {
+  const [rep, setRep] = React.useState(null);
+  React.useEffect(() => {
+    axios.get(`${API}/classification-accuracy`).then(r => setRep(r.data)).catch(() => {});
+  }, []);
+  if (!rep) return null;
+  const pct = v => `${(v * 100).toFixed(1)}%`;
+  return (
+    <div className="mt-8 flex items-baseline gap-8 rule-top pt-4" data-testid="accuracy-strip">
+      <div>
+        <div className="kicker">Category accuracy</div>
+        <div className="font-display text-display-md text-oxblood">{pct(rep.category_accuracy)}</div>
+      </div>
+      <div>
+        <div className="kicker">Method appropriateness</div>
+        <div className="font-display text-display-md text-oxblood">{pct(rep.action_accuracy)}</div>
+      </div>
+      <div>
+        <div className="kicker">Columns validated</div>
+        <div className="font-display text-display-md text-ink">{rep.total}</div>
+      </div>
+      <div className="text-[12px] text-ink-muted ml-auto max-w-xs">
+        Deterministic hard-rule accuracy on the shipped labelled corpus. HIPAA A-R plus non-PHI keepers and free-text scrubbers.
+      </div>
+    </div>
+  );
+}
+
 
 // ---------- WIZARD --------------------------------------------------------
 
