@@ -262,3 +262,40 @@ def test_every_hipaa_letter_has_at_least_one_pattern():
     # R = catch-all). We assert the ones the guard is expected to catch.
     for expected in ("B", "C", "D", "F", "G", "K", "L", "M", "N", "O", "P", "Q"):
         assert expected in covered, f"HIPAA category {expected} missing from Publish Guard"
+
+
+# ---------- AGE_OVER_89 must not false-positive on pseudonyms ----------
+
+def test_age_over_89_does_not_false_positive_on_pseudonym(tmp_path: Path):
+    """Regression: `P3a4c96db`-style pseudonyms carry hex bigrams like
+    "96" that used to trip the AGE_OVER_89 guard. With word-boundary anchor
+    the guard must ignore them."""
+    p = _write_csv(tmp_path, "clean.csv", [
+        ["patient_id", "age"],
+        ["P3a4c96db", "50"],   # "96" inside hex pseudonym is not an age
+        ["Pab262286", "35"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "clean", r
+
+
+def test_age_over_89_still_catches_real_age(tmp_path: Path):
+    """Positive: a standalone age >=90 must still be flagged."""
+    p = _write_csv(tmp_path, "leaky.csv", [
+        ["patient_id", "age"],
+        ["Pxxx", "95"],   # real age > 89 that was NOT capped
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "AGE_OVER_89" for f in r.findings)
+
+
+def test_age_over_89_ignores_cap_output(tmp_path: Path):
+    """`90+` is the correct Safe Harbor output for age > 89 and must not
+    itself be flagged."""
+    p = _write_csv(tmp_path, "clean.csv", [
+        ["patient_id", "age"],
+        ["Pxxx", "90+"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "clean", r

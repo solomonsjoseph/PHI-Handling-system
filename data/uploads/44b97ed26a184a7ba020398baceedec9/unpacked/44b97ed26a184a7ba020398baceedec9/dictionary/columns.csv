@@ -1,0 +1,8 @@
+column_name,description,type
+patient_id,Patient identifier (study-scoped),string
+name,Full patient name (PHI cat A),string
+dob,Date of birth (PHI cat C),date
+phone,Phone number (PHI cat D),string
+zip,ZIP code (PHI cat B),string
+age,Age in years,int
+notes,Free-text encounter notes,string

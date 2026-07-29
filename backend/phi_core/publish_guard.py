@@ -53,7 +53,7 @@ _PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     ("RESTRICTED_ZIP3", "B", re.compile(
         r"\b(036|059|063|102|203|556|692|790|821|823|830|831|878|879|884|890|893)\d{2}\b"
     )),
-    ("AGE_OVER_89", "C", re.compile(r"(?<![\d.])9[0-9](?![\d+])")),
+    ("AGE_OVER_89", "C", re.compile(r"\b9[0-9]\b(?![\+\-])")),
     # --- Phase B parity for categories L / M / N / O / P / Q / R -----------
     ("URL", "N", re.compile(r"\bhttps?://[^\s,\"']{3,}", re.IGNORECASE)),
     ("IPV4", "O", re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")),
