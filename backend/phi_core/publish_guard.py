@@ -5,26 +5,31 @@ to be shared and used publicly'. The Publish Guard is the boundary between
 those two states. It runs AFTER the Executor has emitted files to
 ``/app/data/exports/`` and BEFORE any download URL is served.
 
+Regulatory basis:
+    HIPAA Privacy Rule 45 CFR 164.514(b)(2)(i) identifies TYPES of
+    information. A pattern whose SHAPE overlaps with legitimate clinical
+    data (a bare "95" that is a heart-rate, an "ARM 001" study code that
+    resembles a license plate, a 15-digit barcode that resembles an IMEI)
+    must therefore be gated by column semantics from Judge's decision, or
+    by an in-cell anchor token, before it fires. Otherwise the guard
+    over-blocks real de-identified exports.
+
 Design rules:
 
 * **Fail closed.** If anything looks like PHI, the export is blocked; the
   operator must fix the pipeline (add a rule, tighten a decision) rather
   than override the guard.
+* **Regulation-aware.** Conditional patterns consult the per-column HIPAA
+  category and in-cell anchor tokens before firing.
 * **Deterministic.** No LLM in this path. Presidio + regex + explicit
-  denylists. Every finding cites the pattern that matched, so the operator
-  can reproduce it.
+  denylists. Every finding cites the pattern that matched.
 * **Cheap.** Runs synchronously on already-redacted files so the overhead
   is negligible relative to the 12-agent pipeline.
 
 Public API:
 
-* :func:`scan_export_file(path)` -> :class:`GuardResult`
-* :func:`scan_all_exports(export_paths)` -> :class:`GuardReport`
-
-Both return plain dicts (via ``model_dump``) so they can be stored on the
-session document and served via the read endpoints. The ``findings`` field
-is bounded (``MAX_FINDINGS_PER_FILE``) so a completely broken export cannot
-blow up the response body.
+* :func:`scan_export_file(path, decisions_by_file=None)` -> :class:`GuardResult`
+* :func:`scan_all_exports(export_paths, decisions=None)` -> :class:`GuardReport`
 """
 from __future__ import annotations
 
@@ -211,10 +216,21 @@ def _sanitise_sample(sample: str) -> str:
     return sample[:2] + "*" * (len(sample) - 4) + sample[-2:]
 
 
-def scan_export_file(file_id: str, path: Path) -> GuardResult:
+def scan_export_file(
+    file_id: str,
+    path: Path,
+    column_categories: dict[str, str] | None = None,
+) -> GuardResult:
     """Scan a single exported file. Only CSV/TSV/XLSX/TXT are inspected;
     anything else is marked ``skipped`` so we do not falsely block PDFs
-    whose scrub happened at the raw-text layer."""
+    whose scrub happened at the raw-text layer.
+
+    ``column_categories`` maps CSV/XLSX header names to the pipeline's
+    per-column HIPAA category letter ("A".."R"). Used by the conditional
+    patterns (AGE_OVER_89, LICENSE_PLATE, IMEI) so they fire only on cells
+    whose column actually carries that identifier type. Non-CSV surfaces
+    fall back to in-cell anchor detection.
+    """
     try:
         ext = path.suffix.lower().lstrip(".")
     except AttributeError:
@@ -229,12 +245,12 @@ def scan_export_file(file_id: str, path: Path) -> GuardResult:
         except OSError as e:
             return GuardResult(file_id=file_id, file_path=str(path), status="blocked",
                                detail=f"read failed: {e}", findings=[])
-        findings = _scan_csv_text(text, file_id, path.name)
+        findings = _scan_csv_text(text, file_id, path.name, column_categories or {})
     elif ext in ("txt", "md"):
         text = path.read_text(encoding="utf-8", errors="replace")
         findings = _scan_text(text, file_id, path.name)
     elif ext in ("xlsx", "xls"):
-        findings = _scan_xlsx(file_id, path)
+        findings = _scan_xlsx(file_id, path, column_categories or {})
     else:
         return GuardResult(file_id=file_id, file_path=str(path), status="skipped",
                            detail=f"extension {ext!r} not scanned")
@@ -245,19 +261,31 @@ def scan_export_file(file_id: str, path: Path) -> GuardResult:
     return GuardResult(file_id=file_id, file_path=str(path), status="clean")
 
 
-def _scan_csv_text(text: str, file_id: str, filename: str) -> list[Finding]:
-    """CSV-aware scan: only inspect DATA rows, skip the header row so a
-    column name like ``phone_number`` doesn't itself trip the guard."""
+def _scan_csv_text(
+    text: str,
+    file_id: str,
+    filename: str,
+    column_categories: dict[str, str],
+) -> list[Finding]:
+    """CSV-aware scan: skip the header row and consult column semantics
+    for conditional patterns so a clinical value 90-99 in a
+    heart-rate column does not trip AGE_OVER_89."""
     findings: list[Finding] = []
     seen: set[tuple[str, str]] = set()
     reader = csv.reader(text.splitlines())
+    headers: list[str] = []
     for lineno, row in enumerate(reader, start=1):
         if lineno == 1:
-            continue  # header row - column names are metadata, not PHI values
-        for cell in row:
+            headers = [str(h) for h in row]
+            continue
+        for col_idx, cell in enumerate(row):
+            col_name = headers[col_idx] if col_idx < len(headers) else ""
+            col_cat = column_categories.get(col_name)
             for pid, cat, rx in _PATTERNS:
                 m = rx.search(cell)
                 if not m:
+                    continue
+                if not _should_fire(pid, cell, col_cat):
                     continue
                 key = (pid, m.group(0))
                 if key in seen:
@@ -272,7 +300,11 @@ def _scan_csv_text(text: str, file_id: str, filename: str) -> list[Finding]:
     return findings
 
 
-def _scan_xlsx(file_id: str, path: Path) -> list[Finding]:
+def _scan_xlsx(
+    file_id: str,
+    path: Path,
+    column_categories: dict[str, str],
+) -> list[Finding]:
     try:
         import openpyxl  # local dep, already installed
     except ImportError:
@@ -281,16 +313,22 @@ def _scan_xlsx(file_id: str, path: Path) -> list[Finding]:
     seen: set[tuple[str, str]] = set()
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     ws = wb[wb.sheetnames[0]]
+    headers: list[str] = []
     for lineno, row in enumerate(ws.iter_rows(values_only=True), start=1):
         if lineno == 1:
+            headers = ["" if v is None else str(v) for v in row]
             continue
-        for cell in row:
+        for col_idx, cell in enumerate(row):
             if cell is None:
                 continue
             cell = str(cell)
+            col_name = headers[col_idx] if col_idx < len(headers) else ""
+            col_cat = column_categories.get(col_name)
             for pid, cat, rx in _PATTERNS:
                 m = rx.search(cell)
                 if not m:
+                    continue
+                if not _should_fire(pid, cell, col_cat):
                     continue
                 key = (pid, m.group(0))
                 if key in seen:
@@ -305,24 +343,39 @@ def _scan_xlsx(file_id: str, path: Path) -> list[Finding]:
     return findings
 
 
-def scan_all_exports(export_paths: dict[str, str]) -> GuardReport:
+def scan_all_exports(
+    export_paths: dict[str, str],
+    decisions: list[dict[str, Any]] | None = None,
+) -> GuardReport:
     """Run :func:`scan_export_file` over every entry in ``export_paths``.
 
-    Returns a :class:`GuardReport` where ``status='clean'`` means every
-    scanned file was clean (skipped files do not block). Otherwise
-    ``status='blocked'`` and each blocked file lists its findings.
+    ``decisions`` is the pipeline's per-column decision list. When
+    provided, each cell's column is looked up to determine whether a
+    conditional pattern should fire (see ``_should_fire``). When absent,
+    conditional patterns rely purely on in-cell anchor tokens (safer
+    default: catches free-text leaks even without column context).
     """
+    # Build (file_id -> {column_name: hipaa_category}) from decisions
+    per_file_col_cats: dict[str, dict[str, str]] = {}
+    for d in decisions or []:
+        fid = d.get("file_id") or ""
+        col = d.get("column") or ""
+        # Judge emits `phi_category`; older decisions may use `hipaa_category`
+        # or plain `category`. Accept any of them.
+        cat = d.get("hipaa_category") or d.get("phi_category") or d.get("category") or ""
+        if fid and col and cat:
+            per_file_col_cats.setdefault(fid, {})[col] = cat
+
     results: list[GuardResult] = []
     blocked = 0
     scanned = 0
     for file_id, p in (export_paths or {}).items():
         if not p:
-            # Some deployments blank the path for security; guard runs from Executor
-            # where the real path is still available, so this branch is diagnostic.
             results.append(GuardResult(file_id=file_id, file_path="", status="skipped",
                                        detail="path unavailable"))
             continue
-        r = scan_export_file(file_id, Path(p))
+        col_cats = per_file_col_cats.get(file_id, {})
+        r = scan_export_file(file_id, Path(p), column_categories=col_cats)
         results.append(r)
         if r.status == "blocked":
             blocked += 1

@@ -844,7 +844,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
             exec_out = await Executor(**common).run(files=files, decisions=decisions)
             # Publish Guard on the fresh exports before we mark complete.
             from phi_core.publish_guard import scan_all_exports as _scan_all_exports
-            guard_report = _scan_all_exports(exec_out["exports"]).to_dict()
+            guard_report = _scan_all_exports(exec_out["exports"], decisions=decisions).to_dict()
             audit = await Auditor(**common).run(decisions=decisions, exports=exec_out["exports"], files=files)
             scout = await Scout(**common).run()
             ledger = await Ledger(**common).run(decisions=decisions, audit=audit, scout=scout, benchmark_result=None)

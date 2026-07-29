@@ -165,6 +165,22 @@ Sir directed a five-phase IRB-readiness roadmap in /app/memory/TODO.md. Phase A 
 
 **Full regression after iteration_8**: 120 tests passed + 1 skipped across the unit-test suite (excluding live-LLM-required agent pipeline tests). Legacy integration test `test_agent_pipeline.py::test_human_review_and_export` updated to send `actual_knowledge_ack=true` + reviewer field so it no longer trips the Phase E gate.
 
+### iteration_9 (fork) regulator-defensible guard + jurisdiction registry + phase F E2E
+
+Sir directed a full security audit + code review. The audit was clean on architecture; the code review surfaced a HIGH-severity false-positive: `AGE_OVER_89` was firing on any two-digit number 90-99 regardless of column context, blocking real clinical exports (heart rate 95, systolic BP 92, glucose 96). Sir corrected the direction: the fix must be regulator-defensible, not just code-defensible. Per HIPAA §164.514(b)(2)(i)(C), the identifier is "the age of an individual" — not "any 90-99". The rule regulates identifier TYPES, not shapes.
+
+- **CR-HIGH fix — Column-semantics + in-cell anchor gate on the 3 shape-ambiguous patterns**. `phi_core/publish_guard.py` `_CONDITIONAL` table now gates `AGE_OVER_89`, `LICENSE_PLATE`, `IMEI` on either (a) the pipeline's per-column HIPAA category matching the identifier type or (b) an in-cell anchor token (e.g. `age`, `y/o`, `yrs`, `plate`, `vehicle`, `imei`, `device id`). Every other pattern (SSN, phone, email, URL, IPv4/IPv6, DEVICE_SERIAL prefix-anchored, IMAGE_REF, BIOMETRIC_HASH, DNA_PROFILE, NPI, DEA) remains unconditional because its shape is unique enough that a false-positive is implausible. Verified live: `heart_rate=95`, `systolic_bp=92`, `arm_code="HB 120"`, `barcode="490154203237518"` no longer trip the guard, while `age=95` still does (real leak).
+
+- **`scan_all_exports(export_paths, decisions=None)`** — the guard now accepts the pipeline's per-column decisions and builds a `{file_id: {column: phi_category}}` map, threaded through CSV + XLSX scanners. Both `orchestrator.py` (initial run) and `server.py` (human-review resume) pass decisions to the guard.
+
+- **`phi_core/jurisdictions.py`** — first-class `JurisdictionPack` seeded (US-HIPAA fully populated + EU/UK/IN/CA/BR stubs). The pack contains identifier_categories, age_aggregation_threshold, restricted_zip3_prefixes, and pattern-set per jurisdiction. Will become the fallback cache for the Regulations expert once it is armed with real web-search.
+
+- **Phase F E2E live-verified**: full run through `create → intake → handle → awaiting_human_review → preview → 400 gate → 200 submit → complete → bundle` on realistic study data. `publish_guard.status = clean, scanned=2, blocked=0`. Bundle attestation.json.actual_knowledge_ack = True.
+
+- **`iteration_8` bonus fix**: 3 legacy security-round2 tests had a phone regex `\b\d{3}[\s\-.]?\d{3}[\s\-.]?\d{4}\b` with optional separators that false-positives on floating-point `duration_ms` values whose fractional part is a 10-digit sequence. Tightened to require at least one separator.
+
+**Full regression after iteration_9**: **125/125 unit tests + 3 skipped (unrelated env-skip) green + Phase F live E2E passing.**
+
 **GOAL cross-check after iteration_8**:
 - (a) LLM never reads dataset rows — HOLDS.
 - (b) Exports contain no residual raw PHI — HOLDS AND ENFORCED across every HIPAA A-R category (Phase B pattern parity).

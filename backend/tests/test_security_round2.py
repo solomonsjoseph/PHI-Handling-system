@@ -159,7 +159,7 @@ def test_agent_trace_recursively_scrubs_nested_payload():
     guard and leaked raw names/phones. Verify the recursive scrubber closes it.
     """
     import re as _re
-    phone = _re.compile(r"\b\d{3}[\s\-.]?\d{3}[\s\-.]?\d{4}\b")
+    phone = _re.compile(r"\b\d{3}[\s\-.]\d{3}[\s\-.]\d{4}\b")
     email = _re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[A-Za-z]{2,}\b")
     ssn = _re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
     r = requests.get(f"{BASE_URL}/api/sessions", timeout=10)
@@ -204,7 +204,7 @@ def test_scrub_nested_walks_dicts_and_lists():
 def test_results_scrubs_reasons():
     """No obvious PHI substrings should appear in decision reasons/citations."""
     import re as _re
-    phone = _re.compile(r"\b\d{3}[\s\-.]?\d{3}[\s\-.]?\d{4}\b")
+    phone = _re.compile(r"\b\d{3}[\s\-.]\d{3}[\s\-.]\d{4}\b")
     ssn = _re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
     email = _re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[A-Za-z]{2,}\b")
     r = requests.get(f"{BASE_URL}/api/sessions", timeout=10)
@@ -228,7 +228,7 @@ def test_results_scrubs_reasons():
         pytest.skip("no decisions with reason/citation available")
     """No obvious PHI substrings should appear in decision reasons/citations."""
     import re as _re
-    phone = _re.compile(r"\b\d{3}[\s\-.]?\d{3}[\s\-.]?\d{4}\b")
+    phone = _re.compile(r"\b\d{3}[\s\-.]\d{3}[\s\-.]\d{4}\b")
     ssn = _re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
     email = _re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[A-Za-z]{2,}\b")
     r = requests.get(f"{BASE_URL}/api/sessions", timeout=10)

@@ -173,9 +173,20 @@ def test_license_plate_blocks_export_category_L(tmp_path: Path):
         ["patient_id", "vehicle"],
         ["Px1", "ABC 1234"],
     ])
-    r = scan_export_file("f1", p)
+    r = scan_export_file("f1", p, column_categories={"vehicle": "L"})
     assert r.status == "blocked"
     assert any(f["pattern_id"] == "LICENSE_PLATE" for f in r.findings)
+
+
+def test_license_plate_ignored_without_column_or_anchor(tmp_path: Path):
+    """Regulator-defensible: a study arm code like 'ARM 001' or 'HB 120'
+    must NOT fire LICENSE_PLATE without column semantics or anchor."""
+    p = _write_csv(tmp_path, "clean.csv", [
+        ["patient_id", "arm_code"],
+        ["Px1", "ARM 001"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "clean"
 
 
 def test_imei_blocks_export_category_M(tmp_path: Path):
@@ -183,9 +194,19 @@ def test_imei_blocks_export_category_M(tmp_path: Path):
         ["patient_id", "device_imei"],
         ["Px1", "490154203237518"],
     ])
-    r = scan_export_file("f1", p)
+    r = scan_export_file("f1", p, column_categories={"device_imei": "M"})
     assert r.status == "blocked"
     assert any(f["pattern_id"] == "IMEI" for f in r.findings)
+
+
+def test_imei_ignored_without_column_or_anchor(tmp_path: Path):
+    """Long numeric barcodes must not trip IMEI without column context."""
+    p = _write_csv(tmp_path, "clean.csv", [
+        ["patient_id", "barcode"],
+        ["Px1", "490154203237518"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "clean"
 
 
 def test_device_serial_blocks_export_category_M(tmp_path: Path):
@@ -280,10 +301,36 @@ def test_age_over_89_does_not_false_positive_on_pseudonym(tmp_path: Path):
 
 
 def test_age_over_89_still_catches_real_age(tmp_path: Path):
-    """Positive: a standalone age >=90 must still be flagged."""
+    """Positive: a standalone age >=90 in an age-classified column must
+    still be flagged (HIPAA §164.514(b)(2)(i)(C))."""
     p = _write_csv(tmp_path, "leaky.csv", [
         ["patient_id", "age"],
         ["Pxxx", "95"],   # real age > 89 that was NOT capped
+    ])
+    r = scan_export_file("f1", p, column_categories={"age": "C"})
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "AGE_OVER_89" for f in r.findings)
+
+
+def test_age_over_89_ignored_on_clinical_measurement(tmp_path: Path):
+    """CR-HIGH regression: a heart rate of 95 or systolic BP of 92 in
+    a NON-age column must NOT trip AGE_OVER_89. HIPAA regulates the
+    age identifier, not the numeric value 90-99."""
+    p = _write_csv(tmp_path, "clean.csv", [
+        ["patient_id", "heart_rate_bpm", "systolic_bp"],
+        ["Px1", "95", "92"],
+        ["Px2", "98", "90"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "clean", r
+
+
+def test_age_anchor_in_free_text_still_fires(tmp_path: Path):
+    """In-cell anchor fallback: notes column carrying 'aged 95' must
+    still trip AGE_OVER_89 even without column semantics."""
+    p = _write_csv(tmp_path, "leaky.csv", [
+        ["patient_id", "notes"],
+        ["Px1", "Patient aged 95 admitted with chest pain"],
     ])
     r = scan_export_file("f1", p)
     assert r.status == "blocked"
