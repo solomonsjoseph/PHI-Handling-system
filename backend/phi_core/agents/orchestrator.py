@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from .base import AgentMessage, ITERATION_CAP
-from .experts import Statute, Praxis
+from .experts import Statute
 from .llm import LlmConfig
 from .outward import Herald, Ledger, Scout
 from .reasoning import Auditor, Executor, Judge, Sentinel, apply_sentinel_hard_rules

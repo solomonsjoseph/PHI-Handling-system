@@ -23,7 +23,6 @@ import asyncio
 import uuid
 import json
 import os
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -689,13 +688,58 @@ async def get_llm_catalog():
 async def corpus_study_catalog():
     from phi_corpus.scenarios import list_scenarios
     from phi_corpus.edge_cases import EDGE_CASES
+    db = get_db()
+    # Discovered scenarios (from CorpusResearcher) live alongside the
+    # hand-curated library so the catalog reflects both.
+    researched = []
+    async for doc in db.corpus_scenarios.find({}, {"_id": 0}):
+        researched.append({
+            "id": doc.get("scenario_id"),
+            "label": doc.get("label"),
+            "source": "researcher",
+            "jurisdictions": doc.get("jurisdictions", []),
+            "source_study": doc.get("source_study"),
+        })
     return {
-        "scenarios": list_scenarios(),
+        "scenarios": list_scenarios() + researched,
         "edge_cases": [
             {"tag": e.tag, "label": e.label, "applies_to_column": e.applies_to_column}
             for e in EDGE_CASES.values()
         ],
     }
+
+
+class CorpusStudyResearchBody(BaseModel):
+    domain: str
+
+
+@app.post("/api/corpus/study/research", dependencies=[Depends(require_api_token)])
+async def corpus_study_research(body: CorpusStudyResearchBody):
+    """Run the CorpusResearcher agent to discover a real-life scenario
+    for the requested study domain and persist it to the ``corpus_scenarios``
+    Mongo collection so it survives restart and shows up in the catalog.
+    """
+    from phi_corpus.researcher import CorpusResearcher
+    db = get_db()
+    cfg = await _current_llm_cfg()
+    agent = CorpusResearcher(session_id="corpus-researcher", llm=cfg, db=db)
+    reply = await agent.research(body.domain)
+
+    if reply.get("error"):
+        # Do not persist an errored/ungrounded scenario.
+        raise HTTPException(422, f"corpus researcher: {reply.get('error')}")
+
+    # Persist keyed by scenario_id so repeated research on the same domain
+    # updates the same row.
+    sid_key = reply.get("scenario_id") or body.domain.strip().lower()
+    reply["scenario_id"] = sid_key
+    await db.corpus_scenarios.update_one(
+        {"scenario_id": sid_key},
+        {"$set": {**reply, "domain": body.domain, "updated_at":
+                  datetime.now(timezone.utc).isoformat()}},
+        upsert=True,
+    )
+    return reply
 
 
 class CorpusStudyGenerateBody(BaseModel):

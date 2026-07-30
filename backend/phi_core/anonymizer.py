@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Iterable
 
 import openpyxl
 
-from .models import DetectedSpan, FileArtifact
+from .models import DetectedSpan
 
 
 def _tag(span: DetectedSpan) -> str:

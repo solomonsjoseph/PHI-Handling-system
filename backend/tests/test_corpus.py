@@ -35,7 +35,7 @@ def test_planter_ground_truth_covers_every_cell():
     verifier can score both PHI transforms and clinical preservation."""
     from phi_corpus.planters import plant
     art = plant(scenario_id="oncology_v1", edge_case_tags=[],
-                row_count=5, seed=1)
+                row_count=5, seed=1, include_forms=False)
     z = zipfile.ZipFile(io.BytesIO(art.zip_bytes))
     total_cells = 0
     for n in z.namelist():
@@ -45,12 +45,51 @@ def test_planter_ground_truth_covers_every_cell():
     assert len(art.ground_truth["planted"]) == total_cells
 
 
+# ---- Forms tests (Phase C1 forms/pdf component) -----------------------
+
+def test_planter_emits_two_pdfs_when_forms_enabled():
+    from phi_corpus.planters import plant
+    art = plant(scenario_id="oncology_v1", edge_case_tags=[],
+                row_count=2, seed=1, include_forms=True)
+    names = zipfile.ZipFile(io.BytesIO(art.zip_bytes)).namelist()
+    assert "forms/consent_digital.pdf" in names
+    assert "forms/consent_scanned.pdf" in names
+
+
+def test_planter_form_pdfs_add_phi_plants_to_ground_truth():
+    from phi_corpus.planters import plant
+    art = plant(scenario_id="diabetes_v1", edge_case_tags=[],
+                row_count=1, seed=2, include_forms=True)
+    edge_tags = {p["edge_case_tag"] for p in art.ground_truth["planted"]}
+    assert "form_consent_digital" in edge_tags
+    assert "form_consent_scanned" in edge_tags
+    # Each PDF plants 6 PHI slots (A/C/D/F/B + a repeated D)
+    digital_plants = [p for p in art.ground_truth["planted"]
+                      if p["edge_case_tag"] == "form_consent_digital"]
+    assert len(digital_plants) == 6
+
+
+def test_digital_pdf_text_layer_is_extractable():
+    """The digital PDF must be pypdf-extractable so the fast path handles
+    it without invoking OCR."""
+    from phi_corpus.planters import plant
+    from pypdf import PdfReader
+    art = plant(scenario_id="oncology_v1", edge_case_tags=[],
+                row_count=1, seed=3, include_forms=True)
+    z = zipfile.ZipFile(io.BytesIO(art.zip_bytes))
+    pdf_bytes = z.read("forms/consent_digital.pdf")
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    text = reader.pages[0].extract_text()
+    assert "Study Protocol" in text
+    assert "Patient Full Name" in text
+
+
 def test_planter_edge_case_tag_persists_into_ground_truth():
     from phi_corpus.planters import plant
     art = plant(scenario_id="oncology_v1",
                 edge_case_tags=["age_over_89", "restricted_zip3",
                                 "notes_carry_name", "clinical_hr_90s"],
-                row_count=3, seed=99)
+                row_count=3, seed=99, include_forms=False)
     tags = {p["edge_case_tag"] for p in art.ground_truth["planted"] if p["edge_case_tag"]}
     assert tags == {"age_over_89", "restricted_zip3", "notes_carry_name", "clinical_hr_90s"}
 

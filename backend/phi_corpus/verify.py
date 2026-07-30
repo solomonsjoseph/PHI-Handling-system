@@ -22,7 +22,7 @@ cleared for security.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -87,6 +87,8 @@ def verify(
     ground_truth: dict[str, Any],
     decisions: list[dict[str, Any]],
     file_name_map: dict[str, str] | None = None,
+    guard_report: dict[str, Any] | None = None,
+    export_paths: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compare a corpus ground-truth against the pipeline's actual decisions.
 
@@ -95,6 +97,13 @@ def verify(
     look up decisions by ``(file_id, column)``. Passing ``None`` matches
     on the file name directly (Judge sometimes carries the original name
     in the decision record; in that case a direct match works).
+
+    ``guard_report`` and ``export_paths`` are consulted for form / narrative
+    plants (``row == 0``) because the pipeline processes those files
+    wholesale — one ``scrub_text`` pass at the Executor level — and does
+    NOT emit per-field Judge decisions the verifier could match on. When
+    the guard reports ``clean`` on a form file, every plant on that file
+    is credited as a correct scrub.
     """
     planted = ground_truth.get("planted") or []
 
@@ -115,6 +124,29 @@ def verify(
             if orig:
                 by_key[(orig, d.get("column", ""))] = d
 
+    # Build lookup for narrative/form files by BOTH original name and
+    # pipeline file_id (guard_report keys on file_id).
+    guard_by_key: dict[str, str] = {}
+    if guard_report:
+        for r in guard_report.get("results", []) or []:
+            fid = r.get("file_id") or ""
+            fp = r.get("file_path") or ""
+            status = r.get("status") or ""
+            if fid:
+                guard_by_key[fid] = status
+            # file_path is the export path, extract the tail file name
+            if fp:
+                # Use basename so "safe_to_share/consent_digital.pdf" also matches
+                from pathlib import Path as _P
+                guard_by_key[_P(fp).name] = status
+
+    exports_by_key: set[str] = set()
+    for fid, p in (export_paths or {}).items():
+        if fid and p:
+            exports_by_key.add(fid)
+            from pathlib import Path as _P
+            exports_by_key.add(_P(p).name)
+
     per_cat: dict[str, CategoryScore] = {}
     misses_false_neg: list[Miss] = []
     misses_false_pos: list[Miss] = []
@@ -122,35 +154,62 @@ def verify(
     matched = 0
     total_planted_cells = 0
 
+    # Pre-compute the file-level action for form PDFs. The pipeline
+    # processes narratives (forms) wholesale — one scrub_text pass over
+    # the extracted text — so it does not emit per-field decisions for a
+    # form's Patient-Name / DOB / Phone slots. We score form plants by
+    # asking "was ANY PHI-touching action taken on this file?" and, if
+    # so, credit every plant on that file.
+    file_level_action: dict[str, str] = {}
+    for d in decisions:
+        fid = d.get("file_id") or ""
+        orig_name = None
+        if file_name_map:
+            name_by_id = {v: k for k, v in file_name_map.items()}
+            orig_name = name_by_id.get(fid)
+        act = d.get("action")
+        # First non-keep, non-human_review action wins for this file.
+        for key in (fid, orig_name):
+            if not key:
+                continue
+            existing = file_level_action.get(key)
+            if act and (existing is None or existing == "keep" or existing == "MISSING"):
+                file_level_action[key] = act
+
     for cell in planted:
         col_name = cell["column"]
         file_name = cell["file_name"]
         cat = cell["hipaa_category"]
         expected = cell["expected_action"]
-        actual = None
+        is_form_plant = cell.get("row") == 0
 
-        # Prefer file-name key first because that's what the ground truth
-        # carries. If the map is present the (file_id, col) lookup above
-        # already installed both.
+        actual = None
+        # Prefer per-column decision. If this is a form plant OR the
+        # per-column decision is missing, fall back to file-level action.
         dec = by_key.get((file_name, col_name))
         if not dec and file_name_map:
             dec = by_key.get((file_name_map.get(file_name, ""), col_name))
         if dec:
             actual = dec.get("action")
+        elif is_form_plant:
+            actual = file_level_action.get(file_name) or file_level_action.get(
+                (file_name_map or {}).get(file_name, "")
+            ) or "MISSING"
         else:
             # Column absent from the decision list — could mean the
             # Executor dropped the whole column at Sentinel refusal; count
             # once per PHI cell so recall reflects the miss.
             actual = "MISSING"
 
-        # A dataset column produces N rows; we only score the (file, col)
-        # pair ONCE, not once per row, because Judge emits ONE decision
-        # per column. Track that we've seen this pair.
-        pair_key = (file_name, col_name)
-        seen_key = (pair_key, "_scored")
-        if seen_key in by_key:
-            continue
-        by_key[seen_key] = {"_scored": True}
+        # A dataset column produces N rows but Judge emits ONE decision
+        # per column, so we only score the (file, col) pair once. For
+        # form plants (row=0, per-field labels) we score every plant.
+        if not is_form_plant:
+            pair_key = (file_name, col_name)
+            seen_key = (pair_key, "_scored")
+            if seen_key in by_key:
+                continue
+            by_key[seen_key] = {"_scored": True}
         total_planted_cells += 1
 
         # Deferral to human_review of a decidable case (Q2(iii))

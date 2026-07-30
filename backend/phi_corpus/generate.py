@@ -36,6 +36,8 @@ def _cli(argv: list[str]) -> int:
                    help=f"comma-separated tags. Available: {','.join(sorted(all_tags()))}")
     p.add_argument("--rows", type=int, default=8)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--no-forms", action="store_true",
+                   help="skip PDF form generation (default: include both digital + scanned)")
     p.add_argument("--out", required=True, help="output ZIP path")
     p.add_argument("--ground-truth", default="",
                    help="ground-truth JSON path (default: <out>.groundtruth.json)")
@@ -60,6 +62,7 @@ def _cli(argv: list[str]) -> int:
         edge_case_tags=tags,
         row_count=args.rows,
         seed=args.seed,
+        include_forms=not args.no_forms,
     )
 
     out = Path(args.out)

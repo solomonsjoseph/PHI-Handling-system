@@ -14,7 +14,7 @@ import hashlib
 import json
 import random
 import string
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Iterable, List, Optional, Tuple
 
 from .models import CorpusRecord, GoldSpan

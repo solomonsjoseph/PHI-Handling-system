@@ -1,0 +1,12 @@
+column_name,description,type
+patient_id,Study-scoped patient identifier,string
+name,Full patient name (PHI cat A),string
+dob,Date of birth (PHI cat C),date
+phone,Phone number (PHI cat D),string
+email,Email address (PHI cat F),string
+zip,ZIP code (PHI cat B),string
+age,Age in [C],string
+heart_rate_bpm,Heart rate in beats per minute,int
+systolic_bp,Systolic blood pressure in mmHg,int
+arm_code,Study arm assignment,string
+notes,Free-text clinical notes,string

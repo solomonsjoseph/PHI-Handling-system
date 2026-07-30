@@ -32,10 +32,11 @@ import csv
 import io
 import random
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from .scenarios import SCENARIOS, Scenario, ColumnSpec
+from .forms import build_digital_pdf, build_scanned_pdf
+from .scenarios import SCENARIOS, Scenario
 from .edge_cases import EDGE_CASES, EdgeCase
 
 
@@ -70,9 +71,20 @@ def plant(
     edge_case_tags: list[str] | None = None,
     row_count: int = 8,
     seed: int = 42,
+    include_forms: bool = True,
 ) -> CorpusArtifact:
     """Plant PHI/PII per the scenario + edge-cases and emit both the corpus
-    ZIP and the ground-truth dict."""
+    ZIP and the ground-truth dict.
+
+    ``include_forms`` toggles emission of ``forms/*.pdf`` documents. When
+    True, two PDFs are generated per corpus:
+
+    * ``forms/consent_digital.pdf`` — text-layer PDF (pypdf fast path)
+    * ``forms/consent_scanned.pdf`` — image-only PDF (OCR fallback path)
+
+    Both plants are added to the ground truth so the verifier can score
+    whether the pipeline caught the form-embedded PHI.
+    """
     scn = SCENARIOS[scenario_id]
     rng = random.Random(seed)
     edge_cases = [EDGE_CASES[t] for t in (edge_case_tags or []) if t in EDGE_CASES]
@@ -91,12 +103,28 @@ def plant(
         dict_text = _generate_dictionary(scn)
         z.writestr("dictionary/columns.csv", dict_text)
 
-        # NOTE: forms/ intentionally omitted from the base corpus. The
-        # intake pipeline requires forms/ to contain .pdf only, and the
-        # narrative body is a scenario-level annotation that the Lexicon
-        # agent reads via the dictionary description column already. A
-        # future edge-case ("scanned_form_ocr") will emit a real PDF into
-        # forms/ to torture-test the OCR path.
+        # 3) forms/*.pdf — third study component per Sir's original spec.
+        # Digital + scanned variants exercise both the pypdf fast path
+        # and the OCR fallback (Phase C). Every planted PHI slot is
+        # recorded on the ground truth with ``column`` = form-field label.
+        if include_forms:
+            for form_kind, builder in (
+                ("consent_digital", build_digital_pdf),
+                ("consent_scanned", build_scanned_pdf),
+            ):
+                pdf_bytes, plants = builder(scn.label, rng)
+                filename = f"{form_kind}.pdf"
+                z.writestr(f"forms/{filename}", pdf_bytes)
+                for p in plants:
+                    planted.append(PlantedCell(
+                        file_name=filename,
+                        row=0,   # forms have no row concept
+                        column=p["label"],
+                        value=p["value"],
+                        hipaa_category=p["hipaa_category"],
+                        expected_action=p["expected_action"],
+                        edge_case_tag=f"form_{form_kind}",
+                    ))
 
     ground_truth = {
         "scenario_id": scenario_id,
@@ -104,6 +132,7 @@ def plant(
         "row_count": row_count,
         "edge_case_tags": [ec.tag for ec in edge_cases],
         "seed": seed,
+        "include_forms": include_forms,
         "planted": [c.__dict__ for c in planted],
     }
     summary = _summarise(planted)

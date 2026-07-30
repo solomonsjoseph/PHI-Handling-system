@@ -20,7 +20,7 @@ import ipaddress
 import os
 import re
 import socket
-from typing import Any, AsyncIterator
+from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import Header, HTTPException

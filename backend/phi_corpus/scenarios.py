@@ -14,7 +14,7 @@ mined from ClinicalTrials.gov / PubMed.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Any
 
 
@@ -26,7 +26,6 @@ from typing import Callable, Any
 
 import random
 import string
-import datetime as _dt
 
 
 def gen_name(rng: random.Random) -> str:

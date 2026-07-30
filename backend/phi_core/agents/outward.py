@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..benchmark import run_benchmark
-from ..models import CorpusRecord
 from .base import Agent
 from .cache import cache_get, cache_put
 

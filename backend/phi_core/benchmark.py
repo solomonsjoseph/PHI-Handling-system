@@ -83,7 +83,6 @@ def run_benchmark(records: Iterable[CorpusRecord], corpus_id: str, detectors: li
     total_tp = total_fp = total_fn = 0
     total_gold = 0
     per_cat_tp: Counter = Counter()
-    per_cat_fp: Counter = Counter()
     per_cat_fn: Counter = Counter()
     per_det: dict[str, Counter] = defaultdict(Counter)
     n = 0

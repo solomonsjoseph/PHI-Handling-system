@@ -13,7 +13,6 @@ from __future__ import annotations
 import csv
 import email
 import hashlib
-import io
 from pathlib import Path
 from typing import Iterator
 

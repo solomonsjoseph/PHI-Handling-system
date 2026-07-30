@@ -10,11 +10,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..anonymizer import apply_to_dataset, apply_to_text
-from ..detectors import detect_text, header_phi_columns
-from ..file_readers import iter_dataset_rows
+from ..anonymizer import apply_to_text
+from ..detectors import detect_text
 from ..pipeline import EXPORT_DIR
-from .base import Agent, ITERATION_CAP
+from .base import Agent
 
 
 ACTION_TYPES = {
@@ -228,7 +227,6 @@ class Executor(Agent):
 
     async def run(self, files: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> dict[str, Any]:
         """Apply decisions to each file. Returns {"exports": {file_id: path}}."""
-        import shutil
         await self._log("executor.begin", "info", {"decision_count": len(decisions)})
         exports: dict[str, str] = {}
         by_file: dict[str, list[dict[str, Any]]] = {}
