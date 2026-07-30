@@ -1,0 +1,5 @@
+patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
+Pa980ca19,,1965,,,000,90+,90,86,ARM 224,Patient [A] enrolled on [C]; contact via phone.
+P11660f75,,1955,,,000,90+,90,133,HB 715,Patient [A] enrolled on [C]; contact via phone.
+P842f106e,,1973,,,000,90+,90,131,INT 550,Patient [A] enrolled on [C]; contact via phone.
+P612243ee,,2010,,,000,90+,94,90,HB 888,Patient [A] enrolled on [C]; contact via phone.

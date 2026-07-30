@@ -16,8 +16,12 @@ export default function Benchmark() {
     listCorpora().then(d => {
       setCorpora(d.corpora || []);
       if ((d.corpora || []).length > 0) setSelCorpus(d.corpora[0].id);
-    });
-    listBenchmarks().then(d => setBenchmarks(d.benchmarks || []));
+    }).catch(err => console.warn('listCorpora failed:', err));
+    listBenchmarks()
+      .then(d => setBenchmarks(d.benchmarks || []))
+      .catch(err => console.warn('listBenchmarks failed:', err));
+    // Fetch once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const run = async () => {

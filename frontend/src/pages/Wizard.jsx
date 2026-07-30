@@ -170,7 +170,11 @@ function StepUpload({ onNext, setSid, sid }) {
 function StepConfigure({ onNext, onBack, sid, config, setConfig }) {
   const [providers, setProviders] = useState([]);
   useEffect(() => {
-    axios.get(`${API}/settings/llm`).then(r => setProviders(r.data.providers || [])).catch(() => {});
+    axios.get(`${API}/settings/llm`)
+      .then(r => setProviders(r.data.providers || []))
+      .catch(err => console.warn('load providers failed:', err));
+    // Empty dep array intentional: fetch once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const canNext = config.reviewer.trim().length >= 2;
 
@@ -296,7 +300,11 @@ function StepOutput({ onBack, onRun, output, setOutput, busy }) {
 function AccuracyStrip() {
   const [rep, setRep] = React.useState(null);
   React.useEffect(() => {
-    axios.get(`${API}/classification-accuracy`).then(r => setRep(r.data)).catch(() => {});
+    axios.get(`${API}/classification-accuracy`)
+      .then(r => setRep(r.data))
+      .catch(err => console.warn('classification-accuracy load failed:', err));
+    // Fetch once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   if (!rep) return null;
   const pct = v => `${(v * 100).toFixed(1)}%`;
@@ -344,7 +352,9 @@ export default function Wizard() {
         window.localStorage.setItem('phi_reviewer_id', config.reviewer.trim());
         window.localStorage.setItem('phi_reviewer_comment', config.comment || '');
         window.localStorage.setItem('phi_output_options', JSON.stringify(output));
-      } catch (_) {}
+      } catch (err) {
+        console.warn('reviewer state persistence failed:', err);
+      }
       await axios.post(`${API}/sessions/${sid}/handle`);
       navigate(`/studies/${sid}?bundle=${output.publication ? 'publication' : 'default'}${output.attestation_pdf ? '&pdf=1' : ''}`);
     } catch (e) {

@@ -78,6 +78,9 @@ export default function SessionDetail() {
     es.onerror = () => es.close();
     esRef.current = es;
     return () => es.close();
+    // Only re-open the stream when the session id changes; `refresh` closes
+    // over `sid` and `setState` setters which are stable across renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sid]);
 
   const status = session?.status;
@@ -120,7 +123,8 @@ export default function SessionDetail() {
       const [file_id, ...rest] = key.split('|');
       return { file_id, column: rest.join('|'), action };
     });
-    try { window.localStorage.setItem('phi_reviewer_id', reviewer.trim()); } catch (_) {}
+    try { window.localStorage.setItem('phi_reviewer_id', reviewer.trim()); }
+    catch (err) { console.warn('phi_reviewer_id write failed:', err); }
     setBusy(true);
     try {
       const r = await axios.post(`${API}/sessions/${sid}/human-review`, {

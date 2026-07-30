@@ -8,7 +8,12 @@ export default function Sessions() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    listSessions().then(d => setItems(d.sessions || [])).finally(() => setLoading(false));
+    listSessions()
+      .then(d => setItems(d.sessions || []))
+      .catch(err => console.warn('listSessions failed:', err))
+      .finally(() => setLoading(false));
+    // Fetch once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (

@@ -30,7 +30,11 @@ export default function Settings() {
     const { providers: _p, api_key_set: _a, api_key: _k, ...rest } = r;
     setCfg(prev => ({ ...prev, ...rest }));
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    // `load` closes over stable setState setters; fetch once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const saveOpToken = () => {
     setApiToken(opToken);

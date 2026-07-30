@@ -24,7 +24,13 @@ export default function AgentSection({ sid, session, onRefresh }) {
     setTrace(t || []);
   };
 
-  useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, [sid]);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+    // `load` closes over `sid` + stable setState setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sid]);
 
   const startHandle = async () => {
     setBusy(true);
