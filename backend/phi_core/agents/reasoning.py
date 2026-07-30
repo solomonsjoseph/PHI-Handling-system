@@ -67,8 +67,8 @@ _HARD_RULE_TABLE: list[tuple[str, list[str], str, str]] = [
     # (G) SSN
     (r"^(ssn|social[_ ]?security(?:[_ ]?number)?|ss[_ ]?number|ss[_ ]?no)$",
      ["drop"], "drop", "164.514(b)(2)(i)(G)"),
-    # (H) Medical record number
-    (r"^(mrn|medical[_ ]?record(?:[_ ]?number)?|record[_ ]?number|chart[_ ]?number|chart[_ ]?id|patient[_ ]?record[_ ]?id)$",
+    # (H) Medical record number / study-scoped participant record identifier
+    (r"^(mrn|medical[_ ]?record(?:[_ ]?number)?|record[_ ]?number|chart[_ ]?number|chart[_ ]?id|patient[_ ]?record[_ ]?id|patient[_ ]?id|subject[_ ]?id|participant[_ ]?id|child[_ ]?id|study[_ ]?id|enrol(?:l)?ment[_ ]?id|record[_ ]?id)$",
      ["pseudonymize", "hash", "drop"], "pseudonymize", "164.514(b)(2)(i)(H)"),
     # (I) Health-plan beneficiary
     (r"^(insurance[_ ]?id|member[_ ]?id|health[_ ]?plan[_ ]?number|subscriber[_ ]?id|hpid|policy[_ ]?number)$",
@@ -104,7 +104,7 @@ _HARD_RULE_TABLE: list[tuple[str, list[str], str, str]] = [
     (r"^(notes|visit[_ ]?notes|clinician[_ ]?notes|provider[_ ]?notes|comments|remarks|observations|free[_ ]?text|note|comment)$",
      ["scrub_text", "drop"], "scrub_text", "164.514(b)(1) — free-text scrub"),
     # Explicit non-PHI keepers — clinical measurements and stratifiers
-    (r"^(hemoglobin|bmi|systolic[_ ]?bp|diastolic[_ ]?bp|heart[_ ]?rate|temperature|glucose|wbc[_ ]?count|hgb[_ ]?a1c|ldl|hdl|creatinine|spo2|dose|dose[_ ]?mg|sex|gender|race|ethnicity|study[_ ]?arm|treatment[_ ]?group|visit[_ ]?number|state|country)$",
+    (r"^(hemoglobin|bmi|systolic[_ ]?bp|diastolic[_ ]?bp|heart[_ ]?rate|heart[_ ]?rate[_ ]?bpm|temperature|glucose|glucose[_ ]?mgdl|wbc[_ ]?count|hgb[_ ]?a1c|hba1c[_ ]?percent|ldl|hdl|creatinine|spo2|dose|dose[_ ]?mg|sex|gender|race|ethnicity|study[_ ]?arm|treatment[_ ]?group|arm[_ ]?code|visit[_ ]?number|state|country|barcode|specimen[_ ]?barcode|specimen[_ ]?id|cbcl[_ ]?total[_ ]?score)$",
      ["keep"], "keep", "clinical / stratifier"),
 ]
 

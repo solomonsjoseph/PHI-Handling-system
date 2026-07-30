@@ -687,7 +687,7 @@ async def get_llm_catalog():
 @app.get("/api/corpus/study/catalog")
 async def corpus_study_catalog():
     from phi_corpus.scenarios import list_scenarios
-    from phi_corpus.edge_cases import EDGE_CASES
+    from phi_corpus.edge_cases import EDGE_CASES, HIPAA_MAX_EDGE_CASE_TAGS
     db = get_db()
     # Discovered scenarios (from CorpusResearcher) live alongside the
     # hand-curated library so the catalog reflects both.
@@ -706,6 +706,13 @@ async def corpus_study_catalog():
             {"tag": e.tag, "label": e.label, "applies_to_column": e.applies_to_column}
             for e in EDGE_CASES.values()
         ],
+        "presets": {
+            "hipaa_max_adversarial": {
+                "scenario_id": "hipaa_max_adversarial_v1",
+                "edge_case_tags": list(HIPAA_MAX_EDGE_CASE_TAGS),
+                "label": "Every HIPAA A-R identifier + every torture edge case",
+            },
+        },
     }
 
 
@@ -919,7 +926,13 @@ async def corpus_study_verify(sid: str):
         f.get("original_name", ""): f.get("file_id", "")
         for f in doc.get("files") or []
     }
-    report = _verify(gt, doc.get("agent_decisions") or [], file_name_map=name_map)
+    report = _verify(
+        gt,
+        doc.get("agent_decisions") or [],
+        file_name_map=name_map,
+        export_paths=doc.get("export_paths") or {},
+        guard_report=doc.get("guard_report") or {},
+    )
     report["session_id"] = sid
     report["status"] = doc.get("status")
     return report

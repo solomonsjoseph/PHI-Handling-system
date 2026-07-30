@@ -111,7 +111,46 @@ EDGE_CASES: dict[str, EdgeCase] = {
         # This is a defensive test: the value SHOULD survive to the export
         # unchanged, so the "expected_action" is `keep` (already default).
     ),
+
+    # ---- Notes carrying (K/M/N) identifiers --------------------------
+    "notes_carry_url": EdgeCase(
+        tag="notes_carry_url",
+        label="Personal URL (HIPAA cat N) embedded in the notes column",
+        applies_to_column="notes",
+        mutate=_S.gen_notes_with_url,
+    ),
+    "notes_carry_device_serial": EdgeCase(
+        tag="notes_carry_device_serial",
+        label="Device serial (HIPAA cat M) embedded in the notes column",
+        applies_to_column="notes",
+        mutate=_S.gen_notes_with_device_serial,
+    ),
+    "notes_carry_license": EdgeCase(
+        tag="notes_carry_license",
+        label="Provider licence (HIPAA cat K) embedded in the notes column",
+        applies_to_column="notes",
+        mutate=_S.gen_notes_with_license,
+    ),
 }
+
+
+# Convenience preset: every edge case that targets a column present in the
+# hipaa_max_adversarial_v1 scenario. Used by the "adversarial" preset in
+# the corpus catalog UI.
+HIPAA_MAX_EDGE_CASE_TAGS: tuple[str, ...] = (
+    "age_over_89",
+    "dob_indicative_of_age_over_89",
+    "restricted_zip3",
+    "notes_carry_name",
+    "notes_carry_phone",
+    "notes_carry_age_over_89",
+    "notes_carry_ipv4",
+    "notes_carry_email",
+    "notes_carry_url",
+    "notes_carry_device_serial",
+    "notes_carry_license",
+    "clinical_hr_90s",
+)
 
 
 def all_tags() -> list[str]:

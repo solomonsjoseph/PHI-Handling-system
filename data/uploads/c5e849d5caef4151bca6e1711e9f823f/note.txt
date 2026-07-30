@@ -1,0 +1,6 @@
+Progress note for John Smith, DOB 03/15/1975.
+SSN: 123-45-6789. MRN: MRN-12345678.
+Contact: (415) 555-1234, email john.smith@example.com.
+Portal: https://portal.hospital.example.com/patients/12345
+Access IP: 192.168.1.100.
+Enrolled in trial NCT12345678.

@@ -43,11 +43,14 @@ function ProgressRail({ step }) {
 
 // ---------- STEP 1 --------------------------------------------------------
 
-function StepUpload({ onNext, setSid, sid }) {
+function StepUpload({ onNext, setSid, sid, corpusMode, setCorpusMode, setCorpusResult }) {
   const [file, setFile] = useState(null);
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const [manifest, setManifest] = useState(null);
+  const [corpusBusy, setCorpusBusy] = useState(false);
+  const [corpusPreset, setCorpusPreset] = useState('hipaa_max_adversarial');
+  const [rowCount, setRowCount] = useState(6);
   const inputRef = useRef(null);
 
   const openPicker = () => inputRef.current?.click();
@@ -79,7 +82,37 @@ function StepUpload({ onNext, setSid, sid }) {
     } finally { setBusy(false); }
   };
 
-  const canNext = !!manifest && manifest.status === 'ready';
+  const runCorpus = async () => {
+    setCorpusBusy(true);
+    try {
+      // Load catalog to pick the preset payload.
+      const cat = await axios.get(`${API}/corpus/study/catalog`);
+      const preset = (cat.data.presets || {})[corpusPreset];
+      if (!preset) throw new Error('preset unavailable');
+      const body = {
+        scenario_id: preset.scenario_id,
+        jurisdiction: 'us',
+        edge_case_tags: preset.edge_case_tags || [],
+        row_count: Math.max(1, Math.min(parseInt(rowCount, 10) || 6, 30)),
+        seed: 42,
+      };
+      const r = await axios.post(`${API}/corpus/study/run`, body);
+      setSid(r.data.session_id);
+      setCorpusResult({
+        session_id: r.data.session_id,
+        summary: r.data.summary || {},
+        scenario_id: r.data.scenario_id,
+        edge_case_tags: r.data.edge_case_tags || [],
+      });
+      toast.success('Adversarial corpus launched — pipeline running');
+    } catch (e) {
+      toast.error(`Corpus launch failed: ${e?.response?.data?.detail || e.message}`);
+    } finally { setCorpusBusy(false); }
+  };
+
+  const canNext = corpusMode
+    ? true // Corpus flow bypasses upload gate; next step becomes results view
+    : (!!manifest && manifest.status === 'ready');
   const accepted = manifest?.accepted_by_component || {};
 
   return (
@@ -97,30 +130,114 @@ function StepUpload({ onNext, setSid, sid }) {
 
       <AccuracyStrip />
 
-      <div
-        className={`mt-12 border-2 border-dashed transition-all duration-200 py-16 px-10 text-center
-          ${dragging ? 'border-oxblood bg-paper-2' : 'border-rule'}
-          ${file ? 'border-clean' : ''}`}
-        onDragOver={e => { e.preventDefault(); setDragging(true); }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={e => { e.preventDefault(); setDragging(false); onFile(e.dataTransfer.files?.[0]); }}
-        data-testid="upload-dropzone"
-      >
-        <div className="kicker text-ink-muted">{busy ? 'Extracting & validating' : file ? 'Study package received' : 'Drop zip here'}</div>
-        <div className="font-display text-display-md text-ink mt-3">
-          {file ? file.name : 'or choose a file'}
+      {/* Corpus adversarial mode toggle -------------------------------- */}
+      <div className="mt-10 rule-top pt-6" data-testid="corpus-mode-panel">
+        <div className="flex items-start justify-between gap-6">
+          <div className="max-w-xl">
+            <div className="kicker">Optional · IRB torture test</div>
+            <div className="font-display text-[19px] text-ink mt-1">
+              Generate an adversarial corpus and run it through the same pipeline.
+            </div>
+            <p className="text-sm text-ink-2 leading-6 mt-2">
+              The system plants synthetic PHI covering every HIPAA §164.514(b)(2)(i)
+              identifier (A through R) plus deliberate edge cases (age &gt; 89,
+              restricted ZIP3, name-in-notes, license-plate-shaped codes, IP in
+              notes). The pipeline&apos;s job is to leave zero raw PHI in the
+              exported bundle. The verifier then scores every plant.
+            </p>
+          </div>
+          <label className="flex items-center gap-2 mt-1 cursor-pointer" data-testid="corpus-mode-toggle-label">
+            <input
+              type="checkbox"
+              checked={corpusMode}
+              onChange={e => setCorpusMode(e.target.checked)}
+              data-testid="corpus-mode-toggle"
+              className="accent-oxblood w-4 h-4"
+            />
+            <span className="font-mono text-[12px] uppercase tracking-wider text-ink-2">
+              Enable
+            </span>
+          </label>
         </div>
-        {!file && <div className="text-sm text-ink-muted mt-3">Max 250 MB · ZIP only</div>}
-        <div className="mt-8 flex items-center justify-center gap-3">
-          <Btn onClick={openPicker} variant="default" testId="btn-choose-file">
-            {file ? 'Replace file' : 'Choose file'}
-          </Btn>
-          {file && <Btn onClick={() => { setFile(null); setManifest(null); }} variant="ghost" testId="btn-clear-file">Remove</Btn>}
-          <input ref={inputRef} type="file" accept=".zip" hidden onChange={e => onFile(e.target.files?.[0])} />
-        </div>
+
+        {corpusMode && (
+          <div className="mt-6 grid grid-cols-2 gap-6" data-testid="corpus-mode-controls">
+            <div>
+              <div className="kicker">Preset</div>
+              <select
+                data-testid="corpus-preset"
+                value={corpusPreset}
+                onChange={e => setCorpusPreset(e.target.value)}
+                className="mt-2 w-full h-10 bg-transparent border-b border-ink text-ink font-display focus:border-oxblood"
+              >
+                <option value="hipaa_max_adversarial">
+                  HIPAA A-R + every torture edge case
+                </option>
+              </select>
+              <div className="text-[11px] text-ink-muted mt-2">
+                One preset ships today. It exercises the whole HIPAA A-R matrix in a single run.
+              </div>
+            </div>
+            <div>
+              <div className="kicker">Rows per dataset</div>
+              <input
+                type="number"
+                min={1}
+                max={30}
+                data-testid="corpus-row-count"
+                value={rowCount}
+                onChange={e => setRowCount(e.target.value)}
+                className="mt-2 w-full h-10 bg-transparent border-b border-ink text-ink font-display focus:border-oxblood"
+              />
+              <div className="text-[11px] text-ink-muted mt-2">
+                6 rows is enough to cover every category. Increase for scale testing.
+              </div>
+            </div>
+            <div className="col-span-2 flex items-center gap-3 pt-2">
+              <Btn
+                variant="primary"
+                onClick={runCorpus}
+                disabled={corpusBusy}
+                testId="btn-run-corpus"
+              >
+                {corpusBusy ? 'Launching…' : 'Launch adversarial run →'}
+              </Btn>
+              {sid && corpusMode && (
+                <span className="font-mono text-[11px] text-ink-muted">
+                  session · {sid.slice(0, 12)}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
-      {manifest && (
+      {!corpusMode && (
+        <div
+          className={`mt-12 border-2 border-dashed transition-all duration-200 py-16 px-10 text-center
+            ${dragging ? 'border-oxblood bg-paper-2' : 'border-rule'}
+            ${file ? 'border-clean' : ''}`}
+          onDragOver={e => { e.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={e => { e.preventDefault(); setDragging(false); onFile(e.dataTransfer.files?.[0]); }}
+          data-testid="upload-dropzone"
+        >
+          <div className="kicker text-ink-muted">{busy ? 'Extracting & validating' : file ? 'Study package received' : 'Drop zip here'}</div>
+          <div className="font-display text-display-md text-ink mt-3">
+            {file ? file.name : 'or choose a file'}
+          </div>
+          {!file && <div className="text-sm text-ink-muted mt-3">Max 250 MB · ZIP only</div>}
+          <div className="mt-8 flex items-center justify-center gap-3">
+            <Btn onClick={openPicker} variant="default" testId="btn-choose-file">
+              {file ? 'Replace file' : 'Choose file'}
+            </Btn>
+            {file && <Btn onClick={() => { setFile(null); setManifest(null); }} variant="ghost" testId="btn-clear-file">Remove</Btn>}
+            <input ref={inputRef} type="file" accept=".zip" hidden onChange={e => onFile(e.target.files?.[0])} />
+          </div>
+        </div>
+      )}
+
+      {manifest && !corpusMode && (
         <div className="mt-10 rule-top pt-6" data-testid="intake-manifest">
           <div className="kicker mb-4">Intake manifest — v3</div>
           <div className="grid grid-cols-3 gap-6">
@@ -158,7 +275,7 @@ function StepUpload({ onNext, setSid, sid }) {
 
       <div className="mt-16 flex items-center justify-end">
         <Btn variant="primary" size="lg" disabled={!canNext} onClick={onNext} testId="btn-next-step-2">
-          Configure the run →
+          {corpusMode ? 'Watch the corpus run →' : 'Configure the run →'}
         </Btn>
       </div>
     </div>
@@ -343,6 +460,8 @@ export default function Wizard() {
   });
   const [output, setOutput] = useState({ publication: false, attestation_pdf: false });
   const [busy, setBusy] = useState(false);
+  const [corpusMode, setCorpusMode] = useState(false);
+  const [corpusResult, setCorpusResult] = useState(null);
 
   const runPipeline = async () => {
     if (!sid) { toast.error('Upload a study package first'); setStep(1); return; }
@@ -362,11 +481,36 @@ export default function Wizard() {
     } finally { setBusy(false); }
   };
 
+  const onStepOneNext = () => {
+    if (corpusMode) {
+      if (!sid) {
+        toast.error('Launch the adversarial run first');
+        return;
+      }
+      // Corpus flow already POSTed /corpus/study/run which launches the
+      // pipeline; jump straight to the session detail page so the operator
+      // can watch classification -> anonymizing -> guard -> complete and
+      // read the verifier report inline.
+      navigate(`/studies/${sid}?corpus=1`);
+      return;
+    }
+    setStep(2);
+  };
+
   return (
     <div className="min-h-screen flex bg-paper text-ink">
       <ProgressRail step={step} />
       <main className="flex-1 px-10 pt-20 pb-32 max-w-5xl mx-auto lg:mx-0 lg:pl-20">
-        {step === 1 && <StepUpload onNext={() => setStep(2)} sid={sid} setSid={setSid} />}
+        {step === 1 && (
+          <StepUpload
+            onNext={onStepOneNext}
+            sid={sid}
+            setSid={setSid}
+            corpusMode={corpusMode}
+            setCorpusMode={setCorpusMode}
+            setCorpusResult={setCorpusResult}
+          />
+        )}
         {step === 2 && <StepConfigure onBack={() => setStep(1)} onNext={() => setStep(3)}
                                        sid={sid} config={config} setConfig={setConfig} />}
         {step === 3 && <StepOutput onBack={() => setStep(2)} onRun={runPipeline}

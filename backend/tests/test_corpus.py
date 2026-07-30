@@ -259,7 +259,85 @@ def test_verifier_reports_scenario_and_jurisdiction():
     assert "notes_carry_name" in rep["edge_case_tags"]
 
 
-# ---- CLI test ---------------------------------------------------------
+# ---- Narrative / form-plant scoring (Phase C form fix) ---------------
+
+
+def test_verifier_credits_form_plant_when_planted_value_absent_from_export(tmp_path):
+    """Form/narrative plants (row == 0) are scored by inspecting the
+    pipeline's redacted export text: if the raw planted value substring
+    is absent, credit the plant as TP."""
+    from phi_corpus.verify import verify
+
+    ground_truth = {
+        "scenario_id": "custom_v1",
+        "jurisdiction": "us",
+        "planted": [
+            {"file_name": "consent.pdf", "row": 0, "column": "Phone",
+             "value": "415-555-1234", "hipaa_category": "D",
+             "expected_action": "scrub_text", "edge_case_tag": "form_test"},
+            {"file_name": "consent.pdf", "row": 0, "column": "Full Name",
+             "value": "James Smith", "hipaa_category": "A",
+             "expected_action": "scrub_text", "edge_case_tag": "form_test"},
+        ],
+    }
+    # Redacted export that scrubbed both plants.
+    export = tmp_path / "abc__consent.redacted.txt"
+    export.write_text(
+        "Patient [A] enrolled. Contact [D] between 9am and 5pm.",
+        encoding="utf-8",
+    )
+    export_paths = {"abc": str(export)}
+    name_map = {"consent.pdf": "abc"}
+
+    rep = verify(ground_truth, decisions=[], file_name_map=name_map,
+                 export_paths=export_paths)
+    assert rep["summary"]["fn"] == 0, "form plants must be credited as caught"
+    assert rep["summary"]["tp"] == 2
+    assert rep["correctness"]["overall_recall"] == 1.0
+
+
+def test_verifier_flags_form_plant_when_raw_phi_survives_in_export(tmp_path):
+    """If the pipeline's redacted export STILL contains the raw planted
+    PHI substring, the verifier flags it as a false-negative leak."""
+    from phi_corpus.verify import verify
+
+    ground_truth = {
+        "scenario_id": "custom_v1", "jurisdiction": "us",
+        "planted": [
+            {"file_name": "consent.pdf", "row": 0, "column": "Phone",
+             "value": "415-555-1234", "hipaa_category": "D",
+             "expected_action": "scrub_text", "edge_case_tag": "form_test"},
+        ],
+    }
+    export = tmp_path / "abc__consent.redacted.txt"
+    # Leak: raw phone survived.
+    export.write_text(
+        "Contact the participant at 415-555-1234 during clinic hours.",
+        encoding="utf-8",
+    )
+    rep = verify(
+        ground_truth, decisions=[],
+        file_name_map={"consent.pdf": "abc"},
+        export_paths={"abc": str(export)},
+    )
+    assert rep["summary"]["fn"] == 1
+    fn = rep["correctness"]["false_negatives"][0]
+    assert fn["file"] == "consent.pdf"
+    assert fn["column"] == "Phone"
+    assert fn["actual_action"] == "leaked_in_export"
+
+
+def test_verifier_scores_max_adversarial_ground_truth_shape():
+    """Sanity: the max-adversarial scenario ground truth covers HIPAA A-R."""
+    from phi_corpus.planters import plant
+
+    art = plant(scenario_id="hipaa_max_adversarial_v1", jurisdiction="us",
+                edge_case_tags=[], row_count=3, seed=1)
+    cats = {p["hipaa_category"] for p in art.ground_truth["planted"]}
+    for letter in "ABCDEFGHIJKLMNOPQR":
+        assert letter in cats, f"HIPAA {letter} missing from max-adversarial corpus"
+
+
 
 
 def test_cli_summary_only_lists_scenarios_and_edge_cases(tmp_path):

@@ -129,6 +129,81 @@ def gen_pan(rng: random.Random) -> str:
     return f"{prefix}{rng.randint(1000,9999)}{suffix}"
 
 
+# ---- Adversarial HIPAA A-R generators ----------------------------------
+
+def gen_fax_us(rng: random.Random) -> str:
+    """(E) Fax number."""
+    return f"212-555-{rng.randint(1000, 9999):04d}"
+
+
+def gen_health_plan_id(rng: random.Random) -> str:
+    """(I) Health-plan beneficiary number."""
+    return f"HP{rng.randint(10000000, 99999999)}"
+
+
+def gen_account_number(rng: random.Random) -> str:
+    """(J) Account / billing number."""
+    return f"ACCT-{rng.randint(100000, 999999)}"
+
+
+def gen_license_number(rng: random.Random) -> str:
+    """(K) Certificate / licence number (US-DEA-shaped)."""
+    letters = string.ascii_uppercase
+    return f"{rng.choice(letters)}{rng.choice(letters)}{rng.randint(1000000, 9999999)}"
+
+
+def gen_vin(rng: random.Random) -> str:
+    """(L) Vehicle identification number — 17-char VIN."""
+    chars = string.ascii_uppercase.replace("I", "").replace("O", "").replace("Q", "") + string.digits
+    return "".join(rng.choice(chars) for _ in range(17))
+
+
+def gen_device_serial(rng: random.Random) -> str:
+    """(M) Device serial / identifier."""
+    letters = string.ascii_uppercase
+    return f"DEV-{''.join(rng.choice(letters) for _ in range(3))}-{rng.randint(100000, 999999)}"
+
+
+def gen_url(rng: random.Random) -> str:
+    """(N) Personal URL."""
+    slug = "".join(rng.choice(string.ascii_lowercase) for _ in range(6))
+    return f"https://patient-portal.example.org/u/{slug}"
+
+
+def gen_ipv4(rng: random.Random) -> str:
+    """(O) IPv4 address."""
+    return f"{rng.randint(1, 223)}.{rng.randint(0, 255)}.{rng.randint(0, 255)}.{rng.randint(1, 254)}"
+
+
+def gen_biometric_hash(rng: random.Random) -> str:
+    """(P) Biometric identifier — placeholder hash string."""
+    chars = string.hexdigits.lower()[:16]
+    return "bio_" + "".join(rng.choice(chars) for _ in range(32))
+
+
+def gen_image_ref(rng: random.Random) -> str:
+    """(Q) Full-face photograph reference (URL / storage key)."""
+    return f"s3://phi-photos-bucket/patient_{rng.randint(1000, 9999)}.jpg"
+
+
+def gen_unique_code(rng: random.Random) -> str:
+    """(R) Any other unique code — tracking / linkage tag."""
+    letters = string.ascii_uppercase
+    return f"UID-{''.join(rng.choice(letters) for _ in range(4))}{rng.randint(1000, 9999)}"
+
+
+def gen_notes_with_url(rng: random.Random) -> str:
+    return f"Patient uploaded records via {gen_url(rng)} on 2024-05-20."
+
+
+def gen_notes_with_device_serial(rng: random.Random) -> str:
+    return f"CPAP device serial {gen_device_serial(rng)} configured at last visit."
+
+
+def gen_notes_with_license(rng: random.Random) -> str:
+    return f"Provider license {gen_license_number(rng)} verified before dispensing controlled substance."
+
+
 def gen_notes_with_name(rng: random.Random) -> str:
     name = gen_name(rng)
     return f"Patient {name} enrolled on 2024-03-15; contact via phone."
@@ -335,6 +410,114 @@ SCENARIOS: dict[str, Scenario] = {
     _DIABETES.id: _DIABETES,
     _PEDIATRIC.id: _PEDIATRIC,
 }
+
+
+# ---- Maximum-adversarial scenario (all HIPAA A-R + edge cases) ---------
+#
+# One dataset that violates every identifier category HIPAA §164.514(b)(2)(i)
+# calls out. Used as the corpus torture-test proof for IRB review.
+
+_HIPAA_MAX = Scenario(
+    id="hipaa_max_adversarial_v1",
+    label="Adversarial cohort - every HIPAA A-R identifier + edge cases",
+    jurisdictions=frozenset({"us"}),
+    datasets=(
+        DatasetSpec(
+            filename="max_adversarial.csv",
+            columns=(
+                # (A) Names
+                ColumnSpec("patient_name", "A", "drop", gen_name),
+                # (B) Geography
+                ColumnSpec("street_address", "B", "drop",
+                           lambda r: f"{r.randint(100,9999)} Main St, Apt {r.randint(1,99)}"),
+                ColumnSpec("zip", "B", "zip3_truncate", gen_zip5),
+                # (C) Dates + age
+                ColumnSpec("dob", "C", "year_only", gen_dob),
+                ColumnSpec("admission_date", "C", "year_only", gen_dob),
+                ColumnSpec("age", "C", "cap_age_90", gen_age_under_90),
+                # (D) Phone
+                ColumnSpec("phone", "D", "drop", gen_phone_us),
+                # (E) Fax
+                ColumnSpec("fax", "E", "drop", gen_fax_us),
+                # (F) Email
+                ColumnSpec("email", "F", "drop", gen_email),
+                # (G) SSN
+                ColumnSpec("ssn", "G", "drop", gen_ssn),
+                # (H) Medical record / study-scoped id
+                ColumnSpec("patient_id", "H", "pseudonymize", gen_mrn),
+                # (I) Health-plan beneficiary
+                ColumnSpec("insurance_id", "I", "drop", gen_health_plan_id),
+                # (J) Account number
+                ColumnSpec("account_number", "J", "drop", gen_account_number),
+                # (K) Certificate / licence
+                ColumnSpec("license_number", "K", "drop", gen_license_number),
+                # (L) Vehicle identifier
+                ColumnSpec("vehicle_id", "L", "drop", gen_vin),
+                # (M) Device serial
+                ColumnSpec("device_serial", "M", "drop", gen_device_serial),
+                # (N) URL
+                ColumnSpec("personal_url", "N", "drop", gen_url),
+                # (O) IP address
+                ColumnSpec("client_ip", "O", "drop", gen_ipv4),
+                # (P) Biometric identifier
+                ColumnSpec("biometric_hash", "P", "drop", gen_biometric_hash),
+                # (Q) Photographs / images
+                ColumnSpec("face_photo", "Q", "drop", gen_image_ref),
+                # (R) Any other unique code
+                ColumnSpec("tracking_code", "R", "pseudonymize", gen_unique_code),
+                # Clinical variables (MUST NOT be flagged)
+                ColumnSpec("heart_rate_bpm", "NONE", "keep", gen_heart_rate),
+                ColumnSpec("systolic_bp", "NONE", "keep", gen_systolic_bp),
+                ColumnSpec("glucose_mgdl", "NONE", "keep", gen_glucose_mgdl),
+                ColumnSpec("bmi", "NONE", "keep",
+                           lambda r: f"{r.uniform(18, 42):.1f}"),
+                ColumnSpec("arm_code", "NONE", "keep", gen_arm_code),
+                ColumnSpec("barcode", "NONE", "keep", gen_barcode),
+                ColumnSpec("notes", "NONE", "scrub_text", gen_notes_clinical_only),
+            ),
+            n_rows=8,
+        ),
+    ),
+    dictionary=(
+        DictionaryRow("patient_name", "Full patient name"),
+        DictionaryRow("street_address", "Street address"),
+        DictionaryRow("zip", "ZIP code"),
+        DictionaryRow("dob", "Date of birth", "date"),
+        DictionaryRow("admission_date", "Admission date", "date"),
+        DictionaryRow("age", "Age in years", "int"),
+        DictionaryRow("phone", "Contact phone"),
+        DictionaryRow("fax", "Contact fax"),
+        DictionaryRow("email", "Contact email"),
+        DictionaryRow("ssn", "Social security number"),
+        DictionaryRow("patient_id", "Study-scoped patient identifier"),
+        DictionaryRow("insurance_id", "Health plan beneficiary id"),
+        DictionaryRow("account_number", "Billing account number"),
+        DictionaryRow("license_number", "Certificate / licence number"),
+        DictionaryRow("vehicle_id", "Vehicle identification number"),
+        DictionaryRow("device_serial", "Study-issued device serial"),
+        DictionaryRow("personal_url", "Personal URL"),
+        DictionaryRow("client_ip", "Client IP address"),
+        DictionaryRow("biometric_hash", "Biometric hash"),
+        DictionaryRow("face_photo", "Face photograph reference"),
+        DictionaryRow("tracking_code", "Unique tracking / linkage code"),
+        DictionaryRow("heart_rate_bpm", "Heart rate", "int"),
+        DictionaryRow("systolic_bp", "Systolic BP", "int"),
+        DictionaryRow("glucose_mgdl", "Fasting glucose", "int"),
+        DictionaryRow("bmi", "Body mass index", "float"),
+        DictionaryRow("arm_code", "Study arm assignment"),
+        DictionaryRow("barcode", "Specimen barcode"),
+        DictionaryRow("notes", "Free-text clinical notes"),
+    ),
+    narrative_body=(
+        "HIPAA-MAX-2026 adversarial protocol. This scenario deliberately "
+        "violates every §164.514(b)(2)(i) identifier so the pipeline can "
+        "prove it removes every plant.\n"
+    ),
+)
+
+
+SCENARIOS[_HIPAA_MAX.id] = _HIPAA_MAX
+
 
 
 def list_scenarios() -> list[dict[str, Any]]:

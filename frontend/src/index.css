@@ -99,6 +99,10 @@ input:focus, textarea:focus, select:focus {
 .step-in > *:nth-child(4) { animation-delay: 0.20s; }
 .step-in > *:nth-child(5) { animation-delay: 0.26s; }
 .step-in > *:nth-child(6) { animation-delay: 0.32s; }
+.step-in > *:nth-child(7) { animation-delay: 0.38s; }
+.step-in > *:nth-child(8) { animation-delay: 0.44s; }
+.step-in > *:nth-child(9) { animation-delay: 0.50s; }
+.step-in > *:nth-child(n+10) { animation-delay: 0.56s; }
 
 /* Abstract graphic — hairline lattice used behind step headings */
 .hairline-lattice {
