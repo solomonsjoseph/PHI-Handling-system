@@ -20,6 +20,7 @@ Endpoints (all under /api):
 from __future__ import annotations
 
 import asyncio
+import uuid
 import json
 import os
 import shutil
@@ -674,6 +675,210 @@ async def get_llm_catalog():
     """
     from phi_core.llm_catalog import catalog_for_ui
     return catalog_for_ui()
+
+
+# --- Corpus generator + verifier -------------------------------------------
+#
+# The corpus is a red-team torture-test rig: PHI is planted in realistic
+# study data, run through the pipeline, and every decision compared
+# against the planted ground truth. Ground truth stays in the session
+# document only (Sir's Q1(iii)) — it is never persisted to disk.
+
+
+@app.get("/api/corpus/study/catalog")
+async def corpus_study_catalog():
+    from phi_corpus.scenarios import list_scenarios
+    from phi_corpus.edge_cases import EDGE_CASES
+    return {
+        "scenarios": list_scenarios(),
+        "edge_cases": [
+            {"tag": e.tag, "label": e.label, "applies_to_column": e.applies_to_column}
+            for e in EDGE_CASES.values()
+        ],
+    }
+
+
+class CorpusStudyGenerateBody(BaseModel):
+    scenario_id: str
+    jurisdiction: str = "us"
+    edge_case_tags: list[str] = []
+    row_count: int = 8
+    seed: int = 42
+
+
+@app.post("/api/corpus/study/generate", dependencies=[Depends(require_api_token)])
+async def corpus_study_generate(body: CorpusStudyGenerateBody):
+    """Generate a corpus in memory and attach it to a fresh session so the
+    intake -> handle -> verify flow can run entirely from a single call.
+
+    Returns the new ``session_id``, the ground-truth summary, and the
+    upload token needed to trigger the intake step. Ground truth itself
+    is stored in the session document under ``corpus_ground_truth`` and
+    never emitted to a filesystem path.
+    """
+    from phi_corpus.planters import plant
+    art = plant(
+        scenario_id=body.scenario_id,
+        jurisdiction=body.jurisdiction,
+        edge_case_tags=body.edge_case_tags,
+        row_count=max(1, min(int(body.row_count or 8), 100)),
+        seed=int(body.seed or 42),
+    )
+    # Reuse the existing session-create flow to get a canonical session
+    # document with all defaults populated.
+    sid = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).isoformat()
+    db = get_db()
+    session_doc = {
+        "id": sid,
+        "created_at": now,
+        "status": "corpus_ready",
+        "jurisdiction": body.jurisdiction,
+        "files": [],
+        "agent_decisions": [],
+        "corpus_ground_truth": art.ground_truth,
+        "corpus_summary": art.ground_truth_summary,
+    }
+    await db.sessions.insert_one(session_doc)
+
+    # Stash the zip bytes in a temp path so /intake can pick it up.
+    tmp_path = Path("/app/data/corpus") / f"{sid}.zip"
+    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path.write_bytes(art.zip_bytes)
+
+    return {
+        "session_id": sid,
+        "jurisdiction": body.jurisdiction,
+        "scenario_id": body.scenario_id,
+        "edge_case_tags": body.edge_case_tags,
+        "summary": art.ground_truth_summary,
+        "corpus_zip_size_bytes": len(art.zip_bytes),
+        "corpus_zip_path": str(tmp_path),
+    }
+
+
+class CorpusStudyRunBody(BaseModel):
+    scenario_id: str
+    jurisdiction: str = "us"
+    edge_case_tags: list[str] = []
+    row_count: int = 8
+    seed: int = 42
+
+
+@app.post("/api/corpus/study/run", dependencies=[Depends(require_api_token)])
+async def corpus_study_run(body: CorpusStudyRunBody):
+    """One-shot: create session, plant corpus, run intake + pipeline.
+
+    Piggybacks on the existing intake + orchestrator paths so the corpus
+    goes through exactly the same code path as an operator-uploaded
+    manifest. Client polls ``GET /api/sessions/{sid}`` and, once
+    ``status='complete'``, calls ``GET /api/corpus/study/verify/{sid}``.
+    """
+    from phi_corpus.planters import plant
+    from phi_core.intake import build_manifest
+
+    art = plant(
+        scenario_id=body.scenario_id,
+        jurisdiction=body.jurisdiction,
+        edge_case_tags=body.edge_case_tags,
+        row_count=max(1, min(int(body.row_count or 8), 100)),
+        seed=int(body.seed or 42),
+    )
+    sid = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).isoformat()
+    db = get_db()
+
+    # Persist session with ground truth first (idempotent).
+    await db.sessions.insert_one({
+        "id": sid, "created_at": now, "status": "intake",
+        "jurisdiction": body.jurisdiction,
+        "files": [], "agent_decisions": [],
+        "corpus_ground_truth": art.ground_truth,
+        "corpus_summary": art.ground_truth_summary,
+    })
+
+    # Mirror the /intake endpoint flow so the corpus travels through the
+    # same code path as an operator upload.
+    session_dir = UPLOAD_DIR / sid
+    session_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = safe_join(session_dir, "intake.zip", fallback="intake.zip")
+    zip_path.write_bytes(art.zip_bytes)
+
+    manifest = build_manifest(sid, zip_path, session_dir / "unpacked")
+    accepted: list[FileArtifact] = []
+    for e in manifest.entries:
+        if e.component == "_unclassified":
+            continue
+        ext = Path(e.relpath).suffix.lstrip(".").lower()
+        if e.component == "datasets":
+            kind = "dataset"
+        elif e.component == "forms":
+            kind = "narrative"
+        else:
+            kind = "metadata"
+        accepted.append(FileArtifact(
+            original_name=Path(e.relpath).name,
+            size_bytes=e.size_bytes, sha256=e.sha256,
+            kind=kind, subtype=ext,
+            stored_path=e.stored_path, component=e.component,
+        ))
+
+    await db.sessions.update_one(
+        {"id": sid},
+        {"$set": {
+            "files": [f.model_dump() for f in accepted],
+            "intake_status": manifest.status,
+            "intake_exit_code": manifest.exit_code,
+            "intake_missing": manifest.missing_components,
+            "status": "intake",
+            "error": manifest.error,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    if manifest.status != "ready":
+        raise HTTPException(400, f"corpus intake not ready: {manifest.status} / {manifest.error}")
+
+    # Delegate to the existing /handle endpoint so the corpus goes through
+    # the exact same 12-agent pipeline path as an operator-uploaded run.
+    await session_handle(sid)
+
+    return {
+        "session_id": sid, "status": "started",
+        "scenario_id": body.scenario_id,
+        "jurisdiction": body.jurisdiction,
+        "edge_case_tags": body.edge_case_tags,
+        "summary": art.ground_truth_summary,
+    }
+
+
+# Keep task references alive so CPython does not GC them mid-flight.
+_CORPUS_STUDY_TASKS: dict[str, asyncio.Task] = {}
+
+
+@app.get("/api/corpus/study/verify/{sid}")
+async def corpus_study_verify(sid: str):
+    """Compare the pipeline's actual decisions against the corpus ground
+    truth stored on the session document. Returns the full scored report
+    from :func:`phi_corpus.verify.verify`."""
+    from phi_corpus.verify import verify as _verify
+    db = get_db()
+    doc = await db.sessions.find_one({"id": sid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "session not found")
+    gt = doc.get("corpus_ground_truth")
+    if not gt:
+        raise HTTPException(400, "session has no corpus_ground_truth (not a corpus run)")
+
+    # Map ground-truth file names to the pipeline's file_id so the
+    # verifier can look up decisions correctly.
+    name_map: dict[str, str] = {
+        f.get("original_name", ""): f.get("file_id", "")
+        for f in doc.get("files") or []
+    }
+    report = _verify(gt, doc.get("agent_decisions") or [], file_name_map=name_map)
+    report["session_id"] = sid
+    report["status"] = doc.get("status")
+    return report
 
 
 @app.post("/api/settings/llm", dependencies=[Depends(require_api_token)])

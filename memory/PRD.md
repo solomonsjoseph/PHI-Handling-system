@@ -210,6 +210,22 @@ Sir directed: "I want an option to choose between different models from differen
 
 **Full regression after iteration_11**: **141/141 unit tests + 3 skipped green + Settings UI smoke-verified live.**
 
+### iteration_12 (fork) study-level corpus torture-test harness (Phases C1 + C2)
+
+Sir clarified: the corpus generator's sole purpose is to PLANT PHI/PII into realistic study data so the pipeline can prove it removes every plant, including deliberate edge cases. Ground-truth labels stay in the session document only (never on disk). The verifier dual-scores correctness (0% PHI leak / 100% accuracy) AND deferral rate (how often Judge sends a decidable case to human review — the metric to drive down over iterations).
+
+- **`phi_corpus/`** — new package:
+  * **`scenarios.py`** — 3 hand-curated real-life archetypes (oncology_v1, diabetes_v1, pediatric_behavioral_v1). Each declares dataset column specs with `hipaa_category`, `expected_action`, and a value `generator`. Includes 20+ cell generators covering names, DOB, phones, emails, ZIPs, SSNs, MRNs, ages (under/over 89), clinical vitals (HR, BP, glucose), study arm codes shaped like license plates, 15-digit barcodes, Aadhaar, PAN.
+  * **`edge_cases.py`** — 10 torture tests: `age_over_89`, `age_over_89_diabetes`, `dob_indicative_of_age_over_89`, `restricted_zip3`, `notes_carry_name`, `notes_carry_phone`, `notes_carry_age_over_89`, `notes_carry_ipv4`, `notes_carry_email`, `clinical_hr_90s` (guard false-positive test).
+  * **`planters.py`** — `plant(scenario_id, jurisdiction, edge_case_tags, row_count, seed)` returns `CorpusArtifact(zip_bytes, ground_truth, ground_truth_summary)`. Ground truth records every `(file, row, column, value, hipaa_category, expected_action, edge_case_tag)` cell — clinical too, so the verifier can score false-positives.
+  * **`verify.py`** — dual-scoring per Sir's Q2(iii). `verify(ground_truth, decisions, file_name_map)` returns `{correctness: {precision, recall, F1, accuracy, per_category, false_positives, false_negatives}, deferral: {rate, count, cells}, summary: {TP, FP, FN, TN}}`.
+  * **`generate.py`** — CLI: `python -m phi_corpus.generate --scenario X --jurisdiction Y --edge-cases A,B,C --rows N --out /tmp/corpus.zip`.
+- **`GET /api/corpus/study/catalog`**, **`POST /api/corpus/study/generate`**, **`POST /api/corpus/study/run`**, **`GET /api/corpus/study/verify/{sid}`** — study-level endpoints. Prefixed `/study/` to avoid shadowing the pre-existing detector-benchmark corpus endpoints (`/api/corpus/generate` for individual-example labelled corpus + `/api/corpus/{id}` + `/api/benchmark/run`).
+- **Live E2E verified**: oncology_v1 + 4 edge cases (age_over_89 + restricted_zip3 + notes_carry_name + clinical_hr_90s) → pipeline completed with **precision 1.0 / recall 1.0 / F1 1.0 / accuracy 1.0** and **zero deferrals**. Heart-rate 90-99 correctly preserved (CR-HIGH guard fix confirmed on real corpus). Age 90+ correctly capped. Restricted ZIP3 correctly truncated. Name embedded in notes correctly scrub_text'd.
+- **`tests/test_corpus.py`** — 12 unit tests covering ZIP shape validity, ground-truth completeness, edge-case tag persistence, ZIP3 denylist coverage, HR-90s range check, verifier scoring on perfect / leak / over-block / deferral cases.
+
+**Full regression after iteration_12**: **153/153 unit tests + 3 skipped green + live corpus E2E precision/recall/F1 = 1.0.**
+
 **GOAL cross-check after iteration_8**:
 - (a) LLM never reads dataset rows — HOLDS.
 - (b) Exports contain no residual raw PHI — HOLDS AND ENFORCED across every HIPAA A-R category (Phase B pattern parity).
