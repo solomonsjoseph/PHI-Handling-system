@@ -83,7 +83,7 @@ class CategoryScore:
 # FALSE-POSITIVE (over-blocking clinical data).
 _PHI_ACTIONS: frozenset[str] = frozenset({
     "drop", "year_only", "zip3_truncate", "cap_age_90",
-    "pseudonymize", "scrub_text",
+    "pseudonymize", "hash", "scrub_text",
 })
 
 

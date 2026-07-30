@@ -289,6 +289,66 @@ Security audit surfaced one HIGH and two LOW findings. All three fixed and locke
 
 - **Not fixed (accepted-low, per audit hardening list)**: Token in URL query string for SSE + downloads; reviewer newline injection in `attestation.txt`; `?force=true` guard override recording (now recorded onto `session.guard_overrides` array); persisted agent logs may still hold raw PHI substrings in `prompt_preview` (partially mitigated by read-time `scrub_nested`); BYOK auto-key generation on multi-worker deploys.
 
+### iteration_15 (fork) Speed + STOP + live trace UX
+
+Sir's directives Q1-Q4:
+- Q1 "Sentinel must nitpick only where required" -> severity gate
+- Q2 "Herald must meet the manuscript goal but easier to complete" -> two-subagent split (Abstract, Sections)
+- Q3 "Ledger could benefit from a subagent" -> two-subagent split (Compare, Aggregate)
+- Q4 "STOP button + live agent trace + user must feel movement, not loading screen" -> cancel endpoint + live-trace panel
+
+**Speed (measured, oncology_v1 + 4 edge cases, 5 rows):**
+- **Before: 340 s wall clock / 341 s of LLM time across 13 calls** (Judge×3+Sentinel×3=158 s, Ledger=52 s monolithic, Herald=90 s hit timeout with empty output).
+- **After: 190 s wall clock / 193 s of LLM time across 11 real calls** (Judge×1+Sentinel×1=43 s short-circuit, Ledger.Compare + Ledger.Aggregate=28 s, Herald.Abstract + Herald.Sections=83 s producing a COMPLETE manuscript).
+- **-44 % wall clock, -43 % LLM time, +manuscript quality (no more Herald timeout).**
+
+**Sentinel severity gate** (`phi_core/agents/reasoning.py::Sentinel`):
+- Prompt now asks Sentinel to tag each issue `severity: "blocking"|"advisory"`.
+- Post-processing forces `verdict='approved'` whenever there are zero blocking issues, even if the LLM's own JSON said `'revise'`. This closes the observed pathology where Sentinel kept issuing philosophical objections (hash vs pseudonymize, retention-policy details) that Judge could not practically resolve.
+- Orchestrator uses `_blocking_issues()` (not `verdict`) to decide whether to iterate again OR force human review. Advisory issues are logged onto `session.advisory_issues` for the audit trail but never block progress.
+- `ITERATION_CAP` lowered from 3 to 2 (severity gate typically ends on iter 1).
+
+**Ledger split** (`phi_core/agents/outward.py`):
+- `LedgerCompare` -- per-competitor delta narrative (JSON: `{"comparisons": [...]}`), ~15-20 s.
+- `LedgerAggregate` -- rollup headline + metrics narrative + recommendations (JSON: `{"headline", "our_system", "metrics_narrative", "recommendations"}`), ~15-20 s.
+- Public `Ledger` class stitches both subagent outputs into the legacy schema so callers don't change.
+- `_count_actions()` is deterministic (no LLM) and runs alongside the LLM call.
+
+**Herald split** (`phi_core/agents/outward.py`):
+- `HeraldAbstract` -- title + abstract + methods + references (~35-45 s).
+- `HeraldSections` -- results + discussion + limitations + conclusion + alt_venues (~30-40 s).
+- Public `Herald` class merges into the legacy manuscript schema. Neither subagent hits the 90 s hard timeout; the manuscript is always fully populated.
+
+**Parallel Auditor + Scout** (`phi_core/agents/orchestrator.py`):
+- `asyncio.gather(Auditor.run, Scout.run, _empty(None))` -- Scout is cache-hit in most cases so the parallel win is Auditor overlapping with the cache lookup, but still tighter than the previous strict sequence.
+
+**Cancel endpoint** (`server.py`):
+- `POST /api/sessions/{sid}/cancel` -- idempotent, token-gated. Sets `session.cancel_requested=true` and emits an SSE event so the UI knows.
+- Orchestrator's `_check_cancel()` runs between every phase boundary. If the flag is set it raises `PipelineCancelled` which the worker traps and writes `status='cancelled'` + emits a `cancelled` SSE event.
+- In-flight LLM call still finishes (base Agent has a 90 s hard timeout) but no further calls are issued.
+
+**Live agent trace panel** (`frontend/src/pages/SessionDetail.jsx`):
+- `AgentTracePanel` groups every AgentMessage by `(agent, phase_key)` and renders one row per group with a status badge (`RUNNING` / `DONE` / `ERROR` / `INFO`), the phase key, and duration.
+- Clicking a row expands prompt-preview + reply-preview so the operator can drill in and see WHY an agent decided what it did.
+- Header shows total agent-call count + cumulative LLM time -- Sir Q4 ("the user must feel like the process is moving further").
+- `SSE onmessage` triggers a full refresh (`refresh()`) which re-fetches `/agent-trace` -- new rows appear within ~2 s.
+- Advisory Sentinel issues are surfaced in a dedicated sub-block so the operator can see the "we chose X over Y for stylistic reasons" reasoning without them being escalated to human review.
+
+**STOP button** (`frontend/src/pages/SessionDetail.jsx`):
+- Rendered while `isPending` is true. `data-testid="btn-cancel-run"`.
+- POSTs to `/api/sessions/{sid}/cancel`, toasts "Cancel requested", and re-fetches. Once the flag is set the button label flips to "Cancel pending..." until the server sets `status='cancelled'`.
+
+**Verifier bug fix** (`phi_corpus/verify.py`):
+- `hash` was missing from `_PHI_ACTIONS`, so a Judge decision of `hash` on a (H)-category column was counted as a leak (false negative). It is a valid deterministic one-way transform allowed by the Sentinel hard-rule table. Added.
+- Verified: oncology_v1 corpus now scores **P=1.0 R=1.0 F1=1.0 · 0 FN · 0 FP**.
+
+**Regression**: 180 unit + 3 skipped (up from 169). New coverage: `test_speed_and_ux.py` (11 tests) locks severity gate, cancel flag, endpoint token-gate, Ledger/Herald split registration, `_count_actions` determinism, `ITERATION_CAP == 2`, and `hash in _PHI_ACTIONS`.
+
+**End-to-end proven live**:
+- Corpus run wall-clock 189.5 s, verifier score P=R=F1=1.0 · 0 FN · 0 FP.
+- Cancel flow: HTTP 200 `cancel_requested=true` -> `status=cancelled` within 30 s.
+- Screenshot confirms STOP button + "1 agent call · 0.0 s of LLM time · pipeline in phase classifying" live display with RUNNING badge on Lexicon.
+
 ## Minor items (from iteration_3, non-blocking)
 
 - Herald sometimes hits the 90s LLM timeout on the full manuscript draft. When it does, pipeline still completes; results.herald is empty and Sir can rerun.

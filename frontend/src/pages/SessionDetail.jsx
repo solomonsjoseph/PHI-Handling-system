@@ -13,6 +13,8 @@ function StatusChip({ status }) {
     awaiting_human_review: 'signal',
     classifying: 'signal',
     anonymizing: 'signal',
+    reading: 'signal',
+    cancelled: 'default',
     intake_failed: 'reject',
     failed: 'reject',
   };
@@ -26,6 +28,162 @@ function Spinner() {
       <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.25"/>
       <path d="M22 12a10 10 0 0 1-10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/>
     </svg>
+  );
+}
+
+// ---- Live agent trace ---------------------------------------------------
+//
+// The pipeline emits one AgentMessage per LLM call (direction='in' before
+// the call, 'out' after, with duration_ms). Rendering these live gives the
+// operator continuous feedback -- Sir's Q4: "the user must feel like the
+// process is moving further instead of them looking at a loading screen".
+//
+// Design: group by (agent, phase_key) so a Judge iteration shows as one
+// row that flips from 'running' (only in) to 'done' (has out) once the
+// LLM returns. Duration is read straight from the 'out' message. We keep
+// prompt/reply previews collapsible so operators can drill in to WHY an
+// agent decided what it did, without cluttering the default view.
+function _groupTrace(rawMessages) {
+  const groups = new Map();
+  for (const m of rawMessages || []) {
+    const key = `${m.agent}::${m.phase}`;
+    const existing = groups.get(key) || { agent: m.agent, phase: m.phase, ts: m.ts };
+    if (m.direction === 'in') {
+      existing.prompt_preview = m.payload?.prompt_preview || existing.prompt_preview;
+      existing.tool = m.payload?.tool || existing.tool;
+      existing.started = m.ts;
+      existing.state = existing.state || 'running';
+    } else if (m.direction === 'out') {
+      existing.reply_preview = m.payload?.reply_preview || existing.reply_preview;
+      existing.error = m.payload?.error;
+      existing.duration_ms = m.duration_ms;
+      existing.state = m.payload?.error ? 'errored' : 'done';
+      existing.ended = m.ts;
+    } else if (m.direction === 'info') {
+      existing.state = existing.state || 'info';
+      existing.info = { ...(existing.info || {}), ...(m.payload || {}) };
+    }
+    groups.set(key, existing);
+  }
+  return Array.from(groups.values()).sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+}
+
+function AgentTracePanel({ sid, trace, status, cancelRequested, advisory }) {
+  const [openIdx, setOpenIdx] = useState(null);
+  const grouped = _groupTrace(trace);
+  const running = status && !['complete', 'awaiting_human_review', 'failed', 'cancelled', 'intake_failed'].includes(status);
+  const totalMs = grouped.reduce((s, g) => s + (g.duration_ms || 0), 0);
+  return (
+    <div className="mt-10 rule-bottom pb-10" data-testid="agent-trace-panel">
+      <div className="flex items-baseline justify-between">
+        <div>
+          <div className="kicker">Agent trace</div>
+          <div className="font-display text-[22px] text-ink mt-1">
+            {grouped.length} agent call{grouped.length === 1 ? '' : 's'} · {(totalMs / 1000).toFixed(1)} s of LLM time
+          </div>
+        </div>
+        {running && (
+          <div className="flex items-center gap-2 text-[12px] text-ink-2">
+            <Spinner /> pipeline in phase <span className="font-mono">{status}</span>
+            {cancelRequested && <span className="font-mono text-oxblood ml-2">· cancel pending</span>}
+          </div>
+        )}
+      </div>
+
+      {grouped.length === 0 && (
+        <div className="mt-6 text-[13px] text-ink-muted">
+          Waiting for the first agent to check in… (SSE stream is open, this list will populate live.)
+        </div>
+      )}
+
+      <div className="mt-6 divide-y divide-rule">
+        {grouped.map((g, i) => (
+          <div key={i} className="py-3" data-testid={`trace-row-${i}`}>
+            <button
+              className="w-full text-left flex items-center gap-4 hover:bg-paper-2 px-2 -mx-2 py-1 transition-colors"
+              onClick={() => setOpenIdx(openIdx === i ? null : i)}
+              data-testid={`trace-row-toggle-${i}`}
+            >
+              <div className="w-24 shrink-0">
+                <TraceStateBadge state={g.state} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="font-display text-ink text-[14px]">
+                  <span className="text-oxblood">{g.agent}</span>
+                  <span className="text-ink-muted mx-2">·</span>
+                  <span className="font-mono text-[12px] text-ink-2">{g.phase}</span>
+                </div>
+                {g.error && (
+                  <div className="font-mono text-[11px] text-oxblood mt-0.5">{g.error}</div>
+                )}
+              </div>
+              <div className="text-right shrink-0">
+                <div className="font-mono text-[12px] text-ink">
+                  {g.duration_ms ? `${(g.duration_ms / 1000).toFixed(1)} s` : (g.state === 'running' ? '…' : '')}
+                </div>
+                {g.tool && <div className="font-mono text-[10px] text-ink-muted">{g.tool}</div>}
+              </div>
+            </button>
+            {openIdx === i && (
+              <div className="mt-3 pl-24 space-y-3" data-testid={`trace-row-details-${i}`}>
+                {g.prompt_preview && (
+                  <div>
+                    <div className="kicker text-ink-muted">Prompt preview</div>
+                    <pre className="mt-1 text-[11px] text-ink-2 whitespace-pre-wrap font-mono bg-paper-2 p-3 rounded border border-rule">
+                      {g.prompt_preview}
+                    </pre>
+                  </div>
+                )}
+                {g.reply_preview && (
+                  <div>
+                    <div className="kicker text-ink-muted">Reply preview</div>
+                    <pre className="mt-1 text-[11px] text-ink-2 whitespace-pre-wrap font-mono bg-paper-2 p-3 rounded border border-rule">
+                      {g.reply_preview}
+                    </pre>
+                  </div>
+                )}
+                {g.info && Object.keys(g.info).length > 0 && (
+                  <div>
+                    <div className="kicker text-ink-muted">Info</div>
+                    <pre className="mt-1 text-[11px] text-ink-2 whitespace-pre-wrap font-mono bg-paper-2 p-3 rounded border border-rule">
+                      {JSON.stringify(g.info, null, 2)}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {advisory && advisory.length > 0 && (
+        <div className="mt-6 border-l-2 border-signal pl-4" data-testid="trace-advisory">
+          <div className="kicker text-signal">Sentinel advisory issues ({advisory.length})</div>
+          <div className="mt-2 space-y-1 text-[12px] text-ink-2">
+            {advisory.slice(0, 8).map((a, i) => (
+              <div key={i} className="font-mono">
+                {a.column || '?'}: {a.problem || a.suggested_action || '—'}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TraceStateBadge({ state }) {
+  const map = {
+    running: { color: 'bg-signal text-paper', label: 'RUNNING' },
+    done: { color: 'bg-clean text-paper', label: 'DONE' },
+    errored: { color: 'bg-oxblood text-paper', label: 'ERROR' },
+    info: { color: 'bg-ink-muted text-paper', label: 'INFO' },
+  };
+  const cfg = map[state] || map.info;
+  return (
+    <span className={`inline-block px-2 py-0.5 text-[10px] font-mono ${cfg.color}`}>
+      {cfg.label}
+    </span>
   );
 }
 
@@ -101,7 +259,7 @@ export default function SessionDetail() {
 
   const status = session?.status;
   const isComplete = status === 'complete';
-  const isPending = !isComplete && status !== 'awaiting_human_review' && status !== 'failed';
+  const isPending = !isComplete && !['awaiting_human_review', 'failed', 'cancelled', 'intake_failed'].includes(status);
   const awaiting = status === 'awaiting_human_review';
   const guard = results?.guard || session?.guard_report;
   const decisions = results?.decisions || [];
@@ -177,7 +335,11 @@ export default function SessionDetail() {
         <div className="kicker">Run receipt</div>
         <div className="mt-2 flex items-baseline gap-4 flex-wrap">
           <h1 className="font-display text-display-lg text-ink">
-            {isComplete ? 'Handled.' : awaiting ? 'Awaiting your review.' : isPending ? 'Working on it.' : 'Something went wrong.'}
+            {isComplete ? 'Handled.'
+              : awaiting ? 'Awaiting your review.'
+              : status === 'cancelled' ? 'Run cancelled.'
+              : isPending ? 'Working on it.'
+              : 'Something went wrong.'}
           </h1>
           <StatusChip status={status} />
         </div>
@@ -191,7 +353,38 @@ export default function SessionDetail() {
             <Btn variant="ghost" onClick={() => navigate('/')} testId="btn-new-run">Start another run</Btn>
           </div>
         )}
+        {isPending && (
+          <div className="mt-10 flex items-center gap-4">
+            <Btn
+              variant="ghost"
+              size="lg"
+              disabled={busy || session?.cancel_requested}
+              testId="btn-cancel-run"
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  await axios.post(`${API}/sessions/${sid}/cancel`);
+                  toast.info('Cancel requested — pipeline exits at next phase boundary.');
+                  await refresh();
+                } catch (e) {
+                  toast.error(`cancel failed: ${e?.response?.data?.detail || e.message}`);
+                } finally { setBusy(false); }
+              }}
+            >
+              {session?.cancel_requested ? 'Cancel pending…' : '■ Stop this run'}
+            </Btn>
+          </div>
+        )}
       </div>
+
+      {/* Live agent trace — always shown so operators see the pipeline moving. */}
+      <AgentTracePanel
+        sid={sid}
+        trace={trace}
+        status={status}
+        cancelRequested={session?.cancel_requested}
+        advisory={session?.advisory_issues || []}
+      />
 
       {/* Guard */}
       {guard && (

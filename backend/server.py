@@ -1072,13 +1072,56 @@ async def session_handle(sid: str):
             result = await run_agent_pipeline(session, db, cfg, emit_msg, on_phase)
             await _emit(sid, ProgressEvent(phase="complete", message=f"Pipeline done: {result.get('status')}", percent=100.0))
         except Exception as e:
-            await db.sessions.update_one({"id": sid}, {"$set": {"status": "failed", "error": f"{type(e).__name__}: {e}"}})
-            await _emit(sid, ProgressEvent(phase="failed", message=f"pipeline error: {e}"))
+            # Import here to keep this endpoint's cold-start light.
+            from phi_core.agents.orchestrator import PipelineCancelled
+            if isinstance(e, PipelineCancelled):
+                await db.sessions.update_one(
+                    {"id": sid},
+                    {"$set": {"status": "cancelled",
+                              "cancelled_at": datetime.now(timezone.utc).isoformat()}},
+                )
+                await _emit(sid, ProgressEvent(
+                    phase="cancelled",
+                    message="Pipeline cancelled by operator.",
+                    payload={"reason": "operator_cancel"},
+                ))
+            else:
+                await db.sessions.update_one({"id": sid}, {"$set": {"status": "failed", "error": f"{type(e).__name__}: {e}"}})
+                await _emit(sid, ProgressEvent(phase="failed", message=f"pipeline error: {e}"))
         finally:
             await _emit(sid, ProgressEvent(phase="__end__", message="stream end"))
 
     asyncio.create_task(worker())
     return {"status": "started", "llm": {"provider": cfg.provider, "model": cfg.model}}
+
+
+@app.post("/api/sessions/{sid}/cancel", dependencies=[Depends(require_api_token)])
+async def session_cancel(sid: str):
+    """Request cancellation of a running pipeline.
+
+    The pipeline worker checks the ``cancel_requested`` flag between
+    phases and exits cleanly with ``status='cancelled'``. In-flight LLM
+    calls finish (they are subject to a 90-180 s hard timeout in
+    ``base.Agent``) but no further calls are issued. Idempotent.
+    """
+    db = get_db()
+    doc = await db.sessions.find_one({"id": sid}, {"status": 1})
+    if not doc:
+        raise HTTPException(404, "session not found")
+    if doc.get("status") in ("complete", "failed", "cancelled"):
+        return {"status": doc.get("status"), "already_settled": True}
+    await db.sessions.update_one(
+        {"id": sid},
+        {"$set": {
+            "cancel_requested": True,
+            "cancel_requested_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    await _emit(sid, ProgressEvent(
+        phase="cancel_requested",
+        message="Cancel requested by operator; pipeline will exit at next phase boundary.",
+    ))
+    return {"status": "cancel_requested", "already_settled": False}
 
 
 class HumanReviewSubmit(BaseModel):

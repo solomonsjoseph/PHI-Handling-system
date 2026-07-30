@@ -3,12 +3,18 @@
 Pipeline:
   1. Specialists in parallel (Lexicon, Schema, Instrument)
   2. Statute (jurisdiction rules)
-  3. Judge <-> Sentinel loop (up to ITERATION_CAP)
-  4. Human review gate if Sentinel still not approved
+  3. Judge <-> Sentinel loop (short-circuits on 0 blocking issues; capped at ITERATION_CAP=2)
+  4. Human review gate if Sentinel still has blocking issues
   5. Executor applies decisions
-  6. Auditor verifies
-  7. Scout + Ledger (comparative benchmark) run in parallel
-  8. Herald drafts manuscript
+  6. Auditor + Scout run in parallel (Scout doesn't depend on Auditor)
+  7. Ledger (Compare + Aggregate) sub-agent split
+  8. Herald (Abstract + Sections) sub-agent split
+  9. Publish Guard (deterministic)
+
+Cancellation: the orchestrator checks ``is_cancelled(sid)`` between
+phases. When True the pipeline exits early with status='cancelled' and
+no further LLM calls are made. This is why every await for a phase is
+followed by a cancel check.
 """
 from __future__ import annotations
 
@@ -28,6 +34,30 @@ from .specialists import Instrument, Lexicon, Schema
 
 
 PhaseCb = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+
+class PipelineCancelled(Exception):
+    """Raised by the orchestrator when the operator requested cancel."""
+
+
+def _blocking_issues(sentinel_out: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the sentinel issues whose severity is 'blocking'.
+
+    Advisory issues are recorded for the audit trail but do NOT trigger
+    another Judge iteration. This closes the "Sentinel nitpicks endlessly"
+    pathology and is Sir's Q1 requirement -- iterate 'where required',
+    not always.
+    """
+    return [i for i in (sentinel_out.get("issues") or [])
+            if str(i.get("severity", "")).lower() == "blocking"]
+
+
+async def _check_cancel(db: AsyncIOMotorDatabase, sid: str, on_phase: PhaseCb) -> None:
+    doc = await db.sessions.find_one({"id": sid}, {"cancel_requested": 1, "status": 1})
+    if doc and doc.get("cancel_requested"):
+        await on_phase("cancelled",
+                       {"reason": "operator requested cancel via /api/sessions/{sid}/cancel"})
+        raise PipelineCancelled()
 
 
 async def run_pipeline(
@@ -58,12 +88,14 @@ async def run_pipeline(
     await on_phase("statute", {})
     statute = await Statute(**common).run(jurisdiction=session.get("jurisdiction", "us"))
 
-    # 3. Judge <-> Sentinel loop
+    # 3. Judge <-> Sentinel loop -- short-circuits on 0 blocking issues.
     judge = Judge(**common)
     sentinel = Sentinel(**common)
     prior_feedback = ""
     approved_decisions: list[dict[str, Any]] = []
+    advisory_issues: list[dict[str, Any]] = []
     for iteration in range(1, ITERATION_CAP + 1):
+        await _check_cancel(db, sid, on_phase)
         await on_phase(f"judge_iter_{iteration}", {"iteration": iteration})
         j = await judge.run(schema=schema, instrument=instrument, lexicon=lexicon,
                             statute=statute, prior_feedback=prior_feedback)
@@ -75,13 +107,27 @@ async def run_pipeline(
         if overrides:
             await on_phase(f"sentinel_hard_rules_iter_{iteration}",
                            {"iteration": iteration, "overrides": overrides})
+        await _check_cancel(db, sid, on_phase)
         await on_phase(f"sentinel_iter_{iteration}", {"iteration": iteration, "decision_count": len(decisions)})
         s = await sentinel.run(decisions=decisions, statute=statute, instrument=instrument)
-        if s.get("verdict") == "approved":
-            approved_decisions = decisions
+        blocking = _blocking_issues(s)
+        # Every advisory issue stays in the audit trail even after early
+        # approval (Sir Q1: 'nitpicks logged where required').
+        advisory_issues.extend(
+            i for i in (s.get("issues") or [])
+            if str(i.get("severity", "")).lower() == "advisory"
+        )
+        approved_decisions = decisions
+        if not blocking:
+            # Sir Q1: iterate only when required. No blocking issues means
+            # Sentinel has nothing PHI-critical to complain about, so we
+            # approve and skip the remaining iterations.
+            await on_phase(f"sentinel_short_circuit_iter_{iteration}",
+                           {"iteration": iteration,
+                            "advisory_issues": len(advisory_issues)})
+            s["verdict"] = "approved"
             break
-        prior_feedback = _summarise_issues(s.get("issues", []))
-        approved_decisions = decisions   # keep last set for possible human hand-off
+        prior_feedback = _summarise_issues(blocking)
 
     if not approved_decisions:
         approved_decisions = []
@@ -96,10 +142,16 @@ async def run_pipeline(
         for k in ("summary", "reason", "notes"):
             if isinstance(s.get(k), str):
                 s[k] = scrub_persisted_text(s[k])
+    # Human review is required only when either (a) a decision itself
+    # routes to human_review, or (b) Sentinel still has unresolved
+    # BLOCKING issues after ITERATION_CAP iterations. Advisory issues
+    # are logged and never force human review.
     human_needed = any(d.get("action") == "human_review" for d in approved_decisions)
-    if s.get("verdict") != "approved":
+    if _blocking_issues(s):
         human_needed = True
-        await on_phase("human_review_required", {"reason": "sentinel did not approve within cap"})
+        await on_phase("human_review_required",
+                       {"reason": "sentinel still has blocking issues after cap",
+                        "blocking_count": len(_blocking_issues(s))})
 
     # 4. Human review gate (persist and pause if needed)
     await db.sessions.update_one(
@@ -132,19 +184,29 @@ async def run_pipeline(
                                      "scanned": guard_report["scanned"],
                                      "blocked": guard_report["blocked"]})
 
-    # 6. Auditor
-    await on_phase("auditor", {})
-    audit = await Auditor(**common).run(decisions=approved_decisions, exports=exec_out["exports"], files=files)
+    await _check_cancel(db, sid, on_phase)
 
-    # 7. Scout + Ledger
-    await on_phase("scout_ledger", {})
-    scout, benchmark = await asyncio.gather(
+    # 6+7. Auditor and Scout in parallel (Scout has no dependency on
+    # Auditor). Ledger + Herald still need Auditor's metrics + Scout's
+    # landscape so they wait on both.
+    await on_phase("auditor_scout", {})
+    audit, scout, benchmark = await asyncio.gather(
+        Auditor(**common).run(decisions=approved_decisions, exports=exec_out["exports"], files=files),
         Scout(**common).run(),
         _empty(None),   # placeholder for future synthetic benchmark run
     )
-    ledger = await Ledger(**common).run(decisions=approved_decisions, audit=audit, scout=scout, benchmark_result=benchmark)
 
-    # 8. Herald
+    await _check_cancel(db, sid, on_phase)
+
+    # 7. Ledger (split into Compare + Aggregate under the hood).
+    await on_phase("ledger", {})
+    ledger = await Ledger(**common).run(decisions=approved_decisions, audit=audit,
+                                        scout=scout, benchmark_result=benchmark)
+
+    await _check_cancel(db, sid, on_phase)
+
+    # 8. Herald (split into Abstract + Sections under the hood so no LLM
+    # call exceeds the 90 s hard timeout).
     await on_phase("herald", {})
     herald = await Herald(**common).run(ledger=ledger, audit=audit,
                                         target_venue=session.get("target_venue") or "JAMIA Open")
@@ -158,6 +220,7 @@ async def run_pipeline(
         "herald": herald,
         "exports": exec_out["exports"],
         "guard": guard_report,
+        "advisory_issues": advisory_issues,
     }
     await db.sessions.update_one(
         {"id": sid},
@@ -166,6 +229,7 @@ async def run_pipeline(
             "agent_ledger": ledger,
             "agent_herald": herald,
             "agent_scout": scout,
+            "advisory_issues": advisory_issues,
             "guard_report": guard_report,
             "export_paths": exec_out["exports"],
             "status": "complete",

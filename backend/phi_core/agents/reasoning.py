@@ -202,10 +202,19 @@ class Sentinel(Agent):
     PROMPT = (
         "You are Sentinel. Review Judge's decisions with ONE goal: zero PHI leak, 100% accuracy. "
         "Cross-check every 'keep' against Statute rules and Instrument fields. Flag any column "
-        "whose action is inconsistent with its PHI category or citation. Return JSON: "
+        "whose action is inconsistent with its PHI category or citation.\n\n"
+        "For every issue, set severity honestly:\n"
+        "  - 'blocking' ONLY when the current action would leak PHI or over-block clinical signal. "
+        "This is the bar for another iteration. Reserve for real leaks (e.g. keep on a phone column, "
+        "keep on a name column, drop on a study arm).\n"
+        "  - 'advisory' for style, retention-policy nits, or preference between two safe transforms "
+        "(e.g. hash vs pseudonymize when both close the leak). Advisory issues NEVER trigger a "
+        "re-iteration; they are logged and included in the audit trail.\n\n"
+        "Return JSON: "
         '{"verdict": "approved|revise", "issues": [{"file_id": str, "column": str, '
-        '"problem": str, "suggested_action": str}], "summary": str}. '
-        "Approve only when every decision defensibly closes the leak while preserving research signal."
+        '"problem": str, "suggested_action": str, "severity": "blocking|advisory"}], "summary": str}. '
+        "Set verdict='approved' unless at least one blocking issue remains after your review. "
+        "Nitpick sparingly and only where it materially reduces PHI risk."
     )
 
     async def run(self, decisions: list[dict[str, Any]], statute: dict, instrument: dict) -> dict[str, Any]:
@@ -213,9 +222,19 @@ class Sentinel(Agent):
             f"Judge decisions: {decisions}\n\n"
             f"Statute rules: {statute}\n\n"
             f"Instrument fields: {instrument}\n"
-            "Respond with JSON only."
+            "Respond with JSON only. Remember: only 'blocking' severity triggers another iteration."
         )
-        return await self.call_json(prompt, phase="sentinel.review", default={"verdict": "approved", "issues": []})
+        out = await self.call_json(prompt, phase="sentinel.review", default={"verdict": "approved", "issues": []})
+        # Deterministic post-processing: if there are no blocking issues,
+        # force verdict='approved' regardless of what the LLM wrote. This
+        # closes the "Sentinel nitpicks endlessly" pathology observed on
+        # live sessions where the LLM emitted verdict='revise' with only
+        # style-level objections.
+        issues = out.get("issues") or []
+        blocking = [i for i in issues if str(i.get("severity", "")).lower() == "blocking"]
+        if not blocking:
+            out["verdict"] = "approved"
+        return out
 
 
 class Executor(Agent):

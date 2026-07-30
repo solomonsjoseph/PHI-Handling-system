@@ -1,0 +1,4 @@
+patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
+MRN523601,Aditya Patel,2006-03-08,415-555-5070,mjones.98@example.edu,21348,98,106,109,ARM 961,HbA1c improved from 8.2 to 7.4 over 3 months.
+MRN309157,Aditya Volkov,2005-04-26,415-555-7127,ppatel.88@example.edu,37864,94,89,127,HB 871,Reports mild fatigue; no new symptoms.
+MRN186995,Lin Jones,1990-06-13,415-555-1698,pwong.72@example.edu,10998,103,73,108,ARM 474,"Post-op day 2, wound healing normally."
