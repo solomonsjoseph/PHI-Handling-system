@@ -195,6 +195,21 @@ Sir directed: "The agents already exist. They must be given the right tools to e
 
 **Full regression after iteration_10**: **130/130 unit tests + 3 skipped green.**
 
+### iteration_11 (fork) multi-provider LLM catalog + provider-aware web_search
+
+Sir directed: "I want an option to choose between different models from different AI company so that user has option to choose for themselves instead of building around one model." Same-session refactor of both plumbing and UX so every one of the 12 agents can run under Claude / GPT / Gemini through either the Emergent Universal Key (zero-setup) or BYOK.
+
+- **`phi_core/llm_catalog.py`** — curated multi-provider model catalog. 10 models across Anthropic (Claude Sonnet 4.5 / Opus 4 / Haiku 4.5), OpenAI (GPT-5.2 / 5.4 / 5.4-mini), Google (Gemini 3 Pro / Flash), and BYOK OpenRouter entries. Every row declares `tier` (flagship/balanced/fast) and `supports_web_search`. `PROVIDER_FAMILIES` table maps family → native web_search tool descriptor. `resolve_family(provider, model_id)` picks the underlying family when routing through the Emergent proxy.
+- **`phi_core/agents/llm.py`** — `_emergent_call` and `_emergent_call_with_web_search` both use the catalog to route to the correct `LlmChat.with_model(family, model_id)` and select the right web_search tool descriptor:
+  * Anthropic → `{"type":"web_search_20250305","name":"web_search","max_uses":N}`
+  * Gemini → `{"googleSearch":{}}` (Google Search grounding)
+  * OpenAI / OpenRouter / OpenAI-compatible → no native tool; falls back to plain LLM call
+- **`GET /api/settings/llm/catalog`** — new endpoint feeding the UI with providers + models + default_model_id.
+- **`frontend/src/pages/Settings.jsx`** — full UX rebuild. Provider dropdown shows human-readable labels ("Emergent Universal Key (Claude · GPT · Gemini)"), model dropdown cascades on the provider choice, each option annotates the tier + web-search capability, an "available models" grid shows the full catalog at a glance. Changing provider auto-resets model when the current selection isn't valid for the new provider family. Live tags surface `web-search enabled` + tier when the picked model supports them.
+- **`tests/test_llm_catalog.py`** — 11 tests covering catalog shape, provider-family coverage (Anthropic + OpenAI + Gemini all reachable via Emergent), family resolution parametrized over model IDs, and per-family web_search tool selection.
+
+**Full regression after iteration_11**: **141/141 unit tests + 3 skipped green + Settings UI smoke-verified live.**
+
 **GOAL cross-check after iteration_8**:
 - (a) LLM never reads dataset rows — HOLDS.
 - (b) Exports contain no residual raw PHI — HOLDS AND ENFORCED across every HIPAA A-R category (Phase B pattern parity).

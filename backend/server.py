@@ -663,6 +663,19 @@ async def get_llm_settings():
     return doc | {"providers": sorted(allowed_providers())}
 
 
+@app.get("/api/settings/llm/catalog")
+async def get_llm_catalog():
+    """Curated multi-provider model catalog for the Settings UI.
+
+    Lets operators pick a model from a real list (grouped by provider,
+    with tier and web-search-capability flags) instead of typing a raw
+    model ID. Returns provider families and their members from
+    ``phi_core/llm_catalog.py``.
+    """
+    from phi_core.llm_catalog import catalog_for_ui
+    return catalog_for_ui()
+
+
 @app.post("/api/settings/llm", dependencies=[Depends(require_api_token)])
 async def set_llm_settings(body: LlmSettings):
     validate_llm_provider(body.provider)

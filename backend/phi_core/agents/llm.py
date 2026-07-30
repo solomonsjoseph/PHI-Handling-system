@@ -48,11 +48,36 @@ class LlmConfig:
         )
 
 
+def _resolve_emergent_family(model_id: str) -> str:
+    """Route to the underlying provider family for a given model id when
+    using the Emergent Universal Key.
+
+    Delegates to the catalog when possible so a single source of truth
+    decides Anthropic vs OpenAI vs Gemini routing.
+    """
+    try:
+        from ..llm_catalog import resolve_family
+        return resolve_family("emergent", model_id)
+    except Exception:
+        # Fallback heuristics on model id if the catalog import fails.
+        m = model_id.lower()
+        if m.startswith("gpt") or m.startswith("openai/"):
+            return "openai"
+        if m.startswith("gemini") or "google" in m:
+            return "gemini"
+        return "anthropic"
+
+
 def _emergent_call(system: str, user: str, cfg: LlmConfig) -> str:
-    """Call Claude via emergentintegrations (Emergent Universal Key)."""
+    """Call the Emergent Universal Key. Routes to anthropic / openai /
+    gemini based on the model id."""
     from emergentintegrations.llm.chat import LlmChat, UserMessage
     key = os.environ["EMERGENT_LLM_KEY"]
-    chat = LlmChat(api_key=key, session_id="agent", system_message=system).with_model("anthropic", cfg.model)
+    family = _resolve_emergent_family(cfg.model)
+    chat = (
+        LlmChat(api_key=key, session_id="agent", system_message=system)
+        .with_model(family, cfg.model)
+    )
     reply = chat.send_message_sync(UserMessage(text=user)) if hasattr(chat, "send_message_sync") else None
     if reply is None:
         # emergentintegrations exposes async send_message; block via asyncio
@@ -67,37 +92,46 @@ def _emergent_call(system: str, user: str, cfg: LlmConfig) -> str:
 
 def _emergent_call_with_web_search(system: str, user: str, cfg: LlmConfig,
                                    max_uses: int = 3) -> tuple[str, list[dict[str, Any]]]:
-    """Call Claude with Anthropic's provider-hosted ``web_search_20250305``
-    tool enabled. Anthropic executes the search server-side and returns
-    the final answer with inline citations; there is no client-side tool
-    loop to run.
+    """Call the Emergent Universal Key with the provider's native
+    web-search tool enabled when the family exposes one.
 
-    Returns ``(content, citations)`` where ``citations`` is the list of
-    source URLs Claude used (may be empty if the LLM answered from its
-    own knowledge without searching). Because LiteLLM collapses the raw
-    Anthropic block structure into a plain string, citation extraction is
-    best-effort: URLs appearing in the reply text are captured as
-    ``{"url": ..., "title": ""}`` entries.
+    Provider-specific tool schemas:
+      * ``anthropic`` — ``{"type": "web_search_20250305", "name": "web_search"}``
+      * ``gemini``    — ``{"googleSearch": {}}``
+      * ``openai``    — Not exposed through the Emergent proxy today; falls
+                        back to a plain LLM call without web search.
+
+    Returns ``(content, citations)``; citations may be empty when the
+    provider chose not to search or is running without tool support.
     """
     from emergentintegrations.llm.chat import LlmChat, UserMessage
+    from ..llm_catalog import web_search_tool_for
     import asyncio
 
     key = os.environ["EMERGENT_LLM_KEY"]
+    family = _resolve_emergent_family(cfg.model)
+    tool = web_search_tool_for(family)
+
+    if tool is None:
+        # No native web-search on this family. Return a plain call so the
+        # agent still gets an answer, just without live citations.
+        content = _emergent_call(system, user, cfg)
+        return content, []
+
+    # Anthropic supports ``max_uses``; Gemini doesn't accept it. Only add
+    # for anthropic so we don't send an unrecognised field.
+    tool = dict(tool)
+    if family == "anthropic":
+        tool["max_uses"] = max_uses
 
     async def _do() -> tuple[str, list[dict[str, Any]]]:
         chat = (
             LlmChat(api_key=key, session_id="agent-web", system_message=system)
-            .with_model("anthropic", cfg.model)
-            .with_tools(tools=[{
-                "type": "web_search_20250305",
-                "name": "web_search",
-                "max_uses": max_uses,
-            }])
+            .with_model(family, cfg.model)
+            .with_tools(tools=[tool])
         )
         resp = await chat.send_message_with_tools(UserMessage(text=user))
         content = getattr(resp, "content", None) or ""
-        # LiteLLM stringifies Anthropic's structured web_search response, so
-        # citations must be recovered from URLs embedded in the text.
         urls = _URL_RE.findall(content)
         seen: set[str] = set()
         cites: list[dict[str, Any]] = []
