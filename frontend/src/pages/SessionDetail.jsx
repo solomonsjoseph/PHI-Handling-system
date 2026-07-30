@@ -41,7 +41,13 @@ export default function SessionDetail() {
   const [trace, setTrace] = useState([]);
   const [resolutions, setResolutions] = useState({});
   const [reviewer, setReviewer] = useState(() => {
-    try { return window.localStorage.getItem('phi_reviewer_id') || ''; } catch (_) { return ''; }
+    try { return window.localStorage.getItem('phi_reviewer_id') || ''; }
+    catch (err) {
+      // localStorage unavailable (e.g. sandboxed iframe / private mode)
+      // — fall back to empty and let the operator retype the reviewer id.
+      console.warn('phi_reviewer_id read failed:', err);
+      return '';
+    }
   });
   const [reviewComment, setReviewComment] = useState('');
   const [actualKnowledgeAck, setActualKnowledgeAck] = useState(false);
