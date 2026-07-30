@@ -65,6 +65,74 @@ def _emergent_call(system: str, user: str, cfg: LlmConfig) -> str:
     return str(reply)
 
 
+def _emergent_call_with_web_search(system: str, user: str, cfg: LlmConfig,
+                                   max_uses: int = 3) -> tuple[str, list[dict[str, Any]]]:
+    """Call Claude with Anthropic's provider-hosted ``web_search_20250305``
+    tool enabled. Anthropic executes the search server-side and returns
+    the final answer with inline citations; there is no client-side tool
+    loop to run.
+
+    Returns ``(content, citations)`` where ``citations`` is the list of
+    source URLs Claude used (may be empty if the LLM answered from its
+    own knowledge without searching). Because LiteLLM collapses the raw
+    Anthropic block structure into a plain string, citation extraction is
+    best-effort: URLs appearing in the reply text are captured as
+    ``{"url": ..., "title": ""}`` entries.
+    """
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    import asyncio
+
+    key = os.environ["EMERGENT_LLM_KEY"]
+
+    async def _do() -> tuple[str, list[dict[str, Any]]]:
+        chat = (
+            LlmChat(api_key=key, session_id="agent-web", system_message=system)
+            .with_model("anthropic", cfg.model)
+            .with_tools(tools=[{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": max_uses,
+            }])
+        )
+        resp = await chat.send_message_with_tools(UserMessage(text=user))
+        content = getattr(resp, "content", None) or ""
+        # LiteLLM stringifies Anthropic's structured web_search response, so
+        # citations must be recovered from URLs embedded in the text.
+        urls = _URL_RE.findall(content)
+        seen: set[str] = set()
+        cites: list[dict[str, Any]] = []
+        for u in urls:
+            if u in seen:
+                continue
+            seen.add(u)
+            cites.append({"url": u, "title": ""})
+            if len(cites) >= 20:
+                break
+        return content, cites
+
+    return asyncio.run(_do())
+
+
+_URL_RE = re.compile(r"https?://[^\s\)\]\"']+")
+
+
+def call_llm_with_web_search(system: str, user: str,
+                             cfg: LlmConfig | None = None,
+                             max_uses: int = 3) -> tuple[str, list[dict[str, Any]]]:
+    """Public helper: LLM call with Claude native web_search.
+
+    Only wired for the ``emergent`` provider today because the Emergent
+    Universal Key routes to Anthropic and Anthropic exposes the
+    provider-hosted ``web_search_20250305`` tool. Falls back to a plain
+    LLM call (no citations) for other providers so agents remain
+    functional without the tool.
+    """
+    cfg = cfg or LlmConfig()
+    if cfg.provider == "emergent":
+        return _emergent_call_with_web_search(system, user, cfg, max_uses=max_uses)
+    return _litellm_call(system, user, cfg), []
+
+
 def _litellm_call(system: str, user: str, cfg: LlmConfig) -> str:
     """Call via LiteLLM. Model naming follows LiteLLM conventions."""
     model = cfg.model

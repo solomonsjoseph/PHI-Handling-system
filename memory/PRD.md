@@ -181,6 +181,20 @@ Sir directed a full security audit + code review. The audit was clean on archite
 
 **Full regression after iteration_9**: **125/125 unit tests + 3 skipped (unrelated env-skip) green + Phase F live E2E passing.**
 
+### iteration_10 (fork) Statute + Praxis armed with Claude native web_search
+
+Sir directed: "The agents already exist. They must be given the right tools to execute the task. AI/LLM used must use its existing abilities like Claude can use native web_search." This iteration arms the two research-grade agents with Anthropic's provider-hosted `web_search_20250305` tool so their answers reflect the current primary-law text and current best-practice methods rather than stale LLM training data.
+
+- **`phi_core/agents/llm.py`** — new `call_llm_with_web_search(system, user, cfg, max_uses)` that routes through `emergentintegrations.LlmChat.with_tools([{type:"web_search_20250305", name:"web_search", max_uses}])`. Uses `asyncio.run` for correct LiteLLM cleanup. Extracts URLs from the reply text (LiteLLM stringifies Anthropic's structured citation blocks, so best-effort URL regex is the pragmatic path).
+- **`phi_core/agents/base.py`** — new `Agent.call_with_web_search(prompt, phase, max_uses)` and `Agent.call_json_with_web_search(...)` boilerplate. 180-second timeout (web search is slower). Citations logged into agent_log alongside the reply preview.
+- **`phi_core/agents/experts.py`** — Statute + Praxis rewritten.
+  - **Statute** now web-searches the current primary-law text per jurisdiction, merges results with the deterministic `JurisdictionPack` fallback so `identifier_categories` and `age_aggregation_threshold` are always populated. Cache-first, web-search-on-miss.
+  - **Praxis** short-circuits well-known HIPAA categories (A/B/C/D/F/G/H) with deterministic canonical techniques (no web search wasted); non-canonical categories trigger a live web-search returning `{technique, params, utility_preserving, clinical_impact, reference_paper, sources}`.
+- **Live-verified**: Statute(`"in"`) returned real DPDPA 2023 + DPDP Rules 2025 with 6 web citations from live search (not training-time knowledge). Cache hit on subsequent call.
+- **`tests/test_experts_web_search.py`** (5 tests, includes 1 live web-search test) and **`tests/conftest.py`** (loads `.env` so tests see `EMERGENT_LLM_KEY` and `MONGO_URL`).
+
+**Full regression after iteration_10**: **130/130 unit tests + 3 skipped green.**
+
 **GOAL cross-check after iteration_8**:
 - (a) LLM never reads dataset rows — HOLDS.
 - (b) Exports contain no residual raw PHI — HOLDS AND ENFORCED across every HIPAA A-R category (Phase B pattern parity).
