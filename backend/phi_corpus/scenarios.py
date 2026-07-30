@@ -280,7 +280,6 @@ class Scenario:
     jurisdictions: frozenset[str]
     datasets: tuple[DatasetSpec, ...]
     dictionary: tuple[DictionaryRow, ...]
-    narrative_body: str = ""
 
 
 # ---- Scenario library --------------------------------------------------
@@ -322,11 +321,6 @@ _ONCOLOGY = Scenario(
         DictionaryRow("arm_code", "Study arm assignment", "string"),
         DictionaryRow("notes", "Free-text clinical notes"),
     ),
-    narrative_body=(
-        "OncoTrial-2026 baseline enrollment protocol.\n"
-        "Inclusion: adults 18+ with confirmed stage II-IV solid tumor.\n"
-        "Exclusion: prior systemic therapy within 90 days.\n"
-    ),
 )
 
 
@@ -365,7 +359,6 @@ _DIABETES = Scenario(
         DictionaryRow("bmi", "Body mass index", "float"),
         DictionaryRow("study_visit_notes", "Free-text visit notes"),
     ),
-    narrative_body="DIAB-2026 baseline visit protocol.",
 )
 
 
@@ -401,7 +394,6 @@ _PEDIATRIC = Scenario(
         DictionaryRow("cbcl_total_score", "CBCL total problem score"),
         DictionaryRow("interview_notes", "Screening interview notes"),
     ),
-    narrative_body="PEDI-BEHAV-2026 screening protocol.",
 )
 
 
@@ -507,11 +499,6 @@ _HIPAA_MAX = Scenario(
         DictionaryRow("arm_code", "Study arm assignment"),
         DictionaryRow("barcode", "Specimen barcode"),
         DictionaryRow("notes", "Free-text clinical notes"),
-    ),
-    narrative_body=(
-        "HIPAA-MAX-2026 adversarial protocol. This scenario deliberately "
-        "violates every §164.514(b)(2)(i) identifier so the pipeline can "
-        "prove it removes every plant.\n"
     ),
 )
 

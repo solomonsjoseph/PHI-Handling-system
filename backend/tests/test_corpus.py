@@ -12,7 +12,7 @@ import zipfile
 
 def test_planter_emits_valid_manifest_zip():
     """The corpus ZIP must be a valid manifest the intake endpoint would
-    accept: datasets/, dictionary/, and (optionally) forms/ folders."""
+    accept: datasets/ + dictionary/ folders (forms are no longer emitted)."""
     from phi_corpus.planters import plant
     art = plant(scenario_id="oncology_v1", jurisdiction="us",
                 edge_case_tags=[], row_count=4, seed=1)
@@ -20,6 +20,11 @@ def test_planter_emits_valid_manifest_zip():
     names = z.namelist()
     assert any(n.startswith("datasets/") and n.endswith(".csv") for n in names)
     assert any(n.startswith("dictionary/") and n.endswith(".csv") for n in names)
+    # Sir's directive: NO PDF/form generation. Confirm none leak in.
+    assert not any(n.startswith("forms/") for n in names), \
+        f"corpus emitted a forms/ artefact: {[n for n in names if n.startswith('forms/')]}"
+    assert not any(n.endswith(".pdf") for n in names), \
+        f"corpus emitted a pdf: {[n for n in names if n.endswith('.pdf')]}"
     # Every dataset row is a valid CSV row (matches header column count)
     for n in names:
         if n.startswith("datasets/"):
@@ -35,7 +40,7 @@ def test_planter_ground_truth_covers_every_cell():
     verifier can score both PHI transforms and clinical preservation."""
     from phi_corpus.planters import plant
     art = plant(scenario_id="oncology_v1", edge_case_tags=[],
-                row_count=5, seed=1, include_forms=False)
+                row_count=5, seed=1)
     z = zipfile.ZipFile(io.BytesIO(art.zip_bytes))
     total_cells = 0
     for n in z.namelist():
@@ -45,43 +50,13 @@ def test_planter_ground_truth_covers_every_cell():
     assert len(art.ground_truth["planted"]) == total_cells
 
 
-# ---- Forms tests (Phase C1 forms/pdf component) -----------------------
-
-def test_planter_emits_two_pdfs_when_forms_enabled():
-    from phi_corpus.planters import plant
-    art = plant(scenario_id="oncology_v1", edge_case_tags=[],
-                row_count=2, seed=1, include_forms=True)
-    names = zipfile.ZipFile(io.BytesIO(art.zip_bytes)).namelist()
-    assert "forms/consent_digital.pdf" in names
-    assert "forms/consent_scanned.pdf" in names
-
-
-def test_planter_form_pdfs_add_phi_plants_to_ground_truth():
-    from phi_corpus.planters import plant
-    art = plant(scenario_id="diabetes_v1", edge_case_tags=[],
-                row_count=1, seed=2, include_forms=True)
-    edge_tags = {p["edge_case_tag"] for p in art.ground_truth["planted"]}
-    assert "form_consent_digital" in edge_tags
-    assert "form_consent_scanned" in edge_tags
-    # Each PDF plants 6 PHI slots (A/C/D/F/B + a repeated D)
-    digital_plants = [p for p in art.ground_truth["planted"]
-                      if p["edge_case_tag"] == "form_consent_digital"]
-    assert len(digital_plants) == 6
-
-
-def test_digital_pdf_text_layer_is_extractable():
-    """The digital PDF must be pypdf-extractable so the fast path handles
-    it without invoking OCR."""
-    from phi_corpus.planters import plant
-    from pypdf import PdfReader
-    art = plant(scenario_id="oncology_v1", edge_case_tags=[],
-                row_count=1, seed=3, include_forms=True)
-    z = zipfile.ZipFile(io.BytesIO(art.zip_bytes))
-    pdf_bytes = z.read("forms/consent_digital.pdf")
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    text = reader.pages[0].extract_text()
-    assert "Study Protocol" in text
-    assert "Patient Full Name" in text
+def test_planter_no_pdf_generation_module():
+    """Regression: `phi_corpus.forms` was fully deleted per Sir's directive.
+    Importing it must fail; nothing in the corpus package may reference it."""
+    import importlib
+    import pytest as _pytest
+    with _pytest.raises(ModuleNotFoundError):
+        importlib.import_module("phi_corpus.forms")
 
 
 def test_planter_edge_case_tag_persists_into_ground_truth():
@@ -89,7 +64,7 @@ def test_planter_edge_case_tag_persists_into_ground_truth():
     art = plant(scenario_id="oncology_v1",
                 edge_case_tags=["age_over_89", "restricted_zip3",
                                 "notes_carry_name", "clinical_hr_90s"],
-                row_count=3, seed=99, include_forms=False)
+                row_count=3, seed=99)
     tags = {p["edge_case_tag"] for p in art.ground_truth["planted"] if p["edge_case_tag"]}
     assert tags == {"age_over_89", "restricted_zip3", "notes_carry_name", "clinical_hr_90s"}
 
@@ -259,72 +234,7 @@ def test_verifier_reports_scenario_and_jurisdiction():
     assert "notes_carry_name" in rep["edge_case_tags"]
 
 
-# ---- Narrative / form-plant scoring (Phase C form fix) ---------------
-
-
-def test_verifier_credits_form_plant_when_planted_value_absent_from_export(tmp_path):
-    """Form/narrative plants (row == 0) are scored by inspecting the
-    pipeline's redacted export text: if the raw planted value substring
-    is absent, credit the plant as TP."""
-    from phi_corpus.verify import verify
-
-    ground_truth = {
-        "scenario_id": "custom_v1",
-        "jurisdiction": "us",
-        "planted": [
-            {"file_name": "consent.pdf", "row": 0, "column": "Phone",
-             "value": "415-555-1234", "hipaa_category": "D",
-             "expected_action": "scrub_text", "edge_case_tag": "form_test"},
-            {"file_name": "consent.pdf", "row": 0, "column": "Full Name",
-             "value": "James Smith", "hipaa_category": "A",
-             "expected_action": "scrub_text", "edge_case_tag": "form_test"},
-        ],
-    }
-    # Redacted export that scrubbed both plants.
-    export = tmp_path / "abc__consent.redacted.txt"
-    export.write_text(
-        "Patient [A] enrolled. Contact [D] between 9am and 5pm.",
-        encoding="utf-8",
-    )
-    export_paths = {"abc": str(export)}
-    name_map = {"consent.pdf": "abc"}
-
-    rep = verify(ground_truth, decisions=[], file_name_map=name_map,
-                 export_paths=export_paths)
-    assert rep["summary"]["fn"] == 0, "form plants must be credited as caught"
-    assert rep["summary"]["tp"] == 2
-    assert rep["correctness"]["overall_recall"] == 1.0
-
-
-def test_verifier_flags_form_plant_when_raw_phi_survives_in_export(tmp_path):
-    """If the pipeline's redacted export STILL contains the raw planted
-    PHI substring, the verifier flags it as a false-negative leak."""
-    from phi_corpus.verify import verify
-
-    ground_truth = {
-        "scenario_id": "custom_v1", "jurisdiction": "us",
-        "planted": [
-            {"file_name": "consent.pdf", "row": 0, "column": "Phone",
-             "value": "415-555-1234", "hipaa_category": "D",
-             "expected_action": "scrub_text", "edge_case_tag": "form_test"},
-        ],
-    }
-    export = tmp_path / "abc__consent.redacted.txt"
-    # Leak: raw phone survived.
-    export.write_text(
-        "Contact the participant at 415-555-1234 during clinic hours.",
-        encoding="utf-8",
-    )
-    rep = verify(
-        ground_truth, decisions=[],
-        file_name_map={"consent.pdf": "abc"},
-        export_paths={"abc": str(export)},
-    )
-    assert rep["summary"]["fn"] == 1
-    fn = rep["correctness"]["false_negatives"][0]
-    assert fn["file"] == "consent.pdf"
-    assert fn["column"] == "Phone"
-    assert fn["actual_action"] == "leaked_in_export"
+# ---- HIPAA A-R adversarial coverage ----------------------------------
 
 
 def test_verifier_scores_max_adversarial_ground_truth_shape():
@@ -336,8 +246,6 @@ def test_verifier_scores_max_adversarial_ground_truth_shape():
     cats = {p["hipaa_category"] for p in art.ground_truth["planted"]}
     for letter in "ABCDEFGHIJKLMNOPQR":
         assert letter in cats, f"HIPAA {letter} missing from max-adversarial corpus"
-
-
 
 
 def test_cli_summary_only_lists_scenarios_and_edge_cases(tmp_path):

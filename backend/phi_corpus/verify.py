@@ -1,9 +1,9 @@
-"""Corpus verifier -- dual-scoring per Sir's Q2(iii).
+"""Corpus verifier -- tabular-only scoring.
 
 Given a completed pipeline session and the ground-truth dict produced
 by ``phi_corpus.planters.plant()``, this module compares every planted
-cell's expected action / category against the pipeline's actual output
-and produces a report with two independent scores:
+cell's expected action against the pipeline's Judge decision and
+produces a report with two independent scores:
 
 1. **Correctness** -- did the pipeline take the right action per plant?
    Precision / recall / F1 per HIPAA category. This is the "0 % PHI leak
@@ -11,22 +11,14 @@ and produces a report with two independent scores:
 2. **Deferral rate** -- how often did Judge defer a plant that we know is
    decidable (i.e. the ground truth is unambiguous) to human_review?
 
-Two disjoint scoring paths, one per file kind:
-
-* **Tabular plants** (dataset CSV/XLSX, ``row >= 2``) -- scored against
-  Judge's ``agent_decisions`` list. One decision per column; the verifier
-  scores the (file, column) pair once and credits or debits it.
-* **Narrative / form plants** (PDF forms, ``row == 0``) -- scored by
-  reading the pipeline's redacted export text and asserting the raw
-  planted value substring is ABSENT. Forms do not emit per-field Judge
-  decisions because the Executor processes them wholesale via
-  ``detect_text`` + ``apply_to_text``. The redacted text IS the ground
-  truth of "what the pipeline did".
+Scoring path: every plant is a tabular column decision. One Judge
+decision governs an entire column, so the verifier credits or debits
+each (file, column) pair once. There is no form / PDF plant scoring:
+the corpus generator emits only ``datasets/`` and ``dictionary/`` now.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 
@@ -87,65 +79,26 @@ _PHI_ACTIONS: frozenset[str] = frozenset({
 })
 
 
-def _load_narrative_texts(export_paths: dict[str, str] | None,
-                          name_map: dict[str, str] | None) -> dict[str, str]:
-    """Return ``{original_form_filename: redacted_text}``.
-
-    Reads each redacted export file the Executor wrote for narrative
-    files. The map is keyed by the ORIGINAL corpus form filename (e.g.
-    ``consent_digital.pdf``) so the caller can look up by ground-truth
-    ``file_name`` directly.
-    """
-    if not export_paths:
-        return {}
-    id_to_name: dict[str, str] = {}
-    if name_map:
-        # name_map is {original_name: file_id}; invert to look up by file_id.
-        id_to_name = {v: k for k, v in name_map.items()}
-    out: dict[str, str] = {}
-    for file_id, path in export_paths.items():
-        if not path:
-            continue
-        p = Path(path)
-        # Narrative exports are written as ``<file_id>__<stem>.redacted.txt``.
-        if p.suffix.lower() != ".txt":
-            continue
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        orig = id_to_name.get(file_id)
-        if orig:
-            out[orig] = text
-        # Also key by file_id for callers that carry file_id in ground truth.
-        out[file_id] = text
-    return out
-
-
 def verify(
     ground_truth: dict[str, Any],
     decisions: list[dict[str, Any]],
     file_name_map: dict[str, str] | None = None,
     guard_report: dict[str, Any] | None = None,
-    export_paths: dict[str, str] | None = None,
+    export_paths: dict[str, str] | None = None,   # kept for API back-compat; unused
 ) -> dict[str, Any]:
     """Compare a corpus ground-truth against the pipeline's actual outputs.
 
     ``file_name_map`` translates the ORIGINAL corpus file name to the
     pipeline's ``file_id`` so ``(file_id, column)`` lookups resolve.
 
-    ``export_paths`` maps ``file_id -> export path on disk``. Used to
-    read redacted narrative text and score form plants by absence of the
-    raw planted value.
-
-    ``guard_report`` is currently informational (surfaced in the report
-    but not used for scoring so leaks the guard missed are still caught
-    by the substring check).
+    ``guard_report`` is surfaced in the report but not used for scoring
+    so leaks the guard missed are still caught by the Judge decision.
     """
     planted = ground_truth.get("planted") or []
+    _ = export_paths   # retained for backwards-compatible callers
 
     # ------------------------------------------------------------------
-    # Tabular decision index: (file_key, column) -> decision
+    # Decision index: (file_key, column) -> decision
     # ------------------------------------------------------------------
     by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for d in decisions:
@@ -161,69 +114,21 @@ def verify(
             if orig:
                 by_key[(orig, d.get("column", ""))] = d
 
-    # Narrative redacted text lookup, keyed by original form file name.
-    narrative_text = _load_narrative_texts(export_paths, file_name_map)
-
     per_cat: dict[str, CategoryScore] = {}
     misses_false_neg: list[Miss] = []
     misses_false_pos: list[Miss] = []
     deferred_decidable: list[Miss] = []
     matched = 0
-    total_planted_cells = 0
     # Track scored (file, column) pairs so dataset columns are counted once.
     scored_pairs: set[tuple[str, str]] = set()
+    total_planted_cells = 0
 
     for cell in planted:
         col_name = cell["column"]
         file_name = cell["file_name"]
         cat = cell["hipaa_category"]
         expected = cell["expected_action"]
-        planted_value = str(cell.get("value") or "")
-        is_form_plant = int(cell.get("row") or 0) == 0
 
-        if is_form_plant:
-            # ---- narrative / form scoring by export text substring ----
-            total_planted_cells += 1
-            redacted = narrative_text.get(file_name) or ""
-            if not redacted and file_name_map:
-                redacted = narrative_text.get(file_name_map.get(file_name, "")) or ""
-            scr = per_cat.setdefault(cat, CategoryScore(category=cat))
-            expected_is_phi = expected in _PHI_ACTIONS
-            # Non-PHI form plants (clinical narrative text) do not exist
-            # today but we handle the case symmetrically for safety.
-            leaked = bool(planted_value) and (planted_value in redacted)
-            if expected_is_phi:
-                if not leaked:
-                    scr.tp += 1
-                    matched += 1
-                else:
-                    scr.fn += 1
-                    misses_false_neg.append(Miss(
-                        file=file_name, column=col_name,
-                        expected_action=expected, actual_action="leaked_in_export",
-                        hipaa_category=cat,
-                        edge_case_tag=cell.get("edge_case_tag", ""),
-                        reason="PHI substring survived to redacted export",
-                    ))
-            else:
-                # expected == keep on narrative plant: substring should survive.
-                if leaked:
-                    scr.tn += 1
-                    matched += 1
-                else:
-                    scr.fp += 1
-                    misses_false_pos.append(Miss(
-                        file=file_name, column=col_name,
-                        expected_action=expected, actual_action="over_redacted",
-                        hipaa_category=cat,
-                        edge_case_tag=cell.get("edge_case_tag", ""),
-                        reason="Non-PHI narrative content was redacted",
-                    ))
-            continue
-
-        # ---- tabular scoring by Judge decision ------------------------
-        # One decision per column governs every row of that column, so we
-        # score each (file, column) pair exactly once.
         pair_key = (file_name, col_name)
         if pair_key in scored_pairs:
             continue

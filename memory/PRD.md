@@ -405,6 +405,34 @@ Sir asked to verify the current implementation aligns with the 12-agent spec and
 - Wizard corpus toggle (iter_13)
 - Live trace panel + STOP button (iter_15)
 
+### iteration_17 (fork) Remove PDF / form generation from corpus generator
+
+Sir's directive: "remove pdf or form creation in corpus generator, the output is useless. Completely remove it with no traces of it left."
+
+**What was removed** (traceable back to iter_13 Phase B/C):
+- `phi_corpus/forms.py` -- deleted. fpdf2-driven `build_digital_pdf` + `build_scanned_pdf` gone.
+- `phi_corpus/planters.py::plant(include_forms=...)` argument -- gone. `plant()` now emits only `datasets/` + `dictionary/`.
+- `phi_corpus/scenarios.py::Scenario.narrative_body` field + every scenario's `narrative_body=` payload -- gone.
+- `phi_corpus/generate.py::--no-forms` CLI flag -- gone.
+- `phi_corpus/verify.py` narrative-scoring path (row == 0, redacted-export-text substring absence check) -- removed. Verifier is now tabular-only, one Judge decision per (file, column). Kept `export_paths` in the signature as a silent-noop for backwards-compatible callers.
+- Tests `test_planter_emits_two_pdfs_when_forms_enabled`, `test_planter_form_pdfs_add_phi_plants_to_ground_truth`, `test_digital_pdf_text_layer_is_extractable`, `test_verifier_credits_form_plant_when_planted_value_absent_from_export`, `test_verifier_flags_form_plant_when_raw_phi_survives_in_export` -- removed.
+
+**Regression tests added**:
+- `test_planter_emits_valid_manifest_zip` now asserts no `forms/` folder and no `.pdf` files in the corpus ZIP.
+- `test_planter_no_pdf_generation_module` asserts `phi_corpus.forms` is not importable (ModuleNotFoundError).
+
+**Untouched (Sir: "if functional don't touch")**:
+- The intake endpoint (`server.py::/sessions/{sid}/intake`) still accepts user-uploaded `forms/` folders in the study ZIP. This directive only removed the CORPUS GENERATOR's synthetic PDF emission.
+- The pipeline's Instrument agent + OCR fast path still handle real user-uploaded PDF forms.
+- `fpdf2==2.8.7` stays pinned in `requirements.txt` as dead-weight; removing it triggers an unrelated litellm resolver conflict. It is not imported by any code path in the app.
+
+**Live E2E after removal** (oncology_v1, 5 rows, 4 edge cases, seed=55):
+- Wall clock: 195.4 s (fastest to date -- Praxis cache-hit + no form-gen overhead).
+- Verifier: **P = R = F1 = 1.0, 0 FN, 0 FP**.
+- Bundle contents: `safe_to_share/datasets/enrollment.csv`, `safe_to_share/dictionary/columns.csv`, `attestation.json`, `attestation.txt`, `README.md`. **Zero PDFs**.
+
+**Regression**: **179 passed / 3 skipped** (down from 183 = the 4 removed form-scoring tests). All ex-corpus tests still green.
+
 ## Minor items (from iteration_3, non-blocking)
 
 - Herald sometimes hits the 90s LLM timeout on the full manuscript draft. When it does, pipeline still completes; results.herald is empty and Sir can rerun.
