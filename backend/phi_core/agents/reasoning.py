@@ -184,15 +184,32 @@ class Judge(Agent):
         "Preserve clinically-needed non-PHI (diagnoses, procedures, vitals, labs)."
     )
 
-    async def run(self, schema: dict, instrument: dict, lexicon: dict, statute: dict, prior_feedback: str = "") -> dict[str, Any]:
+    async def run(self, schema: dict, instrument: dict, lexicon: dict, statute: dict,
+                  praxis: dict[str, dict] | None = None, prior_feedback: str = "") -> dict[str, Any]:
         prompt = (
-            f"Statute rules: {statute}\n\n"
-            f"Schema columns: {schema}\n\n"
-            f"Instrument fields: {instrument}\n\n"
-            f"Lexicon columns: {lexicon}\n"
+            f"Statute rules (jurisdictional regulations): {statute}\n\n"
+            f"Schema columns (dataset headers -- rows never shown): {schema}\n\n"
+            f"Instrument fields (from study forms): {instrument}\n\n"
+            f"Lexicon columns (dictionary): {lexicon}\n"
         )
+        if praxis:
+            # Praxis-recommended technique per HIPAA identifier category,
+            # web-sourced where possible. Judge uses these to pick the
+            # correct `action` value below rather than reasoning from
+            # scratch.
+            praxis_summary = {c: {"technique": m.get("technique"),
+                                  "utility_preserving": m.get("utility_preserving")}
+                              for c, m in praxis.items() if m}
+            prompt += (f"\nPraxis methods (current best-practice technique per HIPAA "
+                       f"identifier category): {praxis_summary}\n")
         if prior_feedback:
-            prompt += f"\nPreview feedback to address: {prior_feedback}\n"
+            prompt += (
+                "\nPreview (Sentinel) blocking feedback to address. Before correcting, "
+                "verify each issue is a real leak / real over-block against Statute + "
+                "Instrument. If an issue is a false positive, keep the original decision "
+                "and add a `justification` field explaining why.\n"
+                f"{prior_feedback}\n"
+            )
         prompt += "\nRespond with JSON only."
         return await self.call_json(prompt, phase="judge.decide", default={"decisions": []})
 

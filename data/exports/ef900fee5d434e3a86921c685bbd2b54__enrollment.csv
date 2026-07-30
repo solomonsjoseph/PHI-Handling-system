@@ -1,0 +1,6 @@
+patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
+P14b3f135,,1965,,,000,90+,88,103,ARM 309,Contact at [D] between [C] 5pm PST.
+P1d24d379,,1936,,,000,90+,80,141,STD 219,Contact at [D] between [C] 5pm PST.
+Pa2c8a1cc,,2013,,,000,90+,95,110,INT 190,Contact at [D] between [C] 5pm PST.
+P6e596d51,,1945,,,000,90+,77,107,HB 888,Contact at [D] between [C].
+Pc2944d69,,2006,,,000,90+,90,109,INT 777,Contact at [D] between [C].

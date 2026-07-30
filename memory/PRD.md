@@ -349,6 +349,62 @@ Sir's directives Q1-Q4:
 - Cancel flow: HTTP 200 `cancel_requested=true` -> `status=cancelled` within 30 s.
 - Screenshot confirms STOP button + "1 agent call · 0.0 s of LLM time · pipeline in phase classifying" live display with RUNNING badge on Lexicon.
 
+### iteration_16 (fork) Spec-alignment audit + hang-protection
+
+Sir asked to verify the current implementation aligns with the 12-agent spec and add safeguards for "system may get stuck or load forever" scenarios. Systematic audit results:
+
+| Sir's Spec Agent | Current Code | Status |
+|------------------|--------------|--------|
+| Dictionary specialist | `Lexicon` | ALIGNED |
+| Dataset (headers only) specialist | `Schema` | ALIGNED |
+| Forms specialist | `Instrument` | ALIGNED |
+| Regulations expert (web search) | `Statute` (native Claude web_search_20250305) | ALIGNED |
+| PHI Methods expert | `Praxis` exists but NOT wired into Judge | **FIXED** |
+| Classifier | `Judge` | ALIGNED |
+| Preview (`false-positive check first`) | `Sentinel` + Judge FP-check prompt | **FIXED** |
+| Cap "more than 3 times then human review" | `ITERATION_CAP=3` (was 2 after iter_15) | **FIXED** |
+| Operator | `Executor` (deterministic) | ALIGNED |
+| Reviewer | `Auditor` | ALIGNED |
+| Research | `Scout` | ALIGNED |
+| Benchmark | `Ledger.Compare + Ledger.Aggregate` | ALIGNED |
+| Publishing | `Herald.Abstract + Herald.Sections` | ALIGNED |
+| Corpus generator + optional toggle | Wizard corpus mode (iter_13) | ALIGNED |
+| Live agent trace + STOP | (iter_15) | ALIGNED |
+| Human review escalation | (iter_15 severity gate) | ALIGNED |
+| Safe-to-share downloadable bundle + auditor report + benchmark | (iter_15) | ALIGNED |
+
+**Fixes applied (targeted, minimal, non-regressive):**
+
+- **Praxis wired into orchestrator + Judge** (`phi_core/agents/orchestrator.py`, `reasoning.py`).
+  - Orchestrator runs Praxis for the 17 HIPAA A-R categories in parallel (`asyncio.gather`) between Statute and Judge. Cached in Mongo cross-session so first run pays ~30 s, subsequent runs are ~free.
+  - Judge signature: `run(schema, instrument, lexicon, statute, praxis, prior_feedback)`. Judge's prompt now includes a Praxis summary `{category: {technique, utility_preserving}}` so it picks the current best-practice technique per category rather than reasoning from scratch.
+  - Praxis cache-hit path now emits a `praxis.cache_hit:{cat}` info log so operators see the agent firing in the live trace even when cached.
+
+- **Judge false-positive verification** (`reasoning.py::Judge.run`) — Sir's spec: "the classifier ensures its not false positive first before correcting". When `prior_feedback` is present, Judge's prompt instructs it to VERIFY each blocking issue against Statute + Instrument and add a `justification` field for any issue it declines to act on. Prevents Sentinel from over-tuning Judge.
+
+- **ITERATION_CAP 2 -> 3** (`phi_core/agents/base.py`) — Sir's spec explicitly says "if the issue continues MORE THAN 3 times then it must be sent to human review agent". Restored the 3-iteration bound. The severity gate from iter_15 still short-circuits when zero blocking issues remain, so most sessions finish in 1 iteration; only genuine PHI-leak disputes now get the full 3 chances before escalation.
+
+**Hang-protection fixes (Sir's concern: "system may get stuck or load forever"):**
+
+- **Global wall-clock ceiling** (`server.py::worker`) — `asyncio.wait_for(run_agent_pipeline(...), timeout=900)` = 15-minute hard ceiling. On timeout the session is marked `failed` with `reason=wall_clock_ceiling_exceeded` and a clear SSE event tells the operator "try again or switch model in Settings". 15 min = 5x the observed 190 s happy path, 2x the historical worst case.
+
+- **SSE heartbeat** (`server.py::session_stream`) — `asyncio.wait_for(q.get(), timeout=15.0)` emits an SSE comment (`: heartbeat\n\n`) every 15 s of silence so browsers / K8s proxies don't reap the connection during a long Herald.Sections or Statute web-search call. Comment lines are ignored by EventSource per SSE spec.
+
+**Live E2E measurements (oncology_v1 + 4 edge cases, 5 rows):**
+- First run (Praxis cold): 219 s wall clock. Verifier P=R=F1=1.0 · 0 FN · 0 FP.
+- Second run (Praxis cache-hit): 183 s wall clock. Verifier P=R=F1=1.0 · 0 FN · 0 FP.
+- All 12 spec agents visible in the live trace: Lexicon, Schema, Instrument, Statute, **Praxis (17 category rows)**, Judge, Sentinel, Executor, Auditor, Scout, Ledger.Compare + Aggregate, Herald.Abstract + Sections.
+
+**Regression**: **183 passed / 3 skipped** unit tests (up from 170). 4 new tests in `test_speed_and_ux.py`: `test_iteration_cap_is_three`, `test_praxis_agent_wired_into_orchestrator`, `test_judge_prompt_asks_for_false_positive_check`, `test_orchestrator_emits_praxis_phase`.
+
+**Untouched (Sir's directive "if functional don't touch"):**
+- Executor deterministic pipeline (works, no LLM needed at the last mile)
+- Publish Guard (fail-closed, iter_14)
+- All specialist agents (Lexicon / Schema / Instrument)
+- Corpus generator + verifier (iter_13/14)
+- Wizard corpus toggle (iter_13)
+- Live trace panel + STOP button (iter_15)
+
 ## Minor items (from iteration_3, non-blocking)
 
 - Herald sometimes hits the 90s LLM timeout on the full manuscript draft. When it does, pipeline still completes; results.herald is empty and Sir can rerun.

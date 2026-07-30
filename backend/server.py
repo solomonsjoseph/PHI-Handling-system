@@ -494,8 +494,17 @@ async def session_run(sid: str):
 async def session_stream(sid: str):
     async def gen():
         q = _queue_for(sid)
+        # HANG PROTECTION: emit an SSE keep-alive comment every 15 s so
+        # browsers / proxies do not close the connection during a long
+        # LLM call (Herald.Sections and Statute web-search can each run
+        # >30 s without a message). The comment starts with ":" per SSE
+        # spec so the EventSource on the client ignores it silently.
         while True:
-            ev: ProgressEvent = await q.get()
+            try:
+                ev: ProgressEvent = await asyncio.wait_for(q.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                yield ": heartbeat\n\n"
+                continue
             yield f"data: {json.dumps(ev.model_dump())}\n\n"
             if ev.phase == "__end__":
                 break
@@ -1069,8 +1078,29 @@ async def session_handle(sid: str):
             session["files"] = files_hydrated
             await db.sessions.update_one({"id": sid}, {"$set": {"files": files_hydrated, "status": "classifying"}})
 
-            result = await run_agent_pipeline(session, db, cfg, emit_msg, on_phase)
+            # HANG PROTECTION: hard 15-minute wall-clock ceiling. If the
+            # pipeline burns beyond this the worker is cancelled with a
+            # clear "timeout" reason -- no orphaned tasks, no infinite
+            # loading screens. 15 min is 5x the observed 190 s happy path
+            # and 2x the worst historical case (~340 s + Herald 90 s x2).
+            result = await asyncio.wait_for(
+                run_agent_pipeline(session, db, cfg, emit_msg, on_phase),
+                timeout=900,
+            )
             await _emit(sid, ProgressEvent(phase="complete", message=f"Pipeline done: {result.get('status')}", percent=100.0))
+        except asyncio.TimeoutError:
+            await db.sessions.update_one(
+                {"id": sid},
+                {"$set": {"status": "failed",
+                          "error": "pipeline exceeded 15-minute wall-clock ceiling"}},
+            )
+            await _emit(sid, ProgressEvent(
+                phase="failed",
+                message="Pipeline hit the 15-minute wall-clock ceiling. "
+                        "This usually means an LLM call is stuck; try again "
+                        "or switch model in Settings.",
+                payload={"reason": "wall_clock_ceiling_exceeded"},
+            ))
         except Exception as e:
             # Import here to keep this endpoint's cold-start light.
             from phi_core.agents.orchestrator import PipelineCancelled

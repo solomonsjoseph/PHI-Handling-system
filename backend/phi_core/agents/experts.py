@@ -170,7 +170,15 @@ class Praxis(Agent):
     async def method_for(self, category: str) -> dict[str, Any]:
         cached = await cache_get(self.db, f"phi_method:{category}", "generic")
         if cached:
-            return _json.loads(cached["content"])
+            # Log the cache hit so operators can see Praxis actually
+            # consulted in the live agent-trace panel (otherwise the row
+            # is missing on cached runs and it looks like Praxis was
+            # skipped -- Sir Q "user must feel movement").
+            payload = _json.loads(cached["content"])
+            await self._log(f"praxis.cache_hit:{category}", "info",
+                            {"technique": payload.get("technique"),
+                             "source": cached.get("source", "cache")})
+            return payload
 
         # For well-defined HIPAA categories with canonical techniques, skip
         # the web search (deterministic + free) and log the shortcut.

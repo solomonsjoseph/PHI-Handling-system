@@ -126,11 +126,14 @@ def test_ledger_count_actions_deterministic():
     assert _count_actions(decisions) == {"drop": 2, "keep": 1, "pseudonymize": 1}
 
 
-def test_iteration_cap_lowered_to_two():
-    """The Judge<->Sentinel loop caps at 2 iterations (down from 3) since
-    the severity gate short-circuits when there are no blocking issues."""
+def test_iteration_cap_is_three():
+    """Sir's spec: 'if the issue continues MORE THAN 3 times then it must
+    be sent to human review agent'. So we try up to 3 iterations of
+    Judge<->Sentinel; on the 4th unresolved iteration the pipeline
+    escalates to human review. The severity gate short-circuits when
+    zero blocking issues remain, so most sessions finish in 1 iteration."""
     from phi_core.agents import ITERATION_CAP
-    assert ITERATION_CAP == 2
+    assert ITERATION_CAP == 3
 
 
 # ---- Verifier hash-is-safe fix -----------------------------------------
@@ -146,3 +149,46 @@ def test_verifier_treats_hash_as_phi_safe_action():
     # Sanity: `keep` and unknown actions are NOT PHI-safe.
     assert "keep" not in _PHI_ACTIONS
     assert "unknown" not in _PHI_ACTIONS
+
+
+# ---- Spec-alignment audit tests (Sir Q "ensure implementation aligns") --
+
+
+def test_praxis_agent_wired_into_orchestrator():
+    """Sir's spec: 'PHI Methods experts ... the classifier asks for method
+    to handle dates then the agent would search the latest jittering
+    method (eg. SANT) then provide the necessary information'. Praxis
+    must be imported and invoked in the orchestrator before Judge."""
+    import inspect
+    from phi_core.agents import orchestrator
+    src = inspect.getsource(orchestrator)
+    assert "Praxis(" in src, "Praxis not instantiated in orchestrator"
+    assert "praxis_methods" in src, "Praxis output not fed forward"
+    # Judge signature must accept praxis so it can be consulted
+    from phi_core.agents.reasoning import Judge
+    sig = inspect.signature(Judge.run)
+    assert "praxis" in sig.parameters, "Judge.run must accept a `praxis` argument"
+
+
+def test_judge_prompt_asks_for_false_positive_check():
+    """Sir's spec: 'If the preview agent send report for fixing the this
+    agent would ensure its not false positive first then if it is real
+    issue then it corrects'. Judge's prompt must include the FP-check
+    instruction when prior_feedback is present."""
+    import inspect
+    from phi_core.agents.reasoning import Judge
+    src = inspect.getsource(Judge.run)
+    assert "false positive" in src.lower(), (
+        "Judge.run must instruct itself to verify Sentinel issues are "
+        "not false positives before correcting"
+    )
+
+
+def test_orchestrator_emits_praxis_phase():
+    """UI-visibility check: the orchestrator must emit an on_phase('praxis')
+    call so the live agent-trace panel renders a 'Praxis' row and the
+    operator can see the PHI-methods lookup happening."""
+    import inspect
+    from phi_core.agents import orchestrator
+    src = inspect.getsource(orchestrator)
+    assert 'on_phase("praxis"' in src, "orchestrator must emit a 'praxis' phase event"

@@ -25,7 +25,7 @@ from typing import Any, Awaitable, Callable
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from .base import AgentMessage, ITERATION_CAP
-from .experts import Statute
+from .experts import Praxis, Statute
 from .llm import LlmConfig
 from .outward import Herald, Ledger, Scout
 from .reasoning import Auditor, Executor, Judge, Sentinel, apply_sentinel_hard_rules
@@ -84,9 +84,27 @@ async def run_pipeline(
     schema_task = Schema(**common).run(dataset_files=dataset_files, lexicon_columns=lexicon.get("columns", [])) if dataset_files else _empty({"columns": []})
     schema, instrument = await asyncio.gather(schema_task, inst_task)
 
-    # 2. Statute
+    # 2. Statute (jurisdictional regulations, live web search)
     await on_phase("statute", {})
     statute = await Statute(**common).run(jurisdiction=session.get("jurisdiction", "us"))
+
+    # 2b. Praxis (PHI transformation methods expert). Fetches the CURRENT
+    # best-practice technique per HIPAA identifier category from Sir's spec:
+    # "The classifier asks for method to handle dates then the agent would
+    # search the latest jittering method (eg. SANT)". We prime Praxis with
+    # the categories that appear in the Statute rule table so Judge can
+    # consult it inline without extra roundtrips.
+    await on_phase("praxis", {})
+    praxis_agent = Praxis(**common)
+    hipaa_cats = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K",
+                  "L", "M", "N", "O", "P", "Q", "R"]
+    praxis_methods = {}
+    method_tasks = [praxis_agent.method_for(c) for c in hipaa_cats]
+    results = await asyncio.gather(*method_tasks, return_exceptions=True)
+    for cat, res in zip(hipaa_cats, results):
+        if isinstance(res, Exception):
+            continue
+        praxis_methods[cat] = res
 
     # 3. Judge <-> Sentinel loop -- short-circuits on 0 blocking issues.
     judge = Judge(**common)
@@ -98,7 +116,8 @@ async def run_pipeline(
         await _check_cancel(db, sid, on_phase)
         await on_phase(f"judge_iter_{iteration}", {"iteration": iteration})
         j = await judge.run(schema=schema, instrument=instrument, lexicon=lexicon,
-                            statute=statute, prior_feedback=prior_feedback)
+                            statute=statute, praxis=praxis_methods,
+                            prior_feedback=prior_feedback)
         decisions = j.get("decisions", [])
         # Sentinel deterministic hard-rules: force known direct identifiers off
         # 'human_review' before invoking the LLM Sentinel. Closes the accuracy

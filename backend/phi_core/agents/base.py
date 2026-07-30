@@ -131,4 +131,4 @@ class Agent:
         raise NotImplementedError
 
 
-ITERATION_CAP = 2
+ITERATION_CAP = 3
