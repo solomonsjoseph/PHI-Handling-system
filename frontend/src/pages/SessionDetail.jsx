@@ -78,7 +78,9 @@ export default function SessionDetail() {
     }
     // Corpus session: fetch the verifier report once the pipeline is done
     // so the IRB reviewer can see 0-PHI-leak / 100 %-accuracy inline.
-    if (s.status === 'complete' && s.corpus_ground_truth) {
+    // `corpus_summary` is present on any corpus-mode session (ground truth
+    // itself is stripped from session reads for SEC-003).
+    if (s.status === 'complete' && s.corpus_summary) {
       axios.get(`${API}/corpus/study/verify/${sid}`)
         .then(vr => setCorpusReport(vr.data))
         .catch(() => setCorpusReport(null));

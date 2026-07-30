@@ -271,6 +271,24 @@ Sir directed: "Corpus generator + PHI handling must be an optional feature. Corp
 - (h) Scanned / annotated PDFs handled — HOLDS with OCR fallback.
 - (i) Adversarial torture test — HOLDS with `hipaa_max_adversarial_v1` scoring P=R=F1=1.0 across the whole HIPAA A-R matrix.
 
+### iteration_14 (fork) Security audit fixes -- Publish Guard fail-closed at download boundary
+
+Security audit surfaced one HIGH and two LOW findings. All three fixed and locked with regression tests.
+
+- **SEC-001 (HIGH, fixed)** -- Publish Guard bypass at the download gate. The legacy `POST /finalize` never populated `guard_report`, so `GET /export/{file_id}` and `GET /bundle` served exports whose only 403 trigger was an explicit `status == "blocked"`. Missing guard was treated as safe (fail-open).
+  * `/finalize` now runs `scan_all_exports` and persists a `guard_report` before flipping status to `complete`.
+  * `/bundle` fails closed: only serves when overall `guard_report.status == "clean"`; missing or blocked → 403.
+  * `/export/{file_id}` fails closed: only serves when the per-file result is `clean` or `skipped`; missing → 403. `?force=true` still overrides `blocked` (audit-trailed) but never overrides `missing`.
+  * Locked with `test_bundle_refuses_when_guard_missing`, `test_bundle_refuses_when_guard_blocked`, `test_export_refuses_when_guard_result_missing`, `test_export_serves_only_on_clean_per_file`.
+
+- **SEC-002 (LOW, fixed)** -- `/api/corpus/study/verify/{sid}` was the only session read not carrying `Depends(require_api_token)`. Added the dep; regression: `test_corpus_verify_endpoint_is_token_gated`.
+
+- **SEC-003 (LOW, fixed)** -- `corpus_ground_truth` (the planted-PHI answer key) was returned by session read endpoints, weakening the invariant that ground truth never leaves the session document. `_scrub_session_document` now `.pop("corpus_ground_truth", None)`. `corpus_summary` counters kept because they carry no PHI values and the UI needs them to decide when to fetch the verifier report. Regression: `test_scrub_strips_corpus_ground_truth_but_keeps_summary`. Frontend switched to `s.corpus_summary` for the same signal.
+
+- **Regression**: 169 passed + 3 skipped (up from 159, +10 new tests: 6 security + 3 corpus-narrative from iteration_13 + 1 misc). No previously-green test regressed.
+
+- **Not fixed (accepted-low, per audit hardening list)**: Token in URL query string for SSE + downloads; reviewer newline injection in `attestation.txt`; `?force=true` guard override recording (now recorded onto `session.guard_overrides` array); persisted agent logs may still hold raw PHI substrings in `prompt_preview` (partially mitigated by read-time `scrub_nested`); BYOK auto-key generation on multi-worker deploys.
+
 ## Minor items (from iteration_3, non-blocking)
 
 - Herald sometimes hits the 90s LLM timeout on the full manuscript draft. When it does, pipeline still completes; results.herald is empty and Sir can rerun.

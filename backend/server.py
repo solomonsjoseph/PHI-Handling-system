@@ -227,6 +227,11 @@ def _scrub_session_document(doc: dict) -> dict:
         # Convert absolute paths to opaque blank strings; keys retained so
         # the UI still shows which file_ids are downloadable.
         doc["export_paths"] = {k: "" for k in (doc.get("export_paths") or {})}
+    # SEC-003: strip the corpus ground-truth answer key from session reads.
+    # The verifier endpoint reads it directly from Mongo, so no consumer
+    # needs it via session_get / session_list / session_results. Leaving
+    # it out prevents an attacker from post-hoc grading their own attempt.
+    doc.pop("corpus_ground_truth", None)
     for k in (
         "agent_decisions", "agent_herald", "agent_ledger",
         "agent_scout", "agent_audit", "agent_sentinel_last",
@@ -547,13 +552,35 @@ async def session_finalize(sid: str):
         await _emit(sid, ev)
 
     exports = await anonymize_files(files, spans, emit)
+    # SEC-001 fix: run the Publish Guard on the freshly written exports so
+    # the legacy /finalize path is fail-closed at the download boundary too.
+    # Without this, /export/{file_id} and /bundle would serve raw dictionaries
+    # (copied verbatim by anonymize_files) with no residual-PHI check.
+    from phi_core.publish_guard import scan_all_exports as _scan_all_exports
+    guard_report = _scan_all_exports(
+        exports,
+        decisions=[  # minimal decision context so column-conditional patterns fire correctly
+            {"file_id": s.file_id, "column": s.column, "hipaa_category": s.hipaa_category}
+            for s in spans if s.column
+        ],
+    ).to_dict()
     await db.sessions.update_one(
         {"id": sid},
-        {"$set": {"status": "complete", "export_paths": exports, "updated_at": datetime.now(timezone.utc).isoformat()}},
+        {"$set": {
+            "status": "complete",
+            "export_paths": exports,
+            "guard_report": guard_report,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
     )
-    await emit(ProgressEvent(phase="complete", message="All files anonymized and ready to export", percent=100.0))
+    await emit(ProgressEvent(
+        phase="complete",
+        message=f"All files anonymized ({guard_report.get('status')})",
+        percent=100.0,
+        payload={"guard_status": guard_report.get("status")},
+    ))
     await emit(ProgressEvent(phase="__end__", message="stream end"))
-    return {"status": "complete", "exports": exports}
+    return {"status": "complete", "exports": exports, "guard": guard_report}
 
 
 @app.get("/api/coverage-matrix")
@@ -594,8 +621,17 @@ async def session_bundle(sid: str, publication: bool = False, attestation_pdf: b
     if not session:
         raise HTTPException(404, "session not found")
     guard = session.get("guard_report") or {}
-    if guard.get("status") == "blocked":
-        raise HTTPException(403, "Publish Guard blocked one or more files; fix the pipeline first.")
+    guard_status = guard.get("status")
+    # SEC-001 fix: fail-closed. Missing guard result → refuse. Only serve
+    # bundles built from a fully-scanned "clean" pipeline. `blocked` and
+    # any other unrecognised status remain refused.
+    if guard_status != "clean":
+        raise HTTPException(
+            403,
+            "Publish Guard has not certified this session as clean "
+            f"(status={guard_status or 'missing'}). Re-run the pipeline "
+            "so the last-mile PHI scan populates a passing guard report.",
+        )
     data, filename = build_bundle(session, BundleOptions(
         include_publication=publication, include_attestation_pdf=attestation_pdf,
     ))
@@ -625,14 +661,32 @@ async def session_export(sid: str, file_id: str, force: bool = False):
         raise HTTPException(404, "export not ready")
     guard = session.get("guard_report") or {}
     per_file = next((r for r in (guard.get("results") or []) if r.get("file_id") == file_id), None)
-    status = (per_file or {}).get("status") if per_file else guard.get("status")
-    if status == "blocked" and not force:
-        # Use a JSONResponse so the body is not double-nested inside `detail`.
-        return JSONResponse(status_code=403, content={
-            "error": "publish_guard_blocked",
-            "message": "Publish Guard blocked this export: residual PHI detected.",
-            "guard": per_file,
-        })
+    status = (per_file or {}).get("status") if per_file else None
+    # SEC-001 fix: fail-closed. Serve only if this file has a per-file
+    # guard result of `clean` (or `skipped` where the guard could not
+    # scan the format but the pipeline still produced the file). Missing
+    # or `blocked` results refuse — `?force=true` overrides but only when
+    # the operator has manually reviewed the guard findings.
+    if status not in ("clean", "skipped"):
+        if force and status == "blocked":
+            # Record the override on the session so the audit trail keeps it.
+            await db.sessions.update_one(
+                {"id": sid},
+                {"$push": {"guard_overrides": {
+                    "file_id": file_id,
+                    "overridden_at": datetime.now(timezone.utc).isoformat(),
+                }}},
+            )
+        else:
+            return JSONResponse(status_code=403, content={
+                "error": "publish_guard_not_certified",
+                "message": (
+                    "Publish Guard has not certified this file as clean "
+                    f"(status={status or 'missing'}). Re-run the pipeline so "
+                    "the last-mile PHI scan populates a passing result."
+                ),
+                "guard": per_file,
+            })
     return FileResponse(path, filename=Path(path).name)
 
 
@@ -906,7 +960,7 @@ async def corpus_study_run(body: CorpusStudyRunBody):
 _CORPUS_STUDY_TASKS: dict[str, asyncio.Task] = {}
 
 
-@app.get("/api/corpus/study/verify/{sid}")
+@app.get("/api/corpus/study/verify/{sid}", dependencies=[Depends(require_api_token)])
 async def corpus_study_verify(sid: str):
     """Compare the pipeline's actual decisions against the corpus ground
     truth stored on the session document. Returns the full scored report
