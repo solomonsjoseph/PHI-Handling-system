@@ -493,6 +493,36 @@ Sir uploaded three example artefacts (Word dictionary, CSV dataset, annotated CR
 - Corpus PDF/form removal (iter_17)
 - Existing dictionary readers for CSV/XLSX
 
+### iteration_20 (fork) Security audit — SEC-001 + SEC-002 fixed on iter_19 docx parser
+
+Post-iter_19 security audit came back **CONDITIONAL PASS**. Two findings in the new `_read_docx_tables` code — both fixed and locked with regression tests.
+
+- **SEC-001 [MEDIUM] Nested-docx decompression bomb → memory exhaustion FIXED** (`phi_core/agents/specialists.py`):
+  * Added `_DOCX_XML_MAX_BYTES = 10 * 1024 * 1024` ceiling on the decompressed size of the inner `word/document.xml`.
+  * Defence-in-depth: check `ZipInfo.file_size` BEFORE opening, then also cap the streamed read at `_DOCX_XML_MAX_BYTES + 1` to catch archives that lie about their declared uncompressed size.
+  * Real dict.docx (~50 KB inflated) passes; crafted bomb with ~10 MB whitespace payload in a ~50 KB archive is refused. Reader returns empty string so Lexicon just sees no dictionary text rather than the process crashing with OOM.
+
+- **SEC-002 [LOW] XML parsed with stdlib ElementTree instead of installed defusedxml FIXED** (`phi_core/agents/specialists.py`):
+  * Switched to `defusedxml.ElementTree.fromstring(raw, forbid_dtd=True)`. `defusedxml==0.7.1` was already in `requirements.txt` — audit found it installed but unused.
+  * Refuses ANY `<!DOCTYPE ...>` declaration → blocks billion-laughs and quadratic-blowup entity expansion even on hosts with older libexpat.
+
+- **Hardening cleanup** — removed the dead xlrd fallback in `_read_xls_tables`. xlrd was never in `requirements.txt`, so the fallback was unreachable dead code. Contract preserved: legacy .xls returns "" (Sir's spec is docx small / xlsx large; real BIFF-format .xls is out of scope).
+
+**Regression tests added** (`test_realworld_file_shapes.py`):
+- `test_read_docx_tables_rejects_oversize_document_xml` — locks the SEC-001 cap.
+- `test_read_docx_tables_refuses_dtd_via_defusedxml` — locks the SEC-002 DTD refusal.
+
+**Verification** — `testing_agent` iter_11: **100% pass on all 41 requested tests** across four suites (`test_realworld_file_shapes` 8/8, `test_corpus` 14/14, `test_security_findings` 6/6, `test_security_audit_iter18` 13/13). Sir's real `diabetes.csv` + `dict.docx` still accepted end-to-end via POST /intake with exit_code=0. Zero backend or frontend issues.
+
+**Total backend regression: 199 passed / 4 skipped** (up from 197). No previously-green test regressed.
+
+**Untouched (audit re-verified as holding)**:
+- All iter_14 fixes (guard-gating on /finalize, /bundle, /export)
+- All iter_18 fixes (SSE queue leak, subscriber cap, corpus_ground_truth stripped, scrubber breadth)
+- ZIP intake caps (path traversal, symlink, zip-bomb on the OUTER study zip)
+- BYO Fernet encryption + never returned plaintext
+- Praxis never receives dataset rows
+
 ## Minor items (from iteration_3, non-blocking)
 
 - Herald sometimes hits the 90s LLM timeout on the full manuscript draft. When it does, pipeline still completes; results.herald is empty and Sir can rerun.
