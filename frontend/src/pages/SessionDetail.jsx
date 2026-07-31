@@ -46,8 +46,24 @@ function Spinner() {
 function _groupTrace(rawMessages) {
   const groups = new Map();
   for (const m of rawMessages || []) {
-    const key = `${m.agent}::${m.phase}`;
+    // Sir Q "praxis trace overwhelm" -- collapse the 17 per-category Praxis
+    // rows into a single "Praxis · N methods" group. Every category still
+    // lives in the expanded detail panel below; the top row just fires once.
+    let key;
+    if (m.agent === 'Praxis') {
+      key = 'Praxis::praxis.all';
+    } else {
+      key = `${m.agent}::${m.phase}`;
+    }
     const existing = groups.get(key) || { agent: m.agent, phase: m.phase, ts: m.ts };
+    if (m.agent === 'Praxis') {
+      // Override phase label with a per-group counter.
+      existing.phase = 'praxis.methods';
+      existing.praxis_count = (existing.praxis_count || 0) + 1;
+      existing.praxis_categories = existing.praxis_categories || [];
+      const catMatch = (m.phase || '').match(/:([A-Z]|[a-z_]+)$/);
+      if (catMatch) existing.praxis_categories.push(catMatch[1]);
+    }
     if (m.direction === 'in') {
       existing.prompt_preview = m.payload?.prompt_preview || existing.prompt_preview;
       existing.tool = m.payload?.tool || existing.tool;
@@ -56,7 +72,12 @@ function _groupTrace(rawMessages) {
     } else if (m.direction === 'out') {
       existing.reply_preview = m.payload?.reply_preview || existing.reply_preview;
       existing.error = m.payload?.error;
-      existing.duration_ms = m.duration_ms;
+      // For collapsed Praxis, sum durations so "N s of LLM time" reflects total.
+      if (m.agent === 'Praxis') {
+        existing.duration_ms = (existing.duration_ms || 0) + (m.duration_ms || 0);
+      } else {
+        existing.duration_ms = m.duration_ms;
+      }
       existing.state = m.payload?.error ? 'errored' : 'done';
       existing.ended = m.ts;
     } else if (m.direction === 'info') {
@@ -112,6 +133,11 @@ function AgentTracePanel({ sid, trace, status, cancelRequested, advisory }) {
                   <span className="text-oxblood">{g.agent}</span>
                   <span className="text-ink-muted mx-2">·</span>
                   <span className="font-mono text-[12px] text-ink-2">{g.phase}</span>
+                  {g.praxis_count && (
+                    <span className="ml-2 font-mono text-[11px] text-ink-muted">
+                      {g.praxis_count} method{g.praxis_count === 1 ? '' : 's'}
+                    </span>
+                  )}
                 </div>
                 {g.error && (
                   <div className="font-mono text-[11px] text-oxblood mt-0.5">{g.error}</div>
@@ -126,6 +152,18 @@ function AgentTracePanel({ sid, trace, status, cancelRequested, advisory }) {
             </button>
             {openIdx === i && (
               <div className="mt-3 pl-24 space-y-3" data-testid={`trace-row-details-${i}`}>
+                {g.praxis_categories && g.praxis_categories.length > 0 && (
+                  <div>
+                    <div className="kicker text-ink-muted">HIPAA categories consulted</div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {g.praxis_categories.map((c, ci) => (
+                        <span key={ci} className="font-mono text-[10px] px-2 py-0.5 bg-paper-2 border border-rule">
+                          {c}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {g.prompt_preview && (
                   <div>
                     <div className="kicker text-ink-muted">Prompt preview</div>

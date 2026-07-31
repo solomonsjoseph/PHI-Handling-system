@@ -29,8 +29,16 @@ export default function Corpus() {
   };
 
   return (
-    <div>
-      <Panel title="Synthetic Corpus" cite="45 CFR 164.514(b)(2)(i) A-R + (b)(2)(ii)" testId="corpus-panel">
+    <div data-testid="corpus-page">
+      <Panel title="Synthetic Corpus"
+             cite="Legacy PHI-span corpus builder · for the IRB adversarial-run flow use the Wizard (New Run) instead"
+             testId="corpus-panel">
+        <div className="text-xs text-text-muted mb-4 leading-relaxed">
+          Generate a small synthetic corpus of PHI-labelled records for span-detection benchmarking.
+          To run the full 12-agent pipeline on a torture-test corpus with real Judge decisions and a
+          publish-guard bundle, use the <span className="text-text-primary">New Run</span> wizard&apos;s
+          <span className="text-text-primary"> IRB torture test</span> toggle instead.
+        </div>
         <div className="grid grid-cols-4 gap-4">
           <label className="block text-xs font-mono">
             <div className="text-text-muted uppercase text-[10px] tracking-widest mb-1">Jurisdiction</div>

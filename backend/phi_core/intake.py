@@ -9,7 +9,7 @@ accompany it.
 Rules (fail-closed):
   - `datasets/` required. Extensions: .csv, .xls, .xlsx. Single sheet only for xlsx.
     .json / .jsonl NOT accepted here.
-  - At least one of `forms/` (.pdf) or `dictionary/` (.csv, .xlsx) must accompany datasets.
+  - At least one of `forms/` (.pdf) or `dictionary/` (.csv, .xlsx, .xls, .docx) must accompany datasets.
   - Any unsupported suffix, multi-sheet xlsx dataset, unreadable xls, empty
     file, cross-component duplicate content, or symlink -> `_unclassified`
     review bucket recording only `{path, reason, blocking}` (never row values).
@@ -35,7 +35,7 @@ import openpyxl
 COMPONENT_SUFFIXES: dict[str, set[str]] = {
     "datasets":   {".csv", ".xls", ".xlsx"},
     "forms":      {".pdf"},
-    "dictionary": {".csv", ".xlsx", ".xls"},
+    "dictionary": {".csv", ".xlsx", ".xls", ".docx"},
 }
 COMPONENTS = tuple(COMPONENT_SUFFIXES)
 MANDATORY = {"datasets"}

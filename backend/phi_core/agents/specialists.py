@@ -124,8 +124,104 @@ class Instrument(Agent):
 
 # --- deterministic helpers ------------------------------------------------
 
+
+_DOCX_W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def _read_docx_tables(path: Path) -> str:
+    """Extract every table from a .docx file as CSV-shaped text.
+
+    A .docx is a ZIP that stores the document body at ``word/document.xml``.
+    We walk that XML and pull every ``<w:tbl>`` element out row-by-row so
+    the LLM sees a flat, header + rows shape that mirrors what it would
+    see for a CSV dictionary. Non-table paragraphs (title, intro prose)
+    are concatenated after the tables so the LLM still gets any framing
+    text the data steward may have written above the table.
+    """
+    import xml.etree.ElementTree as ET
+    import zipfile as _zip
+
+    lines: list[str] = []
+    prose: list[str] = []
+    try:
+        with _zip.ZipFile(path) as z:
+            with z.open("word/document.xml") as f:
+                tree = ET.parse(f)
+    except (KeyError, _zip.BadZipFile, ET.ParseError):
+        return ""
+
+    root = tree.getroot()
+    body = root.find(f"{_DOCX_W_NS}body")
+    if body is None:
+        return ""
+
+    def _cell_text(cell: ET.Element) -> str:
+        parts = [t.text or "" for t in cell.iter(f"{_DOCX_W_NS}t")]
+        return " ".join(x for x in parts if x).strip()
+
+    table_index = 0
+    for child in body:
+        tag = child.tag
+        if tag == f"{_DOCX_W_NS}p":
+            # paragraph text -- capture short framing prose only
+            text = " ".join((t.text or "") for t in child.iter(f"{_DOCX_W_NS}t")).strip()
+            if text:
+                prose.append(text)
+        elif tag == f"{_DOCX_W_NS}tbl":
+            table_index += 1
+            lines.append(f"# table {table_index}")
+            for tr in child.iter(f"{_DOCX_W_NS}tr"):
+                cells = [_cell_text(tc) for tc in tr.iter(f"{_DOCX_W_NS}tc")]
+                # emit CSV-shaped row; escape any embedded commas
+                lines.append(",".join(
+                    '"' + c.replace('"', '""') + '"' if ("," in c or '"' in c) else c
+                    for c in cells
+                ))
+    if prose:
+        lines.append("# narrative context")
+        lines.extend(prose[:40])   # cap at 40 paragraphs to keep prompt bounded
+    return "\n".join(lines)
+
+
+def _read_xls_tables(path: Path) -> str:
+    """Extract .xls (legacy Excel) sheets. Uses openpyxl if the file is
+    actually .xlsx-shaped (some data stewards mis-rename), otherwise
+    falls back to xlrd where available. Returns empty on unsupported
+    binary .xls; caller treats absence as "no dictionary text"."""
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        try:
+            import xlrd  # type: ignore
+        except ImportError:
+            return ""
+        try:
+            book = xlrd.open_workbook(str(path))
+        except Exception:
+            return ""
+        lines: list[str] = []
+        for sh in book.sheets():
+            lines.append(f"# sheet: {sh.name}")
+            for r in range(sh.nrows):
+                lines.append(",".join(str(sh.cell_value(r, c)) for c in range(sh.ncols)))
+        return "\n".join(lines)
+    lines = []
+    for ws in wb.worksheets:
+        lines.append(f"# sheet: {ws.title}")
+        for row in ws.iter_rows(values_only=True):
+            lines.append(",".join("" if v is None else str(v) for v in row))
+    wb.close()
+    return "\n".join(lines)
+
+
 def _read_table_flat(path: Path) -> str:
-    """Flatten a small dictionary/mapping table to text for the LLM."""
+    """Flatten a small dictionary/mapping table to text for the LLM.
+
+    Supports .csv/.tsv (raw read), .xlsx (openpyxl), .xls (openpyxl for
+    mis-named files, xlrd for real BIFF), and .docx (Word tables via
+    stdlib zipfile + ET). Sir Q "dictionary is word doc here but if
+    large then it would be excel workbook -- align it accordingly".
+    """
     ext = path.suffix.lower()
     if ext in {".csv", ".tsv"}:
         try:
@@ -144,4 +240,8 @@ def _read_table_flat(path: Path) -> str:
             return "\n".join(lines)
         except Exception:
             return ""
+    if ext == ".xls":
+        return _read_xls_tables(path)
+    if ext == ".docx":
+        return _read_docx_tables(path)
     return ""

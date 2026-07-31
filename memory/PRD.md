@@ -462,6 +462,37 @@ Post-iter_17 security audit came back **CONDITIONAL PASS**. All iter_14 fixes ve
 
 **Regression**: **192 passed / 3 skipped** (up from 179). 13 new tests in `test_security_audit_iter18.py` lock every SEC-002/003 defence.
 
+### iteration_19 (fork) Real-world file shapes + trace polish
+
+Sir uploaded three example artefacts (Word dictionary, CSV dataset, annotated CRF PDF) with directive: "handling of these types of files is must, the dictionary is word doc here but if large then it would be excel workbook -- align it accordingly". Also asked to progressively implement the next-items backlog.
+
+**A. Dictionary supports `.docx`** (`phi_core/intake.py`, `phi_core/agents/specialists.py`):
+- `COMPONENT_SUFFIXES["dictionary"]` extended to `{.csv, .xlsx, .xls, .docx}`.
+- New `_read_docx_tables(path)` uses stdlib `zipfile` + `xml.etree.ElementTree` (no new deps) to walk `word/document.xml`, extract every `<w:tbl>` element as CSV-shaped rows, correctly quote comma-containing cells, and capture non-table prose (up to 40 paragraphs) as "narrative context" for the Lexicon agent.
+- New `_read_xls_tables(path)` handles legacy `.xls` -- openpyxl for mis-renamed xlsx binaries, xlrd fallback where installed; returns "" gracefully when neither works so Lexicon just sees no table text rather than crashing.
+- `_read_table_flat` dispatches on suffix so Lexicon transparently accepts all four dictionary formats.
+- Verified live: intake accepts Sir's real `dict.docx` + `diabetes.csv` ZIP with exit=0, dictionary and dataset both stored.
+
+**B. Praxis trace collapse** (`frontend/src/pages/SessionDetail.jsx::_groupTrace`):
+- 17 per-category `Praxis` rows now collapse into a SINGLE trace row: `Praxis · praxis.methods · 27 methods · 302.4 s`.
+- Expanded panel lists every HIPAA-category consulted as a chip strip so operators can drill in without scrolling past 17 near-identical rows.
+- Trace header now shows the correct "17 agent calls" instead of "27+" (the true LLM call count minus the collapsed Praxis hits).
+
+**C. `/corpus` empty-state intro** (`frontend/src/pages/Corpus.jsx`):
+- Testing_agent iter_10 flagged the legacy Corpus page as "blank canvas". Added a short intro that (a) explains this is the legacy span-corpus builder, (b) points operators to the Wizard's IRB torture-test toggle for the full 12-agent flow. No behaviour change to the underlying corpus generator; purely a wayfinding fix.
+
+**D. Regression tests** (`test_realworld_file_shapes.py`):
+- 6 new tests locking `_read_docx_tables` behaviour: table extraction, comma-quoting, narrative-context capture, bad-zip graceful failure, suffix dispatch, `.xls` graceful degradation without xlrd.
+
+**Regression**: **197 passed / 4 skipped** (up from 192). Zero regressions.
+
+**Untouched (Sir "if functional don't touch")**:
+- Wizard corpus mode + STOP button + live trace panel (iter_13/15)
+- Publish Guard fail-closed at download (iter_14)
+- BYO API token architecture (audit iter_18 documented as intentional)
+- Corpus PDF/form removal (iter_17)
+- Existing dictionary readers for CSV/XLSX
+
 ## Minor items (from iteration_3, non-blocking)
 
 - Herald sometimes hits the 90s LLM timeout on the full manuscript draft. When it does, pipeline still completes; results.herald is empty and Sir can rerun.
