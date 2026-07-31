@@ -190,7 +190,7 @@ export default function AgentSection({ sid, session, onRefresh }) {
         </Panel>
       )}
 
-      <Panel title={`Agent Trace (${trace.length})`} testId="agent-trace-panel"
+      <Panel title={`Agent Trace (${trace.length})`} testId="agent-section-trace-panel"
         right={<button className="font-mono text-[10px] uppercase tracking-widest text-phi" onClick={() => setTraceOpen(o => !o)} data-testid="btn-toggle-trace">{traceOpen ? 'hide' : 'show'}</button>}
       >
         {traceOpen && (
