@@ -17,10 +17,6 @@ export default function LiveCounters({ session, events }) {
     acc[k] = (acc[k] || 0) + 1;
     return acc;
   }, {});
-  const spansByFile = spans.reduce((acc, s) => {
-    if (s.file_id) acc[s.file_id] = (acc[s.file_id] || 0) + 1;
-    return acc;
-  }, {});
   const lastEvent = (events && events.length > 0) ? events[events.length - 1] : null;
 
   const cell = (label, value, testId) => (

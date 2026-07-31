@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { toast } from 'sonner';
 import { useNavigate } from 'react-router-dom';
-import { API, getApiToken } from '../lib/api';
+import { API } from '../lib/api';
 import { Btn, CheckCard, Tag } from '../components/ui';
 
 const STEPS = [
@@ -461,7 +461,10 @@ export default function Wizard() {
   const [output, setOutput] = useState({ publication: false, attestation_pdf: false });
   const [busy, setBusy] = useState(false);
   const [corpusMode, setCorpusMode] = useState(false);
-  const [corpusResult, setCorpusResult] = useState(null);
+  // corpus result state is stashed by StepUpload for future use; consumed via
+  // navigation to /studies/{sid}?corpus=1 today. Setter kept so StepUpload
+  // can hand its result to a future summary panel without another refactor.
+  const [, setCorpusResult] = useState(null);
 
   const runPipeline = async () => {
     if (!sid) { toast.error('Upload a study package first'); setStep(1); return; }
