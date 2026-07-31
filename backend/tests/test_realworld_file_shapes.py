@@ -77,6 +77,47 @@ def test_read_docx_tables_returns_empty_on_bad_zip(tmp_path):
     assert _read_docx_tables(p) == ""
 
 
+# ---- SEC-001 iter_20: nested-docx decompression bomb -------------------
+
+
+def test_read_docx_tables_rejects_oversize_document_xml(tmp_path):
+    """A malicious docx can pack a >10 MiB document.xml into a tiny
+    compressed archive. The reader must refuse it rather than allocate
+    unbounded RAM in ET.parse. Return "" so Lexicon just sees no
+    dictionary text; no crash, no OOM."""
+    from phi_core.agents.specialists import _read_docx_tables, _DOCX_XML_MAX_BYTES
+    import zipfile as _zip
+    p = tmp_path / "bomb.docx"
+    with _zip.ZipFile(p, "w", _zip.ZIP_DEFLATED) as z:
+        # Compressible payload > cap
+        big = (b"<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
+               b"<w:body>" + b" " * (_DOCX_XML_MAX_BYTES + 500_000) + b"</w:body></w:document>")
+        z.writestr("word/document.xml", big)
+    assert p.stat().st_size < 200_000, "test setup: outer archive should be small"
+    assert _read_docx_tables(p) == "", "oversized inner xml must be rejected"
+
+
+# ---- SEC-002 iter_20: billion-laughs DTD refusal ------------------------
+
+
+def test_read_docx_tables_refuses_dtd_via_defusedxml(tmp_path):
+    """defusedxml with forbid_dtd=True must refuse ANY <!DOCTYPE ...>
+    declaration. Blocks billion-laughs / quadratic-blowup entity
+    expansion even on hosts with older libexpat that lack the built-in
+    amplification protection."""
+    from phi_core.agents.specialists import _read_docx_tables
+    import zipfile as _zip
+    p = tmp_path / "dtd.docx"
+    with _zip.ZipFile(p, "w") as z:
+        z.writestr("word/document.xml", (
+            b"<?xml version='1.0'?>"
+            b"<!DOCTYPE lolz [<!ENTITY lol 'lol'>]>"
+            b"<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
+            b"<w:body><w:p><w:r><w:t>&lol;</w:t></w:r></w:p></w:body></w:document>"
+        ))
+    assert _read_docx_tables(p) == "", "DTD-bearing docx must be refused"
+
+
 def test_read_table_flat_dispatches_docx(tmp_path):
     from phi_core.agents.specialists import _read_table_flat
     p = tmp_path / "dict.docx"
