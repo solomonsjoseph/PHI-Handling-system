@@ -433,6 +433,35 @@ Sir's directive: "remove pdf or form creation in corpus generator, the output is
 
 **Regression**: **179 passed / 3 skipped** (down from 183 = the 4 removed form-scoring tests). All ex-corpus tests still green.
 
+### iteration_18 (fork) Security audit re-run -- SEC-002 + SEC-003 fixed
+
+Post-iter_17 security audit came back **CONDITIONAL PASS**. All iter_14 fixes verified as still holding (guard-gating on /finalize + /bundle + /export, corpus_ground_truth stripped, BYO Fernet encryption, verify token-gated, SSRF allowlist, ZIP intake caps). Three items:
+
+- **SEC-001 [MEDIUM] Deployment posture, NOT code defect** -- preview `.env` has empty `API_TOKEN`, so `require_api_token` is a no-op and any internet user could hit the console. Gating code fails-closed correctly the moment `API_TOKEN` is set. **ACTION REQUIRED FROM OPERATOR: set `API_TOKEN=<strong-random>` in `/app/backend/.env` before touching real PHI or promoting the preview to production.** The frontend already carries `X-API-Token` from `localStorage['phi_api_token']`; operators paste the same token into Settings -> API Token.
+
+- **SEC-002 [MEDIUM] SSE queue leak / DoS FIXED** (`server.py`):
+  * Added `_progress_subscribers: dict[str, int]` counter per session id.
+  * `session_stream()` now returns 404 for unknown sids, 409 for settled sids (`{complete, failed, cancelled, intake_failed, awaiting_human_review}`), and 429 when subscriber count for a session >= `_MAX_STREAM_SUBSCRIBERS_PER_SESSION` (4).
+  * Stream generator wraps its loop in `try / finally` that calls `_release_stream(sid)` on client disconnect / normal end. The queue is popped from `_progress_queues` when the last subscriber leaves so idle streams cannot pin memory indefinitely.
+  * Verified live: `curl` on a settled sid -> HTTP 409 with the reason body; unknown sid -> HTTP 404.
+
+- **SEC-003 [LOW] Scrubber breadth FIXED** (`phi_core/security.py`):
+  * `scrub_persisted_text` now covers HIPAA (C) ISO / US / named dates, (C-age) explicit "age NN years" over-89 patterns (context-clued so clinical values like glucose 105 or heart rate 82 survive), (B) US street-address suffixes, (H) MRN / account / device / UID prefixes with 4+ char tail, (N) URLs, (O) IPv4. Order matters: MRN scrubbed before dates so `MRN 202305` cannot leak its numeric tail.
+
+**Untouched (audit re-verified as holding)**:
+- SEC-001 guard-gating (fail-closed on /finalize, /bundle, /export)
+- SEC-002 verify endpoint token-gated
+- SEC-003 corpus_ground_truth stripped from session reads
+- BYO Fernet encryption + never returned plaintext
+- SSRF allowlist + private-IP block on Base URL
+- ZIP intake caps (path traversal, symlink, zip-bomb)
+- Praxis never receives dataset rows (category letter only)
+- `verify.py::export_paths` truly unused (no traversal window)
+- `phi_corpus/forms.py` deletion has no orphan imports
+- No cookies used, so cancel/POST paths have no CSRF window
+
+**Regression**: **192 passed / 3 skipped** (up from 179). 13 new tests in `test_security_audit_iter18.py` lock every SEC-002/003 defence.
+
 ## Minor items (from iteration_3, non-blocking)
 
 - Herald sometimes hits the 90s LLM timeout on the full manuscript draft. When it does, pipeline still completes; results.herald is empty and Sir can rerun.

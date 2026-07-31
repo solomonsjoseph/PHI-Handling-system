@@ -93,8 +93,30 @@ async def _stream_to_disk(upload_file: UploadFile, dst_path: Path, max_bytes: in
 
 
 # --- In-memory progress queues per session (SSE) --------------------------
+#
+# Per-session queue lifecycle (SEC-002 fix, audit iteration_18):
+#   * created lazily by `_queue_for` when the pipeline first emits OR the
+#     client first subscribes to the stream
+#   * removed by `_release_stream` when the LAST subscriber for that
+#     session disconnects OR the pipeline emits the terminal `__end__`
+#     event
+# Client counts prevent premature GC when the pipeline outlives one
+# client's connection (e.g. tab reload) but ensure the queue does not
+# leak for sessions no one is watching any more.
 
 _progress_queues: dict[str, asyncio.Queue] = {}
+_progress_subscribers: dict[str, int] = {}
+
+# Terminal statuses that guarantee the pipeline is done and no more
+# events will arrive on the SSE queue.
+_SETTLED_STATUSES = frozenset({"complete", "failed", "cancelled",
+                                "intake_failed", "awaiting_human_review"})
+
+# Cap of concurrent SSE subscribers per session. 4 is enough for the
+# operator + a couple of secondary viewers + one connection retry. Beyond
+# that we refuse new subscribers (returns HTTP 429) to prevent an
+# attacker from opening thousands of streams and pinning memory.
+_MAX_STREAM_SUBSCRIBERS_PER_SESSION = 4
 
 
 def _queue_for(session_id: str) -> asyncio.Queue:
@@ -103,6 +125,16 @@ def _queue_for(session_id: str) -> asyncio.Queue:
         q = asyncio.Queue()
         _progress_queues[session_id] = q
     return q
+
+
+def _release_stream(session_id: str) -> None:
+    """One subscriber has disconnected; free the queue if this was the last."""
+    remaining = _progress_subscribers.get(session_id, 1) - 1
+    if remaining <= 0:
+        _progress_subscribers.pop(session_id, None)
+        _progress_queues.pop(session_id, None)
+    else:
+        _progress_subscribers[session_id] = remaining
 
 
 async def _emit(session_id: str, ev: ProgressEvent) -> None:
@@ -492,22 +524,46 @@ async def session_run(sid: str):
 
 @app.get("/api/sessions/{sid}/stream", dependencies=[Depends(require_api_token)])
 async def session_stream(sid: str):
+    # SEC-002 fix: refuse new subscribers for already-settled sessions so
+    # attackers cannot open thousands of streams to random ids and pin a
+    # queue per id. Settled sessions serve their history over the regular
+    # GET endpoints; there is nothing more to stream.
+    db = get_db()
+    doc = await db.sessions.find_one({"id": sid}, {"status": 1})
+    if not doc:
+        raise HTTPException(404, "session not found")
+    if doc.get("status") in _SETTLED_STATUSES:
+        raise HTTPException(status_code=409,
+                            detail=f"session already settled ({doc.get('status')}); "
+                                   "no more stream events will arrive")
+    if _progress_subscribers.get(sid, 0) >= _MAX_STREAM_SUBSCRIBERS_PER_SESSION:
+        raise HTTPException(status_code=429,
+                            detail="too many concurrent stream subscribers "
+                                   "for this session")
+
     async def gen():
+        _progress_subscribers[sid] = _progress_subscribers.get(sid, 0) + 1
         q = _queue_for(sid)
-        # HANG PROTECTION: emit an SSE keep-alive comment every 15 s so
-        # browsers / proxies do not close the connection during a long
-        # LLM call (Herald.Sections and Statute web-search can each run
-        # >30 s without a message). The comment starts with ":" per SSE
-        # spec so the EventSource on the client ignores it silently.
-        while True:
-            try:
-                ev: ProgressEvent = await asyncio.wait_for(q.get(), timeout=15.0)
-            except asyncio.TimeoutError:
-                yield ": heartbeat\n\n"
-                continue
-            yield f"data: {json.dumps(ev.model_dump())}\n\n"
-            if ev.phase == "__end__":
-                break
+        try:
+            # HANG PROTECTION: emit an SSE keep-alive comment every 15 s so
+            # browsers / proxies do not close the connection during a long
+            # LLM call (Herald.Sections and Statute web-search can each run
+            # >30 s without a message). The comment starts with ":" per SSE
+            # spec so the EventSource on the client ignores it silently.
+            while True:
+                try:
+                    ev: ProgressEvent = await asyncio.wait_for(q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
+                yield f"data: {json.dumps(ev.model_dump())}\n\n"
+                if ev.phase == "__end__":
+                    break
+        finally:
+            # SEC-002 fix: release the queue on client disconnect or
+            # stream end so an idle/nonexistent subscriber cannot pin
+            # memory indefinitely.
+            _release_stream(sid)
 
     return StreamingResponse(
         gen(),

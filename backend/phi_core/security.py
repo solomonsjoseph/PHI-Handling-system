@@ -151,6 +151,47 @@ _SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 # conservative to avoid nuking every capitalised word.
 _NAME_RE = re.compile(r"\b(?:Mr|Mrs|Ms|Dr)\.?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b|\b[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}\b")
 
+# SEC-003 (audit iteration_18) broadening -- these patterns catch the
+# identifier shapes the LLM most commonly echoes back into `reason` /
+# `prompt_preview` / `reply_preview` from PDF forms or dictionaries.
+# Every pattern is scoped tight enough to avoid nuking clinical values
+# (heart rate, glucose, etc.).
+_DATE_RE = re.compile(
+    r"\b("
+    r"\d{4}-\d{2}-\d{2}"                          # 2024-05-20
+    r"|\d{1,2}/\d{1,2}/\d{2,4}"                   # 5/20/24 or 05/20/2024
+    r"|\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4}"  # 20-May-2024
+    r"|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}"  # May 20, 2024
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_AGE_OVER_89_RE = re.compile(
+    # Require an age/years-old context clue so we don't nuke clinical
+    # values like glucose 105 or blood pressure 100.
+    r"(?:\bage(?:d)?\s+(?:of\s+)?)?(9\d|1[0-1]\d|1[2-9]\d)\s*(?:years?|yrs?|y/o|-?year[-\s]?old)\b"
+    r"|\bage(?:d)?\s+(?:of\s+)?(9\d|1[0-1]\d|1[2-9]\d)\b",
+    flags=re.IGNORECASE,
+)
+_STREET_ADDR_RE = re.compile(
+    r"\b\d{1,6}[a-z]?\s+[A-Z][\w.\- ]{2,60}?\s+"
+    r"(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Way|"
+    r"Ct|Court|Pl|Place|Ter|Terrace|Cir|Circle|Hwy|Highway|Pkwy|Parkway)"
+    r"(?:\.|,|\b)",
+)
+# MRN / account / IMEI-shaped: 6+ digit runs with optional letter prefix
+# and dash separators. Deliberately does NOT match short ints like
+# blood-pressure or heart-rate values (max 4 digits) so clinical context
+# is preserved.
+_MRN_RE = re.compile(
+    r"\b(?:MRN|mrn|Medical\s?Record(?:\s?Number)?|Chart(?:\s?ID)?|"
+    r"Account(?:\s?Number)?|Acct|HP|ACCT|DEV|UID)"
+    r"[\s#:\-]*[A-Z0-9]{4,}[\-A-Z0-9]{0,20}\b",
+)
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+# URL identifiers -- consumer-facing patient portals / uploads / anything
+# with a path segment that looks personally targeted (u/, patient/, etc.).
+_URL_RE = re.compile(r"\bhttps?://[\w./\-?=&%+#:]{6,200}\b")
+
 
 def scrub_persisted_text(text: str) -> str:
     """Redact obvious PHI substrings from a stored string.
@@ -163,6 +204,15 @@ def scrub_persisted_text(text: str) -> str:
     out = _EMAIL_RE.sub("[F]", text)
     out = _PHONE_RE.sub("[D]", out)
     out = _SSN_RE.sub("[G]", out)
+    # Order matters: strip MRN-shaped runs BEFORE the date/age regex so
+    # something like "MRN 202305" cannot leak the numeric tail as an
+    # unrecognised span.
+    out = _MRN_RE.sub("[H]", out)
+    out = _URL_RE.sub("[N]", out)
+    out = _IPV4_RE.sub("[O]", out)
+    out = _STREET_ADDR_RE.sub("[B]", out)
+    out = _DATE_RE.sub("[C]", out)
+    out = _AGE_OVER_89_RE.sub("[C-age]", out)
     out = _NAME_RE.sub("[A]", out)
     return out
 
