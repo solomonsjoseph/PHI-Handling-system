@@ -120,21 +120,30 @@ def test_read_docx_tables_refuses_dtd_via_defusedxml(tmp_path):
 
 def test_narrative_read_docx_rejects_oversize_document_xml(tmp_path):
     """The narrative-file reader (`file_readers.read_docx`) must apply
-    the same 10 MiB cap as the dictionary reader hardened in iter_20.
-    Without this, the legacy POST /upload → /run narrative path is a
-    reachable OOM DoS vector."""
-    from phi_core.file_readers import read_docx, _DOCX_NARRATIVE_MAX_BYTES
+    the same size cap as the dictionary reader. Both readers now share
+    `phi_core.docx_safe.DOCX_XML_MAX_BYTES` so a future adjustment applies
+    to both paths at once (iter_23 shared-helper refactor)."""
+    from phi_core.file_readers import read_docx
+    from phi_core.docx_safe import DOCX_XML_MAX_BYTES
     import zipfile as _zip
     p = tmp_path / "bomb.docx"
     with _zip.ZipFile(p, "w", _zip.ZIP_DEFLATED) as z:
         big = (b"<?xml version='1.0'?>"
                b"<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
-               b"<w:body>" + b" " * (_DOCX_NARRATIVE_MAX_BYTES + 500_000) + b"</w:body></w:document>")
+               b"<w:body>" + b" " * (DOCX_XML_MAX_BYTES + 500_000) + b"</w:body></w:document>")
         z.writestr("word/document.xml", big)
-    # Real python-docx would OOM the process on read; the cap should
-    # short-circuit BEFORE python-docx sees the file.
-    assert p.stat().st_size < 200_000, "test setup: outer archive should be small"
+    assert p.stat().st_size < 200_000
     assert read_docx(p) == "", "oversized inner xml on narrative path must be refused"
+
+
+def test_docx_safe_helper_is_single_source_of_truth():
+    """iter_23: both docx readers must consult `phi_core.docx_safe` so
+    the bomb + DTD defence cannot drift again."""
+    import inspect
+    from phi_core.file_readers import read_docx
+    from phi_core.agents.specialists import _read_docx_tables
+    assert "docx_safe" in inspect.getsource(read_docx)
+    assert "docx_safe" in inspect.getsource(_read_docx_tables)
 
 
 def test_narrative_read_docx_returns_empty_on_bad_zip(tmp_path):

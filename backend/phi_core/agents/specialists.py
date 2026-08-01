@@ -127,14 +127,6 @@ class Instrument(Agent):
 
 _DOCX_W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
-# SEC-001 (audit iter_20) cap on the DECOMPRESSED size of a docx's
-# `word/document.xml`. A malicious docx can deflate at ratios up to
-# ~1032x, so a tiny outer file that passes intake's per-file cap could
-# still expand into hundreds of megabytes of RAM under `ET.parse`.
-# 10 MiB is well above any legitimate data-dictionary XML we would
-# ever see (Sir's real ~12 KB dict.docx inflates to ~50 KB of XML).
-_DOCX_XML_MAX_BYTES = 10 * 1024 * 1024
-
 
 def _read_docx_tables(path: Path) -> str:
     """Extract every table from a .docx file as CSV-shaped text.
@@ -146,40 +138,23 @@ def _read_docx_tables(path: Path) -> str:
     are concatenated after the tables so the LLM still gets any framing
     text the data steward may have written above the table.
 
-    Security: uses ``defusedxml`` to forbid DOCTYPEs / external entities
-    (SEC-002 defense-in-depth) and enforces a hard cap on the
-    decompressed size of ``word/document.xml`` (SEC-001).
+    Security: bomb / DTD defence lives in ``phi_core.docx_safe`` so the
+    dictionary and narrative readers can never drift again (root cause
+    of iter_22 SEC-001).
     """
-    # defusedxml with forbid_dtd=True refuses any DOCTYPE, which is the
-    # attack surface for billion-laughs / quadratic-blowup expansion.
     from defusedxml import ElementTree as _DET
-    import zipfile as _zip
+    from ..docx_safe import safe_read_docx_xml
+
+    raw = safe_read_docx_xml(path)
+    if raw is None:
+        return ""
+    try:
+        tree = _DET.fromstring(raw, forbid_dtd=True)
+    except (_DET.ParseError, ValueError):
+        return ""
 
     lines: list[str] = []
     prose: list[str] = []
-    try:
-        with _zip.ZipFile(path) as z:
-            try:
-                info = z.getinfo("word/document.xml")
-            except KeyError:
-                return ""
-            # SEC-001 cap: refuse any docx whose declared uncompressed
-            # size exceeds the ceiling. `file_size` is the decompressed
-            # byte count declared in the central directory header; a
-            # malicious archive could lie, so also verify the running
-            # byte count while streaming below.
-            if info.file_size > _DOCX_XML_MAX_BYTES:
-                return ""
-            with z.open("word/document.xml") as f:
-                # Cap the read to _DOCX_XML_MAX_BYTES + 1; if the stream
-                # exceeds the cap the header lied and we abort.
-                raw = f.read(_DOCX_XML_MAX_BYTES + 1)
-                if len(raw) > _DOCX_XML_MAX_BYTES:
-                    return ""
-                tree = _DET.fromstring(raw, forbid_dtd=True)
-    except (_zip.BadZipFile, _DET.ParseError, ValueError):
-        return ""
-
     root = tree
     body = root.find(f"{_DOCX_W_NS}body")
     if body is None:
