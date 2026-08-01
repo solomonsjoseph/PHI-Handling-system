@@ -115,6 +115,51 @@ def test_read_docx_tables_refuses_dtd_via_defusedxml(tmp_path):
     assert _read_docx_tables(p) == "", "DTD-bearing docx must be refused"
 
 
+# ---- SEC-001 iter_22: narrative-path docx reader parity ---------------
+
+
+def test_narrative_read_docx_rejects_oversize_document_xml(tmp_path):
+    """The narrative-file reader (`file_readers.read_docx`) must apply
+    the same 10 MiB cap as the dictionary reader hardened in iter_20.
+    Without this, the legacy POST /upload → /run narrative path is a
+    reachable OOM DoS vector."""
+    from phi_core.file_readers import read_docx, _DOCX_NARRATIVE_MAX_BYTES
+    import zipfile as _zip
+    p = tmp_path / "bomb.docx"
+    with _zip.ZipFile(p, "w", _zip.ZIP_DEFLATED) as z:
+        big = (b"<?xml version='1.0'?>"
+               b"<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
+               b"<w:body>" + b" " * (_DOCX_NARRATIVE_MAX_BYTES + 500_000) + b"</w:body></w:document>")
+        z.writestr("word/document.xml", big)
+    # Real python-docx would OOM the process on read; the cap should
+    # short-circuit BEFORE python-docx sees the file.
+    assert p.stat().st_size < 200_000, "test setup: outer archive should be small"
+    assert read_docx(p) == "", "oversized inner xml on narrative path must be refused"
+
+
+def test_narrative_read_docx_returns_empty_on_bad_zip(tmp_path):
+    """Malformed / non-zip .docx must not raise; caller must see ""."""
+    from phi_core.file_readers import read_docx
+    p = tmp_path / "junk.docx"
+    p.write_bytes(b"this is not a docx")
+    assert read_docx(p) == ""
+
+
+def test_narrative_read_docx_still_reads_normal_docx(tmp_path):
+    """Positive path: a legitimate small .docx returns its paragraph
+    text unchanged after the iter_22 cap was added."""
+    from docx import Document
+    from phi_core.file_readers import read_docx
+    p = tmp_path / "consent.docx"
+    d = Document()
+    d.add_paragraph("Patient consent form")
+    d.add_paragraph("Signed 2024-05-20")
+    d.save(str(p))
+    out = read_docx(p)
+    assert "Patient consent form" in out
+    assert "Signed 2024-05-20" in out
+
+
 def test_read_table_flat_dispatches_docx(tmp_path):
     from phi_core.agents.specialists import _read_table_flat
     p = tmp_path / "dict.docx"

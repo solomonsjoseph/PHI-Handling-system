@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import email
 import hashlib
+import zipfile
 from pathlib import Path
 from typing import Iterator
 
@@ -171,9 +172,36 @@ def read_pdf(path: Path) -> str:
     return text
 
 
+# SEC-001 (audit iter_22) cap on decompressed size of a .docx's inner
+# ``word/document.xml`` on the NARRATIVE reader path too. iter_20 hardened
+# the dictionary docx reader (`_read_docx_tables`) but this legacy narrative
+# reader was left uncapped, so a hostile .docx uploaded via the narrative
+# path could inflate into gigabytes and OOM the worker. Kept in lock-step
+# with `phi_core.agents.specialists._DOCX_XML_MAX_BYTES`.
+_DOCX_NARRATIVE_MAX_BYTES = 10 * 1024 * 1024
+
+
 def read_docx(path: Path) -> str:
+    """Extract paragraph text from a .docx narrative file.
+
+    Uses ``python-docx`` for the actual paragraph walk, but first
+    verifies the inner ``word/document.xml`` declared uncompressed size
+    is under the cap. If not, returns "" so the pipeline continues with
+    no narrative text rather than crashing with OOM.
+    """
     if DocxDocument is None:
         raise RuntimeError("python-docx is not installed")
+    # Up-front size check against the ZIP central-directory header.
+    try:
+        with zipfile.ZipFile(path) as z:
+            try:
+                info = z.getinfo("word/document.xml")
+            except KeyError:
+                return ""
+            if info.file_size > _DOCX_NARRATIVE_MAX_BYTES:
+                return ""
+    except zipfile.BadZipFile:
+        return ""
     d = DocxDocument(str(path))
     return "\n".join(p.text for p in d.paragraphs)
 
