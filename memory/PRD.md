@@ -567,6 +567,8 @@ Sir directed "find the gap and fix the gap and loop until nothing to be found to
 ### Recently DONE (this fork)
 - Sentinel hard-rule table (dob->year_only, ssn->drop, mrn->pseudonymize, phone/email/fax->drop, name->drop, zip->zip3_truncate, age->cap_age_90, address/url/ip->drop). Runs deterministically before the LLM Sentinel.
 - Multi-provider settings UI page at /settings (BYO API key for Anthropic, OpenAI, Gemini, OpenRouter, OpenAI-compatible; Emergent Universal Key by default).
+- 2026-02-01: PipelineProgressBar (phase %, current-phase label + blurb) mounted above the live agent trace on `/sessions/{sid}`. Fixed initial `events` undefined build blocker by wiring the component to the `trace` state (SSE-driven). Frontend lint: 0 errors.
+- Scope decision (2026-02-01): No jurisdiction expansion until US-HIPAA proves 100% reliable end-to-end across live runs. EU/UK/IN/CA/BR stubs remain in `jurisdictions.py`; expansion deferred.
 
 ## Enhancement (would Sir like this next?)
 
