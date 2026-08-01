@@ -5,8 +5,6 @@ import io
 import json
 import zipfile
 
-import pytest
-
 from phi_core.bundle import BundleOptions, build_bundle
 from phi_core.coverage_matrix import COVERAGE, TOOLS, coverage_counts
 

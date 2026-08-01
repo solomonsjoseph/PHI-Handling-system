@@ -1,5 +1,4 @@
 """End-to-end backend API tests for PHI Handling Console v2.0.0."""
-import io
 import os
 import time
 
@@ -180,7 +179,12 @@ def test_narrative_flow(session_id):
     assert state["status"] == "awaiting_review", state.get("error")
 
     spans = state["spans"]
-    assert len(spans) >= 10, f"only got {len(spans)} spans"
+    # This narrative contains 9 canonical HIPAA identifiers (name, DOB,
+    # SSN, MRN, phone, email, URL, IP, trial code). The per-category
+    # coverage check below is the stronger assertion; keep the count
+    # gate loose so a detector improvement that merges two adjacent
+    # spans into one (or emits an extra sub-span) does not flake this.
+    assert len(spans) >= 9, f"only got {len(spans)} spans"
     cats = {s["hipaa_category"] for s in spans}
     required_cats = {"A", "C", "D", "F", "G", "H", "N", "O", "R"}
     missing = required_cats - cats

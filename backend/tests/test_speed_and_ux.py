@@ -38,7 +38,6 @@ def test_sentinel_post_processes_verdict_when_no_blocking_issues():
     'approved' so the orchestrator's Judge<->Sentinel loop short-circuits.
     This is the fix for "Sentinel nitpicks endlessly".
     """
-    from phi_core.agents.reasoning import Sentinel
     # Simulate the post-processing logic directly on a canned Sentinel reply.
     llm_out = {
         "verdict": "revise",

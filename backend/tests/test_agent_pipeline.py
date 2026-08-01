@@ -73,8 +73,11 @@ def test_llm_settings_default(api):
     d = r.json()
     assert d["provider"] == "emergent"
     assert d["model"] == "claude-sonnet-4-5-20250929"
-    for p in ("emergent", "anthropic", "openai", "gemini", "openrouter", "openai_compatible"):
-        assert p in d["providers"]
+    # `openai_compatible` is opt-in via ALLOWED_LLM_BASE_URL_HOSTS env var
+    # so the endpoint hides it from the default provider list. This is a
+    # SSRF-defence design decision (see phi_core/security.py:52).
+    for p in ("emergent", "anthropic", "openai", "gemini", "openrouter"):
+        assert p in d["providers"], f"missing {p}: {d['providers']}"
 
 
 def test_llm_settings_post_persist(api):

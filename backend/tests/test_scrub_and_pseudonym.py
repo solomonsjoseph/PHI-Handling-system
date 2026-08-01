@@ -6,8 +6,6 @@
    in the same study (exact-match cross-file linkage).
 4. PseudonymRegistry: different sessions -> different tokens (no cross-study leak).
 """
-import pytest
-
 from phi_core.agents.reasoning import PseudonymRegistry, _apply_action, _scrub_text_cell
 
 

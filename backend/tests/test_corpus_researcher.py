@@ -6,7 +6,6 @@ test only runs when EMERGENT_LLM_KEY is present.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from unittest.mock import AsyncMock, patch

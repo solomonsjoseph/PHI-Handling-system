@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from phi_core.publish_guard import (
-    GuardReport, GuardResult, MAX_FINDINGS_PER_FILE,
+    MAX_FINDINGS_PER_FILE,
     scan_all_exports, scan_export_file,
 )
 

@@ -9,11 +9,8 @@ them.
 """
 from __future__ import annotations
 
-import io
 import zipfile
 from pathlib import Path
-
-import pytest
 
 
 DOCX_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

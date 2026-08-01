@@ -1,10 +1,6 @@
 """SEC-004 fail-closed export tests + SEC-005 zip-bomb caps."""
-import io
-import os
 import zipfile
 from pathlib import Path
-
-import pytest
 
 from phi_core.agents.reasoning import (
     _redact_metadata_file,
