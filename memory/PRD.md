@@ -572,6 +572,11 @@ Sir directed "find the gap and fix the gap and loop until nothing to be found to
 - 2026-02-01: `/app/memory/VISION.md` added — one-page north-star (problem, answer, six non-negotiable principles, 12-agent architecture, users, trust bar, non-goals, metrics).
 - 2026-02-07: **Pipeline speedup** — Statute + Praxis (17-category web-search fan-out) now launch in parallel with Specialists at t=0 instead of serialising after them. On cold cache this overlaps ~all Praxis runtime (biggest single wallclock cost) with Lexicon/Schema/Instrument file parsing.
 - 2026-02-07: **Agent trace** — every expanded trace row now shows "role · what · why · how" for the agent (13 agents documented: Lexicon, Schema, Instrument, Statute, Praxis, Judge, Sentinel, Executor, Publish Guard, Auditor, Scout, Ledger, Herald).
+- 2026-02-07: **Live wallclock** — orchestrator persists `session.phase_timings` (start/end/duration per phase) + `run_elapsed_s` at pipeline exit. PipelineProgressBar renders elapsed seconds and an expandable per-phase timing table.
+- 2026-02-07: **Rigor selector** — `POST /api/sessions/{sid}/handle?iteration_cap={1|2|3}` accepts a per-run Sentinel iteration cap; wizard Step 2 exposes Fast/Balanced/Thorough cards. Cap persisted on session, honoured by the Judge↔Sentinel loop.
+- 2026-02-07: **Trace deep-links** — every trace row has `id="trace-{Agent}"` and a "# copy link" affordance in the meta panel; `#trace-Judge` in the URL auto-expands + scrolls to that row.
+- 2026-02-07: **Cold-cache warmup** — `POST /api/settings/warmup` primes Statute + all 17 Praxis methods with an ephemeral session id; button on `/settings` triggers it, reports primed/failed counts.
+- 2026-02-07: **CLAUDE.md** — fully rewritten to reflect the actual 12-agent architecture (was still describing the legacy detectors/llm_classifier layout).
 
 ## Enhancement (would Sir like this next?)
 

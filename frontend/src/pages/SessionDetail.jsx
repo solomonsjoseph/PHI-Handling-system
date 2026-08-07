@@ -190,6 +190,41 @@ function AgentTracePanel({ sid, trace, status, cancelRequested, advisory }) {
   const grouped = _groupTrace(trace);
   const running = status && !['complete', 'awaiting_human_review', 'failed', 'cancelled', 'intake_failed'].includes(status);
   const totalMs = grouped.reduce((s, g) => s + (g.duration_ms || 0), 0);
+
+  // Sir Q "Trace Meta Deep-Link": on mount, if the URL hash points at a
+  // specific agent (e.g. #trace-Judge), auto-expand that row so a shared
+  // link lands the reviewer straight on the cited behaviour.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const hash = window.location.hash || '';
+    const m = hash.match(/^#trace-([A-Za-z]+)$/);
+    if (!m) return;
+    const wanted = m[1].toLowerCase();
+    const idx = grouped.findIndex(g => (g.agent || '').toLowerCase() === wanted);
+    if (idx >= 0) {
+      setOpenIdx(idx);
+      // Defer scroll so the DOM node exists.
+      setTimeout(() => {
+        const el = document.getElementById(`trace-${m[1]}`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 100);
+    }
+    // Only run once per grouped-length change, so late-arriving SSE events
+    // still resolve the hash if the target agent hadn't reported yet.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [grouped.length]);
+
+  const copyDeepLink = (agentName) => {
+    const url = `${window.location.origin}${window.location.pathname}#trace-${agentName}`;
+    try {
+      navigator.clipboard.writeText(url);
+      toast.success(`Link to ${agentName} copied`);
+    } catch (err) {
+      console.warn('clipboard write failed:', err);
+      toast.error('Copy failed. Select the URL bar and copy manually.');
+    }
+  };
+
   return (
     <div className="mt-10 rule-bottom pb-10" data-testid="agent-trace-panel">
       <div className="flex items-baseline justify-between">
@@ -215,7 +250,7 @@ function AgentTracePanel({ sid, trace, status, cancelRequested, advisory }) {
 
       <div className="mt-6 divide-y divide-rule">
         {grouped.map((g, i) => (
-          <div key={i} className="py-3" data-testid={`trace-row-${i}`}>
+          <div key={i} className="py-3" id={`trace-${g.agent}`} data-testid={`trace-row-${i}`}>
             <button
               className="w-full text-left flex items-center gap-4 hover:bg-paper-2 px-2 -mx-2 py-1 transition-colors"
               onClick={() => setOpenIdx(openIdx === i ? null : i)}
@@ -253,7 +288,17 @@ function AgentTracePanel({ sid, trace, status, cancelRequested, advisory }) {
                   if (!meta) return null;
                   return (
                     <div className="border-l-2 border-oxblood pl-3" data-testid={`trace-row-meta-${i}`}>
-                      <div className="kicker text-oxblood">{g.agent} · {meta.role}</div>
+                      <div className="flex items-baseline justify-between gap-3">
+                        <div className="kicker text-oxblood">{g.agent} · {meta.role}</div>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); copyDeepLink(g.agent); }}
+                          className="font-mono text-[10px] text-ink-muted hover:text-oxblood transition-colors"
+                          data-testid={`trace-row-copylink-${i}`}
+                          title={`Copy deep-link to ${g.agent}`}
+                        >
+                          # copy link
+                        </button>
+                      </div>
                       <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-3 text-[12px] text-ink-2 leading-relaxed">
                         <div>
                           <div className="kicker text-ink-muted">What it does</div>
@@ -380,22 +425,47 @@ function _phaseIndexFromEvents(events, status) {
   return 0;
 }
 
-function PipelineProgressBar({ events, status }) {
+function PipelineProgressBar({ events, status, phaseTimings, runElapsed }) {
   const currentIdx = _phaseIndexFromEvents(events, status);
   const isFailed = status === 'failed' || status === 'cancelled';
   const pct = currentIdx < 0
     ? 0
     : Math.round(((currentIdx + 1) / _PHASES.length) * 100);
   const current = currentIdx >= 0 ? _PHASES[currentIdx] : null;
+
+  // Sir Q "Live Wallclock Measurement": show per-phase durations once the
+  // orchestrator has emitted them. Values come from session.phase_timings
+  // (persisted at pipeline exit) or are derived from live SSE events for
+  // the running phase.
+  const timings = phaseTimings || {};
+  const currentPhaseKey = current && (() => {
+    // Judge/Sentinel emit iteration-suffixed phase keys; match the base.
+    for (let i = (events || []).length - 1; i >= 0; i--) {
+      const p = events[i]?.phase || '';
+      if (p.startsWith(current.key)) return p;
+    }
+    return current.key;
+  })();
+  const currentSec = currentPhaseKey && timings[currentPhaseKey]?.duration_ms
+    ? (timings[currentPhaseKey].duration_ms / 1000).toFixed(1)
+    : null;
+
   return (
     <div className="mt-8 mb-2" data-testid="pipeline-progress-bar">
       <div className="flex items-baseline justify-between mb-2">
         <div className="kicker">Pipeline progress · {pct}%</div>
-        {current && (
-          <div className="font-mono text-[11px] text-ink-muted" data-testid="pipeline-current-phase">
-            phase {currentIdx + 1} of {_PHASES.length}
-          </div>
-        )}
+        <div className="flex items-center gap-3 font-mono text-[11px] text-ink-muted">
+          {runElapsed != null && (
+            <span data-testid="pipeline-elapsed">
+              {runElapsed.toFixed(1)} s elapsed
+            </span>
+          )}
+          {current && (
+            <span data-testid="pipeline-current-phase">
+              phase {currentIdx + 1} of {_PHASES.length}
+            </span>
+          )}
+        </div>
       </div>
       <div className="h-1 bg-paper-2 border border-rule relative overflow-hidden">
         <div
@@ -408,11 +478,37 @@ function PipelineProgressBar({ events, status }) {
           <div className="font-mono text-[11px] text-oxblood uppercase tracking-wider mt-0.5 shrink-0">
             {String(currentIdx + 1).padStart(2, '0')}
           </div>
-          <div className="min-w-0">
-            <div className="font-display text-[14px] text-ink">{current.label}</div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-baseline justify-between gap-3">
+              <div className="font-display text-[14px] text-ink">{current.label}</div>
+              {currentSec && (
+                <div className="font-mono text-[11px] text-ink-muted shrink-0" data-testid="pipeline-current-duration">
+                  {currentSec} s
+                </div>
+              )}
+            </div>
             <div className="text-[12px] text-ink-2 leading-relaxed mt-0.5">{current.blurb}</div>
           </div>
         </div>
+      )}
+      {Object.keys(timings).length > 1 && (
+        <details className="mt-3" data-testid="pipeline-phase-timings">
+          <summary className="cursor-pointer text-[11px] font-mono text-ink-muted hover:text-oxblood">
+            per-phase timings ({Object.keys(timings).length})
+          </summary>
+          <div className="mt-2 grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-1 text-[11px] font-mono">
+            {Object.entries(timings)
+              .sort((a, b) => (a[1].start_s || 0) - (b[1].start_s || 0))
+              .map(([k, v]) => (
+                <div key={k} className="flex justify-between gap-2 text-ink-2">
+                  <span className="truncate">{k}</span>
+                  <span className="text-ink-muted shrink-0">
+                    {v.duration_ms ? `${(v.duration_ms / 1000).toFixed(1)}s` : '…'}
+                  </span>
+                </div>
+              ))}
+          </div>
+        </details>
       )}
     </div>
   );
@@ -609,7 +705,12 @@ export default function SessionDetail() {
       </div>
 
       {/* Pipeline progress bar — high-level "what's happening right now" */}
-      <PipelineProgressBar events={trace} status={status} />
+      <PipelineProgressBar
+        events={trace}
+        status={status}
+        phaseTimings={session?.phase_timings}
+        runElapsed={session?.run_elapsed_s}
+      />
 
       {/* Live agent trace — always shown so operators see the pipeline moving. */}
       <AgentTracePanel

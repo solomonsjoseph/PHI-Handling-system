@@ -295,6 +295,16 @@ function StepConfigure({ onNext, onBack, sid, config, setConfig }) {
   }, []);
   const canNext = config.reviewer.trim().length >= 2;
 
+  // Sir Q "Sentinel Iteration Cap Tuner": three-lane rigor selector.
+  // Fast=1 short-circuits after the first Sentinel pass; Balanced=2 is
+  // the historical default; Thorough=3 lets Sentinel iterate up to the
+  // hard cap. Cap ships to the /handle endpoint as ?iteration_cap=N.
+  const rigorOptions = [
+    { value: 1, label: 'Fast', blurb: '1 pass · short studies, high-confidence headers' },
+    { value: 2, label: 'Balanced', blurb: '2 passes · default. Judge revises once if Sentinel flags a leak.' },
+    { value: 3, label: 'Thorough', blurb: '3 passes · max defensibility, longest wallclock' },
+  ];
+
   return (
     <div className="step-in max-w-3xl">
       <div className="kicker">Step two</div>
@@ -351,6 +361,30 @@ function StepConfigure({ onNext, onBack, sid, config, setConfig }) {
             className="mt-3 w-full h-11 bg-transparent border-b border-ink text-ink text-lg font-display focus:border-oxblood"
           />
           <div className="text-[12px] text-ink-muted mt-2">Free-text; persisted in the attestation.</div>
+        </div>
+      </div>
+
+      <div className="mt-14">
+        <div className="kicker">Rigor · Sentinel iteration cap</div>
+        <div className="mt-3 grid grid-cols-3 gap-3" data-testid="config-rigor">
+          {rigorOptions.map(opt => {
+            const active = (config.iteration_cap || 2) === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setConfig({ ...config, iteration_cap: opt.value })}
+                data-testid={`config-rigor-${opt.label.toLowerCase()}`}
+                className={`text-left border p-4 transition-colors ${active ? 'border-oxblood bg-paper-2' : 'border-rule hover:border-ink'}`}
+              >
+                <div className="flex items-baseline justify-between">
+                  <div className={`font-display text-[16px] ${active ? 'text-oxblood' : 'text-ink'}`}>{opt.label}</div>
+                  <div className="font-mono text-[11px] text-ink-muted">{opt.value} pass{opt.value === 1 ? '' : 'es'}</div>
+                </div>
+                <div className="text-[11px] text-ink-2 mt-1 leading-snug">{opt.blurb}</div>
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -457,6 +491,7 @@ export default function Wizard() {
     jurisdiction: 'us', provider: 'emergent',
     reviewer: (typeof window !== 'undefined' && window.localStorage.getItem('phi_reviewer_id')) || '',
     comment: '',
+    iteration_cap: 2,
   });
   const [output, setOutput] = useState({ publication: false, attestation_pdf: false });
   const [busy, setBusy] = useState(false);
@@ -477,7 +512,9 @@ export default function Wizard() {
       } catch (err) {
         console.warn('reviewer state persistence failed:', err);
       }
-      await axios.post(`${API}/sessions/${sid}/handle`);
+      await axios.post(`${API}/sessions/${sid}/handle`, null, {
+        params: { iteration_cap: config.iteration_cap || 2 },
+      });
       navigate(`/studies/${sid}?bundle=${output.publication ? 'publication' : 'default'}${output.attestation_pdf ? '&pdf=1' : ''}`);
     } catch (e) {
       toast.error(`Run failed: ${e?.response?.data?.detail || e.message}`);

@@ -20,6 +20,7 @@ followed by a cancel check.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -74,6 +75,47 @@ async def run_pipeline(
     form_files = [f for f in files if f["kind"] == "narrative"]
     dict_files = [f for f in files if f["kind"] == "metadata"]
 
+    # Sir Q "Live Wallclock Measurement": capture wallclock per phase so the
+    # UI can render per-phase seconds and operators can prove the parallel
+    # launch actually saved time. Wrap the caller's `on_phase` in a timer
+    # that stamps `start` on first visit and `end` on the next visit.
+    _phase_timings: dict[str, dict[str, float]] = {}
+    _last_phase: dict[str, str | None] = {"key": None, "t0": 0.0}
+    _run_started = time.perf_counter()
+
+    async def timed_on_phase(phase: str, payload: dict[str, Any]) -> None:
+        now = time.perf_counter()
+        prev = _last_phase["key"]
+        if prev and prev not in ("cancelled", "complete", "__end__") and prev != phase:
+            row = _phase_timings.setdefault(prev, {"start_s": _last_phase["t0"] - _run_started})
+            row["end_s"] = now - _run_started
+            row["duration_ms"] = (now - _last_phase["t0"]) * 1000
+        _phase_timings.setdefault(phase, {"start_s": now - _run_started})
+        _last_phase["key"] = phase
+        _last_phase["t0"] = now
+        payload = dict(payload or {})
+        payload["_elapsed_s"] = round(now - _run_started, 3)
+        await on_phase(phase, payload)
+
+    async def close_last_phase() -> None:
+        prev = _last_phase["key"]
+        if not prev:
+            return
+        now = time.perf_counter()
+        row = _phase_timings.setdefault(prev, {"start_s": _last_phase["t0"] - _run_started})
+        row.setdefault("end_s", now - _run_started)
+        row.setdefault("duration_ms", (now - _last_phase["t0"]) * 1000)
+
+    # Alias so all existing calls to `on_phase(...)` inside this function
+    # go through the timer. External callers still see the original cb.
+    on_phase = timed_on_phase  # noqa: F811  # rebinding is intentional
+
+    # Sir Q "Sentinel Iteration Cap Tuner": allow per-run rigor. Fast=1,
+    # Balanced=2, Thorough=3. Falls back to the module default when the
+    # session doc doesn't specify one.
+    iteration_cap = int(session.get("iteration_cap") or ITERATION_CAP)
+    iteration_cap = max(1, min(iteration_cap, ITERATION_CAP))
+
     common = dict(session_id=sid, llm=llm_cfg, db=db, emit=emit)
 
     # 1+2+2b. Specialists, Statute, and Praxis kicked off IN PARALLEL.
@@ -127,7 +169,7 @@ async def run_pipeline(
     prior_feedback = ""
     approved_decisions: list[dict[str, Any]] = []
     advisory_issues: list[dict[str, Any]] = []
-    for iteration in range(1, ITERATION_CAP + 1):
+    for iteration in range(1, iteration_cap + 1):
         await _check_cancel(db, sid, on_phase)
         await on_phase(f"judge_iter_{iteration}", {"iteration": iteration})
         j = await judge.run(schema=schema, instrument=instrument, lexicon=lexicon,
@@ -199,11 +241,18 @@ async def run_pipeline(
         }},
     )
     if human_needed:
+        await close_last_phase()
         await db.sessions.update_one(
             {"id": sid},
-            {"$set": {"status": "awaiting_human_review", "updated_at": datetime.now(timezone.utc).isoformat()}},
+            {"$set": {"status": "awaiting_human_review",
+                      "updated_at": datetime.now(timezone.utc).isoformat(),
+                      "phase_timings": _phase_timings,
+                      "run_elapsed_s": time.perf_counter() - _run_started}},
         )
-        return {"status": "awaiting_human_review", "decisions": approved_decisions, "sentinel": s}
+        return {"status": "awaiting_human_review",
+                "decisions": approved_decisions,
+                "sentinel": s,
+                "phase_timings": _phase_timings}
 
     # 5. Executor
     await on_phase("executor", {"decision_count": len(approved_decisions)})
@@ -245,6 +294,7 @@ async def run_pipeline(
     herald = await Herald(**common).run(ledger=ledger, audit=audit,
                                         target_venue=session.get("target_venue") or "JAMIA Open")
 
+    await close_last_phase()
     result = {
         "status": "complete",
         "decisions": approved_decisions,
@@ -255,6 +305,9 @@ async def run_pipeline(
         "exports": exec_out["exports"],
         "guard": guard_report,
         "advisory_issues": advisory_issues,
+        "phase_timings": _phase_timings,
+        "run_elapsed_s": round(time.perf_counter() - _run_started, 3),
+        "iteration_cap": iteration_cap,
     }
     await db.sessions.update_one(
         {"id": sid},
@@ -267,6 +320,9 @@ async def run_pipeline(
             "guard_report": guard_report,
             "export_paths": exec_out["exports"],
             "status": "complete",
+            "phase_timings": _phase_timings,
+            "run_elapsed_s": result["run_elapsed_s"],
+            "iteration_cap": iteration_cap,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }},
     )

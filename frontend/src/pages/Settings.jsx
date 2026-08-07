@@ -17,6 +17,8 @@ export default function Settings() {
   const [catalog, setCatalog] = useState({ providers: [], models: [], default_model_id: '' });
   const [apiKeySet, setApiKeySet] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [warming, setWarming] = useState(false);
+  const [warmupResult, setWarmupResult] = useState(null);
   const [opToken, setOpToken] = useState(getApiToken());
 
   const load = async () => {
@@ -48,6 +50,23 @@ export default function Settings() {
       await load();
     } catch (e) { toast.error(`save failed: ${e?.response?.data?.detail || e.message}`); }
     finally { setBusy(false); }
+  };
+
+  // Sir Q "Cold-Cache Warmup": pre-run Statute + all 17 Praxis categories
+  // so the first study of the day doesn't eat the 10+ web-search cost
+  // live. Takes ~30-60 s on cold cache, near-instant on warm.
+  const warmCache = async () => {
+    setWarming(true);
+    setWarmupResult(null);
+    try {
+      const r = await axios.post(`${API}/settings/warmup`);
+      setWarmupResult(r.data);
+      const primed = r.data?.praxis?.primed?.length || 0;
+      const total = r.data?.praxis?.total || 17;
+      toast.success(`Cache primed: ${primed}/${total} Praxis methods + Statute (${r.data?.statute?.jurisdiction || 'us'})`);
+    } catch (e) {
+      toast.error(`warmup failed: ${e?.response?.data?.detail || e.message}`);
+    } finally { setWarming(false); }
   };
 
   // ------- provider / model picker helpers ------------------------------
@@ -208,6 +227,30 @@ export default function Settings() {
           {selectedModel && selectedModel.tier && (
             <Tag color={TIER_TAG[selectedModel.tier] || 'default'}>{selectedModel.tier}</Tag>
           )}
+        </div>
+
+        {/* Cold-cache warmup: prime Statute + Praxis so the first study of
+            the day doesn't pay for 10+ web searches live. */}
+        <div className="mt-8 rule-top pt-6" data-testid="warmup-panel">
+          <div className="kicker">Cold-cache warmup</div>
+          <div className="mt-2 text-[12px] text-ink-2 max-w-2xl">
+            Pre-runs the Statute rulebook fetch and all 17 Praxis method lookups so the first
+            live study skips the web-search cost. Cache refreshes weekly; you only need to
+            press this after a fresh deploy or when Praxis says "cold" in the trace.
+          </div>
+          <div className="mt-3 flex items-center gap-3 flex-wrap">
+            <Btn variant="secondary" onClick={warmCache} disabled={warming} testId="btn-warmup-cache">
+              {warming ? 'Priming cache… (up to 60 s)' : 'Prime Praxis + Statute'}
+            </Btn>
+            {warmupResult && (
+              <div className="font-mono text-[11px] text-ink-2" data-testid="warmup-result">
+                Statute: {warmupResult.statute?.jurisdiction || 'us'} · Praxis: {warmupResult.praxis?.primed?.length || 0}/{warmupResult.praxis?.total || 17} primed
+                {warmupResult.praxis?.failed?.length > 0 && (
+                  <span className="text-oxblood ml-2">· {warmupResult.praxis.failed.length} failed</span>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Catalog reference — helps operators see the full menu at a glance */}

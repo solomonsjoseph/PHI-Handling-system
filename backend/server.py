@@ -1081,17 +1081,84 @@ async def _current_llm_cfg() -> LlmConfig:
     return LlmConfig.from_dict(doc)
 
 
+@app.post("/api/settings/warmup", dependencies=[Depends(require_api_token)])
+async def settings_warmup():
+    """Prime the Statute + Praxis caches for supported jurisdictions.
+
+    Sir Q "Cold-Cache Warmup": the first study of the day pays for 10+ web
+    searches (Praxis E, I..R) plus Statute. This endpoint pre-runs those
+    with an ephemeral session id so the caches are hot before an operator
+    kicks off a real run. Uses the current LLM config and returns per-task
+    outcome so the UI can report which categories cached vs. failed.
+
+    Only US-HIPAA is warmed for now; extra jurisdictions light up
+    automatically once `jurisdictions.py` graduates them from stub.
+    """
+    from phi_core.agents.experts import Praxis, Statute
+
+    db = get_db()
+    cfg = await _current_llm_cfg()
+    warmup_sid = f"warmup:{uuid.uuid4().hex[:8]}"
+
+    async def _noop_emit(_msg):  # pragma: no cover - trivial
+        return None
+
+    common = dict(session_id=warmup_sid, llm=cfg, db=db, emit=_noop_emit)
+    hipaa_cats = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K",
+                  "L", "M", "N", "O", "P", "Q", "R"]
+
+    praxis_agent = Praxis(**common)
+    statute_task = Statute(**common).run(jurisdiction="us")
+    praxis_task = asyncio.gather(
+        *[praxis_agent.method_for(c) for c in hipaa_cats],
+        return_exceptions=True,
+    )
+    try:
+        statute_res, praxis_res = await asyncio.wait_for(
+            asyncio.gather(statute_task, praxis_task), timeout=240.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "warmup exceeded 240s ceiling")
+
+    praxis_ok = [c for c, r in zip(hipaa_cats, praxis_res)
+                 if not isinstance(r, Exception)]
+    praxis_err = [{"category": c, "error": type(r).__name__}
+                  for c, r in zip(hipaa_cats, praxis_res)
+                  if isinstance(r, Exception)]
+    return {
+        "ok": True,
+        "statute": {"jurisdiction": statute_res.get("jurisdiction", "us"),
+                    "as_of": statute_res.get("as_of", "cache")},
+        "praxis": {
+            "primed": praxis_ok,
+            "failed": praxis_err,
+            "total": len(hipaa_cats),
+        },
+    }
+
+
 # --- Agent-driven PHI handling -------------------------------------------
 
 @app.post("/api/sessions/{sid}/handle", dependencies=[Depends(require_api_token)])
-async def session_handle(sid: str):
-    """Run the full 12-agent PHI handling pipeline for this study."""
+async def session_handle(sid: str, iteration_cap: int | None = None):
+    """Run the full 12-agent PHI handling pipeline for this study.
+
+    Optional ``iteration_cap`` (1..3) selects the Judge<->Sentinel rigor:
+      1 = fast lane (short studies, high-confidence headers)
+      2 = balanced (default)
+      3 = thorough (max defensibility, longest wallclock)
+    """
     db = get_db()
     session = await db.sessions.find_one({"id": sid})
     if not session:
         raise HTTPException(404, "session not found")
     if session.get("intake_status") not in ("ready",):
         raise HTTPException(400, f"intake not ready (status={session.get('intake_status')})")
+
+    if iteration_cap is not None:
+        cap = max(1, min(int(iteration_cap), 3))
+        await db.sessions.update_one({"id": sid}, {"$set": {"iteration_cap": cap}})
+        session["iteration_cap"] = cap
 
     async def emit_msg(msg: AgentMessage) -> None:
         # Persist to session progress in a compact form for the SSE consumer.
