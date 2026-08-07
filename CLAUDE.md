@@ -136,13 +136,34 @@ Kubernetes ingress routes `/api/*` to :8001. Frontend uses
 `process.env.REACT_APP_BACKEND_URL`; backend uses `os.environ["MONGO_URL"]`
 and `os.environ["DB_NAME"]`. Never edit these two.
 
+## Portability -- runs anywhere
+
+The console is deliberately not locked to any hosting platform. Copy
+`backend/.env.example` to `backend/.env` and fill in whichever LLM
+credential you have. The backend auto-detects the default provider in
+this order:
+
+1. `EMERGENT_LLM_KEY`   -> Emergent Universal Key (Emergent platform only)
+2. `ANTHROPIC_API_KEY`  -> Anthropic direct (recommended for self-hosted)
+3. `OPENAI_API_KEY`     -> OpenAI direct
+4. `GEMINI_API_KEY` / `GOOGLE_API_KEY` -> Google Gemini
+5. `OPENROUTER_API_KEY` -> OpenRouter
+
+The `emergent` provider option is only advertised to the UI when
+`EMERGENT_LLM_KEY` is present, so self-hosted deploys don't see paths
+they can't use. `emergentintegrations` is a soft/lazy import; the app
+works cleanly without it. Statute + Praxis (web-search agents) work
+end-to-end with a plain `ANTHROPIC_API_KEY` via LiteLLM's native
+`web_search_20250305` tool -- no Emergent library required.
+
 ## Run / redeploy
 
 ```
 sudo supervisorctl restart backend frontend
 ```
 
-Emergent Universal Key powers Statute, Praxis, and every LLM agent by default.
-BYO-key (Anthropic / OpenAI / Gemini / OpenRouter / OpenAI-compatible) via
-`/settings`. Web-search-capable models (Claude Sonnet 4.5 default) are required
-for Statute + Praxis first-fetch; deterministic fallbacks kick in otherwise.
+Emergent Universal Key powers Statute, Praxis, and every LLM agent when
+running on the Emergent platform. Anywhere else, a plain Anthropic key
+(or any BYO key configured through `/settings`) covers the same paths.
+Web-search-capable models (Claude Sonnet 4.5 default) are required for
+Statute + Praxis first-fetch; deterministic fallbacks kick in otherwise.

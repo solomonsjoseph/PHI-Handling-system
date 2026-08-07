@@ -288,7 +288,17 @@ function StepConfigure({ onNext, onBack, sid, config, setConfig }) {
   const [providers, setProviders] = useState([]);
   useEffect(() => {
     axios.get(`${API}/settings/llm`)
-      .then(r => setProviders(r.data.providers || []))
+      .then(r => {
+        const list = r.data.providers || [];
+        setProviders(list);
+        // Seed the picker with the environment-detected provider (or the
+        // first advertised one) so the wizard doesn't display an empty
+        // dropdown on self-hosted deploys.
+        if (!config.provider && list.length > 0) {
+          const seed = (r.data.env_providers && r.data.env_providers[0]) || r.data.provider || list[0];
+          setConfig(prev => ({ ...prev, provider: seed }));
+        }
+      })
       .catch(err => console.warn('load providers failed:', err));
     // Empty dep array intentional: fetch once on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -488,7 +498,11 @@ export default function Wizard() {
   const [step, setStep] = useState(1);
   const [sid, setSid] = useState(null);
   const [config, setConfig] = useState({
-    jurisdiction: 'us', provider: 'emergent',
+    // Provider defaults to '' so the fetched providers list in Step 2
+    // can seed the first available option (env-detected). Prevents the
+    // dropdown from showing 'emergent' on self-hosted deploys where
+    // EMERGENT_LLM_KEY is not set.
+    jurisdiction: 'us', provider: '',
     reviewer: (typeof window !== 'undefined' && window.localStorage.getItem('phi_reviewer_id')) || '',
     comment: '',
     iteration_cap: 2,

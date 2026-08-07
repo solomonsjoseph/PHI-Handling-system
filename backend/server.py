@@ -769,17 +769,70 @@ class LlmSettings(BaseModel):
     max_tokens: int = 2000
 
 
+def _first_boot_llm_defaults() -> dict:
+    """First-boot defaults resolved from the environment.
+
+    So a deploy with only ``ANTHROPIC_API_KEY`` set gets an Anthropic
+    default instead of the ``emergent`` factory default, without the
+    operator touching Settings.
+    """
+    from phi_core.agents.llm import _default_provider
+    return LlmSettings(provider=_default_provider()).model_dump()
+
+
+def _env_available_providers() -> list[str]:
+    """Return the providers whose credentials are present in the environment.
+
+    Sir Q "Ensure it is not locked to emergent only". If a self-hosted
+    deploy only sets ``ANTHROPIC_API_KEY``, the Settings UI should not
+    invite the user to pick ``emergent`` and crash on first call.
+    """
+    out: list[str] = []
+    if os.environ.get("EMERGENT_LLM_KEY"):
+        out.append("emergent")
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        out.append("anthropic")
+    if os.environ.get("OPENAI_API_KEY"):
+        out.append("openai")
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        out.append("gemini")
+    if os.environ.get("OPENROUTER_API_KEY"):
+        out.append("openrouter")
+    return out
+
+
+def _providers_payload() -> dict:
+    """Compose the providers block for /api/settings/llm.
+
+    ``providers`` = providers the operator MAY configure. Excludes
+    ``emergent`` when EMERGENT_LLM_KEY is not set in the pod (no BYO
+    path exists for it). All other providers stay listed because they
+    can be configured by pasting a BYO key.
+
+    ``env_providers`` = subset with credentials already present in the
+    pod environment (zero-setup path).
+    """
+    env = _env_available_providers()
+    listed = set(allowed_providers())
+    if "emergent" in listed and "emergent" not in env:
+        listed.discard("emergent")
+    return {
+        "providers": sorted(listed),
+        "env_providers": env,
+    }
+
+
 @app.get("/api/settings/llm")
 async def get_llm_settings():
     db = get_db()
     doc = await db.settings.find_one({"_id": "llm"}, {"_id": 0})
     if not doc:
-        return LlmSettings().model_dump() | {"providers": sorted(allowed_providers())}
+        return _first_boot_llm_defaults() | _providers_payload()
     # never leak the api_key back verbatim
     if doc.get("api_key"):
         doc["api_key_set"] = True
         doc["api_key"] = ""
-    return doc | {"providers": sorted(allowed_providers())}
+    return doc | _providers_payload()
 
 
 @app.get("/api/settings/llm/catalog")

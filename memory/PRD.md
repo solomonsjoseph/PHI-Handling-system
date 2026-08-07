@@ -586,6 +586,7 @@ Sir directed "find the gap and fix the gap and loop until nothing to be found to
 - 2026-02-07: **Herald parallelisation** — Herald.Abstract and Herald.Sections now fire concurrently (Sections prompt reworked to skip restating aim/methods). Measured savings: **~33 s cold**, **~31 s warm** on Herald wallclock. Contributed to the 196.8 → 159.9 s total drop on warm runs.
 - 2026-02-07: **Rigor persistence on corpus runs** — `CorpusStudyRunBody.iteration_cap` (default 2, balanced) plumbed into `session_handle(sid, iteration_cap=...)`. Corpus runs no longer silently max to 3.
 - 2026-02-07: **Warmup schedule countdown** — `/settings` auto-warmup line now renders "next run: Mon Aug 10 09:00 UTC (~2d 15h)" via a client-side `_formatSchedule` helper that decodes the ISO timestamp into weekday + local delta.
+- 2026-02-07: **Portability — runs anywhere** — `emergentintegrations` is now a soft/lazy import; `LlmConfig` default provider auto-detects from env (`EMERGENT_LLM_KEY` → `ANTHROPIC_API_KEY` → `OPENAI_API_KEY` → Gemini → OpenRouter). Anthropic native `web_search_20250305` wired through LiteLLM so Statute + Praxis cold-fetch works with a plain Anthropic key. `/settings/llm` no longer advertises `emergent` when the key isn't present. `.env.example` added at `backend/.env.example`. Legacy `phi_core/llm_classifier.py` migrated off direct emergentintegrations calls onto the shared multi-provider client (lazy import to break a circular dep). CLAUDE.md + VISION.md now include portability sections.
 
 ## Enhancement (would Sir like this next?)
 

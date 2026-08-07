@@ -74,6 +74,7 @@ We consider the vision met when a stranger can:
 - A PDF form generator (removed by direction; the corpus is datasets + dictionaries only).
 - A "cloud service" for retained PHI storage. Sessions are transient. The bundle is the receipt.
 - A multi-jurisdiction sprawl before US-HIPAA is airtight end-to-end. Stubs exist for EU-GDPR, UK-GDPR, IN-DPDPA, CA-PIPEDA, BR-LGPD; expansion is deferred until the US pipeline runs green every time.
+- A platform-locked appliance. The console runs on any Python + MongoDB host with any of five LLM providers (Anthropic, OpenAI, Gemini, OpenRouter, OpenAI-compatible endpoint, or Emergent Universal Key when available). No component is exclusive to any hosting vendor.
 
 ## 9. How progress is measured
 

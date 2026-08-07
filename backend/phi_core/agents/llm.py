@@ -1,15 +1,16 @@
 """Multi-provider LLM client for agents.
 
-Providers supported through LiteLLM:
-  - anthropic (claude-*)
+Providers supported through LiteLLM (portable, run anywhere):
+  - anthropic (claude-*) with native web_search_20250305 tool
   - openai (gpt-*)
   - gemini (gemini-*)
   - openrouter (openrouter/*)
-  - custom OpenAI-compatible (base_url override)
+  - openai_compatible (custom base_url; ALLOWED_LLM_BASE_URL_HOSTS gates it)
 
-Also supports the Emergent Universal Key by routing to Anthropic via
-emergentintegrations when EMERGENT_LLM_KEY is present and no external
-key was configured.
+Also supports the Emergent Universal Key by routing to Anthropic /
+OpenAI / Gemini via ``emergentintegrations`` when the library is
+installed and ``EMERGENT_LLM_KEY`` is present. The library is imported
+lazily so the app runs cleanly on any deployment without it.
 """
 from __future__ import annotations
 
@@ -26,9 +27,32 @@ litellm.suppress_debug_info = True
 litellm.drop_params = True
 
 
+def _default_provider() -> str:
+    """Pick a sensible default provider based on the current environment.
+
+    Sir Q "Ensure it is not locked to emergent only, and it must be free
+    to be used anywhere." We honour whichever key the operator's
+    environment actually exposes, so a deploy with an Anthropic key gets
+    an Anthropic default without editing config.
+    """
+    if os.environ.get("EMERGENT_LLM_KEY"):
+        return "emergent"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        return "gemini"
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return "openrouter"
+    # No key at all: still return emergent so the UI renders; the first
+    # LLM call will surface a helpful error rather than crashing silently.
+    return "emergent"
+
+
 @dataclass
 class LlmConfig:
-    provider: str = "emergent"   # emergent|anthropic|openai|gemini|openrouter|openai_compatible
+    provider: str = ""           # "" -> resolved from env at from_dict time
     model: str = "claude-sonnet-4-5-20250929"
     api_key: str = ""
     base_url: str = ""           # for openai_compatible
@@ -38,8 +62,9 @@ class LlmConfig:
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "LlmConfig":
         d = d or {}
+        provider = d.get("provider") or _default_provider()
         return cls(
-            provider=d.get("provider", "emergent"),
+            provider=provider,
             model=d.get("model", "claude-sonnet-4-5-20250929"),
             api_key=d.get("api_key", ""),
             base_url=d.get("base_url", ""),
@@ -70,8 +95,27 @@ def _resolve_emergent_family(model_id: str) -> str:
 
 def _emergent_call(system: str, user: str, cfg: LlmConfig) -> str:
     """Call the Emergent Universal Key. Routes to anthropic / openai /
-    gemini based on the model id."""
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    gemini based on the model id.
+
+    Requires ``emergentintegrations`` (Emergent-specific package). If the
+    library is not installed we fall through to a LiteLLM call using
+    whichever provider-family API key is present in the environment, so
+    self-hosted deployments still work.
+    """
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+    except ImportError:
+        # emergentintegrations not installed: fall back to a direct call
+        # with the underlying family SDK. Requires ANTHROPIC_API_KEY /
+        # OPENAI_API_KEY / GEMINI_API_KEY to be set for the resolved
+        # family.
+        family = _resolve_emergent_family(cfg.model)
+        fallback = LlmConfig(
+            provider=family, model=cfg.model,
+            temperature=cfg.temperature, max_tokens=cfg.max_tokens,
+        )
+        return _litellm_call(system, user, fallback)
+
     key = os.environ["EMERGENT_LLM_KEY"]
     family = _resolve_emergent_family(cfg.model)
     chat = (
@@ -101,16 +145,34 @@ def _emergent_call_with_web_search(system: str, user: str, cfg: LlmConfig,
       * ``openai``    — Not exposed through the Emergent proxy today; falls
                         back to a plain LLM call without web search.
 
+    If ``emergentintegrations`` is not installed we route the anthropic
+    family through LiteLLM's native web_search_20250305 support, so
+    non-Emergent deploys still get citations.
+
     Returns ``(content, citations)``; citations may be empty when the
     provider chose not to search or is running without tool support.
     """
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
     from ..llm_catalog import web_search_tool_for
     import asyncio
 
-    key = os.environ["EMERGENT_LLM_KEY"]
     family = _resolve_emergent_family(cfg.model)
     tool = web_search_tool_for(family)
+
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+    except ImportError:
+        # No emergentintegrations. Route Anthropic through LiteLLM native
+        # web_search_20250305 tool if possible; other families fall back
+        # to a plain LLM call.
+        fallback = LlmConfig(
+            provider=family, model=cfg.model,
+            temperature=cfg.temperature, max_tokens=cfg.max_tokens,
+        )
+        if family == "anthropic":
+            return _litellm_call_with_web_search(system, user, fallback, max_uses=max_uses)
+        return _litellm_call(system, user, fallback), []
+
+    key = os.environ["EMERGENT_LLM_KEY"]
 
     if tool is None:
         # No native web-search on this family. Return a plain call so the
@@ -147,6 +209,48 @@ def _emergent_call_with_web_search(system: str, user: str, cfg: LlmConfig,
     return asyncio.run(_do())
 
 
+def _litellm_call_with_web_search(system: str, user: str, cfg: LlmConfig,
+                                  max_uses: int = 3) -> tuple[str, list[dict[str, Any]]]:
+    """LiteLLM path for Anthropic native web_search_20250305 tool.
+
+    Lets the shipped Statute + Praxis agents work end-to-end with a plain
+    ``ANTHROPIC_API_KEY`` in the environment (no emergentintegrations
+    required). Returns (content, citations) in the same shape as the
+    Emergent path.
+    """
+    tool = {
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": max_uses,
+    }
+    kwargs: dict[str, Any] = {
+        "model": cfg.model,
+        "temperature": cfg.temperature,
+        "max_tokens": cfg.max_tokens,
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+        "tools": [tool],
+    }
+    if cfg.api_key:
+        kwargs["api_key"] = cfg.api_key
+    resp = litellm.completion(**kwargs)
+    content = resp.choices[0].message.content or ""
+    if isinstance(content, list):
+        content = "".join(str(c.get("text", "")) if isinstance(c, dict) else str(c)
+                          for c in content)
+    urls = _URL_RE.findall(content)
+    seen: set[str] = set()
+    cites: list[dict[str, Any]] = []
+    for u in urls:
+        if u in seen:
+            continue
+        seen.add(u)
+        cites.append({"url": u, "title": ""})
+        if len(cites) >= 20:
+            break
+    return content, cites
+
+
 _URL_RE = re.compile(r"https?://[^\s\)\]\"']+")
 
 
@@ -155,15 +259,22 @@ def call_llm_with_web_search(system: str, user: str,
                              max_uses: int = 3) -> tuple[str, list[dict[str, Any]]]:
     """Public helper: LLM call with Claude native web_search.
 
-    Only wired for the ``emergent`` provider today because the Emergent
-    Universal Key routes to Anthropic and Anthropic exposes the
-    provider-hosted ``web_search_20250305`` tool. Falls back to a plain
-    LLM call (no citations) for other providers so agents remain
-    functional without the tool.
+    Wired for both providers that can invoke Anthropic's provider-hosted
+    ``web_search_20250305`` tool:
+
+      * ``emergent`` -> Emergent Universal Key (via emergentintegrations
+        when installed, LiteLLM fallback otherwise).
+      * ``anthropic`` -> plain Anthropic key via LiteLLM's native
+        tool-use path.
+
+    All other providers fall back to a plain LLM call (no citations) so
+    agents remain functional without provider-hosted search.
     """
-    cfg = cfg or LlmConfig()
+    cfg = cfg or LlmConfig.from_dict(None)
     if cfg.provider == "emergent":
         return _emergent_call_with_web_search(system, user, cfg, max_uses=max_uses)
+    if cfg.provider == "anthropic":
+        return _litellm_call_with_web_search(system, user, cfg, max_uses=max_uses)
     return _litellm_call(system, user, cfg), []
 
 
@@ -184,7 +295,7 @@ def _litellm_call(system: str, user: str, cfg: LlmConfig) -> str:
 
 
 def call_llm(system: str, user: str, cfg: LlmConfig | None = None) -> str:
-    cfg = cfg or LlmConfig()
+    cfg = cfg or LlmConfig.from_dict(None)
     if cfg.provider == "emergent":
         return _emergent_call(system, user, cfg)
     return _litellm_call(system, user, cfg)

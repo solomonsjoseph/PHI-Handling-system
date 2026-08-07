@@ -1,18 +1,22 @@
 """LLM classifier: reads only column headers for datasets, full text for narratives.
 
-Uses Emergent Universal Key via emergentintegrations. Returns strict JSON.
+Portable: uses the shared multi-provider client (`agents/llm.py`), which
+auto-detects the default provider from environment keys. Works with
+Emergent Universal Key, plain Anthropic, OpenAI, Gemini, OpenRouter, or
+any OpenAI-compatible endpoint.
 """
 from __future__ import annotations
 
+import asyncio
 import json
-import os
 import re
 from typing import Any
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+# ``phi_core.agents.llm`` is imported lazily inside the call helpers to
+# avoid a circular import (``phi_core.agents.__init__`` pulls the
+# orchestrator, which imports ``phi_core.pipeline``, which imports this
+# module).
 
-
-MODEL_PROVIDER = "anthropic"
 MODEL_NAME = "claude-sonnet-4-5-20250929"
 
 SYSTEM = (
@@ -37,31 +41,33 @@ def _strip_json(s: str) -> dict[str, Any]:
         return {"content_type": "other", "notes": "malformed JSON"}
 
 
+def _cfg():
+    # Lazy import to avoid the circular dep noted at top of module.
+    from phi_core.agents.llm import LlmConfig
+    return LlmConfig.from_dict({"model": MODEL_NAME})
+
+
 async def classify_narrative(text: str, filename: str) -> dict[str, Any]:
+    from phi_core.agents.llm import call_llm
     excerpt = text[:4000]
-    key = os.environ["EMERGENT_LLM_KEY"]
-    chat = LlmChat(
-        api_key=key,
-        session_id=f"classify_narr_{filename}",
-        system_message=SYSTEM,
-    ).with_model(MODEL_PROVIDER, MODEL_NAME)
-    user = UserMessage(text=f"Filename: {filename}\nFile kind: narrative\nExcerpt (first 4000 chars):\n---\n{excerpt}\n---\nRespond with JSON only.")
-    reply = await chat.send_message(user)
+    user = (
+        f"Filename: {filename}\nFile kind: narrative\n"
+        f"Excerpt (first 4000 chars):\n---\n{excerpt}\n---\n"
+        "Respond with JSON only."
+    )
+    reply = await asyncio.to_thread(call_llm, SYSTEM, user, _cfg())
     return _strip_json(str(reply))
 
 
-async def classify_dataset_headers(columns: list[str], filename: str, row_count: int) -> dict[str, Any]:
-    key = os.environ["EMERGENT_LLM_KEY"]
-    chat = LlmChat(
-        api_key=key,
-        session_id=f"classify_ds_{filename}",
-        system_message=SYSTEM,
-    ).with_model(MODEL_PROVIDER, MODEL_NAME)
+async def classify_dataset_headers(columns: list[str], filename: str,
+                                   row_count: int) -> dict[str, Any]:
+    from phi_core.agents.llm import call_llm
     header_list = ", ".join(columns[:200])
-    user = UserMessage(text=(
-        f"Filename: {filename}\nFile kind: structured dataset (row values withheld for PHI safety)\n"
-        f"Row count: {row_count}\nColumn headers only: {header_list}\n"
-        "Respond with JSON only. Base your assessment strictly on the column names."
-    ))
-    reply = await chat.send_message(user)
+    user = (
+        f"Filename: {filename}\nFile kind: structured_dataset\n"
+        f"Row count: {row_count}\n"
+        f"Column headers (headers only, never row values): {header_list}\n"
+        "Respond with JSON only."
+    )
+    reply = await asyncio.to_thread(call_llm, SYSTEM, user, _cfg())
     return _strip_json(str(reply))

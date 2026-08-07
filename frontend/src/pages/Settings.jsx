@@ -130,12 +130,11 @@ export default function Settings() {
   );
 
   const providerOptions = useMemo(() => {
-    // Merge server-allowed providers with catalog families to preserve
-    // server-side validation (SEC-003 provider allow-list).
-    const base = new Set(providers);
-    // 'emergent' is always available (Emergent Universal Key)
-    base.add('emergent');
-    return Array.from(base);
+    // Server-allowed providers only. `emergent` is included by the server
+    // when the pod has EMERGENT_LLM_KEY set; on self-hosted deploys that
+    // don't have it, the option is hidden so operators aren't led to a
+    // path that will fail on first call.
+    return Array.from(new Set(providers));
   }, [providers]);
 
   const providerLabel = (pid) => {
