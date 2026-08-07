@@ -1,15 +1,16 @@
 """Orchestrator: run the full agent pipeline for a session.
 
 Pipeline:
-  1. Specialists in parallel (Lexicon, Schema, Instrument)
-  2. Statute (jurisdiction rules)
-  3. Judge <-> Sentinel loop (short-circuits on 0 blocking issues; capped at ITERATION_CAP=2)
-  4. Human review gate if Sentinel still has blocking issues
-  5. Executor applies decisions
-  6. Auditor + Scout run in parallel (Scout doesn't depend on Auditor)
+  1. Specialists (Lexicon, Schema, Instrument) + Statute + Praxis ALL in
+     parallel (Statute/Praxis don't read file content, so they overlap
+     with specialists rather than serialising after them).
+  2. Judge <-> Sentinel loop (short-circuits on 0 blocking issues; capped at ITERATION_CAP=2)
+  3. Human review gate if Sentinel still has blocking issues
+  4. Executor applies decisions
+  5. Publish Guard (deterministic residual PHI scan)
+  6. Auditor + Scout in parallel (Scout doesn't depend on Auditor)
   7. Ledger (Compare + Aggregate) sub-agent split
   8. Herald (Abstract + Sections) sub-agent split
-  9. Publish Guard (deterministic)
 
 Cancellation: the orchestrator checks ``is_cancelled(sid)`` between
 phases. When True the pipeline exits early with status='cancelled' and
@@ -75,33 +76,47 @@ async def run_pipeline(
 
     common = dict(session_id=sid, llm=llm_cfg, db=db, emit=emit)
 
-    # 1. Specialists in parallel
+    # 1+2+2b. Specialists, Statute, and Praxis kicked off IN PARALLEL.
+    #
+    # Speedup rationale (Sir Q "the entire process is very slow"):
+    #  - Statute only needs the jurisdiction string from the session.
+    #  - Praxis only needs the hardcoded HIPAA category list.
+    #  - Neither reads file content, so they don't have to wait on
+    #    Lexicon/Schema/Instrument. Launching them at t=0 overlaps all
+    #    of their runtime (10 web searches on cold cache) with the
+    #    specialist file parsing.
     await on_phase("specialists", {"agents": ["Lexicon", "Schema", "Instrument"]})
+    await on_phase("statute", {})
+    await on_phase("praxis", {})
+
+    hipaa_cats = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K",
+                  "L", "M", "N", "O", "P", "Q", "R"]
+    praxis_agent = Praxis(**common)
+
+    # Fire the independent long-runners immediately. asyncio.gather()
+    # eagerly schedules its awaitables, so simply calling it starts the
+    # web-search work; we don't need to wrap it in create_task().
+    statute_task = asyncio.create_task(
+        Statute(**common).run(jurisdiction=session.get("jurisdiction", "us"))
+    )
+    praxis_gather_task = asyncio.gather(
+        *[praxis_agent.method_for(c) for c in hipaa_cats],
+        return_exceptions=True,
+    )
+
+    # Specialists: Lexicon must finish before Schema (Schema enriches its
+    # prompt with the dictionary columns). Instrument is independent.
     lex_task = Lexicon(**common).run(dict_files=dict_files) if dict_files else _empty({"columns": []})
     inst_task = Instrument(**common).run(form_files=form_files) if form_files else _empty({"fields": []})
-    # Lexicon must complete before Schema so Schema can enrich its prompt
     lexicon = await lex_task
     schema_task = Schema(**common).run(dataset_files=dataset_files, lexicon_columns=lexicon.get("columns", [])) if dataset_files else _empty({"columns": []})
     schema, instrument = await asyncio.gather(schema_task, inst_task)
 
-    # 2. Statute (jurisdictional regulations, live web search)
-    await on_phase("statute", {})
-    statute = await Statute(**common).run(jurisdiction=session.get("jurisdiction", "us"))
-
-    # 2b. Praxis (PHI transformation methods expert). Fetches the CURRENT
-    # best-practice technique per HIPAA identifier category from Sir's spec:
-    # "The classifier asks for method to handle dates then the agent would
-    # search the latest jittering method (eg. SANT)". We prime Praxis with
-    # the categories that appear in the Statute rule table so Judge can
-    # consult it inline without extra roundtrips.
-    await on_phase("praxis", {})
-    praxis_agent = Praxis(**common)
-    hipaa_cats = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K",
-                  "L", "M", "N", "O", "P", "Q", "R"]
-    praxis_methods = {}
-    method_tasks = [praxis_agent.method_for(c) for c in hipaa_cats]
-    results = await asyncio.gather(*method_tasks, return_exceptions=True)
-    for cat, res in zip(hipaa_cats, results):
+    # Now await the parallel experts.
+    statute = await statute_task
+    praxis_results = await praxis_gather_task
+    praxis_methods: dict[str, Any] = {}
+    for cat, res in zip(hipaa_cats, praxis_results):
         if isinstance(res, Exception):
             continue
         praxis_methods[cat] = res

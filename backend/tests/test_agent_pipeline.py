@@ -167,7 +167,7 @@ def test_results_decisions(api, session_id):
     decisions = res.get("decisions") or []
     assert len(decisions) >= 4, f"only {len(decisions)} decisions"
     allowed_actions = {"keep", "drop", "cap_age_90", "year_only", "zip3_truncate",
-                       "hash", "pseudonymize", "human_review"}
+                       "hash", "pseudonymize", "scrub_text", "human_review"}
     for d in decisions:
         assert set(["file_id", "column", "action", "reason", "confidence"]).issubset(d.keys()), d
         assert d["action"] in allowed_actions, f"bad action: {d['action']}"

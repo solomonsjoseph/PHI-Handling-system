@@ -1,0 +1,29 @@
+column_name,description,type
+patient_name,Full patient name,string
+street_address,Street address,string
+zip,ZIP code,string
+dob,Date of birth,date
+admission_date,Admission date,date
+age,Age in years,int
+phone,Contact phone,string
+fax,Contact fax,string
+email,Contact email,string
+ssn,Social security number,string
+patient_id,Study-scoped patient identifier,string
+insurance_id,Health plan beneficiary id,string
+account_number,Billing account number,string
+license_number,Certificate / licence number,string
+vehicle_id,Vehicle identification number,string
+device_serial,Study-issued device serial,string
+personal_url,Personal URL,string
+client_ip,Client IP address,string
+biometric_hash,Biometric hash,string
+face_photo,Face photograph reference,string
+tracking_code,Unique tracking / linkage code,string
+heart_rate_bpm,Heart rate,int
+systolic_bp,Systolic BP,int
+glucose_mgdl,Fasting glucose,int
+bmi,Body mass index,float
+arm_code,Study arm assignment,string
+barcode,Specimen barcode,string
+notes,Free-text clinical notes,string

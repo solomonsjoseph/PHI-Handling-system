@@ -569,6 +569,9 @@ Sir directed "find the gap and fix the gap and loop until nothing to be found to
 - Multi-provider settings UI page at /settings (BYO API key for Anthropic, OpenAI, Gemini, OpenRouter, OpenAI-compatible; Emergent Universal Key by default).
 - 2026-02-01: PipelineProgressBar (phase %, current-phase label + blurb) mounted above the live agent trace on `/sessions/{sid}`. Fixed initial `events` undefined build blocker by wiring the component to the `trace` state (SSE-driven). Frontend lint: 0 errors.
 - Scope decision (2026-02-01): No jurisdiction expansion until US-HIPAA proves 100% reliable end-to-end across live runs. EU/UK/IN/CA/BR stubs remain in `jurisdictions.py`; expansion deferred.
+- 2026-02-01: `/app/memory/VISION.md` added — one-page north-star (problem, answer, six non-negotiable principles, 12-agent architecture, users, trust bar, non-goals, metrics).
+- 2026-02-07: **Pipeline speedup** — Statute + Praxis (17-category web-search fan-out) now launch in parallel with Specialists at t=0 instead of serialising after them. On cold cache this overlaps ~all Praxis runtime (biggest single wallclock cost) with Lexicon/Schema/Instrument file parsing.
+- 2026-02-07: **Agent trace** — every expanded trace row now shows "role · what · why · how" for the agent (13 agents documented: Lexicon, Schema, Instrument, Statute, Praxis, Judge, Sentinel, Executor, Publish Guard, Auditor, Scout, Ledger, Herald).
 
 ## Enhancement (would Sir like this next?)
 
