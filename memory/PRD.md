@@ -577,6 +577,11 @@ Sir directed "find the gap and fix the gap and loop until nothing to be found to
 - 2026-02-07: **Trace deep-links** — every trace row has `id="trace-{Agent}"` and a "# copy link" affordance in the meta panel; `#trace-Judge` in the URL auto-expands + scrolls to that row.
 - 2026-02-07: **Cold-cache warmup** — `POST /api/settings/warmup` primes Statute + all 17 Praxis methods with an ephemeral session id; button on `/settings` triggers it, reports primed/failed counts.
 - 2026-02-07: **CLAUDE.md** — fully rewritten to reflect the actual 12-agent architecture (was still describing the legacy detectors/llm_classifier layout).
+- 2026-02-07: **Live wallclock baseline** — appended to `VISION.md` Appendix A. Real US-HIPAA corpus run (`diabetes_v1`, iteration_cap=3, cache warm): **196.8 s total**, per-agent LLM time table, projected cold-cache parallel-launch savings ~55 s.
+- 2026-02-07: **Deep-link toast** — `#trace-Judge` URLs auto-expand + scroll AND raise a toast ("Deep-link opened: Judge · scroll below for the reviewer's citation") so operators know why the page moved.
+- 2026-02-07: **Rigor chip on SessionDetail** — `Rigor · Fast/Balanced/Thorough (N)` chip renders next to "Pipeline progress · N%" with a title-tooltip explaining the trade-off.
+- 2026-02-07: **Auto-warmup scheduler** — background loop fires the Statute + 17-Praxis warmup every Monday 09:00 UTC when the operator opts in. Endpoints: `GET/POST /api/settings/warmup/schedule`. UI: checkbox on `/settings` with next-run + last-run bookkeeping.
+- 2026-02-07: **Orchestrator closure bug fixed** — `timed_on_phase` was capturing the rebound `on_phase` name and recursing on itself. Now captures `_original_on_phase` before rebinding. Cleared a `RecursionError` seen on the first live baseline run.
 
 ## Enhancement (would Sir like this next?)
 

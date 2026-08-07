@@ -203,6 +203,12 @@ function AgentTracePanel({ sid, trace, status, cancelRequested, advisory }) {
     const idx = grouped.findIndex(g => (g.agent || '').toLowerCase() === wanted);
     if (idx >= 0) {
       setOpenIdx(idx);
+      // Small toast so the operator knows why the page auto-scrolled and
+      // which agent the shared link is citing (Sir Q "Deep-Link Anchor
+      // Toast: linked from IRB reviewer").
+      toast(`Deep-link opened: ${m[1]} · scroll below for the reviewer's citation`, {
+        duration: 4500,
+      });
       // Defer scroll so the DOM node exists.
       setTimeout(() => {
         const el = document.getElementById(`trace-${m[1]}`);
@@ -425,13 +431,23 @@ function _phaseIndexFromEvents(events, status) {
   return 0;
 }
 
-function PipelineProgressBar({ events, status, phaseTimings, runElapsed }) {
+function PipelineProgressBar({ events, status, phaseTimings, runElapsed, iterationCap }) {
   const currentIdx = _phaseIndexFromEvents(events, status);
   const isFailed = status === 'failed' || status === 'cancelled';
   const pct = currentIdx < 0
     ? 0
     : Math.round(((currentIdx + 1) / _PHASES.length) * 100);
   const current = currentIdx >= 0 ? _PHASES[currentIdx] : null;
+
+  // Sir Q "Rigor Tooltip on SessionDetail": show the chosen rigor as a
+  // chip near the progress bar so reviewers see the confidence trade-off
+  // at a glance without leaving the trace page.
+  const _RIGOR_META = {
+    1: { label: 'Fast', blurb: '1 Sentinel pass · short studies, high-confidence headers' },
+    2: { label: 'Balanced', blurb: '2 Sentinel passes · default rigor for most studies' },
+    3: { label: 'Thorough', blurb: '3 Sentinel passes · max defensibility, longest wallclock' },
+  };
+  const rigor = iterationCap ? _RIGOR_META[iterationCap] : null;
 
   // Sir Q "Live Wallclock Measurement": show per-phase durations once the
   // orchestrator has emitted them. Values come from session.phase_timings
@@ -453,7 +469,18 @@ function PipelineProgressBar({ events, status, phaseTimings, runElapsed }) {
   return (
     <div className="mt-8 mb-2" data-testid="pipeline-progress-bar">
       <div className="flex items-baseline justify-between mb-2">
-        <div className="kicker">Pipeline progress · {pct}%</div>
+        <div className="flex items-baseline gap-3">
+          <div className="kicker">Pipeline progress · {pct}%</div>
+          {rigor && (
+            <span
+              className="font-mono text-[10px] px-2 py-0.5 bg-paper-2 border border-rule text-ink-2"
+              data-testid="pipeline-rigor-chip"
+              title={rigor.blurb}
+            >
+              Rigor · {rigor.label} ({iterationCap})
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-3 font-mono text-[11px] text-ink-muted">
           {runElapsed != null && (
             <span data-testid="pipeline-elapsed">
@@ -710,6 +737,7 @@ export default function SessionDetail() {
         status={status}
         phaseTimings={session?.phase_timings}
         runElapsed={session?.run_elapsed_s}
+        iterationCap={session?.iteration_cap}
       />
 
       {/* Live agent trace — always shown so operators see the pipeline moving. */}

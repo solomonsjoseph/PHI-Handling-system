@@ -23,7 +23,7 @@ import asyncio
 import uuid
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -1081,23 +1081,10 @@ async def _current_llm_cfg() -> LlmConfig:
     return LlmConfig.from_dict(doc)
 
 
-@app.post("/api/settings/warmup", dependencies=[Depends(require_api_token)])
-async def settings_warmup():
-    """Prime the Statute + Praxis caches for supported jurisdictions.
-
-    Sir Q "Cold-Cache Warmup": the first study of the day pays for 10+ web
-    searches (Praxis E, I..R) plus Statute. This endpoint pre-runs those
-    with an ephemeral session id so the caches are hot before an operator
-    kicks off a real run. Uses the current LLM config and returns per-task
-    outcome so the UI can report which categories cached vs. failed.
-
-    Only US-HIPAA is warmed for now; extra jurisdictions light up
-    automatically once `jurisdictions.py` graduates them from stub.
-    """
+async def _run_warmup(db, cfg) -> dict:
+    """Run Statute + all 17 Praxis warmups. Shared by manual and scheduled paths."""
     from phi_core.agents.experts import Praxis, Statute
 
-    db = get_db()
-    cfg = await _current_llm_cfg()
     warmup_sid = f"warmup:{uuid.uuid4().hex[:8]}"
 
     async def _noop_emit(_msg):  # pragma: no cover - trivial
@@ -1113,12 +1100,7 @@ async def settings_warmup():
         *[praxis_agent.method_for(c) for c in hipaa_cats],
         return_exceptions=True,
     )
-    try:
-        statute_res, praxis_res = await asyncio.wait_for(
-            asyncio.gather(statute_task, praxis_task), timeout=240.0,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(504, "warmup exceeded 240s ceiling")
+    statute_res, praxis_res = await asyncio.gather(statute_task, praxis_task)
 
     praxis_ok = [c for c, r in zip(hipaa_cats, praxis_res)
                  if not isinstance(r, Exception)]
@@ -1135,6 +1117,126 @@ async def settings_warmup():
             "total": len(hipaa_cats),
         },
     }
+
+
+@app.post("/api/settings/warmup", dependencies=[Depends(require_api_token)])
+async def settings_warmup():
+    """Prime the Statute + Praxis caches for supported jurisdictions.
+
+    Sir Q "Cold-Cache Warmup": the first study of the day pays for 10+ web
+    searches (Praxis E, I..R) plus Statute. This endpoint pre-runs those
+    with an ephemeral session id so the caches are hot before an operator
+    kicks off a real run. Uses the current LLM config and returns per-task
+    outcome so the UI can report which categories cached vs. failed.
+
+    Only US-HIPAA is warmed for now; extra jurisdictions light up
+    automatically once `jurisdictions.py` graduates them from stub.
+    """
+    db = get_db()
+    cfg = await _current_llm_cfg()
+    try:
+        return await asyncio.wait_for(_run_warmup(db, cfg), timeout=240.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "warmup exceeded 240s ceiling")
+
+
+class AutoWarmupCfg(BaseModel):
+    enabled: bool = False
+
+
+@app.get("/api/settings/warmup/schedule", dependencies=[Depends(require_api_token)])
+async def get_warmup_schedule():
+    """Return the auto-warmup toggle and last-run bookkeeping.
+
+    Auto-warmup fires every Monday at 09:00 UTC so the cache is hot for
+    the workweek. See `_warmup_scheduler_loop` for the timing loop.
+    """
+    db = get_db()
+    doc = await db.settings.find_one({"_id": "warmup"}, {"_id": 0}) or {}
+    return {
+        "enabled": bool(doc.get("enabled", False)),
+        "last_run_at": doc.get("last_run_at"),
+        "last_run_status": doc.get("last_run_status"),
+        "next_run_at": _next_monday_0900_iso(),
+    }
+
+
+@app.post("/api/settings/warmup/schedule", dependencies=[Depends(require_api_token)])
+async def set_warmup_schedule(body: AutoWarmupCfg):
+    db = get_db()
+    await db.settings.update_one(
+        {"_id": "warmup"},
+        {"$set": {"enabled": bool(body.enabled)}},
+        upsert=True,
+    )
+    return {"ok": True, "enabled": bool(body.enabled),
+            "next_run_at": _next_monday_0900_iso()}
+
+
+def _next_monday_0900_iso() -> str:
+    """Compute the next Monday 09:00 UTC as an ISO string."""
+    now = datetime.now(timezone.utc)
+    # Monday=0, ..., Sunday=6
+    days_ahead = (0 - now.weekday()) % 7
+    target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    target = target + timedelta(days=days_ahead)
+    if target <= now:
+        target = target + timedelta(days=7)
+    return target.isoformat()
+
+
+async def _warmup_scheduler_loop():
+    """Background loop: every Monday 09:00 UTC, warm the cache if enabled.
+
+    Runs forever. Sleeps until the next Monday 09:00 UTC, checks the
+    ``settings.warmup.enabled`` flag, and if true calls ``_run_warmup``.
+    Failures are logged to Mongo but never crash the loop -- the scheduler
+    must survive individual warmup errors.
+    """
+    while True:
+        try:
+            next_run_iso = _next_monday_0900_iso()
+            next_run = datetime.fromisoformat(next_run_iso)
+            delay = (next_run - datetime.now(timezone.utc)).total_seconds()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            db = get_db()
+            doc = await db.settings.find_one({"_id": "warmup"}, {"_id": 0}) or {}
+            if not doc.get("enabled"):
+                # Sleep an extra minute so the same window doesn't fire again.
+                await asyncio.sleep(60)
+                continue
+            cfg = await _current_llm_cfg()
+            try:
+                res = await asyncio.wait_for(_run_warmup(db, cfg), timeout=300.0)
+                await db.settings.update_one(
+                    {"_id": "warmup"},
+                    {"$set": {
+                        "last_run_at": datetime.now(timezone.utc).isoformat(),
+                        "last_run_status": "ok",
+                        "last_run_result": res,
+                    }},
+                )
+            except Exception as e:  # pragma: no cover - infrastructure dependent
+                await db.settings.update_one(
+                    {"_id": "warmup"},
+                    {"$set": {
+                        "last_run_at": datetime.now(timezone.utc).isoformat(),
+                        "last_run_status": f"error:{type(e).__name__}",
+                    }},
+                )
+            # Move past the fired minute.
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:  # pragma: no cover - shutdown
+            raise
+        except Exception:  # pragma: no cover - defensive
+            # Any unexpected error: back off a minute and keep the loop alive.
+            await asyncio.sleep(60)
+
+
+@app.on_event("startup")
+async def _start_warmup_scheduler():
+    asyncio.create_task(_warmup_scheduler_loop())
 
 
 # --- Agent-driven PHI handling -------------------------------------------

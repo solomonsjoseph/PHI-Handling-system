@@ -19,16 +19,19 @@ export default function Settings() {
   const [busy, setBusy] = useState(false);
   const [warming, setWarming] = useState(false);
   const [warmupResult, setWarmupResult] = useState(null);
+  const [autoWarmup, setAutoWarmup] = useState({ enabled: false, last_run_at: null, last_run_status: null, next_run_at: null });
   const [opToken, setOpToken] = useState(getApiToken());
 
   const load = async () => {
-    const [r, c] = await Promise.all([
+    const [r, c, w] = await Promise.all([
       axios.get(`${API}/settings/llm`).then(r => r.data),
       axios.get(`${API}/settings/llm/catalog`).then(r => r.data),
+      axios.get(`${API}/settings/warmup/schedule`).then(r => r.data).catch(() => null),
     ]);
     setProviders(r.providers || []);
     setCatalog(c);
     setApiKeySet(!!r.api_key_set);
+    if (w) setAutoWarmup(w);
     const { providers: _p, api_key_set: _a, api_key: _k, ...rest } = r;
     setCfg(prev => ({ ...prev, ...rest }));
   };
@@ -67,6 +70,17 @@ export default function Settings() {
     } catch (e) {
       toast.error(`warmup failed: ${e?.response?.data?.detail || e.message}`);
     } finally { setWarming(false); }
+  };
+
+  // Sir Q "Warmup Auto-Prime": weekly Monday 09:00 UTC background warmup.
+  const toggleAutoWarmup = async (enabled) => {
+    try {
+      const r = await axios.post(`${API}/settings/warmup/schedule`, { enabled });
+      setAutoWarmup(prev => ({ ...prev, enabled: r.data.enabled, next_run_at: r.data.next_run_at }));
+      toast(enabled ? 'Auto-warmup on · Mondays 09:00 UTC' : 'Auto-warmup off');
+    } catch (e) {
+      toast.error(`schedule update failed: ${e?.response?.data?.detail || e.message}`);
+    }
   };
 
   // ------- provider / model picker helpers ------------------------------
@@ -250,6 +264,34 @@ export default function Settings() {
                 )}
               </div>
             )}
+          </div>
+
+          {/* Auto-prime toggle: fires the warmup every Monday 09:00 UTC. */}
+          <div className="mt-6 flex items-start gap-3" data-testid="auto-warmup-toggle">
+            <input
+              type="checkbox"
+              id="auto-warmup"
+              checked={!!autoWarmup.enabled}
+              onChange={e => toggleAutoWarmup(e.target.checked)}
+              className="mt-1"
+              data-testid="auto-warmup-checkbox"
+            />
+            <label htmlFor="auto-warmup" className="text-[12px] text-ink-2 leading-snug">
+              <span className="font-display text-ink text-[13px]">Auto-prime every Monday 09:00 UTC</span>
+              <div className="text-ink-muted mt-0.5 font-mono text-[11px]">
+                {autoWarmup.enabled ? (
+                  <>next run: {autoWarmup.next_run_at || 'monday 09:00 UTC'}</>
+                ) : (
+                  <>off · flip on to keep the cache hot through the workweek</>
+                )}
+                {autoWarmup.last_run_at && (
+                  <span className="ml-2">
+                    · last: {new Date(autoWarmup.last_run_at).toISOString().slice(0, 16).replace('T', ' ')} UTC
+                    {autoWarmup.last_run_status && ` (${autoWarmup.last_run_status})`}
+                  </span>
+                )}
+              </div>
+            </label>
           </div>
         </div>
 

@@ -82,6 +82,7 @@ async def run_pipeline(
     _phase_timings: dict[str, dict[str, float]] = {}
     _last_phase: dict[str, str | None] = {"key": None, "t0": 0.0}
     _run_started = time.perf_counter()
+    _original_on_phase = on_phase  # capture before we rebind below
 
     async def timed_on_phase(phase: str, payload: dict[str, Any]) -> None:
         now = time.perf_counter()
@@ -95,7 +96,7 @@ async def run_pipeline(
         _last_phase["t0"] = now
         payload = dict(payload or {})
         payload["_elapsed_s"] = round(now - _run_started, 3)
-        await on_phase(phase, payload)
+        await _original_on_phase(phase, payload)
 
     async def close_last_phase() -> None:
         prev = _last_phase["key"]
