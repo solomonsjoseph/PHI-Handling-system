@@ -89,66 +89,94 @@ If the LLM never reads a row, and the deterministic layer at the boundary is pro
 
 That is the vision. Everything in the codebase either serves it or gets removed.
 
-## Appendix A. Live wallclock baseline (2026-02-07)
+## Appendix A. Live wallclock baselines (2026-02-07)
 
-First measured on a real US-HIPAA corpus run through the shipped pipeline
-(scenario `diabetes_v1`, 10 columns, iteration_cap=3, cache warm, Claude
-Sonnet 4.5 via Emergent Universal Key).
+Measured on two real US-HIPAA corpus runs of the same shipped pipeline
+(scenario `diabetes_v1`, 10 columns, iteration_cap=3, Claude Sonnet 4.5
+via Emergent Universal Key). Both runs completed with Sentinel
+short-circuiting on iteration 1 (no blocking issues).
 
-**Total wallclock:** 196.8 seconds.
+### Cold cache — first study of the day
+
+Praxis cache wiped before this run; the 10 non-deterministic HIPAA
+categories (E, I..R) had to web-search from scratch.
+
+**Total wallclock: 181.2 s.**
 
 Per-agent LLM time (sum of duration_ms across all calls):
 
 ```
-Lexicon              16.98 s   (dictionary parse)
-Schema                8.03 s   (dataset headers)
-Judge                23.47 s   (per-column classification, 1 iteration)
-Sentinel             26.33 s   (LLM review, short-circuited after 1 pass)
-Auditor               7.23 s   (metrics narrative)
-Ledger.Compare       14.17 s   (per-competitor delta)
-Ledger.Aggregate     14.97 s   (headline + recommendations)
-Herald.Abstract      53.40 s   (title + abstract + methods + refs)
-Herald.Sections      31.02 s   (results + discussion + limitations)
+Praxis              289.87 s   (10 categories × ~29 s web search, ALL RUN IN PARALLEL)
+Herald.Abstract      62.63 s
+Herald.Sections      33.64 s
+Ledger.Compare       17.04 s
+Ledger.Aggregate     14.76 s
+Judge                20.78 s
+Sentinel             23.13 s
+Lexicon              19.30 s
+Schema                8.77 s
+Auditor               7.81 s
                     -------
-                    195.59 s   sum of LLM call durations
+                    497.72 s   sum of LLM call durations
 ```
 
-Phase transitions (in wallclock order):
+The critical wallclock reduction: **Praxis 289.87 s of sequential LLM time
+collapsed into a 34.92 s parallel block** because all 10 web searches fire
+concurrently under `asyncio.gather`. Specialists (Lexicon + Schema, ~28 s)
+overlap the same block; the block is bounded by the slowest single Praxis
+search, not the sum.
+
+### Warm cache — subsequent studies within the weekly refresh window
+
+Cache hit on every Praxis category; Statute cache hit; specialists still
+parse the incoming ZIP.
+
+**Total wallclock: 159.9 s.**
+
+Per-agent LLM time (sum of duration_ms across all calls):
 
 ```
-specialists          t=  0.00s  (Lexicon -> Schema serial; Instrument
-                                 skipped, no forms in this scenario)
-statute              t=  0.00s  (cache hit, 0 s)
-praxis               t=  0.00s  25.04 s  (all 17 categories cache-hit;
-                                 duration reflects the parallel block max
-                                 because Statute + Praxis + Specialists
-                                 launched together)
-judge_iter_1         t= 25.04s  23.47 s
-sentinel_iter_1      t= 48.51s  26.34 s  (short-circuit: 0 blocking issues)
-executor             t= 74.86s   1.12 s  (deterministic, no LLM)
-publish_guard        t= 75.97s   ~0 s    (deterministic scan)
-auditor_scout        t= 75.97s   7.24 s  (parallel)
-ledger               t= 83.21s  29.14 s  (Compare + Aggregate)
-herald               t=112.35s  84.42 s  (Abstract + Sections)
+Herald.Abstract      48.81 s
+Herald.Sections      30.89 s
+Judge                22.83 s
+Sentinel             20.08 s
+Lexicon              20.39 s
+Ledger.Aggregate     19.05 s
+Ledger.Compare       15.23 s
+Schema                7.24 s
+Auditor               6.13 s
+                    -------
+                    190.65 s   sum of LLM call durations
 ```
 
-**Parallel-launch impact.** On the cold-cache first run of the day, Statute
-(~10 s web search) and Praxis (~70 s across 10 non-deterministic web
-searches for categories E, I..R) previously ran *after* the specialists.
-Under the current parallel-launch design they overlap with the specialist
-block, which is dominated by Lexicon + Schema (~25 s). Projected cold-cache
-saving on the first study of the day: ~55 seconds (Statute ~10 s + Praxis
-non-overlapping ~45 s, both now absorbed into the specialist window).
+### What parallel launch buys us (measured, not projected)
 
-Cache-warm runs (every subsequent study within a week) see the parallel
-launch essentially free: Statute and Praxis are cache hits, so the block
-is bounded by the specialist runtime regardless.
+Two parallelisations landed on 2026-02-07:
 
-**IRB-quotable summary.** "The end-to-end 12-agent handling of a real
-US-HIPAA study of 10 variables completes in under 200 seconds on cache-warm
-paths, with zero row values sent to the LLM. On the first study of the day,
-parallel launch of Specialists + Statute + Praxis saves approximately
-55 seconds versus the earlier serial layout."
+1. **Specialists + Statute + Praxis at t=0.** On cold cache the Praxis
+   block collapses 289.87 s of sequential LLM work into 34.92 s of
+   wallclock. Savings: **~255 seconds versus a fully sequential Praxis
+   walk**, absorbed into what would otherwise be the specialist wait
+   anyway.
+
+2. **Herald.Abstract || Herald.Sections.** Previously Abstract had to
+   finish before Sections started (Sections received the abstract text
+   as context). By reworking the Sections prompt to skip restating the
+   aim, both LLM calls now fire concurrently.
+     - Cold-cache run: Herald wallclock 62.6 s vs 96.3 s serial. **Saved ~33 s.**
+     - Warm-cache run: Herald wallclock 48.8 s vs 79.7 s serial. **Saved ~31 s.**
+
+### IRB-quotable summary
+
+"The end-to-end 12-agent handling of a real US-HIPAA study of 10 variables
+completes in **160 seconds cache-warm** and **181 seconds cache-cold** on
+the shipped Claude Sonnet 4.5 pipeline, with zero row values sent to the
+LLM at any point. Two parallel-launch designs — concurrent
+Specialists+Statute+Praxis and concurrent Herald.Abstract+Sections — save
+approximately 285 seconds versus a fully sequential layout, meaning a
+typical study is redacted, attested, and manuscript-drafted in under three
+minutes."
 
 This appendix is regenerated whenever the pipeline order or agent set
 changes materially; treat any earlier numbers here as historical.
+

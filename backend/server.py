@@ -933,6 +933,10 @@ class CorpusStudyRunBody(BaseModel):
     edge_case_tags: list[str] = []
     row_count: int = 8
     seed: int = 42
+    # Same rigor selector the Wizard exposes. Balanced (2) is the default
+    # so corpus runs match a typical operator run's iteration count
+    # instead of silently maxing to 3.
+    iteration_cap: int = 2
 
 
 @app.post("/api/corpus/study/run", dependencies=[Depends(require_api_token)])
@@ -1010,7 +1014,7 @@ async def corpus_study_run(body: CorpusStudyRunBody):
 
     # Delegate to the existing /handle endpoint so the corpus goes through
     # the exact same 12-agent pipeline path as an operator-uploaded run.
-    await session_handle(sid)
+    await session_handle(sid, iteration_cap=body.iteration_cap)
 
     return {
         "session_id": sid, "status": "started",

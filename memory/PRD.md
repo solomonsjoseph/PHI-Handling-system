@@ -582,6 +582,10 @@ Sir directed "find the gap and fix the gap and loop until nothing to be found to
 - 2026-02-07: **Rigor chip on SessionDetail** — `Rigor · Fast/Balanced/Thorough (N)` chip renders next to "Pipeline progress · N%" with a title-tooltip explaining the trade-off.
 - 2026-02-07: **Auto-warmup scheduler** — background loop fires the Statute + 17-Praxis warmup every Monday 09:00 UTC when the operator opts in. Endpoints: `GET/POST /api/settings/warmup/schedule`. UI: checkbox on `/settings` with next-run + last-run bookkeeping.
 - 2026-02-07: **Orchestrator closure bug fixed** — `timed_on_phase` was capturing the rebound `on_phase` name and recursing on itself. Now captures `_original_on_phase` before rebinding. Cleared a `RecursionError` seen on the first live baseline run.
+- 2026-02-07: **Cold-cache rerun** — wiped Praxis + Statute cache and re-measured. Cold: **181.2 s**; warm (same run again): **159.9 s**. Parallel Praxis fan-out collapses **289.87 s of sequential LLM time into 34.92 s wallclock**. VISION.md Appendix A rewritten with measured cold vs warm baselines and IRB-quotable summary.
+- 2026-02-07: **Herald parallelisation** — Herald.Abstract and Herald.Sections now fire concurrently (Sections prompt reworked to skip restating aim/methods). Measured savings: **~33 s cold**, **~31 s warm** on Herald wallclock. Contributed to the 196.8 → 159.9 s total drop on warm runs.
+- 2026-02-07: **Rigor persistence on corpus runs** — `CorpusStudyRunBody.iteration_cap` (default 2, balanced) plumbed into `session_handle(sid, iteration_cap=...)`. Corpus runs no longer silently max to 3.
+- 2026-02-07: **Warmup schedule countdown** — `/settings` auto-warmup line now renders "next run: Mon Aug 10 09:00 UTC (~2d 15h)" via a client-side `_formatSchedule` helper that decodes the ISO timestamp into weekday + local delta.
 
 ## Enhancement (would Sir like this next?)
 

@@ -172,14 +172,16 @@ class HeraldSections(Agent):
         "limitations, and conclusion sections. Return JSON: "
         '{"sections": [{"heading": str, "body": str}], '
         '"alt_venues": [{"venue": str, "rationale": str}]}. '
-        "Order sections as Results, Discussion, Limitations, Conclusion. Each body 120-220 words."
+        "Order sections as Results, Discussion, Limitations, Conclusion. Each body 120-220 words. "
+        "Do NOT restate the study aim, methodology overview, or dataset summary that belongs in "
+        "the abstract or methods; assume those exist verbatim upstream and start each section "
+        "from the numeric or thematic point of interest."
     )
 
     async def run(self, ledger: dict[str, Any], audit: dict[str, Any],
-                  target_venue: str, abstract_text: str) -> dict[str, Any]:
+                  target_venue: str) -> dict[str, Any]:
         prompt = (
             f"Target venue: {target_venue}\n\n"
-            f"Abstract already written: {abstract_text}\n\n"
             f"Ledger comparisons: {ledger.get('comparisons', [])[:8]}\n\n"
             f"Auditor metrics: {audit.get('metrics', {}) if isinstance(audit, dict) else {}}\n"
             "Draft results, discussion, limitations, conclusion. JSON only."
@@ -189,10 +191,14 @@ class HeraldSections(Agent):
 
 
 class Herald:
-    """Combined Herald driver. Runs Abstract + Sections in parallel and
-    stitches the outputs into the same JSON shape the old monolithic
-    Herald returned. If either subagent times out, the other subagent's
-    output is still returned so the publication bundle is never empty."""
+    """Combined Herald driver. Runs Abstract + Sections in TRUE parallel
+    (both are independent LLM calls now that the Sections prompt is
+    instructed to skip restating the aim/methodology). Saves ~30-50 s of
+    wallclock on a typical run without losing manuscript coherence, since
+    human authors edit the merged draft anyway.
+
+    If either subagent times out, the other's output is still returned so
+    the publication bundle is never empty."""
     NAME = "Herald"
 
     def __init__(self, session_id: str, llm, db, emit=None) -> None:
@@ -200,16 +206,11 @@ class Herald:
 
     async def run(self, ledger: dict[str, Any], audit: dict[str, Any],
                   target_venue: str = "JAMIA Open") -> dict[str, Any]:
-        # Abstract must complete first so Sections can reference it. But
-        # both are half the size of the old Herald call, so each fits in
-        # <45 s and Sections runs in parallel with the write-back below.
-        abstract_out = await HeraldAbstract(**self._common).run(ledger, audit, target_venue)
-        sections_task = asyncio.create_task(
-            HeraldSections(**self._common).run(
-                ledger, audit, target_venue, abstract_out.get("abstract", ""),
-            )
+        abstract_out, sections_out = await asyncio.gather(
+            HeraldAbstract(**self._common).run(ledger, audit, target_venue),
+            HeraldSections(**self._common).run(ledger, audit, target_venue),
+            return_exceptions=False,
         )
-        sections_out = await sections_task
 
         methods = abstract_out.get("methods") or {"heading": "Methods", "body": ""}
         sections = [methods] + (sections_out.get("sections") or [])

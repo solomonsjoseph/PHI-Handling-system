@@ -4,6 +4,31 @@ import axios from 'axios';
 import { API, getApiToken, setApiToken } from '../lib/api';
 import { Btn, Panel, Tag } from '../components/ui';
 
+// Turn an ISO timestamp into "Mon 10 Feb 09:00 UTC (~2d 4h)" so operators
+// see the auto-warmup schedule at a glance without decoding ISO strings.
+function _formatSchedule(iso) {
+  if (!iso) return 'monday 09:00 UTC';
+  const then = new Date(iso);
+  if (isNaN(then.getTime())) return iso;
+  const wday = then.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+  const day = then.toLocaleDateString('en-US', { day: '2-digit', month: 'short', timeZone: 'UTC' });
+  const hm = then.toISOString().slice(11, 16);
+  const diffMs = then.getTime() - Date.now();
+  let delta = '';
+  if (diffMs > 0) {
+    const s = Math.floor(diffMs / 1000);
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    if (d > 0) delta = `~${d}d ${h}h`;
+    else if (h > 0) delta = `~${h}h ${m}m`;
+    else delta = `~${m}m`;
+  } else {
+    delta = 'due';
+  }
+  return `${wday} ${day} ${hm} UTC (${delta})`;
+}
+
 export default function Settings() {
   const [cfg, setCfg] = useState({
     provider: 'emergent',
@@ -278,9 +303,9 @@ export default function Settings() {
             />
             <label htmlFor="auto-warmup" className="text-[12px] text-ink-2 leading-snug">
               <span className="font-display text-ink text-[13px]">Auto-prime every Monday 09:00 UTC</span>
-              <div className="text-ink-muted mt-0.5 font-mono text-[11px]">
+              <div className="text-ink-muted mt-0.5 font-mono text-[11px]" data-testid="auto-warmup-schedule">
                 {autoWarmup.enabled ? (
-                  <>next run: {autoWarmup.next_run_at || 'monday 09:00 UTC'}</>
+                  <>next run: {_formatSchedule(autoWarmup.next_run_at)}</>
                 ) : (
                   <>off · flip on to keep the cache hot through the workweek</>
                 )}
