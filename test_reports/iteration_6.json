@@ -1,0 +1,38 @@
+{
+  "summary": "Iteration 6: Publish Guard + reviewer-identity invariant. All 11 review items PASS. 73/73 relevant pytest cases pass (2 gracefully skipped: environment-conditional guard test, and awaiting_human_review E2E-only case). Backend E2E: clean session d36e4593... returns guard{status=clean, scanned=4, blocked=0}; every file entry is 'clean'. Clean download returns HTTP 200 with fully-redacted CSV (pseudonyms scrubbed, dob->year, zip3, 90+ cap). Blocked path constructed by mutating one file's guard result to 'blocked' returns HTTP 403 with body containing 'Publish Guard blocked this export'; ?force=true override returns 200 with the file body — behavior explicit and audited via guard_report. Human-review reviewer=='' returns HTTP 400 with 'reviewer identity is required'. Per-decision resolution with reviewer='qa@example.org' + comment persists reviewer, reviewer_comment, reviewed_at on the decision AND session_review{changed_decisions:true}. Session-level acceptance (empty resolutions, no human_review decisions remaining) still persists session_review with changed_decisions:false and the pipeline resumes to 'complete'. GET /results returns 'guard' AND 'session_review' keys. Frontend: /studies/{sid} for complete clean session renders data-testid='publish-guard-panel' with data-testid='publish-guard-status' text exactly 'PHI-HANDLED \u2713 SAFE TO SHARE'. Reviewer bar renders data-testid='reviewer-id' and 'reviewer-comment'; btn-submit-human-review is disabled when reviewer is empty (also disabled when no resolutions chosen, correctly).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/sessions/{sid}/results", "issue": "The scrubber walks agent_decisions and rewrites decision.reviewer if the reviewer email matches EMAIL pattern (observed 'qa@example.org' -> '[F]' inside decisions but session_review.reviewer preserved). Not a security bug (DB retains raw value), but the two shapes are inconsistent — consider excluding decision.reviewer/session_review.reviewer keys from scrub_nested so operators see who reviewed."},
+      {"endpoint": "GET /api/sessions/{sid}/results", "issue": "Top-level response 'status' key is None (session.status is not surfaced in the /results payload). Frontend derives isComplete from a separate GET /api/sessions/{sid}, so not blocking, but documenting."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_publish_guard.py",
+    "/app/backend/tests/test_human_review_invariant.py",
+    "/app/test_reports/pytest/iteration_6.xml"
+  ],
+  "action_items": [
+    "(minor) Preserve reviewer email in decision/session_review response scrub so ops UI can display who reviewed; today it renders as '[F]' inside decisions.",
+    "(minor) Surface top-level session status in /results payload (currently None)."
+  ],
+  "critical_code_review_comments": [
+    "server.py::session_export — 403 body is nested as {\"detail\": {\"detail\": ..., \"guard\": ...}}. FastAPI wraps the dict passed to HTTPException.detail, producing double-nested 'detail'. Consider passing a string plus a header, or a top-level structured response, to make the API contract cleaner.",
+    "server.py — reviewer identity is required, but there is no length/shape validation (any non-whitespace string accepted, including PHI-looking ones). Consider a lightweight regex/allowlist or trimming plus min length so audit trail is meaningful.",
+    "publish_guard.py — good coverage; consider adding TSV extension recognition (currently treated by extension parsing path) and a note that .xls (legacy) is not scanned by scan_export_file (only .xlsx).",
+    "SessionDetail.jsx L230 — submit is disabled unless resolutions>0 AND reviewer set. That means the session-level acceptance flow (empty resolutions with reviewer only) cannot be triggered from the UI — it works via API but there is no UI affordance. Consider a separate 'Accept globally' button when humanRows.length==0 but status==awaiting_human_review."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "N/A (API_TOKEN empty in preview)",
+  "seed_data_creation": "Ephemeral session c3104e371b1a4d848404ee127491086a created via /api/sessions -> /intake (xfstudy.zip) -> /handle. Then guard_report and agent_decisions mutated in Mongo to exercise blocked-file and awaiting_human_review UI paths.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The pipeline full-run takes ~90-120s on emergent provider (Herald draft was ~74s). If you need a blocked export for E2E, easiest path is to POST /handle -> wait until complete -> mutate session.guard_report in Mongo to mark one result blocked (as done here), then GET the export. The scrub_nested walk in server.py::session_results scrubs email-shaped values inside agent_decisions.reviewer, so if you assert on decision.reviewer=='qa@example.org' via GET /results you will see '[F]' instead — check the raw Mongo doc or session_review.reviewer for the truth.",
+  "rca of the issue": "No functional issues to RCA. Minor observations only (see critical_code_review_comments)."
+}

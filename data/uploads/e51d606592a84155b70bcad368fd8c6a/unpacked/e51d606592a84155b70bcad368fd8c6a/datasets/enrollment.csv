@@ -1,0 +1,5 @@
+patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
+MRN770487,Mary Smith,1965-04-08,415-555-3286,jsmith.87@example.edu,81482,29,97,112,ARM 031,Vitals stable; continue current regimen.
+MRN329258,Sarah Kaur,2007-01-18,415-555-4257,ppatel.29@example.edu,68878,53,60,133,HB 715,HbA1c improved from 8.2 to 7.4 over 3 months.
+MRN456778,Michael Wong,1957-06-04,415-555-2519,ppatel.13@example.edu,57052,62,98,101,ARM 748,HbA1c improved from 8.2 to 7.4 over 3 months.
+MRN662275,Mary Nguyễn,1940-09-10,415-555-6925,mjones.91@example.edu,19116,23,102,99,STD 082,"Post-op day 2, wound healing normally."

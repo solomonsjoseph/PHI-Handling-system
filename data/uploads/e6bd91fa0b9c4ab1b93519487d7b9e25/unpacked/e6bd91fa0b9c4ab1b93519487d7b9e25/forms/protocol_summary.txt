@@ -1,0 +1,3 @@
+OncoTrial-2026 baseline enrollment protocol.
+Inclusion: adults 18+ with confirmed stage II-IV solid tumor.
+Exclusion: prior systemic therapy within 90 days.

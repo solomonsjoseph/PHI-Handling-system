@@ -1,0 +1,27 @@
+{
+  "summary": "iter_20 security audit fixes verified: (1) 41/41 tests pass across the four suites requested (test_realworld_file_shapes 8/8, test_corpus 14/14, test_security_findings 6/6, test_security_audit_iter18 13/13). (2) Sir's real diabetes.csv + dict.docx study package accepted end-to-end via POST /api/sessions then /intake with exit_code=0, both files linked (dataset + dictionary). (3) Decompression-bomb docx (>10 MiB inflated document.xml, ~50 KB archive) is rejected by _read_docx_tables returning '' -- covered by test_read_docx_tables_rejects_oversize_document_xml. (4) Billion-laughs DTD docx is rejected by defusedxml.forbid_dtd=True returning '' -- covered by test_read_docx_tables_refuses_dtd_via_defusedxml. (5) Deterministic replay of the docx reader on Sir's real 12 KB dict.docx returns 2743 chars including all table rows.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_realworld_file_shapes.py",
+    "/app/backend/tests/test_corpus.py",
+    "/app/backend/tests/test_security_findings.py",
+    "/app/backend/tests/test_security_audit_iter18.py",
+    "/app/test_reports/pytest/iter11_sec.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "specialists.py:_read_docx_tables correctly enforces both defenses (declared file_size cap AND streamed read cap of _DOCX_XML_MAX_BYTES+1) which handles archives that lie about uncompressed size. Clean defense-in-depth.",
+    "defusedxml.ElementTree.fromstring(raw, forbid_dtd=True) is the right primitive; ParseError is caught alongside BadZipFile/ValueError so all malformed inputs degrade to empty string rather than raising into the async agent path.",
+    "_read_xls_tables dead-code cleanup done: xlrd fallback removed, contract preserved (returns '' rather than crashing). test_read_xls_tables_handles_xlsx_disguised_as_xls locks that contract.",
+    "Minor observation (non-blocking): the SEC-001 cap of 10 MiB is documented inline; suggest also asserting the max at a shared config-level constant if intake ever needs the same ceiling elsewhere, but not required now."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "not tested (backend-only per request)"},
+  "seed_data_creation": "Downloaded Sir's dict.docx (12,404 bytes) and diabetes.csv (73,365 bytes) to /tmp/sir_examples/ and assembled /tmp/sir_examples/study.zip with datasets/, data_dictionary/, forms/ layout for intake smoke test.",
+  "test_credentials": "API_TOKEN empty in preview (documented deployment posture SEC-001 iter_18); no auth headers needed.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iter_20 security fixes (SEC-001 decompression-bomb cap + SEC-002 defusedxml forbid_dtd) are fully green. All 41 requested pytest tests pass. Intake POST field name is `file` (not `package`), and the ZIP directory for dictionaries is `data_dictionary/` (not `dictionary/`). Session creation uses key `id` (not `session_id`). Use /tmp/sir_examples/study.zip for future intake smokes.",
+  "rca of the issue": "N/A - this was a verification pass, not a bug hunt."
+}

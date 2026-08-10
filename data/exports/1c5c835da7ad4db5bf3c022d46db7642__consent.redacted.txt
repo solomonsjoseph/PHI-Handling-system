@@ -1,0 +1,4 @@
+Consent Form
+Patient: [REDACTED:A:NAME]: [REDACTED:C:DATE]
+[REDACTED:H:MRN]  Phone: [REDACTED:D:PHONE]
+Clinical trial: [REDACTED:R:CLINICAL_TRIAL_ID]

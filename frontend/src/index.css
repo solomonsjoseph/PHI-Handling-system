@@ -1,0 +1,113 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Editorial fonts — Fraunces (serif display), Inter (sans), JetBrains Mono (data) */
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+html, body, #root {
+  background: #F7F5F0;
+  color: #12141A;
+  min-height: 100%;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'ss01', 'ss02', 'cv11';
+}
+
+/* Small caps + tracking for the editorial "kicker" labels */
+.kicker {
+  font-family: 'Inter', sans-serif;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #6B6E76;
+}
+
+/* Elegant selection */
+::selection {
+  background: #8C2135;
+  color: #F7F5F0;
+}
+
+/* Print-inspired paper grain: very subtle, deterministic */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 100;
+  opacity: 0.06;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.6' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+
+/* Deterministic progress bar — editorial */
+.progress-mono {
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.05em;
+  color: #12141A;
+}
+
+/* Editorial rule between sections — no boxes, just hairline */
+.rule-top { border-top: 1px solid #D6D0C4; }
+.rule-bottom { border-bottom: 1px solid #D6D0C4; }
+
+/* Understated data-cell (used inside decision tables) */
+.data-cell {
+  border-bottom: 1px solid #D6D0C4;
+  padding: 0.75rem 0;
+}
+
+/* PHI mask — used only in inline redaction previews */
+.phi-mask {
+  background: #F0E9DD;
+  border-bottom: 1px dashed #8C2135;
+  color: #8C2135;
+  padding: 0 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85em;
+}
+
+/* Restrained scrollbars */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #D6D0C4; }
+::-webkit-scrollbar-thumb:hover { background: #B8B0A0; }
+
+input, textarea, select, button {
+  font-family: inherit;
+}
+
+input:focus, textarea:focus, select:focus {
+  outline: 1px solid #8C2135;
+  outline-offset: 2px;
+}
+
+/* Wizard step transition — subtle stagger */
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.step-in > * { animation: fadeSlideIn 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.step-in > *:nth-child(1) { animation-delay: 0.02s; }
+.step-in > *:nth-child(2) { animation-delay: 0.08s; }
+.step-in > *:nth-child(3) { animation-delay: 0.14s; }
+.step-in > *:nth-child(4) { animation-delay: 0.20s; }
+.step-in > *:nth-child(5) { animation-delay: 0.26s; }
+.step-in > *:nth-child(6) { animation-delay: 0.32s; }
+.step-in > *:nth-child(7) { animation-delay: 0.38s; }
+.step-in > *:nth-child(8) { animation-delay: 0.44s; }
+.step-in > *:nth-child(9) { animation-delay: 0.50s; }
+.step-in > *:nth-child(n+10) { animation-delay: 0.56s; }
+
+/* Abstract graphic — hairline lattice used behind step headings */
+.hairline-lattice {
+  background-image:
+    linear-gradient(to right, rgba(18,20,26,0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(18,20,26,0.05) 1px, transparent 1px);
+  background-size: 32px 32px;
+}

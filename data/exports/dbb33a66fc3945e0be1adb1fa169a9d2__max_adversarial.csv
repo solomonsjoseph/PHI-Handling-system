@@ -1,0 +1,7 @@
+patient_name,street_address,zip,dob,admission_date,age,phone,fax,email,ssn,patient_id,insurance_id,account_number,license_number,vehicle_id,device_serial,personal_url,client_ip,biometric_hash,face_photo,tracking_code,heart_rate_bpm,systolic_bp,glucose_mgdl,bmi,arm_code,barcode,notes
+,,000,1934,2004,90+,,,,,Pc2440e86,,,,,,,,,,,97,107,113,32.7,INT 061,,
+,,000,1909,1959,90+,,,,,P0b74ae6e,,,,,,,,,,,99,136,119,37.3,INT 758,,
+,,000,1930,1930,90+,,,,,P8cd12774,,,,,,,,,,,93,129,140,28.9,INT 520,,
+,,000,1929,1942,90+,,,,,Pb6ecf6b7,,,,,,,,,,,90,101,79,18.4,HB 527,,
+,,000,1910,2015,90+,,,,,P4d037fc3,,,,,,,,,,,93,132,187,29.9,INT 079,,
+,,000,1933,1989,90+,,,,,Pffde51c8,,,,,,,,,,,93,131,90,19.2,INT 462,,

@@ -1,0 +1,7 @@
+patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
+5214153e19acadbf,,1965,,,000,90+,90,86,ARM 224,Patient [A] enrolled on [C]; contact via phone.
+e4133c0ef55495de,,1955,,,000,90+,90,133,HB 715,Patient [A] enrolled on [C]; contact via phone.
+237b7e0a1bf0992d,,1973,,,000,90+,90,131,INT 550,Patient [A] enrolled on [C]; contact via phone.
+e47ec25be6d838b2,,2010,,,000,90+,94,90,HB 888,Patient [A] enrolled on [C]; contact via phone.
+cfcba4d9005c9b1a,,1950,,,000,90+,98,131,HB 168,Patient [A] enrolled on [C]; contact via phone.
+f950c19a35f1363b,,1971,,,000,90+,99,141,STD 218,Patient [A] enrolled on [C]; contact via phone.

@@ -49,6 +49,13 @@ production_data/
 *.real.json
 *.real.xlsx
 
+# Runtime session artifacts (pod-local; never commit)
+# These fill GPFS file quotas and break git pull with ENOSPC.
+data/uploads/*
+!data/uploads/.gitkeep
+data/exports/*
+!data/exports/.gitkeep
+
 # Large generated outputs (regenerate locally)
 corpus/generated/*.tar.gz
 benchmarks/results/*.detailed.json
@@ -56,9 +63,11 @@ benchmarks/results/*.detailed.json
 # Logs
 *.log
 logs/
+.logs/
 
 # Local build artifacts
 tmp/
 *.tmp
 .phi-local-*
-
+*.env
+.credentials

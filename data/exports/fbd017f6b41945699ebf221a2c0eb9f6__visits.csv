@@ -1,0 +1,5 @@
+patient_id,visit_date,provider_name,visit_notes
+,2026,Pf2586167,[A] returned complaining of headache. Prescribed acetaminophen.
+,2026,Pf2586167,Follow-up call at [D]; patient stable.
+,2026,Pb91982b4,Blood pressure [C] for [A].
+,2026,Pf2586167,Guardian [A] picked up medication list.

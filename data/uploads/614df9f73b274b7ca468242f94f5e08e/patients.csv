@@ -1,0 +1,3 @@
+patient_name,dob,ssn,mrn,phone,email,notes
+John Doe,1980-01-15,123-45-6789,MRN-12345678,4155551234,john@example.com,Patient is stable
+Jane Roe,1975-06-20,987-65-4321,MRN-87654321,4155559876,jane@example.com,Followup scheduled
