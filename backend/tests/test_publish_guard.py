@@ -269,19 +269,154 @@ def test_dea_blocks_export_category_K(tmp_path: Path):
     assert any(f["pattern_id"] == "DEA" for f in r.findings)
 
 
+def test_fax_label_blocks_export_category_E(tmp_path: Path):
+    p = _write_csv(tmp_path, "leaky.csv", [
+        ["patient_id", "notes"],
+        ["Px1", "fax: 415-555-1234"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "FAX_LABEL" for f in r.findings)
+
+
+def test_mrn_blocks_export_category_H(tmp_path: Path):
+    p = _write_csv(tmp_path, "leaky.csv", [
+        ["patient_id", "notes"],
+        ["Px1", "MRN-12345678"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "MRN" for f in r.findings)
+
+
+def test_health_plan_id_blocks_export_category_I(tmp_path: Path):
+    p = _write_csv(tmp_path, "leaky.csv", [
+        ["patient_id", "notes"],
+        ["Px1", "Member ID: MID12345"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "HEALTH_PLAN_ID" for f in r.findings)
+
+
+def test_mbi_blocks_export_category_I(tmp_path: Path):
+    p = _write_csv(tmp_path, "leaky.csv", [
+        ["patient_id", "notes"],
+        ["Px1", "1EG4TE5MK73"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "MBI" for f in r.findings)
+
+
+def test_account_blocks_export_category_J(tmp_path: Path):
+    p = _write_csv(tmp_path, "leaky.csv", [
+        ["patient_id", "notes"],
+        ["Px1", "Account: ACC123456"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "ACCOUNT" for f in r.findings)
+
+
+def test_npi_bare_blocks_export_category_K(tmp_path: Path):
+    p = _write_csv(tmp_path, "leaky.csv", [
+        ["patient_id", "provider_npi"],
+        ["Px1", "1234567893"],
+    ])
+    r = scan_export_file("f1", p, column_categories={"provider_npi": "K"})
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "NPI_BARE" for f in r.findings)
+
+
+def test_npi_bare_ignored_without_column_or_anchor(tmp_path: Path):
+    """A bare 10-digit number without an NPI column or anchor must not
+    trip NPI_BARE specifically. (PHONE_US may separately flag the same
+    digits as a possible phone number; that is correct and unrelated.)"""
+    p = _write_csv(tmp_path, "clean.csv", [
+        ["patient_id", "code"],
+        ["Px1", "1234567893"],
+    ])
+    r = scan_export_file("f1", p)
+    assert not any(f["pattern_id"] == "NPI_BARE" for f in r.findings)
+
+
+def test_npi_bare_ignored_when_luhn_invalid(tmp_path: Path):
+    """A 10-digit value in an NPI-typed column that fails the Luhn check
+    against the 80840 issuer prefix must not trip NPI_BARE. (PHONE_US may
+    separately flag the same digits; that is correct and unrelated.)"""
+    p = _write_csv(tmp_path, "clean.csv", [
+        ["patient_id", "provider_npi"],
+        ["Px1", "1234567892"],
+    ])
+    r = scan_export_file("f1", p, column_categories={"provider_npi": "K"})
+    assert not any(f["pattern_id"] == "NPI_BARE" for f in r.findings)
+
+
+def test_vin_blocks_export_category_L(tmp_path: Path):
+    p = _write_csv(tmp_path, "leaky.csv", [
+        ["patient_id", "vehicle"],
+        ["Px1", "1HGCM82633A004352"],
+    ])
+    r = scan_export_file("f1", p, column_categories={"vehicle": "L"})
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "VIN" for f in r.findings)
+
+
+def test_device_udi_blocks_export_category_M(tmp_path: Path):
+    p = _write_csv(tmp_path, "leaky.csv", [
+        ["patient_id", "device"],
+        ["Px1", "(01)12345678901234"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "DEVICE_UDI" for f in r.findings)
+
+
+def test_unique_code_blocks_export_category_R(tmp_path: Path):
+    p = _write_csv(tmp_path, "leaky.csv", [
+        ["patient_id", "notes"],
+        ["Px1", "Tracking Code: TRK123456"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "UNIQUE_CODE" for f in r.findings)
+
+
+def test_clinical_trial_id_blocks_export_category_R(tmp_path: Path):
+    p = _write_csv(tmp_path, "leaky.csv", [
+        ["patient_id", "notes"],
+        ["Px1", "enrolled under NCT12345678"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "CLINICAL_TRIAL_ID" for f in r.findings)
+
+
+def test_step5_patterns_do_not_false_positive_on_common_dictionary_prose(tmp_path: Path):
+    """Labeled-id patterns require a digit after the label; plain prose,
+    pseudonyms, and hash output must not block a clean export."""
+    p = _write_csv(tmp_path, "clean.csv", [
+        ["patient_id", "notes"],
+        ["Px1", "Account Number required"],
+        ["Px2", "Chart ID pending"],
+        ["Px3", "MRN of record"],
+        ["Px4", "P3a4c96db"],
+        ["Px5", "a1b2c3d4e5f6a7b8"],
+        ["Px6", "ARM 001"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "clean", r
+
+
 def test_every_hipaa_letter_has_at_least_one_pattern():
-    """Phase B acceptance gate: every HIPAA letter A-R must be represented
-    in the guard pattern table."""
-    from phi_core.publish_guard import _PATTERNS
-    covered = {cat for _pid, cat, _rx in _PATTERNS}
-    # SSN maps to G (not L), phone to D, email to F, DOB to C, ZIP3 to B,
-    # age>89 to C. So covered letters after Phase B: B, C, D, F, G,
-    # K, L, M, N, O, P, Q + skipped ones that aren't emittable in a
-    # structured export (A = names — handled upstream; E = fax — treated
-    # as phone; H = MRN — pseudonymised, not detectable in export;
-    # I = beneficiary — same; J = certificate — rare in study data;
-    # R = catch-all). We assert the ones the guard is expected to catch.
-    for expected in ("B", "C", "D", "F", "G", "K", "L", "M", "N", "O", "P", "Q"):
+    """Phase B acceptance gate: every HIPAA letter B-R must be represented
+    in the guard pattern table. A is the only uncovered letter: names have
+    no content shape and are handled by the hard-rule table plus Presidio
+    ``PERSON``, not by a Publish Guard regex."""
+    from phi_core.jurisdictions import get_pack
+    covered = {p.category for p in get_pack("us").patterns}
+    for expected in "BCDEFGHIJKLMNOPQR":
         assert expected in covered, f"HIPAA category {expected} missing from Publish Guard"
 
 

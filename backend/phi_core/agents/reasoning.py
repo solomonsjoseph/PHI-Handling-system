@@ -12,7 +12,8 @@ from typing import Any
 
 from ..anonymizer import apply_to_text
 from ..detectors import detect_text
-from ..pipeline import EXPORT_DIR
+from ..file_readers import read_narrative
+from ..paths import EXPORT_DIR
 from .base import Agent
 
 
@@ -50,7 +51,7 @@ _HARD_RULE_TABLE: list[tuple[str, list[str], str, str]] = [
     (r"^(zip|zipcode|zip[_ ]?code|postal[_ ]?code|postcode)$",
      ["zip3_truncate", "drop"], "zip3_truncate", "164.514(b)(2)(i)(B)"),
     # (C) Dates - directly related to individual
-    (r"^(dob|date[_ ]?of[_ ]?birth|birth[_ ]?date|birthdate|admission[_ ]?date|discharge[_ ]?date|death[_ ]?date|visit[_ ]?date|encounter[_ ]?date|service[_ ]?date|onset[_ ]?date|diagnosis[_ ]?date)$",
+    (r"^(dob|date[_ ]?of[_ ]?birth|birth[_ ]?date|birthdate|admission[_ ]?date|admit[_ ]?date|discharge[_ ]?date|death[_ ]?date|visit[_ ]?date|encounter[_ ]?date|service[_ ]?date|onset[_ ]?date|diagnosis[_ ]?date)$",
      ["year_only", "drop"], "year_only", "164.514(b)(2)(i)(C)"),
     # (C) Ages - cap at 90+
     (r"^(age|age[_ ]?years|age[_ ]?in[_ ]?years|age[_ ]?at[_ ]?enrolment|age[_ ]?at[_ ]?enrollment|age[_ ]?at[_ ]?screening)$",
@@ -71,7 +72,7 @@ _HARD_RULE_TABLE: list[tuple[str, list[str], str, str]] = [
     (r"^(mrn|medical[_ ]?record(?:[_ ]?number)?|record[_ ]?number|chart[_ ]?number|chart[_ ]?id|patient[_ ]?record[_ ]?id|patient[_ ]?id|subject[_ ]?id|participant[_ ]?id|child[_ ]?id|study[_ ]?id|enrol(?:l)?ment[_ ]?id|record[_ ]?id)$",
      ["pseudonymize", "hash", "drop"], "pseudonymize", "164.514(b)(2)(i)(H)"),
     # (I) Health-plan beneficiary
-    (r"^(insurance[_ ]?id|member[_ ]?id|health[_ ]?plan[_ ]?number|subscriber[_ ]?id|hpid|policy[_ ]?number)$",
+    (r"^(insurance[_ ]?id|member[_ ]?id|health[_ ]?plan[_ ]?number|subscriber[_ ]?id|hpid|mbi|medicare[_ ]?beneficiary[_ ]?id|policy[_ ]?number)$",
      ["drop"], "drop", "164.514(b)(2)(i)(I)"),
     # (J) Account number
     (r"^(account[_ ]?number|billing[_ ]?account|invoice[_ ]?number|patient[_ ]?account)$",
@@ -286,11 +287,24 @@ class Executor(Agent):
                 apply_column_actions_to_dataset(src, dst, f["subtype"], by_file.get(f["file_id"], []), registry)
             else:
                 dst = EXPORT_DIR / f"{f['file_id']}__{Path(f['original_name']).stem}.redacted.txt"
-                fulltext = src.with_suffix(src.suffix + ".fulltext.txt")
-                text = fulltext.read_text(encoding="utf-8", errors="replace") if fulltext.exists() else ""
-                # For narratives we still run the deterministic detector and redact
+                try:
+                    text = read_narrative(src, f["subtype"])
+                except Exception as e:
+                    await self._log("executor.narrative_read_failed", "info",
+                                    {"file_id": f["file_id"], "error": type(e).__name__})
+                    dst.write_text(
+                        f"[REDACTED] narrative extraction failed ({type(e).__name__}); "
+                        f"content withheld to prevent PHI leak.\n", encoding="utf-8")
+                    exports[f["file_id"]] = str(dst)
+                    continue
+                if not text.strip():
+                    await self._log("executor.narrative_empty", "info",
+                                    {"file_id": f["file_id"]})
+                    dst.write_text(
+                        f"[NO EXTRACTABLE TEXT] {f['original_name']}\n", encoding="utf-8")
+                    exports[f["file_id"]] = str(dst)
+                    continue
                 spans = detect_text(text, detectors=["presidio", "rule"])
-                # Convert spans into review_status='accepted' style for anonymizer
                 for sp in spans:
                     sp.review_status = "accepted"
                 dst.write_text(apply_to_text(text, spans), encoding="utf-8")

@@ -6,6 +6,9 @@ Rule detectors close known Presidio gaps documented in AUTHORITY_MATRIX.md:
 Every rule attaches its 45 CFR 164.514 authority citation.
 
 Presidio maps to HIPAA A-R via _presidio_to_hipaa.
+
+Live consumers: ``Executor.run`` (narrative export), ``_scrub_text_cell``
+(the ``scrub_text`` action), and ``_redact_metadata_file``.
 """
 from __future__ import annotations
 
@@ -14,7 +17,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterable
 
-from presidio_analyzer import AnalyzerEngine, RecognizerResult
 
 from .models import DetectedSpan
 
@@ -24,6 +26,7 @@ AUTH_SAFE_HARBOR = "45 CFR 164.514(b)(2)(i)"
 
 @lru_cache(maxsize=1)
 def _analyzer() -> AnalyzerEngine:
+    from presidio_analyzer import AnalyzerEngine
     return AnalyzerEngine()
 
 
@@ -63,7 +66,7 @@ class Rule:
     validator: object = None  # optional callable(str) -> bool
 
 
-def _luhn(digits: str) -> bool:
+def luhn(digits: str) -> bool:
     ds = [int(d) for d in digits if d.isdigit()]
     if len(ds) < 2:
         return False
@@ -81,7 +84,7 @@ RULES: list[Rule] = [
     Rule("MRN", re.compile(r"\bMRN[-:\s]*([A-Z0-9\-]{6,20})\b"), "MRN", "H"),
     Rule("MBI", re.compile(r"\b[1-9][ACDEFGHJKMNPQRTUVWXY][ACDEFGHJKMNPQRTUVWXY0-9][ACDEFGHJKMNPQRTUVWXY][ACDEFGHJKMNPQRTUVWXY0-9][0-9][ACDEFGHJKMNPQRTUVWXY][ACDEFGHJKMNPQRTUVWXY][0-9]{2}\b"), "MBI", "I"),
     Rule("NPI", re.compile(r"\b\d{10}\b"), "NPI", "K",
-         validator=lambda s: _luhn("80840" + s)),
+         validator=lambda s: luhn("80840" + s)),
     Rule("SSN", re.compile(r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b"), "SSN", "G"),
     Rule("US_PHONE", re.compile(r"\(?\b[2-9]\d{2}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{4}\b"), "PHONE", "D"),
     Rule("EMAIL", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "EMAIL", "F"),
@@ -124,7 +127,7 @@ def rule_detect(text: str) -> list[DetectedSpan]:
 def presidio_detect(text: str, language: str = "en") -> list[DetectedSpan]:
     if not text.strip():
         return []
-    results: list[RecognizerResult] = _analyzer().analyze(text=text, language=language)
+    results = _analyzer().analyze(text=text, language=language)
     out: list[DetectedSpan] = []
     for r in results:
         hipaa, ent = _presidio_to_hipaa(r.entity_type)
@@ -184,33 +187,3 @@ def detect_text(text: str, detectors: Iterable[str] = ("presidio", "rule")) -> l
     for m in merged:
         m.detector = "merged" if len(detectors) > 1 else next(iter(detectors))
     return merged
-
-
-# --- Dataset (cell-level) --------------------------------------------------
-
-# Column-header hints that mark whole columns as PHI without inspecting values.
-HEADER_HINTS: dict[str, tuple[str, str]] = {
-    "name": ("NAME", "A"), "patient_name": ("NAME", "A"), "first_name": ("NAME", "A"), "last_name": ("NAME", "A"), "full_name": ("NAME", "A"),
-    "dob": ("DATE", "C"), "date_of_birth": ("DATE", "C"), "birth_date": ("DATE", "C"), "admit_date": ("DATE", "C"), "discharge_date": ("DATE", "C"),
-    "ssn": ("SSN", "G"), "social_security": ("SSN", "G"), "social_security_number": ("SSN", "G"),
-    "mrn": ("MRN", "H"), "medical_record_number": ("MRN", "H"),
-    "phone": ("PHONE", "D"), "phone_number": ("PHONE", "D"), "mobile": ("PHONE", "D"),
-    "email": ("EMAIL", "F"),
-    "address": ("ADDRESS", "B"), "street": ("ADDRESS", "B"), "zip": ("ADDRESS", "B"), "postal_code": ("ADDRESS", "B"), "city": ("ADDRESS", "B"),
-    "npi": ("NPI", "K"), "provider_npi": ("NPI", "K"),
-    "vin": ("VIN", "L"),
-    "ip": ("IP_ADDRESS", "O"), "ip_address": ("IP_ADDRESS", "O"),
-    "mbi": ("MBI", "I"),
-}
-
-
-def header_phi_columns(columns: list[str]) -> dict[str, tuple[str, str]]:
-    """Return {column_name: (entity_type, hipaa_category)} for headers that
-    unambiguously indicate PHI. Case-insensitive, underscore/space tolerant.
-    """
-    hits: dict[str, tuple[str, str]] = {}
-    for col in columns:
-        key = re.sub(r"[^a-z0-9]+", "_", col.lower()).strip("_")
-        if key in HEADER_HINTS:
-            hits[col] = HEADER_HINTS[key]
-    return hits

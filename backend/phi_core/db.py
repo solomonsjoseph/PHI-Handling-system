@@ -14,6 +14,4 @@ def get_db() -> AsyncIOMotorDatabase:
 
 
 # collections:
-#   sessions          -> Session
-#   corpora           -> {id, jurisdiction, seed, count_per_category, hash, records:[CorpusRecord]}
-#   benchmarks        -> BenchmarkResult
+#   sessions -> Session

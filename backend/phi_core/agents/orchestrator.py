@@ -263,7 +263,7 @@ async def run_pipeline(
     # GOAL invariant: exports are only 'ready to share publicly' after this
     # boundary check clears. Runs synchronously; downloads are 403 until clean.
     from ..publish_guard import scan_all_exports as _scan_all_exports
-    guard_report = _scan_all_exports(exec_out["exports"], decisions=approved_decisions).to_dict()
+    guard_report = _scan_all_exports(exec_out["exports"], decisions=approved_decisions, jurisdiction=session.get("jurisdiction", "us")).to_dict()
     await on_phase("publish_guard", {"status": guard_report["status"],
                                      "scanned": guard_report["scanned"],
                                      "blocked": guard_report["blocked"]})

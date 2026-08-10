@@ -1,5 +1,5 @@
 import React from 'react';
-import { NavLink, Route, Routes, Navigate } from 'react-router-dom';
+import { NavLink, Route, Routes } from 'react-router-dom';
 import Wizard from './pages/Wizard';
 import SessionDetail from './pages/SessionDetail';
 import Settings from './pages/Settings';
@@ -31,14 +31,7 @@ export default function App() {
           <Route path="/" element={<Wizard />} />
           <Route path="/studies/:sid" element={<SessionDetail />} />
           <Route path="/settings" element={<Settings />} />
-          {/* Legacy — redirect quietly */}
-          <Route path="/studies" element={<Navigate to="/" replace />} />
-          <Route path="/studies/new" element={<Navigate to="/" replace />} />
-          <Route path="/sessions" element={<Navigate to="/" replace />} />
-          <Route path="/sessions/new" element={<Navigate to="/" replace />} />
           <Route path="/sessions/:sid" element={<SessionDetail />} />
-          <Route path="/benchmark" element={<Navigate to="/" replace />} />
-          <Route path="/experimental/corpus" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
     </div>

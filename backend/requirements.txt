@@ -97,7 +97,6 @@ platformdirs==4.11.0
 pluggy==1.6.0
 preshed==3.0.13
 presidio_analyzer==2.2.355
-presidio_anonymizer==2.2.355
 propcache==0.5.2
 proto-plus==1.28.1
 protobuf==5.29.6

@@ -2,20 +2,34 @@
 
 Endpoints (all under /api):
   GET  /api/health
-  POST /api/corpus/generate      -> generate synthetic corpus
-  GET  /api/corpus               -> list corpora
-  GET  /api/corpus/{id}          -> get corpus
-  POST /api/benchmark/run        -> run benchmark against a corpus
-  GET  /api/benchmark            -> list benchmarks
-  GET  /api/benchmark/{id}       -> get benchmark
-  POST /api/sessions             -> create session
-  POST /api/sessions/{id}/upload -> upload one file
-  POST /api/sessions/{id}/run    -> start reading/classifying/detecting
-  GET  /api/sessions/{id}        -> session state
-  GET  /api/sessions/{id}/stream -> SSE progress
-  POST /api/sessions/{id}/review -> submit review decisions
-  POST /api/sessions/{id}/finalize -> anonymize and export
-  GET  /api/sessions/{id}/export/{file_id} -> download redacted file
+  POST /api/sessions                       -> create session
+  GET  /api/sessions                       -> list sessions
+  GET  /api/sessions/{id}                  -> session state
+  POST /api/sessions/{id}/intake           -> upload manifest-v3 ZIP, run intake
+  GET  /api/sessions/{id}/intake/receipt   -> redacted intake receipt
+  GET  /api/intake/spec                    -> intake-manifest/v3 spec
+  GET  /api/sessions/{id}/stream           -> SSE progress
+  POST /api/sessions/{id}/handle           -> run the 12-agent pipeline
+  POST /api/sessions/{id}/cancel           -> request pipeline cancellation
+  POST /api/sessions/{id}/human-review     -> resolve human_review decisions
+  GET  /api/sessions/{id}/agent-trace      -> per-message audit log
+  GET  /api/sessions/{id}/preview          -> row-level review preview
+  GET  /api/sessions/{id}/results          -> consolidated agent outputs
+  GET  /api/sessions/{id}/bundle           -> shareable bundle download
+  GET  /api/sessions/{id}/export/{file_id} -> download one redacted file
+  GET  /api/coverage-matrix                -> static coverage matrix
+  GET  /api/classification-accuracy        -> hard-rule layer P/R/F1
+  GET  /api/corpus/study/catalog           -> available corpus scenarios
+  POST /api/corpus/study/research          -> discover a scenario via CorpusResearcher
+  POST /api/corpus/study/generate          -> generate a corpus, attach to a session
+  POST /api/corpus/study/run               -> create session, plant corpus, run pipeline
+  GET  /api/corpus/study/verify/{id}       -> grade decisions against planted ground truth
+  GET  /api/settings/llm                   -> current LLM settings
+  POST /api/settings/llm                   -> update LLM settings
+  GET  /api/settings/llm/catalog           -> multi-provider model catalog
+  GET  /api/settings/warmup/schedule       -> auto-warmup toggle state
+  POST /api/settings/warmup/schedule       -> set auto-warmup toggle
+  POST /api/settings/warmup                -> prime Statute + Praxis caches
 """
 from __future__ import annotations
 
@@ -35,21 +49,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from phi_core.benchmark import run_benchmark
 from phi_core.crypto import decrypt_api_key, encrypt_api_key
 from phi_core.db import get_db
-from phi_core.generators import corpus_hash, generate, HIPAA_CATEGORIES
 from phi_core.intake import (
     COMPONENT_SUFFIXES, MANDATORY, ANY_OF, build_manifest,
 )
-from phi_core.models import (
-    BenchmarkRequest, CorpusRecord, CorpusRequest, DetectedSpan,
-    FileArtifact, ProgressEvent, ReviewDecision, Session,
-)
-from phi_core.paths import UnsafePath, safe_join
-from phi_core.pipeline import (
-    UPLOAD_DIR, anonymize_files, apply_reviews, classify_file, detect_file, ingest_file,
-)
+from phi_core.jurisdictions import get_pack
+from phi_core.models import FileArtifact, ProgressEvent, Session
+from phi_core.paths import UnsafePath, UPLOAD_DIR, safe_join
 from phi_core.security import (
     allowed_providers, require_api_token, validate_llm_base_url, validate_llm_provider,
 )
@@ -153,80 +160,9 @@ async def health():
     return {
         "status": "ok",
         "version": "2.0.0",
-        "hipaa_categories": HIPAA_CATEGORIES,
+        "hipaa_categories": get_pack("us").identifier_categories,
         "supported_jurisdictions": ["us"],
     }
-
-
-# --- Corpus ----------------------------------------------------------------
-
-@app.post("/api/corpus/generate", dependencies=[Depends(require_api_token)])
-async def corpus_generate(req: CorpusRequest):
-    records = generate(req.jurisdiction, req.seed, req.count_per_category, req.include_quasi_identifiers)
-    corpus_id = f"corpus_{req.jurisdiction}_{req.seed}_{req.count_per_category}"
-    h = corpus_hash(records)
-    doc = {
-        "id": corpus_id,
-        "jurisdiction": req.jurisdiction,
-        "seed": req.seed,
-        "count_per_category": req.count_per_category,
-        "include_quasi_identifiers": req.include_quasi_identifiers,
-        "hash": h,
-        "total_records": len(records),
-        "total_gold_spans": sum(len(r.gold_spans) for r in records),
-        "records": [r.model_dump() for r in records],
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    db = get_db()
-    await db.corpora.replace_one({"id": corpus_id}, doc, upsert=True)
-    return {k: v for k, v in doc.items() if k != "records"} | {"sample_records": doc["records"][:5]}
-
-
-@app.get("/api/corpus")
-async def corpus_list():
-    db = get_db()
-    cursor = db.corpora.find({}, {"records": 0, "_id": 0})
-    return {"corpora": [c async for c in cursor]}
-
-
-@app.get("/api/corpus/{corpus_id}")
-async def corpus_get(corpus_id: str, limit: int = 20):
-    db = get_db()
-    doc = await db.corpora.find_one({"id": corpus_id}, {"_id": 0})
-    if not doc:
-        raise HTTPException(404, "corpus not found")
-    doc["records"] = doc.get("records", [])[:limit]
-    return doc
-
-
-# --- Benchmark -------------------------------------------------------------
-
-@app.post("/api/benchmark/run", dependencies=[Depends(require_api_token)])
-async def benchmark_run(req: BenchmarkRequest):
-    db = get_db()
-    corpus = await db.corpora.find_one({"id": req.corpus_id}, {"_id": 0})
-    if not corpus:
-        raise HTTPException(404, "corpus not found")
-    records = [CorpusRecord(**r) for r in corpus["records"]]
-    result = run_benchmark(records, req.corpus_id, req.detectors)
-    await db.benchmarks.insert_one(result.model_dump())
-    return result.model_dump()
-
-
-@app.get("/api/benchmark")
-async def benchmark_list():
-    db = get_db()
-    cursor = db.benchmarks.find({}, {"_id": 0}).sort("created_at", -1).limit(50)
-    return {"benchmarks": [b async for b in cursor]}
-
-
-@app.get("/api/benchmark/{bid}")
-async def benchmark_get(bid: str):
-    db = get_db()
-    doc = await db.benchmarks.find_one({"id": bid}, {"_id": 0})
-    if not doc:
-        raise HTTPException(404, "benchmark not found")
-    return doc
 
 
 # --- Sessions --------------------------------------------------------------
@@ -284,39 +220,11 @@ async def session_get(sid: str):
 
 @app.get("/api/sessions", dependencies=[Depends(require_api_token)])
 async def session_list():
-    cursor = get_db().sessions.find({}, {"_id": 0, "spans": 0, "progress": 0}).sort("created_at", -1).limit(50)
+    cursor = get_db().sessions.find({}, {"_id": 0, "progress": 0}).sort("created_at", -1).limit(50)
     out = []
     async for s in cursor:
         out.append(_scrub_session_document(s))
     return {"sessions": out}
-
-
-@app.post("/api/sessions/{sid}/upload", dependencies=[Depends(require_api_token)])
-async def session_upload(sid: str, file: UploadFile = File(...)):
-    db = get_db()
-    session = await db.sessions.find_one({"id": sid})
-    if not session:
-        raise HTTPException(404, "session not found")
-    session_dir = UPLOAD_DIR / sid
-    session_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        dst = safe_join(session_dir, file.filename, fallback="upload.bin")
-    except UnsafePath as e:
-        raise HTTPException(400, f"unsafe filename: {e}")
-    written = await _stream_to_disk(file, dst, _MAX_UPLOAD_BYTES)
-    art = FileArtifact(
-        original_name=dst.name,
-        size_bytes=written,
-        sha256="",
-        kind="narrative",
-        subtype="txt",
-        stored_path=str(dst),
-    )
-    await db.sessions.update_one(
-        {"id": sid},
-        {"$push": {"files": art.model_dump()}, "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
-    )
-    return {"file_id": art.file_id, "size_bytes": art.size_bytes}
 
 
 @app.post("/api/sessions/{sid}/intake", dependencies=[Depends(require_api_token)])
@@ -368,10 +276,8 @@ async def session_intake(sid: str, file: UploadFile = File(...)):
         {"id": sid},
         {"$set": {
             "files": [f.model_dump() for f in accepted],
-            "spans": [],
             "progress": [],
             "export_paths": {},
-            "review_iteration": 0,
             "intake_status": manifest.status,
             "intake_exit_code": manifest.exit_code,
             "intake_review": [
@@ -458,70 +364,6 @@ async def intake_spec():
     }
 
 
-@app.post("/api/sessions/{sid}/run", dependencies=[Depends(require_api_token)])
-async def session_run(sid: str):
-    db = get_db()
-    session = await db.sessions.find_one({"id": sid})
-    if not session:
-        raise HTTPException(404, "session not found")
-
-    async def emit(ev: ProgressEvent):
-        await _emit(sid, ev)
-
-    async def worker():
-        try:
-            # Refuse to run if intake status is not ready when intake was attempted.
-            if session.get("intake_status") in ("failed", "review_required"):
-                await db.sessions.update_one({"id": sid}, {"$set": {"status": "failed", "error": f"intake_status={session.get('intake_status')} (exit={session.get('intake_exit_code')})"}})
-                await emit(ProgressEvent(phase="failed", message=f"cannot run: intake {session.get('intake_status')}"))
-                await emit(ProgressEvent(phase="__end__", message="stream end"))
-                return
-            await db.sessions.update_one({"id": sid}, {"$set": {"status": "reading"}})
-            fresh_files: list[FileArtifact] = []
-            for raw in session.get("files", []):
-                path = Path(raw["stored_path"])
-                art = await ingest_file(sid, path, raw["original_name"], emit, component=raw.get("component"))
-                art.file_id = raw["file_id"]
-                fresh_files.append(art)
-            await db.sessions.update_one(
-                {"id": sid},
-                {"$set": {"files": [f.model_dump() for f in fresh_files], "status": "classifying"}},
-            )
-
-            for art in fresh_files:
-                cls = await classify_file(art, emit)
-                art.llm_classification = cls
-            await db.sessions.update_one(
-                {"id": sid},
-                {"$set": {"files": [f.model_dump() for f in fresh_files], "status": "detecting"}},
-            )
-
-            all_spans: list[DetectedSpan] = []
-            for art in fresh_files:
-                spans = await detect_file(art, ["presidio", "rule"], emit)
-                for s in spans:
-                    s.file_id = art.file_id
-                    s.review_comment = ""
-                    all_spans.append(s)
-
-            await db.sessions.update_one(
-                {"id": sid},
-                {"$set": {
-                    "spans": [s.model_dump() for s in all_spans],
-                    "status": "awaiting_review",
-                }},
-            )
-            await emit(ProgressEvent(phase="awaiting_review", message=f"{len(all_spans)} spans awaiting human review", percent=100.0))
-        except Exception as e:
-            await db.sessions.update_one({"id": sid}, {"$set": {"status": "failed", "error": f"{type(e).__name__}: {e}"}})
-            await emit(ProgressEvent(phase="failed", message=f"pipeline failed: {e}"))
-        finally:
-            await emit(ProgressEvent(phase="__end__", message="stream end"))
-
-    asyncio.create_task(worker())
-    return {"status": "started"}
-
-
 @app.get("/api/sessions/{sid}/stream", dependencies=[Depends(require_api_token)])
 async def session_stream(sid: str):
     # SEC-002 fix: refuse new subscribers for already-settled sessions so
@@ -570,82 +412,6 @@ async def session_stream(sid: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-class ReviewSubmit(BaseModel):
-    decisions: list[ReviewDecision]
-    add_manual_spans: list[DetectedSpan] = []
-    continue_iteration: bool = False
-
-
-@app.post("/api/sessions/{sid}/review", dependencies=[Depends(require_api_token)])
-async def session_review(sid: str, body: ReviewSubmit):
-    db = get_db()
-    session = await db.sessions.find_one({"id": sid})
-    if not session:
-        raise HTTPException(404, "session not found")
-    spans = [DetectedSpan(**s) for s in session.get("spans", [])]
-    spans = apply_reviews(spans, body.decisions)
-    for m in body.add_manual_spans:
-        m.detector = "manual"
-        m.review_status = "accepted"
-        spans.append(m)
-    iteration = int(session.get("review_iteration", 0)) + 1
-    new_status = "awaiting_review" if body.continue_iteration else "applying_review"
-    await db.sessions.update_one(
-        {"id": sid},
-        {"$set": {
-            "spans": [s.model_dump() for s in spans],
-            "status": new_status,
-            "review_iteration": iteration,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }},
-    )
-    return {"status": new_status, "iteration": iteration, "span_count": len(spans)}
-
-
-@app.post("/api/sessions/{sid}/finalize", dependencies=[Depends(require_api_token)])
-async def session_finalize(sid: str):
-    db = get_db()
-    session = await db.sessions.find_one({"id": sid})
-    if not session:
-        raise HTTPException(404, "session not found")
-    files = [FileArtifact(**f) for f in session.get("files", [])]
-    spans = [DetectedSpan(**s) for s in session.get("spans", [])]
-
-    async def emit(ev: ProgressEvent):
-        await _emit(sid, ev)
-
-    exports = await anonymize_files(files, spans, emit)
-    # SEC-001 fix: run the Publish Guard on the freshly written exports so
-    # the legacy /finalize path is fail-closed at the download boundary too.
-    # Without this, /export/{file_id} and /bundle would serve raw dictionaries
-    # (copied verbatim by anonymize_files) with no residual-PHI check.
-    from phi_core.publish_guard import scan_all_exports as _scan_all_exports
-    guard_report = _scan_all_exports(
-        exports,
-        decisions=[  # minimal decision context so column-conditional patterns fire correctly
-            {"file_id": s.file_id, "column": s.column, "hipaa_category": s.hipaa_category}
-            for s in spans if s.column
-        ],
-    ).to_dict()
-    await db.sessions.update_one(
-        {"id": sid},
-        {"$set": {
-            "status": "complete",
-            "export_paths": exports,
-            "guard_report": guard_report,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }},
-    )
-    await emit(ProgressEvent(
-        phase="complete",
-        message=f"All files anonymized ({guard_report.get('status')})",
-        percent=100.0,
-        payload={"guard_status": guard_report.get("status")},
-    ))
-    await emit(ProgressEvent(phase="__end__", message="stream end"))
-    return {"status": "complete", "exports": exports, "guard": guard_report}
 
 
 @app.get("/api/coverage-matrix")
@@ -1528,7 +1294,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
             exec_out = await Executor(**common).run(files=files, decisions=decisions)
             # Publish Guard on the fresh exports before we mark complete.
             from phi_core.publish_guard import scan_all_exports as _scan_all_exports
-            guard_report = _scan_all_exports(exec_out["exports"], decisions=decisions).to_dict()
+            guard_report = _scan_all_exports(exec_out["exports"], decisions=decisions, jurisdiction=session.get("jurisdiction", "us")).to_dict()
             audit = await Auditor(**common).run(decisions=decisions, exports=exec_out["exports"], files=files)
             scout = await Scout(**common).run()
             ledger = await Ledger(**common).run(decisions=decisions, audit=audit, scout=scout, benchmark_result=None)

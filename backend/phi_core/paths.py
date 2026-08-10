@@ -69,3 +69,10 @@ def safe_join(base: Path, user_name: str | None, *, fallback: str = "upload.bin"
     if common != str(base_resolved) or candidate == base_resolved:
         raise UnsafePath(f"filename resolves outside base: {user_name!r}")
     return candidate
+
+
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
+UPLOAD_DIR = DATA_DIR / "uploads"
+EXPORT_DIR = DATA_DIR / "exports"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+EXPORT_DIR.mkdir(parents=True, exist_ok=True)

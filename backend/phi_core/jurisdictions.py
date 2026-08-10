@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
+
+from .detectors import luhn
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,7 @@ class GuardPattern:
     conditional: bool = False
     column_categories: frozenset[str] = frozenset()
     cell_anchors: re.Pattern[str] | None = None
+    validator: Callable[[str], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,18 @@ class JurisdictionPack:
 # These fire under every jurisdiction because their shapes are effectively
 # unique to the identifier they represent (email, URL, IP, SSN-shaped
 # numbers embedded in text). They are safe to include even in stubs.
+
+def _labeled_id(pid: str, category: str, labels: str) -> GuardPattern:
+    """Label token + separator + an uppercase/digit run that MUST contain a
+    digit. The digit lookahead is what stops prose such as "Account Number
+    required" in a data dictionary from blocking a clean export."""
+    return GuardPattern(
+        pid=pid, category=category,
+        regex=re.compile(
+            rf"\b(?i:{labels})[\s#:\-]*(?=[A-Z0-9\-]*\d)[A-Z0-9][A-Z0-9\-]{{3,19}}\b"
+        ),
+    )
+
 
 _UNIVERSAL_EMAIL = GuardPattern(
     pid="EMAIL", category="F",
@@ -188,6 +203,46 @@ _US_HIPAA_PATTERNS: tuple[GuardPattern, ...] = (
     GuardPattern(
         pid="DEA", category="K",
         regex=re.compile(r"\bDEA[:\- ]*[A-Z]{2}\d{7}\b"),
+    ),
+    GuardPattern(  # (E) fax, label-anchored (ported from detectors.RULES FAX_LABEL)
+        pid="FAX_LABEL", category="E",
+        regex=re.compile(r"\bfax[:\s]+\(?\d{3}\)?[\s\-]?\d{3}-\d{4}\b", re.IGNORECASE),
+    ),
+    _labeled_id("MRN", "H", r"MRN|MEDICAL\s?RECORD(?:\s?NUMBER)?|CHART\s?ID"),
+    _labeled_id("HEALTH_PLAN_ID", "I",
+                r"HP|MEMBER\s?ID|HEALTH\s?PLAN(?:\s?(?:ID|NUMBER))?|SUBSCRIBER\s?ID"),
+    GuardPattern(  # (I) CMS Medicare Beneficiary Identifier, 11 chars, C A AN N A AN N A A N N
+        pid="MBI", category="I",
+        regex=re.compile(
+            r"\b[1-9][ACDEFGHJKMNPQRTUVWXY][ACDEFGHJKMNPQRTUVWXY0-9]\d"
+            r"[ACDEFGHJKMNPQRTUVWXY][ACDEFGHJKMNPQRTUVWXY0-9]\d"
+            r"[ACDEFGHJKMNPQRTUVWXY][ACDEFGHJKMNPQRTUVWXY]\d{2}\b"
+        ),
+    ),
+    _labeled_id("ACCOUNT", "J", r"ACCOUNT(?:\s?NUMBER)?|ACCT"),
+    GuardPattern(  # (K) bare 10-digit NPI, Luhn-checked against the 80840 issuer prefix
+        pid="NPI_BARE", category="K",
+        regex=re.compile(r"\b\d{10}\b"),
+        conditional=True,
+        column_categories=frozenset({"K"}),
+        cell_anchors=re.compile(r"\b(?:npi|provider|clinician|physician)\b", re.IGNORECASE),
+        validator=lambda s: luhn("80840" + s),
+    ),
+    GuardPattern(  # (L) VIN — conditional, same rationale as LICENSE_PLATE above
+        pid="VIN", category="L",
+        regex=re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b"),
+        conditional=True,
+        column_categories=frozenset({"L"}),
+        cell_anchors=re.compile(r"\b(?:vin|vehicle)\b", re.IGNORECASE),
+    ),
+    GuardPattern(  # (M) GS1 device UDI
+        pid="DEVICE_UDI", category="M",
+        regex=re.compile(r"\(01\)\d{14}\b"),
+    ),
+    _labeled_id("UNIQUE_CODE", "R", r"UID|TRACKING\s?CODE|LINKAGE\s?ID"),
+    GuardPattern(  # (R) ClinicalTrials.gov registration id
+        pid="CLINICAL_TRIAL_ID", category="R",
+        regex=re.compile(r"\bNCT\d{8}\b"),
     ),
 )
 

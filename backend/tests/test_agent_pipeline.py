@@ -65,6 +65,11 @@ def test_health(api):
     assert len(d["hipaa_categories"]) == 18
 
 
+def test_session_not_found(api):
+    r = api.get(f"{BASE_URL}/api/sessions/nonexistent-id", timeout=TIMEOUT)
+    assert r.status_code == 404
+
+
 # ------------------------- LLM settings -----------------------------------
 
 def test_llm_settings_default(api):

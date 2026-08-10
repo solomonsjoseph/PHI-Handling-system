@@ -546,8 +546,10 @@ def build_bundle(session: dict[str, Any], opts: BundleOptions) -> tuple[bytes, s
             # Benchmark scaffold (real F1 unlocked when a gold corpus is loaded).
             zf.writestr("publication/benchmark/README.md",
                         (
-                            "Populate this folder with a gold-annotated corpus and re-run the\n"
-                            "benchmark endpoint to produce per-HIPAA-category P/R/F1 tables.\n"
+                            "Populate this folder with a gold-annotated corpus, then grade the\n"
+                            "pipeline with POST /api/corpus/study/run plus GET\n"
+                            "/api/corpus/study/verify/{sid} for per-plant grading, and GET\n"
+                            "/api/classification-accuracy for per-category P/R/F1.\n"
                         ).encode("utf-8"))
 
     return buf.getvalue(), f"phi_console_{sid[:12]}_{ts}.zip"
