@@ -463,6 +463,13 @@ async def session_bundle(sid: str, publication: bool = False, attestation_pdf: b
     session = await db.sessions.find_one({"id": sid}, {"_id": 0})
     if not session:
         raise HTTPException(404, "session not found")
+    if session.get("status") != "complete":
+        raise HTTPException(
+            403,
+            "Publish Guard has not certified this session as clean "
+            f"(session status={session.get('status') or 'missing'}). Re-run "
+            "the pipeline so the last-mile PHI scan populates a passing guard report.",
+        )
     guard = session.get("guard_report") or {}
     guard_status = guard.get("status")
     # SEC-001 fix: fail-closed. Missing guard result → refuse. Only serve
@@ -499,6 +506,16 @@ async def session_export(sid: str, file_id: str, force: bool = False):
     session = await db.sessions.find_one({"id": sid}, {"_id": 0})
     if not session:
         raise HTTPException(404, "session not found")
+    if session.get("status") != "complete":
+        return JSONResponse(status_code=403, content={
+            "error": "publish_guard_not_certified",
+            "message": (
+                "Publish Guard has not certified this file as clean "
+                f"(session status={session.get('status') or 'missing'}). Re-run "
+                "the pipeline so the last-mile PHI scan populates a passing result."
+            ),
+            "guard": None,
+        })
     path = (session.get("export_paths") or {}).get(file_id)
     if not path or not Path(path).exists():
         raise HTTPException(404, "export not ready")

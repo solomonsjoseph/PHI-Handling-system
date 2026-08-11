@@ -78,6 +78,16 @@ async def run_pipeline(
     on_phase: PhaseCb,
 ) -> dict[str, Any]:
     sid = session["id"]
+    # A previous completed run may have left export paths and a clean Guard
+    # report behind. Clear both atomically before any agent is awaited, so a
+    # rerun cannot serve replacement bytes under stale certification.
+    await db.sessions.update_one(
+        {"id": sid},
+        {
+            "$set": {"status": "classifying"},
+            "$unset": {"guard_report": "", "export_paths": ""},
+        },
+    )
     files = session.get("files", [])
     dataset_files = [f for f in files if f["kind"] == "dataset"]
     form_files = [f for f in files if f["kind"] == "narrative"]
