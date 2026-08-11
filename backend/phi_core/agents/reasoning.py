@@ -367,7 +367,7 @@ class Executor(Agent):
                 # (column definitions, code labels) so we run the deterministic
                 # detector over them BEFORE they land in exports/. Never copy
                 # verbatim.
-                _redact_metadata_file(src, dst)
+                dst = _redact_metadata_file(src, dst)
             elif f["kind"] == "dataset":
                 apply_column_actions_to_dataset(src, dst, f["subtype"], by_file.get(f["file_id"], []), registry)
             else:
@@ -587,7 +587,7 @@ def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: l
 
 # --- SEC-004: deterministic metadata (dictionary) redaction ---------------
 
-def _redact_metadata_file(src: Path, dst: Path) -> None:
+def _redact_metadata_file(src: Path, dst: Path) -> Path:
     """Run Presidio + regex over every cell of a dictionary/mapping file and
     write the redacted copy. Called by Executor for ``kind='metadata'``
     artifacts because these files can name PHI in their code-label columns.
@@ -601,18 +601,20 @@ def _redact_metadata_file(src: Path, dst: Path) -> None:
             writer = _csv.writer(fout, delimiter=delim)
             for row in reader:
                 writer.writerow([_scrub_text_cell(c or "") for c in row])
-        return
-    if ext in ("xlsx", "xls"):
+        return dst
+    if ext == "xlsx":
         wb = _openpyxl.load_workbook(src)
-        ws = wb[wb.sheetnames[0]]
-        for row in ws.iter_rows(min_row=1):
-            for cell in row:
-                if cell.value is not None:
-                    cell.value = _scrub_text_cell(str(cell.value))
+        for ws in wb.worksheets:
+            for row in ws.iter_rows(min_row=1):
+                for cell in row:
+                    if cell.value is not None:
+                        cell.value = _scrub_text_cell(str(cell.value))
         wb.save(dst)
-        return
-    # Unknown extension -> withhold entirely (fail closed).
-    dst.write_text(
+        return dst
+    # Unknown extension -> withhold entirely (fail closed) at a scannable path.
+    withheld = dst.with_suffix(".withheld.txt")
+    withheld.write_text(
         f"[REDACTED] metadata extension {ext!r} not supported; withheld to prevent PHI leak.\n",
         encoding="utf-8",
     )
+    return withheld

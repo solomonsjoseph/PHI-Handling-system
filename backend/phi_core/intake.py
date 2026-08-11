@@ -294,7 +294,7 @@ def scan_intake(root: Path) -> tuple[list[IntakeEntry], list[str]]:
 
         # Format-specific validation
         reason = ""
-        if component == "datasets" and ext == ".xlsx":
+        if ext == ".xlsx" and component in ("datasets", "dictionary"):
             ok, reason = _xlsx_is_single_sheet(path)
             if not ok:
                 entries.append(IntakeEntry(

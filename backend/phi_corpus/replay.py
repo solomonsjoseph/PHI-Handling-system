@@ -150,7 +150,7 @@ def replay(artifact: CorpusArtifact, workdir: Path, *,
     for dict_name in dictionary_files:
         src = src_dir / "dictionary" / dict_name
         dst = export_dir / dict_name
-        _redact_metadata_file(src, dst)
+        _ = _redact_metadata_file(src, dst)
         # Dictionary exports are not scored by verify(); intentionally
         # excluded from export_paths, which is planted-cell scoped.
 

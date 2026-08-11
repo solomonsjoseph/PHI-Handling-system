@@ -204,3 +204,132 @@ def test_read_xls_tables_handles_xlsx_disguised_as_xls(tmp_path):
     # function is contract-bound to return a string, never None.
     out = _read_xls_tables(p_xls)
     assert isinstance(out, str)
+
+
+def test_metadata_xlsx_scrubs_every_sheet_and_intake_rejects_multisheet_dictionary(tmp_path):
+    """Dictionary workbooks must never retain PHI on an unscanned worksheet."""
+    from openpyxl import Workbook, load_workbook
+    from phi_core.agents.reasoning import _redact_metadata_file
+    from phi_core.intake import scan_intake
+
+    src = tmp_path / "dictionary" / "codebook.xlsx"
+    src.parent.mkdir()
+    wb = Workbook()
+    wb.active.append(["description"])
+    wb.active.append(["Callback phone 415-555-1234"])
+    second = wb.create_sheet("supplement")
+    second.append(["description"])
+    second.append(["Contact james@example.edu"])
+    wb.save(src)
+
+    redacted = _redact_metadata_file(src, tmp_path / "redacted.xlsx")
+    redacted_wb = load_workbook(redacted)
+    values = [
+        str(cell.value)
+        for worksheet in redacted_wb.worksheets
+        for row in worksheet.iter_rows()
+        for cell in row
+        if cell.value is not None
+    ]
+    assert not any("415-555-1234" in value for value in values)
+    assert not any("james@example.edu" in value for value in values)
+
+    datasets = tmp_path / "datasets"
+    datasets.mkdir()
+    (datasets / "study.csv").write_text("study_id\n1\n", encoding="utf-8")
+    entries, _ = scan_intake(tmp_path)
+    rejected = [entry for entry in entries if entry.relpath == "dictionary/codebook.xlsx"]
+    assert len(rejected) == 1
+    assert rejected[0].component == "_unclassified"
+    assert "xlsx has 2 sheets" in rejected[0].reason
+
+
+def test_withheld_metadata_uses_scannable_txt_destination(tmp_path):
+    """Unsupported dictionary files must be withheld at a guard-scannable path."""
+    from phi_core.agents.reasoning import _redact_metadata_file
+    from phi_core.publish_guard import scan_export_file
+
+    src = tmp_path / "codebook.docx"
+    src.write_text("Jane Q. Patient, MRN 4471129", encoding="utf-8")
+    actual = _redact_metadata_file(src, tmp_path / "codebook.docx")
+
+    assert actual == tmp_path / "codebook.withheld.txt"
+    assert actual.exists()
+    assert "Jane Q. Patient" not in actual.read_text(encoding="utf-8")
+    assert scan_export_file("codebook", actual).status == "clean"
+
+
+def test_read_export_rows_includes_every_xlsx_worksheet(tmp_path):
+    """Verifier input must include rows from sheets after the first."""
+    from openpyxl import Workbook
+    from phi_corpus.verify import _read_export_rows
+
+    export = tmp_path / "export.xlsx"
+    wb = Workbook()
+    wb.active.append(["first"])
+    wb.active.append(["one"])
+    second = wb.create_sheet("supplement")
+    second.append(["second"])
+    second.append(["two"])
+    wb.save(export)
+
+    assert _read_export_rows(str(export)) == [["first"], ["one"], ["second"], ["two"]]
+
+
+def test_intake_accepted_xls_metadata_is_withheld_at_scannable_path(tmp_path):
+    """Legacy dictionary XLS files must be withheld without openpyxl parsing."""
+    from phi_core.agents.reasoning import _redact_metadata_file
+    from phi_core.intake import scan_intake
+
+    src = tmp_path / "dictionary" / "legacy.xls"
+    src.parent.mkdir()
+    src.write_text("Jane Q. Patient, MRN 4471129", encoding="utf-8")
+    datasets = tmp_path / "datasets"
+    datasets.mkdir()
+    (datasets / "study.csv").write_text("study_id\n1\n", encoding="utf-8")
+
+    entries, _ = scan_intake(tmp_path)
+    accepted = [entry for entry in entries if entry.relpath == "dictionary/legacy.xls"]
+    assert len(accepted) == 1
+    assert accepted[0].component == "dictionary"
+
+    actual = _redact_metadata_file(src, tmp_path / "legacy.xls")
+    assert actual == tmp_path / "legacy.withheld.txt"
+    assert actual.read_text(encoding="utf-8").startswith("[REDACTED]")
+
+
+def test_executor_publishes_withheld_metadata_at_its_scannable_path(tmp_path, monkeypatch):
+    """Executor exports the actual withheld marker path for unsupported metadata."""
+    import asyncio
+
+    from phi_core.agents.llm import LlmConfig
+    from phi_core.agents.reasoning import Executor
+    from phi_core.publish_guard import scan_export_file
+    import phi_core.agents.reasoning as reasoning
+
+    class _AgentLog:
+        async def insert_one(self, _message):
+            return None
+
+    class _Database:
+        agent_log = _AgentLog()
+
+    src = tmp_path / "codebook.docx"
+    src.write_text("Jane Q. Patient, MRN 4471129", encoding="utf-8")
+    export_dir = tmp_path / "exports"
+    export_dir.mkdir()
+    monkeypatch.setattr(reasoning, "EXPORT_DIR", export_dir)
+
+    result = asyncio.run(Executor("session", LlmConfig(), _Database()).run(
+        [{
+            "file_id": "dictionary",
+            "stored_path": str(src),
+            "original_name": src.name,
+            "kind": "metadata",
+        }],
+        [],
+    ))
+
+    actual = export_dir / "dictionary__codebook.withheld.txt"
+    assert result["exports"]["dictionary"] == str(actual)
+    assert scan_export_file("dictionary", actual).status == "clean"

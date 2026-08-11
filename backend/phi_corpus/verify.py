@@ -116,8 +116,11 @@ def _read_export_rows(path: str) -> list[list[str]]:
         try:
             import openpyxl
             wb = openpyxl.load_workbook(p, data_only=True)
-            ws = wb[wb.sheetnames[0]]
-            return [["" if c is None else str(c) for c in r] for r in ws.iter_rows(values_only=True)]
+            return [
+                ["" if c is None else str(c) for c in r]
+                for ws in wb.worksheets
+                for r in ws.iter_rows(values_only=True)
+            ]
         except Exception:
             return []
     with p.open("r", encoding="utf-8", errors="replace") as f:
