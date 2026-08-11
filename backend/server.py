@@ -30,6 +30,10 @@ Endpoints (all under /api):
   GET  /api/settings/warmup/schedule       -> auto-warmup toggle state
   POST /api/settings/warmup/schedule       -> set auto-warmup toggle
   POST /api/settings/warmup                -> prime Statute + Praxis caches
+  POST /api/settings/chatgpt/login         -> start ChatGPT OAuth device-code login
+  GET  /api/settings/chatgpt/login/{id}    -> poll device-code login status (one poll)
+  GET  /api/settings/chatgpt/status        -> current ChatGPT connection status
+  DELETE /api/settings/chatgpt             -> disconnect the ChatGPT account
 """
 from __future__ import annotations
 
@@ -56,11 +60,19 @@ from phi_core.intake import (
 )
 from phi_core.jurisdictions import get_pack
 from phi_core.models import FileArtifact, ProgressEvent, Session
-from phi_core.paths import UnsafePath, UPLOAD_DIR, safe_join
+from phi_core.paths import UnsafePath, UPLOAD_DIR, safe_join, CHATGPT_TOKEN_DIR
+
+# Redirect litellm's ChatGPT-provider Authenticator to the pinned token
+# directory (backend/phi_core/paths.py) rather than the per-user home
+# directory it defaults to. Must run before any request-time litellm call
+# constructs an Authenticator, so it is set at import time here rather
+# than in an on_event("startup") hook.
+os.environ.setdefault("CHATGPT_TOKEN_DIR", str(CHATGPT_TOKEN_DIR))
 from phi_core.security import (
     allowed_providers, require_api_token, validate_llm_base_url, validate_llm_provider,
 )
 from phi_core.agents import AgentMessage, LlmConfig, run_pipeline as run_agent_pipeline
+from phi_core import chatgpt_auth
 
 
 app = FastAPI(title="PHI Handling Console", version="2.0.0")
@@ -527,7 +539,7 @@ from typing import Literal
 
 
 class LlmSettings(BaseModel):
-    provider: Literal["emergent", "anthropic", "openai", "gemini", "openrouter", "openai_compatible"] = "emergent"
+    provider: Literal["emergent", "anthropic", "openai", "gemini", "openrouter", "openai_compatible", "chatgpt"] = "emergent"
     model: str = "claude-sonnet-4-5-20250929"
     api_key: str = ""
     base_url: str = ""
@@ -884,6 +896,10 @@ async def corpus_study_verify(sid: str):
 async def set_llm_settings(body: LlmSettings):
     validate_llm_provider(body.provider)
     validate_llm_base_url(body.base_url, body.provider)
+    if body.provider == "chatgpt" and chatgpt_auth.read_auth() is None:
+        raise HTTPException(
+            400, "ChatGPT account not connected; run POST /api/settings/chatgpt/login first"
+        )
     db = get_db()
     payload = body.model_dump()
     # Encrypt at rest (SEC-003). Empty string means "keep existing".
@@ -899,9 +915,66 @@ async def set_llm_settings(body: LlmSettings):
 async def _current_llm_cfg() -> LlmConfig:
     db = get_db()
     doc = await db.settings.find_one({"_id": "llm"}, {"_id": 0}) or {}
-    if doc.get("api_key"):
+    if doc.get("provider") == "chatgpt":
+        # ChatGPTConfig supplies both api_key and base_url from the OAuth
+        # auth file; nothing is persisted in the settings document for it.
+        doc = {**doc, "api_key": "", "base_url": ""}
+    elif doc.get("api_key"):
         doc["api_key"] = decrypt_api_key(doc["api_key"])
     return LlmConfig.from_dict(doc)
+
+
+class ChatGptLoginPollOut(BaseModel):
+    status: str
+    detail: str = ""
+    account_id: str = ""
+
+
+# Process-local device-login state, keyed by an opaque id handed to the
+# browser. Intentionally not persisted in Mongo: a device code is valid
+# for 15 minutes, so a server restart should force a fresh login rather
+# than resume polling a code that may already be dead.
+_chatgpt_logins: dict[str, chatgpt_auth.DeviceLogin] = {}
+
+
+@app.post("/api/settings/chatgpt/login", dependencies=[Depends(require_api_token)])
+async def chatgpt_login_start():
+    login = await chatgpt_auth.start_device_login()
+    login_id = uuid.uuid4().hex
+    _chatgpt_logins[login_id] = login
+    return {
+        "login_id": login_id,
+        "user_code": login.user_code,
+        "verify_url": login.verify_url,
+        "interval_s": login.interval_s,
+        "expires_in_s": 900,
+    }
+
+
+@app.get("/api/settings/chatgpt/login/{login_id}", dependencies=[Depends(require_api_token)])
+async def chatgpt_login_poll(login_id: str) -> ChatGptLoginPollOut:
+    login = _chatgpt_logins.get(login_id)
+    if login is None:
+        return ChatGptLoginPollOut(status="error", detail="unknown login_id")
+    # One poll per request -- never loop server-side, which is exactly
+    # the 15-minute blocking hazard this endpoint exists to avoid.
+    login = await chatgpt_auth.poll_once(login)
+    _chatgpt_logins[login_id] = login
+    account_id = ""
+    if login.status == "connected":
+        account_id = chatgpt_auth.auth_status().get("account_id", "")
+    return ChatGptLoginPollOut(status=login.status, detail=login.detail, account_id=account_id)
+
+
+@app.get("/api/settings/chatgpt/status")
+async def chatgpt_status():
+    return chatgpt_auth.auth_status()
+
+
+@app.delete("/api/settings/chatgpt", dependencies=[Depends(require_api_token)])
+async def chatgpt_disconnect():
+    chatgpt_auth.clear_auth()
+    return {"ok": True}
 
 
 async def _run_warmup(db, cfg) -> dict:

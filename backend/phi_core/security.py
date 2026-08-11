@@ -26,7 +26,7 @@ from urllib.parse import urlparse
 from fastapi import Header, HTTPException
 
 
-ALLOWED_PROVIDERS_DEFAULT = {"emergent", "anthropic", "openai", "gemini", "openrouter"}
+ALLOWED_PROVIDERS_DEFAULT = {"emergent", "anthropic", "openai", "gemini", "openrouter", "chatgpt"}
 # Kept behind an explicit env flag because openai_compatible allows a user-
 # controlled base_url which is the SSRF vector called out in SEC-003.
 ALLOWED_PROVIDERS_WITH_CUSTOM = ALLOWED_PROVIDERS_DEFAULT | {"openai_compatible"}
@@ -41,6 +41,7 @@ PROVIDER_HOSTS: dict[str, tuple[str, ...]] = {
     "openai": ("api.openai.com",),
     "gemini": ("generativelanguage.googleapis.com",),
     "openrouter": ("openrouter.ai", "api.openrouter.ai"),
+    "chatgpt": ("chatgpt.com", "auth.openai.com"),
 }
 
 

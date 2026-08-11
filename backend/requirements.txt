@@ -70,7 +70,7 @@ jsonschema-specifications==2025.9.1
 kiwisolver==1.5.0
 langcodes==3.5.1
 librt==0.13.0
-litellm @ https://customer-assets.emergentagent.com/internal-asset/library/litellm-1.80.0-py3-none-any.whl#sha256=adf398c513273de9341f61822296c6b2145f7f2dc4a69daf3ac04829f5bde3f8
+litellm==1.83.9
 lxml==6.1.1
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3

@@ -15,8 +15,10 @@ lazily so the app runs cleanly on any deployment without it.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +27,8 @@ import litellm
 # Silence litellm's noisy prints
 litellm.suppress_debug_info = True
 litellm.drop_params = True
+
+logger = logging.getLogger(__name__)
 
 
 def _default_provider() -> str:
@@ -39,6 +43,8 @@ def _default_provider() -> str:
         return "emergent"
     if os.environ.get("ANTHROPIC_API_KEY"):
         return "anthropic"
+    if _chatgpt_account_connected():
+        return "chatgpt"
     if os.environ.get("OPENAI_API_KEY"):
         return "openai"
     if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
@@ -48,6 +54,19 @@ def _default_provider() -> str:
     # No key at all: still return emergent so the UI renders; the first
     # LLM call will surface a helpful error rather than crashing silently.
     return "emergent"
+
+
+def _chatgpt_account_connected() -> bool:
+    """Whether a ChatGPT OAuth auth file is already on disk. Local import
+    to sidestep a module-load-order cycle (phi_core.chatgpt_auth imports
+    phi_core.paths, not phi_core.agents, but we still keep the import
+    function-scoped to match the existing ``_resolve_emergent_family``
+    pattern of deferring optional-provider imports until needed)."""
+    try:
+        from ..chatgpt_auth import read_auth
+        return read_auth() is not None
+    except Exception:
+        return False
 
 
 @dataclass
@@ -271,6 +290,13 @@ def call_llm_with_web_search(system: str, user: str,
     agents remain functional without provider-hosted search.
     """
     cfg = cfg or LlmConfig.from_dict(None)
+    if cfg.provider == "chatgpt":
+        _require_chatgpt_connected()
+        logger.info(
+            "web_search unavailable on provider 'chatgpt'; "
+            "falling back to deterministic Statute/Praxis"
+        )
+        return _litellm_call(system, user, cfg), []
     if cfg.provider == "emergent":
         return _emergent_call_with_web_search(system, user, cfg, max_uses=max_uses)
     if cfg.provider == "anthropic":
@@ -294,8 +320,37 @@ def _litellm_call(system: str, user: str, cfg: LlmConfig) -> str:
     return resp.choices[0].message.content or ""
 
 
+def _require_chatgpt_connected() -> None:
+    """Fail fast instead of letting a call reach litellm's ChatGPTConfig
+    with no auth file, or with a dead one. Without this, litellm's
+    Authenticator prints a device code to stdout and polls for 15 minutes;
+    under Agent.call that await is cancelled at 90s but the worker thread
+    it ran in keeps polling, leaking one thread per agent call.
+
+    Checking file presence alone is not enough: an access token expires
+    long before the on-disk file is deleted, and litellm's own refresh
+    fallback only saves us when the refresh token is STILL valid --
+    revoked-elsewhere or past its own lifetime, and litellm falls through
+    to the same 15-minute interactive login this guard exists to prevent.
+    We cannot know the refresh token's live validity without a network
+    call (which would just re-implement litellm's own refresh), so treat
+    an expired access token the same as no file: fail fast and force
+    reconnect through our own bounded HTTP-poll flow instead.
+    """
+    from ..chatgpt_auth import read_auth
+    auth = read_auth()
+    if auth is None:
+        raise RuntimeError("ChatGPT account not connected")
+    expires_at = auth.get("expires_at")
+    if expires_at is not None and time.time() >= expires_at - 60:
+        raise RuntimeError("ChatGPT account not connected")
+
+
 def call_llm(system: str, user: str, cfg: LlmConfig | None = None) -> str:
     cfg = cfg or LlmConfig.from_dict(None)
+    if cfg.provider == "chatgpt":
+        _require_chatgpt_connected()
+        return _litellm_call(system, user, cfg)
     if cfg.provider == "emergent":
         return _emergent_call(system, user, cfg)
     return _litellm_call(system, user, cfg)

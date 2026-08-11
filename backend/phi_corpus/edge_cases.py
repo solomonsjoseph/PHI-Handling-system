@@ -23,6 +23,7 @@ from typing import Callable
 import random
 
 from . import scenarios as _S
+from . import realism as _realism
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,58 @@ class EdgeCase:
     # implies a stricter transform (e.g. name-in-notes must be scrubbed
     # even though the notes column normally rides on scrub_text already).
     override_expected_action: str = ""
+
+_AGE_NONNUMERIC_POOL: tuple[tuple[str, int], ...] = (
+    ("ninety-two", 92),
+    (">89", 92),
+    ("92 yrs", 92),
+    ("90+", 90),
+    ("nonagenarian", 91),
+)
+
+
+def _mutate_age_nonnumeric_over_89(rng: random.Random) -> tuple[str, dict]:
+    value, age = rng.choice(_AGE_NONNUMERIC_POOL)
+    return value, {"age": age}
+
+
+def _mutate_dob_two_digit_year(rng: random.Random) -> tuple[str, dict]:
+    year = rng.randint(1930, 2015)
+    month = rng.randint(1, 12)
+    day = rng.randint(1, 28)
+    value = _realism.render_date(year, month, day, "us_short")
+    return value, {"year": year}
+
+
+_NON_US_POSTCODES: tuple[str, ...] = ("K1A 0B1", "SW1A 1AA", "2000 NSW")
+
+
+def _mutate_zip_non_us(rng: random.Random) -> tuple[str, dict]:
+    return rng.choice(_NON_US_POSTCODES), {"non_us": True}
+
+
+def _mutate_notes_multi_phi(rng: random.Random) -> tuple[str, dict]:
+    name = _S.gen_name(rng)
+    phone = _S.gen_phone_us(rng)
+    email = _S.gen_email(rng)
+    value = f"Payer follow-up for {name}, call {phone} or email {email} to confirm eligibility."
+    return value, {"literals": (name, phone, email)}
+
+
+def _mutate_notes_phi_across_newline(rng: random.Random) -> tuple[str, dict]:
+    name = _S.gen_name(rng)
+    parts = name.split(" ", 1)
+    first_part = parts[0]
+    last_part = parts[1] if len(parts) > 1 else ""
+    value = (f'Patient presented with, "acute" symptoms.\r\n'
+             f"Contact name: {first_part}\n{last_part} confirmed follow-up.")
+    # The rendered text splits the name across a bare newline, not a space,
+    # so the full space-joined `name` never appears verbatim -- register
+    # each half separately; that is what actually needs to be absent from
+    # the scrubbed export.
+    literals = tuple(p for p in (first_part, last_part) if p)
+    return value, {"literals": literals, "clinical_fragment": "acute"}
+
 
 
 EDGE_CASES: dict[str, EdgeCase] = {
@@ -131,26 +184,72 @@ EDGE_CASES: dict[str, EdgeCase] = {
         applies_to_column="notes",
         mutate=_S.gen_notes_with_license,
     ),
+
+    # ---- New adversarial value shapes (US ladder L2/L3) ----------------
+    #
+    # Each `applies_to_column` is bound to the ACTUAL header the target
+    # scenario uses, not a generic placeholder name, so the ladder table's
+    # scenario -> edge_case_tags assignment is functional.
+    "age_nonnumeric_over_89": EdgeCase(
+        tag="age_nonnumeric_over_89",
+        label="Non-numeric age > 89 (word form, inequality, unit suffix)",
+        applies_to_column="Age at Diagnosis",
+        mutate=lambda r: _mutate_age_nonnumeric_over_89(r),
+    ),
+    "dob_two_digit_year": EdgeCase(
+        tag="dob_two_digit_year",
+        label="Birth date rendered with a 2-digit year (MM/DD/YY)",
+        applies_to_column="BENE_BIRTH_DT",
+        mutate=lambda r: _mutate_dob_two_digit_year(r),
+    ),
+    "zip_non_us": EdgeCase(
+        tag="zip_non_us",
+        label="Foreign postcode in a ZIP column (must not fabricate a US ZIP3)",
+        applies_to_column="Addr at DX--Postal Code",
+        mutate=lambda r: _mutate_zip_non_us(r),
+    ),
+    "notes_multi_phi": EdgeCase(
+        tag="notes_multi_phi",
+        label="Three PHI categories (name, phone, email) in one free-text cell",
+        applies_to_column="RAW_PAYER_NAME_PRIMARY",
+        override_expected_action="scrub_text",
+        mutate=lambda r: _mutate_notes_multi_phi(r),
+    ),
+    "notes_phi_across_newline": EdgeCase(
+        tag="notes_phi_across_newline",
+        label="Patient name split across an embedded CRLF, plus quote hazards",
+        applies_to_column="comments_text",
+        override_expected_action="scrub_text",
+        mutate=lambda r: _mutate_notes_phi_across_newline(r),
+    ),
 }
 
 
 # Convenience preset: every edge case that targets a column present in the
-# hipaa_max_adversarial_v1 scenario. Used by the "adversarial" preset in
-# the corpus catalog UI.
+# hipaa_max_adversarial_v1 scenario, EXCEPT the 7 other "notes_carry_*"
+# free-text variants -- all 8 target the scenario's single "notes" column,
+# and a column holds one value per row, so only one can apply per planting
+# (see the collision guard in planters._generate_dataset_matrix). The other
+# 7 stay individually selectable via EDGE_CASES / the corpus catalog UI.
+# Used by the "adversarial" preset in the corpus catalog UI.
 HIPAA_MAX_EDGE_CASE_TAGS: tuple[str, ...] = (
     "age_over_89",
     "dob_indicative_of_age_over_89",
     "restricted_zip3",
     "notes_carry_name",
-    "notes_carry_phone",
-    "notes_carry_age_over_89",
-    "notes_carry_ipv4",
-    "notes_carry_email",
-    "notes_carry_url",
-    "notes_carry_device_serial",
-    "notes_carry_license",
     "clinical_hr_90s",
 )
+
+
+# Which edge case tags exercise which ladder tier's characteristic value
+# hostility. Informational, used by report/UI code; does not gate planting.
+TIER_EDGE_CASE_TAGS: dict[str, tuple[str, ...]] = {
+    "L0": HIPAA_MAX_EDGE_CASE_TAGS,
+    "L1": (),
+    "L2": ("age_nonnumeric_over_89", "zip_non_us", "dob_two_digit_year",
+           "notes_multi_phi", "notes_phi_across_newline"),
+    "L3": (),
+}
 
 
 def all_tags() -> list[str]:

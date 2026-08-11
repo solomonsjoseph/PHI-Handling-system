@@ -124,6 +124,98 @@ CATALOG: list[dict[str, Any]] = [
         "via_emergent_key": False,
         "notes": "BYOK required.",
     },
+
+    # ---- ChatGPT subscription (OAuth device-code, no API key) ----------
+    {
+        "id": "chatgpt/gpt-5.4",
+        "label": "GPT-5.4 (ChatGPT)",
+        "provider_family": "chatgpt",
+        "tier": "flagship",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "Latest general-purpose GPT via ChatGPT subscription. No web search.",
+    },
+    {
+        "id": "chatgpt/gpt-5.4-pro",
+        "label": "GPT-5.4 Pro (ChatGPT)",
+        "provider_family": "chatgpt",
+        "tier": "flagship",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "Highest-quality GPT via ChatGPT subscription; slower / more expensive.",
+    },
+    {
+        "id": "chatgpt/gpt-5.3-codex",
+        "label": "GPT-5.3 Codex (ChatGPT)",
+        "provider_family": "chatgpt",
+        "tier": "reasoning",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "Codex-tuned reasoning model via ChatGPT subscription.",
+    },
+    {
+        "id": "chatgpt/gpt-5.3-codex-spark",
+        "label": "GPT-5.3 Codex Spark (ChatGPT)",
+        "provider_family": "chatgpt",
+        "tier": "fast",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "Lightweight Codex variant for high-throughput classification.",
+    },
+    {
+        "id": "chatgpt/gpt-5.3-instant",
+        "label": "GPT-5.3 Instant (ChatGPT)",
+        "provider_family": "chatgpt",
+        "tier": "fast",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "Fastest ChatGPT-subscription model.",
+    },
+    {
+        "id": "chatgpt/gpt-5.3-chat-latest",
+        "label": "GPT-5.3 Chat Latest (ChatGPT)",
+        "provider_family": "chatgpt",
+        "tier": "balanced",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "Rolling chat-tuned GPT-5.3 via ChatGPT subscription.",
+    },
+    {
+        "id": "chatgpt/gpt-5.2-codex",
+        "label": "GPT-5.2 Codex (ChatGPT)",
+        "provider_family": "chatgpt",
+        "tier": "reasoning",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "Prior-generation Codex-tuned reasoning model.",
+    },
+    {
+        "id": "chatgpt/gpt-5.2",
+        "label": "GPT-5.2 (ChatGPT)",
+        "provider_family": "chatgpt",
+        "tier": "balanced",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "Prior-generation general-purpose GPT via ChatGPT subscription.",
+    },
+    {
+        "id": "chatgpt/gpt-5.1-codex-max",
+        "label": "GPT-5.1 Codex Max (ChatGPT)",
+        "provider_family": "chatgpt",
+        "tier": "reasoning",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "Highest-reasoning Codex variant of GPT-5.1.",
+    },
+    {
+        "id": "chatgpt/gpt-5.1-codex-mini",
+        "label": "GPT-5.1 Codex Mini (ChatGPT)",
+        "provider_family": "chatgpt",
+        "tier": "fast",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "Smallest, cheapest Codex variant of GPT-5.1.",
+    },
 ]
 
 
@@ -148,6 +240,11 @@ PROVIDER_FAMILIES: dict[str, dict[str, Any]] = {
     "openai_compatible": {
         "label": "Custom OpenAI-compatible endpoint",
         "web_search_tool": None,
+    },
+    "chatgpt": {
+        "label": "ChatGPT subscription",
+        "web_search_tool": None,  # Responses-API surface behind chatgpt.com/backend-api/codex
+                                  # is not the Anthropic tool schema; see agents/llm.py B4 note.
     },
 }
 

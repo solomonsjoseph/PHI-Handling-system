@@ -74,5 +74,7 @@ def safe_join(base: Path, user_name: str | None, *, fallback: str = "upload.bin"
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 UPLOAD_DIR = DATA_DIR / "uploads"
 EXPORT_DIR = DATA_DIR / "exports"
+CHATGPT_TOKEN_DIR = DATA_DIR / "chatgpt"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+CHATGPT_TOKEN_DIR.mkdir(parents=True, exist_ok=True)

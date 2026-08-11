@@ -46,6 +46,9 @@ export default function Settings() {
   const [warmupResult, setWarmupResult] = useState(null);
   const [autoWarmup, setAutoWarmup] = useState({ enabled: false, last_run_at: null, last_run_status: null, next_run_at: null });
   const [opToken, setOpToken] = useState(getApiToken());
+  const [chatgptStatus, setChatgptStatus] = useState({ connected: false, account_id: '' });
+  const [chatgptLogin, setChatgptLogin] = useState(null);
+  const [chatgptBusy, setChatgptBusy] = useState(false);
 
   const load = async () => {
     const [r, c, w] = await Promise.all([
@@ -65,6 +68,66 @@ export default function Settings() {
     // `load` closes over stable setState setters; fetch once on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const loadChatgptStatus = async () => {
+    try {
+      const r = await axios.get(`${API}/settings/chatgpt/status`);
+      setChatgptStatus(r.data);
+    } catch (e) { /* status probe is best-effort; leave prior state */ }
+  };
+  useEffect(() => {
+    if (cfg.provider === 'chatgpt') loadChatgptStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfg.provider]);
+
+  // Poll the pending device-code login at the server-declared cadence
+  // until it resolves; cleared on connected/expired/error or unmount.
+  useEffect(() => {
+    if (!chatgptLogin) return undefined;
+    const id = setInterval(async () => {
+      try {
+        const r = await axios.get(`${API}/settings/chatgpt/login/${chatgptLogin.login_id}`);
+        if (r.data.status === 'connected') {
+          clearInterval(id);
+          setChatgptLogin(null);
+          toast.success('ChatGPT account connected');
+          await loadChatgptStatus();
+          await load();
+        } else if (r.data.status === 'expired' || r.data.status === 'error') {
+          clearInterval(id);
+          setChatgptLogin(null);
+          toast.error(`ChatGPT login ${r.data.status}${r.data.detail ? `: ${r.data.detail}` : ''}`);
+        }
+      } catch (e) {
+        clearInterval(id);
+        toast.error(`ChatGPT login poll failed: ${e?.response?.data?.detail || e.message}`);
+      }
+    }, (chatgptLogin.interval_s || 5) * 1000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatgptLogin]);
+
+  const chatgptConnect = async () => {
+    setChatgptBusy(true);
+    try {
+      const r = await axios.post(`${API}/settings/chatgpt/login`);
+      setChatgptLogin(r.data);
+    } catch (e) {
+      toast.error(`connect failed: ${e?.response?.data?.detail || e.message}`);
+    } finally { setChatgptBusy(false); }
+  };
+
+  const chatgptDisconnect = async () => {
+    setChatgptBusy(true);
+    try {
+      await axios.delete(`${API}/settings/chatgpt`);
+      setChatgptLogin(null);
+      await loadChatgptStatus();
+      toast('ChatGPT account disconnected');
+    } catch (e) {
+      toast.error(`disconnect failed: ${e?.response?.data?.detail || e.message}`);
+    } finally { setChatgptBusy(false); }
+  };
 
   const saveOpToken = () => {
     setApiToken(opToken);
@@ -143,7 +206,7 @@ export default function Settings() {
     return fam ? fam.label : pid;
   };
 
-  const NEEDS_KEY = cfg.provider !== 'emergent';
+  const NEEDS_KEY = cfg.provider !== 'emergent' && cfg.provider !== 'chatgpt';
   const NEEDS_BASE = cfg.provider === 'openai_compatible';
 
   const Field = ({ label, children, hint, required }) => (
@@ -337,6 +400,46 @@ export default function Settings() {
           </div>
         )}
       </Panel>
+
+      {cfg.provider === 'chatgpt' && (
+        <Panel title="ChatGPT account" cite="OAuth device code, no pasted key" testId="settings-chatgpt-panel">
+          <div className="flex items-center gap-3" data-testid="chatgpt-status">
+            {chatgptStatus.connected ? (
+              <>
+                <Tag color="accept">connected</Tag>
+                <span className="font-mono text-[12px] text-ink-2">{chatgptStatus.account_id}</span>
+              </>
+            ) : (
+              <Tag>not connected</Tag>
+            )}
+          </div>
+
+          {chatgptLogin && (
+            <div className="mt-6 rule-top pt-6">
+              <div className="kicker">Enter this code at the link below</div>
+              <div className="mt-2 font-mono text-[28px] tracking-[0.3em] text-oxblood" data-testid="chatgpt-user-code">
+                {chatgptLogin.user_code}
+              </div>
+              <a href={chatgptLogin.verify_url} target="_blank" rel="noreferrer"
+                 className="mt-2 inline-block text-[13px] underline text-ink-2">
+                {chatgptLogin.verify_url}
+              </a>
+              <p className="mt-3 text-[12px] text-ink-muted max-w-md">
+                Device codes are a common phishing target. Never share this code.
+              </p>
+            </div>
+          )}
+
+          <div className="mt-6 flex items-center gap-3 flex-wrap">
+            <Btn variant="primary" onClick={chatgptConnect} disabled={chatgptBusy} testId="btn-chatgpt-connect">
+              Connect ChatGPT account
+            </Btn>
+            <Btn onClick={chatgptDisconnect} disabled={chatgptBusy} testId="btn-chatgpt-disconnect">
+              Disconnect
+            </Btn>
+          </div>
+        </Panel>
+      )}
     </div>
   );
 }
