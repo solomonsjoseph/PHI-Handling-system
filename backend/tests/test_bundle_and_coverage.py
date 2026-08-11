@@ -56,7 +56,15 @@ def _fake_session(tmp_path, with_exports=True):
             {"file_id": "did", "kind": "metadata", "original_name": "dict.csv"},
         ],
         "export_paths": export_paths,
-        "guard_report": {"status": "clean", "scanned": 2, "blocked": 0, "results": []},
+        "guard_report": {
+            "status": "clean",
+            "scanned": 2,
+            "blocked": 0,
+            "results": [
+                {"file_id": "eid", "status": "clean"},
+                {"file_id": "did", "status": "clean"},
+            ],
+        },
         "session_review": {"reviewer": "jane@lab.edu", "comment": "per QA v1",
                            "reviewed_at": "2026-07-28T00:00:00+00:00", "changed_decisions": False},
     }
