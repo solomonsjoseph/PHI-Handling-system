@@ -156,13 +156,18 @@ def _release_stream(session_id: str) -> None:
         _progress_subscribers[session_id] = remaining
 
 
-async def _emit(session_id: str, ev: ProgressEvent) -> None:
-    await _queue_for(session_id).put(ev)
+async def _emit(session_id: str, ev: ProgressEvent, run_id: str | None = None) -> None:
     db = get_db()
-    await db.sessions.update_one(
-        {"id": session_id},
+    query = {"id": session_id}
+    if run_id is not None:
+        query["_pipeline_run_id"] = run_id
+    result = await db.sessions.update_one(
+        query,
         {"$push": {"progress": ev.model_dump()}, "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
     )
+    if run_id is not None and not getattr(result, "matched_count", 0):
+        return
+    await _queue_for(session_id).put(ev)
 
 
 # --- Health ----------------------------------------------------------------
@@ -212,6 +217,8 @@ def _scrub_session_document(doc: dict) -> dict:
     # needs it via session_get / session_list / session_results. Leaving
     # it out prevents an attacker from post-hoc grading their own attempt.
     doc.pop("corpus_ground_truth", None)
+    doc.pop("_pipeline_run_id", None)
+
     for k in (
         "agent_decisions", "agent_herald", "agent_ledger",
         "agent_scout", "agent_audit", "agent_sentinel_last",
@@ -1172,10 +1179,46 @@ async def session_handle(sid: str, iteration_cap: int | None = None):
         raise HTTPException(404, "session not found")
     if session.get("intake_status") not in ("ready",):
         raise HTTPException(400, f"intake not ready (status={session.get('intake_status')})")
+    cfg = await _current_llm_cfg()
 
-    if iteration_cap is not None:
-        cap = max(1, min(int(iteration_cap), 3))
-        await db.sessions.update_one({"id": sid}, {"$set": {"iteration_cap": cap}})
+
+    cap = max(1, min(int(iteration_cap), 3)) if iteration_cap is not None else None
+    run_id = uuid.uuid4().hex
+    claim_set = {
+        "status": "classifying",
+        "_pipeline_run_id": run_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if cap is not None:
+        claim_set["iteration_cap"] = cap
+    claim = await db.sessions.update_one(
+        {
+            "id": sid,
+            "intake_status": "ready",
+            "status": {"$in": ("intake", "complete", "failed", "cancelled")},
+        },
+        {
+            "$set": claim_set,
+            "$unset": {
+                "guard_report": "",
+                "export_paths": "",
+                "cancel_requested": "",
+                "cancel_requested_at": "",
+            },
+        },
+    )
+    if not getattr(claim, "matched_count", 0):
+        current = await db.sessions.find_one({"id": sid}, {"intake_status": 1, "status": 1})
+        if not current:
+            raise HTTPException(404, "session not found")
+        if current.get("intake_status") != "ready":
+            raise HTTPException(400, f"intake not ready (status={current.get('intake_status')})")
+        raise HTTPException(
+            409,
+            f"pipeline launch conflicts with active session (status={current.get('status') or 'missing'})",
+        )
+    session["_pipeline_run_id"] = run_id
+    if cap is not None:
         session["iteration_cap"] = cap
 
     async def emit_msg(msg: AgentMessage) -> None:
@@ -1185,16 +1228,15 @@ async def session_handle(sid: str, iteration_cap: int | None = None):
             message=f"{msg.agent} {msg.phase}",
             payload={"agent": msg.agent, "phase_key": msg.phase, "direction": msg.direction, "duration_ms": msg.duration_ms},
         )
-        await _emit(sid, ev)
+        await _emit(sid, ev, run_id=run_id)
 
     async def on_phase(phase: str, payload: dict):
-        await _emit(sid, ProgressEvent(phase=f"agent_phase:{phase}", message=phase, payload=payload))
+        await _emit(sid, ProgressEvent(phase=f"agent_phase:{phase}", message=phase, payload=payload), run_id=run_id)
 
-    cfg = await _current_llm_cfg()
 
     async def worker():
+        run_filter = {"id": sid, "_pipeline_run_id": run_id}
         try:
-            await db.sessions.update_one({"id": sid}, {"$set": {"status": "reading"}})
             # Populate dataset headers (LLM never sees rows). Persist onto session before pipeline runs.
             from phi_core.file_readers import read_csv_columns, read_xlsx_columns, read_parquet_columns
             files_hydrated = []
@@ -1214,10 +1256,10 @@ async def session_handle(sid: str, iteration_cap: int | None = None):
                         f["columns"] = cols
                         f["row_count"] = rows
                     except Exception as e:
-                        await _emit(sid, ProgressEvent(phase="reading", message=f"header extract failed for {f['original_name']}: {e}"))
+                        await _emit(sid, ProgressEvent(phase="reading", message=f"header extract failed for {f['original_name']}: {e}"), run_id=run_id)
                 files_hydrated.append(f)
             session["files"] = files_hydrated
-            await db.sessions.update_one({"id": sid}, {"$set": {"files": files_hydrated, "status": "classifying"}})
+            await db.sessions.update_one(run_filter, {"$set": {"files": files_hydrated}})
 
             # HANG PROTECTION: hard 15-minute wall-clock ceiling. If the
             # pipeline burns beyond this the worker is cancelled with a
@@ -1225,13 +1267,13 @@ async def session_handle(sid: str, iteration_cap: int | None = None):
             # loading screens. 15 min is 5x the observed 190 s happy path
             # and 2x the worst historical case (~340 s + Herald 90 s x2).
             result = await asyncio.wait_for(
-                run_agent_pipeline(session, db, cfg, emit_msg, on_phase),
+                run_agent_pipeline(session, db, cfg, emit_msg, on_phase, run_id=run_id),
                 timeout=900,
             )
-            await _emit(sid, ProgressEvent(phase="complete", message=f"Pipeline done: {result.get('status')}", percent=100.0))
+            await _emit(sid, ProgressEvent(phase="complete", message=f"Pipeline done: {result.get('status')}", percent=100.0), run_id=run_id)
         except asyncio.TimeoutError:
             await db.sessions.update_one(
-                {"id": sid},
+                run_filter,
                 {"$set": {"status": "failed",
                           "error": "pipeline exceeded 15-minute wall-clock ceiling"}},
             )
@@ -1241,13 +1283,13 @@ async def session_handle(sid: str, iteration_cap: int | None = None):
                         "This usually means an LLM call is stuck; try again "
                         "or switch model in Settings.",
                 payload={"reason": "wall_clock_ceiling_exceeded"},
-            ))
+            ), run_id=run_id)
         except Exception as e:
             # Import here to keep this endpoint's cold-start light.
             from phi_core.agents.orchestrator import PipelineCancelled
             if isinstance(e, PipelineCancelled):
                 await db.sessions.update_one(
-                    {"id": sid},
+                    run_filter,
                     {"$set": {"status": "cancelled",
                               "cancelled_at": datetime.now(timezone.utc).isoformat()}},
                 )
@@ -1255,12 +1297,12 @@ async def session_handle(sid: str, iteration_cap: int | None = None):
                     phase="cancelled",
                     message="Pipeline cancelled by operator.",
                     payload={"reason": "operator_cancel"},
-                ))
+                ), run_id=run_id)
             else:
-                await db.sessions.update_one({"id": sid}, {"$set": {"status": "failed", "error": f"{type(e).__name__}: {e}"}})
-                await _emit(sid, ProgressEvent(phase="failed", message=f"pipeline error: {e}"))
+                await db.sessions.update_one(run_filter, {"$set": {"status": "failed", "error": f"{type(e).__name__}: {e}"}})
+                await _emit(sid, ProgressEvent(phase="failed", message=f"pipeline error: {e}"), run_id=run_id)
         finally:
-            await _emit(sid, ProgressEvent(phase="__end__", message="stream end"))
+            await _emit(sid, ProgressEvent(phase="__end__", message="stream end"), run_id=run_id)
 
     asyncio.create_task(worker())
     return {"status": "started", "llm": {"provider": cfg.provider, "model": cfg.model}}
@@ -1333,6 +1375,14 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
     session = await db.sessions.find_one({"id": sid})
     if not session:
         raise HTTPException(404, "session not found")
+    prior_run_id = session.get("_pipeline_run_id")
+    review_filter = {"id": sid, "status": "awaiting_human_review"}
+    if prior_run_id is None:
+        review_filter["_pipeline_run_id"] = {"$exists": False}
+    else:
+        review_filter["_pipeline_run_id"] = prior_run_id
+
+
 
     decisions = list(session.get("agent_decisions", []))
     ts = datetime.now(timezone.utc).isoformat()
@@ -1366,11 +1416,42 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
     # Any remaining unresolved?
     unresolved = [d for d in decisions if d.get("action") == "human_review"]
     if unresolved:
-        await db.sessions.update_one({"id": sid}, {"$set": {"agent_decisions": decisions}})
-        return {"status": "still_awaiting", "unresolved": len(unresolved)}
+        update = await db.sessions.update_one(
+            review_filter,
+            {"$set": {"agent_decisions": decisions}},
+        )
+        if getattr(update, "matched_count", 0):
+            return {"status": "still_awaiting", "unresolved": len(unresolved)}
+        current = await db.sessions.find_one({"id": sid}, {"status": 1})
+        if not current:
+            raise HTTPException(404, "session not found")
+        raise HTTPException(
+            409,
+            f"human-review update conflicts with active session (status={current.get('status') or 'missing'})",
+        )
 
     files = session.get("files", [])
     cfg = await _current_llm_cfg()
+    resume_run_id = uuid.uuid4().hex
+    claim = await db.sessions.update_one(
+        review_filter,
+        {"$set": {
+            "status": "anonymizing",
+            "agent_decisions": decisions,
+            "human_review_required": False,
+            "_pipeline_run_id": resume_run_id,
+        }},
+    )
+    if not getattr(claim, "matched_count", 0):
+        current = await db.sessions.find_one({"id": sid}, {"status": 1})
+        if not current:
+            raise HTTPException(404, "session not found")
+        raise HTTPException(
+            409,
+            f"human-review resume conflicts with active session (status={current.get('status') or 'missing'})",
+        )
+    run_filter = {"id": sid, "_pipeline_run_id": resume_run_id}
+
 
     async def emit_msg(msg: AgentMessage) -> None:
         ev = ProgressEvent(
@@ -1378,12 +1459,11 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
             message=f"{msg.agent} {msg.phase}",
             payload={"agent": msg.agent, "phase_key": msg.phase, "direction": msg.direction},
         )
-        await _emit(sid, ev)
+        await _emit(sid, ev, run_id=resume_run_id)
 
     async def worker():
         try:
             common = dict(session_id=sid, llm=cfg, db=db, emit=emit_msg)
-            await db.sessions.update_one({"id": sid}, {"$set": {"status": "anonymizing", "agent_decisions": decisions, "human_review_required": False}})
             exec_out = await Executor(**common).run(files=files, decisions=decisions)
             # Publish Guard on the fresh exports before we mark complete.
             from phi_core.publish_guard import scan_all_exports as _scan_all_exports
@@ -1393,9 +1473,8 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
             ledger = await Ledger(**common).run(decisions=decisions, audit=audit, scout=scout, benchmark_result=None)
             herald = await Herald(**common).run(ledger=ledger, audit=audit,
                                                 target_venue=session.get("target_venue") or "JAMIA Open")
-            await db.sessions.update_one(
-                {"id": sid},
-                {"$set": {
+            completion_update = {
+                "$set": {
                     "agent_audit": audit,
                     "agent_ledger": ledger,
                     "agent_herald": herald,
@@ -1405,14 +1484,15 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
                     "export_paths": exec_out["exports"],
                     "status": "complete",
                     "updated_at": datetime.now(timezone.utc).isoformat(),
-                }},
-            )
-            await _emit(sid, ProgressEvent(phase="complete", message="pipeline complete after human review", percent=100.0))
+                },
+            }
+            await db.sessions.update_one(run_filter, completion_update)
+            await _emit(sid, ProgressEvent(phase="complete", message="pipeline complete after human review", percent=100.0), run_id=resume_run_id)
         except Exception as e:
-            await db.sessions.update_one({"id": sid}, {"$set": {"status": "failed", "error": f"{type(e).__name__}: {e}"}})
-            await _emit(sid, ProgressEvent(phase="failed", message=f"pipeline error: {e}"))
+            await db.sessions.update_one(run_filter, {"$set": {"status": "failed", "error": f"{type(e).__name__}: {e}"}})
+            await _emit(sid, ProgressEvent(phase="failed", message=f"pipeline error: {e}"), run_id=resume_run_id)
         finally:
-            await _emit(sid, ProgressEvent(phase="__end__", message="stream end"))
+            await _emit(sid, ProgressEvent(phase="__end__", message="stream end"), run_id=resume_run_id)
 
     asyncio.create_task(worker())
     return {"status": "resuming"}

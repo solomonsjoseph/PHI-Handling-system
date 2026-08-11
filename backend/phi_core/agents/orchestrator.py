@@ -76,18 +76,12 @@ async def run_pipeline(
     llm_cfg: LlmConfig,
     emit: Callable[[AgentMessage], Awaitable[None]],
     on_phase: PhaseCb,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     sid = session["id"]
-    # A previous completed run may have left export paths and a clean Guard
-    # report behind. Clear both atomically before any agent is awaited, so a
-    # rerun cannot serve replacement bytes under stale certification.
-    await db.sessions.update_one(
-        {"id": sid},
-        {
-            "$set": {"status": "classifying"},
-            "$unset": {"guard_report": "", "export_paths": ""},
-        },
-    )
+    session_filter = {"id": sid}
+    if run_id is not None:
+        session_filter["_pipeline_run_id"] = run_id
     files = session.get("files", [])
     dataset_files = [f for f in files if f["kind"] == "dataset"]
     form_files = [f for f in files if f["kind"] == "narrative"]
@@ -257,7 +251,7 @@ async def run_pipeline(
 
     # 4. Human review gate (persist and pause if needed)
     await db.sessions.update_one(
-        {"id": sid},
+        session_filter,
         {"$set": {
             "agent_decisions": approved_decisions,
             "agent_sentinel_last": s,
@@ -269,7 +263,7 @@ async def run_pipeline(
     if human_needed:
         await close_last_phase()
         await db.sessions.update_one(
-            {"id": sid},
+            session_filter,
             {"$set": {"status": "awaiting_human_review",
                       "updated_at": datetime.now(timezone.utc).isoformat(),
                       "phase_timings": _phase_timings,
@@ -335,9 +329,8 @@ async def run_pipeline(
         "run_elapsed_s": round(time.perf_counter() - _run_started, 3),
         "iteration_cap": iteration_cap,
     }
-    await db.sessions.update_one(
-        {"id": sid},
-        {"$set": {
+    completion_update = {
+        "$set": {
             "agent_audit": audit,
             "agent_ledger": ledger,
             "agent_herald": herald,
@@ -350,8 +343,9 @@ async def run_pipeline(
             "run_elapsed_s": result["run_elapsed_s"],
             "iteration_cap": iteration_cap,
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        }},
-    )
+        },
+    }
+    await db.sessions.update_one(session_filter, completion_update)
     return result
 
 
