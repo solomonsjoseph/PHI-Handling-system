@@ -12,8 +12,10 @@ from typing import Any
 
 from ..anonymizer import apply_to_text
 from ..detectors import detect_text
-from ..file_readers import read_narrative
+from ..file_readers import iter_dataset_rows, read_narrative
+from ..jurisdictions import get_pack
 from ..paths import EXPORT_DIR
+from ..publish_guard import should_fire
 from .base import Agent
 
 
@@ -152,6 +154,89 @@ def apply_sentinel_hard_rules(decisions: list[dict[str, Any]]) -> tuple[list[dic
         if not matched:
             out.append(d)
     return out, overrides
+
+def verify_keep_decisions(
+    decisions: list[dict[str, Any]],
+    dataset_paths: dict[str, Path],
+    jurisdiction: str = "us",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Demote keeps whose dataset values match deterministic PHI detectors."""
+    verified = list(decisions)
+    demotions: list[dict[str, Any]] = []
+    patterns = get_pack(jurisdiction).patterns
+    keep_indices_by_file: dict[str, list[int]] = {}
+    for index, decision in enumerate(decisions):
+        file_id = decision.get("file_id")
+        if decision.get("action") == "keep" and file_id in dataset_paths:
+            keep_indices_by_file.setdefault(file_id, []).append(index)
+
+    def demote(decision: dict[str, Any], detector_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        column = decision.get("column")
+        updated = dict(decision)
+        updated.update(
+            action="human_review",
+            reason=(
+                f"Keep verification: column '{column}' matched {detector_id} in a row value; "
+                "demoted pending human review."
+            ),
+            citation="45 CFR 164.514(b)(2)(i)",
+        )
+        return updated, {
+            "file_id": decision.get("file_id"),
+            "column": column,
+            "from": "keep",
+            "to": "human_review",
+            "detector": detector_id,
+            "citation": "45 CFR 164.514(b)(2)(i)",
+        }
+
+    for file_id, indices in keep_indices_by_file.items():
+        file_updates: dict[int, dict[str, Any]] = {}
+        file_demotions: list[dict[str, Any]] = []
+        try:
+            path = dataset_paths[file_id]
+            ext = path.suffix.lstrip(".").lower()
+            for index in indices:
+                decision = decisions[index]
+                column = decision.get("column")
+                detector_id = ""
+                for _row_index, row in iter_dataset_rows(path, ext):
+                    value = row.get(column)
+                    if value is None:
+                        continue
+                    text = str(value)
+                    if not text.strip():
+                        continue
+                    span = next(
+                        (candidate for candidate in detect_text(text, detectors=("presidio", "rule"))
+                         if candidate.hipaa_category),
+                        None,
+                    )
+                    if span is not None:
+                        detector_id = span.hipaa_category
+                        break
+                    for pattern in patterns:
+                        match = pattern.regex.search(text)
+                        if match and should_fire(pattern, match.group(0), text, None):
+                            detector_id = pattern.pid
+                            break
+                    if detector_id:
+                        break
+                if detector_id:
+                    updated, record = demote(decision, detector_id)
+                    file_updates[index] = updated
+                    file_demotions.append(record)
+        except Exception:
+            file_updates = {}
+            file_demotions = []
+            for index in indices:
+                updated, record = demote(decisions[index], "unreadable")
+                file_updates[index] = updated
+                file_demotions.append(record)
+        for index, updated in file_updates.items():
+            verified[index] = updated
+        demotions.extend(file_demotions)
+    return verified, demotions
 
 
 class Judge(Agent):

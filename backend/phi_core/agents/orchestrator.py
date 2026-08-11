@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -30,7 +31,14 @@ from .base import AgentMessage, ITERATION_CAP
 from .experts import Praxis, Statute
 from .llm import LlmConfig
 from .outward import Herald, Ledger, Scout
-from .reasoning import Auditor, Executor, Judge, Sentinel, apply_sentinel_hard_rules
+from .reasoning import (
+    Auditor,
+    Executor,
+    Judge,
+    Sentinel,
+    apply_sentinel_hard_rules,
+    verify_keep_decisions,
+)
 from ..security import scrub_decision, scrub_persisted_text
 from .specialists import Instrument, Lexicon, Schema
 
@@ -212,6 +220,13 @@ async def run_pipeline(
     # `reason`/`citation` fields before we persist. The audit found a real
     # patient name in a stored decision reason on the live deployment.
     approved_decisions = [scrub_decision(d) for d in approved_decisions]
+    approved_decisions, keep_demotions = verify_keep_decisions(
+        approved_decisions,
+        {f["file_id"]: Path(f["stored_path"]) for f in dataset_files},
+        jurisdiction=session.get("jurisdiction", "us"),
+    )
+    if keep_demotions:
+        await on_phase("keep_verification", {"demotions": keep_demotions})
     if isinstance(s, dict):
         s = dict(s)
         if isinstance(s.get("issues"), list):

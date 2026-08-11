@@ -19,9 +19,10 @@ from pathlib import Path
 from typing import Any
 
 from phi_core.agents.reasoning import (
-    apply_sentinel_hard_rules,
-    apply_column_actions_to_dataset,
     PseudonymRegistry,
+    apply_column_actions_to_dataset,
+    apply_sentinel_hard_rules,
+    verify_keep_decisions,
 )
 # Private by convention in phi_core; imported here (not promoted) because
 # the point of the replay is to exercise the code under test, and
@@ -127,6 +128,10 @@ def replay(artifact: CorpusArtifact, workdir: Path, *,
             nd["action"] = expected_index.get((d.get("file_id", ""), d.get("column", "")), "human_review")
             resolved.append(nd)
     decisions = resolved
+    decisions, _keep_demotions = verify_keep_decisions(
+        decisions,
+        {file_name: src_dir / "datasets" / file_name for file_name in dataset_files},
+    )
 
     registry = PseudonymRegistry(salt="replay")
     decisions_by_file: dict[str, list[dict[str, Any]]] = {}

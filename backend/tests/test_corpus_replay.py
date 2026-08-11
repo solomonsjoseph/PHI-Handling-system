@@ -11,6 +11,7 @@ assertions below track what genuinely happens.
 """
 from __future__ import annotations
 
+import csv
 import json
 import tempfile
 from pathlib import Path
@@ -74,19 +75,22 @@ def test_cms_dob_two_digit_year_edge_case_produces_a_transform_violation():
     assert violations, json.dumps(report["transform"]["violations"][:5], indent=2)
 
 
-def test_keeper_hijack_barcode_reaches_the_export_as_a_leak():
-    """The hard-rule "clinical / stratifier" allow-list includes the
-    literal `barcode` alongside genuinely clinical headers, so a
-    header-driven pipeline force-`keep`s a column named "barcode" even
-    though this scenario plants an MRN under it. Oracle mode does not
-    correct this: `apply_sentinel_hard_rules` only leaves genuinely
-    UNMATCHED columns for the oracle substitution to touch, and this one
-    matches (wrongly) via the keeper pattern -- the leak is structural."""
-    _art, _rr, report = _replay_and_verify(
-        "l3_keeper_hijack_v1", row_count=10, seed=402, unmatched="oracle",
-    )
-    hits = [h for h in report["leak"]["hits"] if h["column"] == "barcode"]
-    assert hits, json.dumps(report["leak"]["hits"][:5], indent=2)
+def test_keeper_hijack_barcode_is_demoted_not_leaked():
+    """A keeper allow-list no longer force-keeps a PHI-valued column."""
+    from phi_corpus.planters import plant
+    from phi_corpus.replay import replay
+    from phi_corpus.verify import verify
+
+    art = plant("l3_keeper_hijack_v1", row_count=10, seed=402)
+    with tempfile.TemporaryDirectory() as td:
+        rr = replay(art, Path(td), unmatched="oracle")
+        report = verify(art.ground_truth, rr.decisions, file_name_map=rr.file_name_map,
+                        guard_report=rr.guard_report, export_paths=rr.export_paths)
+        with Path(rr.export_paths["hijack.csv"]).open(newline="", encoding="utf-8") as export:
+            rows = list(csv.DictReader(export))
+
+    assert [h for h in report["leak"]["hits"] if h["column"] == "barcode"] == []
+    assert rows[0]["barcode"] == "[HUMAN_REVIEW_PENDING]"
 
 
 def test_sdtm_studyid_hard_rule_false_positive_is_a_utility_loss():

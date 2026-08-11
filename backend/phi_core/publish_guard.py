@@ -44,8 +44,8 @@ from .jurisdictions import GuardPattern, get_pack
 MAX_FINDINGS_PER_FILE = 20
 
 
-def _should_fire(p: GuardPattern, matched: str, cell_text: str,
-                 column_category: str | None) -> bool:
+def should_fire(p: GuardPattern, matched: str, cell_text: str,
+                column_category: str | None) -> bool:
     """Decide whether a conditional pattern should fire in this cell.
 
     Non-conditional patterns always fire (returns True immediately).
@@ -115,7 +115,7 @@ def _scan_text(text: str, file_id: str, path: str,
             m = p.regex.search(line)
             if not m:
                 continue
-            if not _should_fire(p, m.group(0), line, None):
+            if not should_fire(p, m.group(0), line, None):
                 continue
             key = (p.pid, m.group(0))
             if key in seen:
@@ -212,7 +212,7 @@ def _scan_csv_text(
                 m = p.regex.search(cell)
                 if not m:
                     continue
-                if not _should_fire(p, m.group(0), cell, col_cat):
+                if not should_fire(p, m.group(0), cell, col_cat):
                     continue
                 key = (p.pid, m.group(0))
                 if key in seen:
@@ -256,7 +256,7 @@ def _scan_xlsx(
                 m = p.regex.search(cell)
                 if not m:
                     continue
-                if not _should_fire(p, m.group(0), cell, col_cat):
+                if not should_fire(p, m.group(0), cell, col_cat):
                     continue
                 key = (p.pid, m.group(0))
                 if key in seen:
@@ -280,7 +280,7 @@ def scan_all_exports(
 
     ``decisions`` is the pipeline's per-column decision list. When
     provided, each cell's column is looked up to determine whether a
-    conditional pattern should fire (see ``_should_fire``). When absent,
+    conditional pattern should fire (see ``should_fire``). When absent,
     conditional patterns rely purely on in-cell anchor tokens (safer
     default: catches free-text leaks even without column context).
     ``jurisdiction`` selects which pack's pattern table every file in this
