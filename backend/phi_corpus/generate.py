@@ -23,11 +23,10 @@ Ladder/campaign usage (new)::
     python -m phi_corpus.generate --campaign --tier all --online \\
         --base-url http://127.0.0.1:8001 --jobs 3 --warmup
 
-``--campaign`` runs the fourteen-scenario ladder instead of one scenario and
-writes ``campaign_report.{json,md}`` to ``--out-dir``. Exit code is 0 when
-the campaign completed, 1 when any entry recorded an error, and 2 when an
-L0 entry is not leak-clean; L1/L2/L3 findings are the report's payload and
-never affect the exit code.
+``--campaign`` runs the ladder instead of one scenario and writes
+``campaign_report.{json,md}`` to ``--out-dir``. Exit code is 0 when
+every entry is leak-clean, 1 when any entry recorded an error, and 2 when an
+entry in any tier is not leak-clean.
 """
 from __future__ import annotations
 
@@ -159,10 +158,10 @@ def _cli_campaign(args: argparse.Namespace) -> int:
     if errors:
         return 1
     for e in result.entries:
-        if e.get("error") or e.get("tier") != "L0":
+        if e.get("error"):
             continue
         leak_status = ((e.get("report") or {}).get("leak") or {}).get("status")
-        if leak_status and leak_status != "clean":
+        if leak_status != "clean":
             return 2
     return 0
 

@@ -263,3 +263,68 @@ def test_cli_summary_only_lists_scenarios_and_edge_cases(tmp_path):
     assert any(s["id"] == "oncology_v1" for s in data["scenarios"])
     assert data["edge_cases"]
     assert any(e["tag"] == "age_over_89" for e in data["edge_cases"])
+
+
+def _campaign_result(entries, *, errors=0):
+    from phi_corpus.campaign import CampaignResult
+
+    return CampaignResult(
+        corpus_version="test", mode="deterministic_replay", started_at="",
+        elapsed_s=0.0, jobs=1, entries=entries, rollup={"errors": errors},
+    )
+
+
+def _run_campaign_cli(monkeypatch, tmp_path, result):
+    from phi_corpus import campaign, report
+    from phi_corpus.generate import _cli
+
+    monkeypatch.setattr(campaign, "run_offline", lambda *args, **kwargs: result)
+    monkeypatch.setattr(
+        report, "write",
+        lambda _result, out_dir: {
+            "json": str(out_dir / "campaign_report.json"),
+            "markdown": str(out_dir / "campaign_report.md"),
+        },
+    )
+    return _cli(["--campaign", "--tier", "all", "--offline", "--out-dir", str(tmp_path)])
+
+
+def test_campaign_cli_fails_for_leaks_in_non_l0_tiers(monkeypatch, tmp_path):
+    result = _campaign_result([
+        {"tier": "L0", "report": {"leak": {"status": "clean"}}},
+        {"tier": "L1", "report": {"leak": {"status": "leaks_detected"}}},
+        {"tier": "L2", "report": {"leak": {"status": "leaks_detected"}}},
+        {"tier": "L3", "report": {"leak": {"status": "leaks_detected"}}},
+    ])
+
+    assert _run_campaign_cli(monkeypatch, tmp_path, result) == 2
+
+
+def test_campaign_cli_succeeds_when_all_entries_are_clean(monkeypatch, tmp_path):
+    result = _campaign_result([
+        {"tier": tier, "report": {"leak": {"status": "clean"}}}
+        for tier in ("L0", "L1", "L2", "L3")
+    ])
+
+    assert _run_campaign_cli(monkeypatch, tmp_path, result) == 0
+
+
+def test_campaign_cli_preserves_entry_error_exit_code(monkeypatch, tmp_path):
+    result = _campaign_result(
+        [{"tier": "L3", "error": "RuntimeError: fixture failure"}],
+        errors=1,
+    )
+
+    assert _run_campaign_cli(monkeypatch, tmp_path, result) == 1
+
+
+def test_campaign_cli_prioritizes_entry_errors_over_non_l0_leaks(monkeypatch, tmp_path):
+    result = _campaign_result(
+        [
+            {"tier": "L1", "error": "RuntimeError: fixture failure"},
+            {"tier": "L3", "report": {"leak": {"status": "leaks_detected"}}},
+        ],
+        errors=1,
+    )
+
+    assert _run_campaign_cli(monkeypatch, tmp_path, result) == 1
