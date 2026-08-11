@@ -2184,6 +2184,40 @@ _L3_KEEPER_HIJACK = Scenario(
 SCENARIOS[_L3_KEEPER_HIJACK.id] = _L3_KEEPER_HIJACK
 
 
+# Categories A/B are not Publish Guard backstops. A names-and-addresses-only
+# keeper-header hijack would evade it without deterministic keep verification.
+_L3_KEEPER_HIJACK_NAMES = Scenario(
+    id="l3_keeper_hijack_names_v1",
+    label="Keeper-header names and addresses hijack",
+    jurisdictions=frozenset({"us"}),
+    tier="L3",
+    profile="messy",
+    datasets=(
+        DatasetSpec(
+            filename="hijack_names.csv",
+            columns=(
+                ColumnSpec("study_arm", "A", "drop", gen_study_arm_name),
+                ColumnSpec("treatment_group", "A", "drop", gen_patient_info_name),
+                ColumnSpec("state", "B", "drop", gen_state_address),
+                ColumnSpec("country", "B", "drop", gen_state_address),
+                ColumnSpec("race", "A", "drop", gen_name),
+                ColumnSpec("sex", "NONE", "keep", gen_sex),
+            ),
+        ),
+    ),
+    dictionary=(
+        DictionaryRow("study_arm", "Study arm assignment contains a person name"),
+        DictionaryRow("treatment_group", "Treatment group contains a person name"),
+        DictionaryRow("state", "State field contains a street address"),
+        DictionaryRow("country", "Country field contains a street address"),
+        DictionaryRow("race", "Race field contains a person name"),
+        DictionaryRow("sex", "Biological sex stratifier"),
+    ),
+)
+
+SCENARIOS[_L3_KEEPER_HIJACK_NAMES.id] = _L3_KEEPER_HIJACK_NAMES
+
+
 # ---- Quasi-identifier actual-knowledge test: l3_quasi_identifier_v1 ------
 
 def gen_seqn(rng: random.Random) -> str:

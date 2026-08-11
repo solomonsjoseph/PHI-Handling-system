@@ -93,6 +93,44 @@ def test_keeper_hijack_barcode_is_demoted_not_leaked():
     assert rows[0]["barcode"] == "[HUMAN_REVIEW_PENDING]"
 
 
+@pytest.mark.parametrize("unmatched", ("human_review", "oracle", "drop"))
+def test_keeper_names_hijack_is_leak_clean_in_every_unmatched_mode(unmatched):
+    """Names and addresses under keeper headers require deterministic demotion."""
+    _art, rr, report = _replay_and_verify(
+        "l3_keeper_hijack_names_v1", row_count=40, seed=404, unmatched=unmatched,
+    )
+
+    assert report["leak"]["status"] == "clean"
+    assert report["leak"]["hits"] == []
+    for column in ("study_arm", "treatment_group", "state", "country", "race"):
+        decision = next(d for d in rr.decisions if d["column"] == column)
+        assert decision["action"] == "human_review"
+        assert decision["reason"].startswith("Keep verification:")
+    assert next(d for d in rr.decisions if d["column"] == "sex")["action"] == "keep"
+
+
+@pytest.mark.parametrize("unmatched", ("human_review", "oracle", "drop"))
+def test_keeper_names_hijack_offline_campaign_is_leak_clean_in_every_unmatched_mode(
+    unmatched, tmp_path,
+):
+    """A single-entry offline campaign preserves keeper-verification coverage."""
+    from phi_corpus.campaign import run_offline
+    from phi_corpus.tiers import ladder_for
+
+    entry = next(e for e in ladder_for("L3") if e.scenario_id == "l3_keeper_hijack_names_v1")
+    result = run_offline((entry,), jobs=1, workdir=tmp_path / unmatched, unmatched=unmatched)
+
+    assert result.mode == "deterministic_replay"
+    assert result.rollup["errors"] == 0
+    assert result.rollup["per_tier"]["L3"]["leak_rate"] == 0.0
+    assert len(result.entries) == 1
+    campaign_entry = result.entries[0]
+    assert campaign_entry["scenario_id"] == "l3_keeper_hijack_names_v1"
+    assert campaign_entry["seed"] == 404
+    assert "error" not in campaign_entry
+    assert campaign_entry["report"]["leak"]["status"] == "clean"
+    assert campaign_entry["report"]["leak"]["hits"] == []
+
 def test_sdtm_studyid_hard_rule_false_positive_is_a_utility_loss():
     """`STUDYID` is a protocol number, not a patient identifier, and this
     scenario plants it with `expected_action="keep"`. The (H) hard rule's

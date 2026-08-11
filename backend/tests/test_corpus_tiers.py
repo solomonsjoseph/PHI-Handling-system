@@ -3,13 +3,65 @@ and no LLM. ``backend/tests/test_corpus.py`` is untouched and must stay
 green independently of these."""
 from __future__ import annotations
 
+import csv
 import hashlib
 import io
+import re
 import subprocess
 import sys
 import zipfile
 
 import pytest
+
+
+def test_l3_keeper_names_hijack_has_exact_shape_and_no_accidental_guard_anchors():
+    """Names and addresses under keeper headers require verification, not Guard."""
+    from phi_corpus.planters import plant
+    from phi_corpus.tiers import ladder_for
+
+    entry = next(e for e in ladder_for("L3") if e.scenario_id == "l3_keeper_hijack_names_v1")
+    assert entry.tier == "L3"
+    assert entry.edge_case_tags == ()
+    assert entry.row_count == 40
+    assert entry.seed == 404
+
+    art = plant(entry.scenario_id, row_count=entry.row_count, seed=entry.seed, tier=entry.tier)
+    expected = {
+        "study_arm": ("A", "drop"),
+        "treatment_group": ("A", "drop"),
+        "state": ("B", "drop"),
+        "country": ("B", "drop"),
+        "race": ("A", "drop"),
+        "sex": ("NONE", "keep"),
+    }
+    z = zipfile.ZipFile(io.BytesIO(art.zip_bytes))
+    assert "datasets/hijack_names.csv" in z.namelist()
+    headers = next(csv.reader(io.TextIOWrapper(z.open("datasets/hijack_names.csv"), encoding="utf-8-sig")))
+    assert headers == list(expected)
+
+    cells_by_column = {}
+    for cell in art.ground_truth["planted"]:
+        cells_by_column.setdefault(cell["column"], []).append(cell)
+    assert set(cells_by_column) == set(expected)
+    for column, (category, action) in expected.items():
+        assert {(c["hipaa_category"], c["expected_action"]) for c in cells_by_column[column]} == {
+            (category, action)
+        }
+
+    values = "\n".join(c["value"] for cells in cells_by_column.values() for c in cells)
+    forbidden_shapes = (
+        r"\bMRN[-:\s]*([A-Z0-9\-]{6,20})\b",
+        r"\b\d{3}-\d{2}-\d{4}\b",
+        r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}",
+        r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+        r"https?://|www\.",
+        r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+        r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b",
+        r"\b(?:\d{1,4}[-/]\d{1,2}[-/]\d{1,4}|\d{1,2}[A-Za-z]{3,9}\d{2,4})\b",
+    )
+    assert not any(re.search(pattern, values, re.IGNORECASE) for pattern in forbidden_shapes)
+    assert {c["value"] for c in cells_by_column["sex"]} <= {"M", "F"}
+
 
 
 # ---- every ladder entry plants and satisfies intake v3 -------------------

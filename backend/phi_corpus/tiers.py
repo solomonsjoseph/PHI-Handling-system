@@ -71,6 +71,7 @@ LADDER: tuple[LadderEntry, ...] = (
     LadderEntry("L2", "l2_redcap_hostile_v1", ("notes_phi_across_newline",), 40, 304),
     LadderEntry("L3", "l3_i2b2_crosswalk_v1", (), 40, 401),
     LadderEntry("L3", "l3_keeper_hijack_v1", (), 40, 402),
+    LadderEntry("L3", "l3_keeper_hijack_names_v1", (), 40, 404),
     LadderEntry("L3", "l3_quasi_identifier_v1", (), 40, 403),
 )
 
