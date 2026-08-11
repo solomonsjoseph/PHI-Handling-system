@@ -5,6 +5,9 @@ concealment. Any future refactor that reintroduces a fail-open path or
 leaks the corpus answer key should fail these tests.
 """
 from __future__ import annotations
+import io
+import zipfile
+
 
 import pytest
 
@@ -58,11 +61,13 @@ class _StubDB:
     def __init__(self, doc):
         self._doc = doc
         self.sessions = self
+        self.updates = []
 
     async def find_one(self, *_args, **_kwargs):
         return self._doc
 
-    async def update_one(self, *_args, **_kwargs):
+    async def update_one(self, *args, **kwargs):
+        self.updates.append((args, kwargs))
         return None
 
 
@@ -121,3 +126,166 @@ async def test_export_serves_only_on_clean_per_file(monkeypatch, tmp_path):
     resp = await srv.session_export("sid", "a", force=False)
     # FileResponse: status_code is 200 by default.
     assert getattr(resp, "status_code", 200) == 200
+
+
+@pytest.mark.asyncio
+async def test_export_refuses_skipped_per_file_status(monkeypatch, tmp_path):
+    """A file the Guard did not scan cannot be downloaded without review."""
+    import server as srv
+
+    p = tmp_path / "export.txt"
+    p.write_text("clean text", encoding="utf-8")
+    doc = {
+        "id": "sid",
+        "status": "complete",
+        "export_paths": {"a": str(p)},
+        "guard_report": {
+            "status": "clean",
+            "results": [{"file_id": "a", "status": "skipped"}],
+        },
+    }
+    monkeypatch.setattr(srv, "get_db", lambda: _StubDB(doc))
+
+    response = await srv.session_export("sid", "a", force=False)
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "results",
+    [
+        [{"file_id": "a", "status": "clean"}, {"file_id": "a", "status": "blocked"}],
+        [{"file_id": "a", "status": "blocked"}, {"file_id": "a", "status": "clean"}],
+    ],
+)
+async def test_export_refuses_conflicting_per_file_guard_results(monkeypatch, tmp_path, results):
+    """Conflicting stale Guard rows must not certify a file in either order."""
+    import server as srv
+
+    p = tmp_path / "export.txt"
+    p.write_text("conflicting", encoding="utf-8")
+    doc = {
+        "id": "sid",
+        "status": "complete",
+        "export_paths": {"a": str(p)},
+        "guard_report": {"status": "clean", "results": results},
+    }
+    monkeypatch.setattr(srv, "get_db", lambda: _StubDB(doc))
+
+    response = await srv.session_export("sid", "a", force=False)
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "results",
+    [
+        [{"file_id": "a", "status": "skipped"}],
+        [],
+    ],
+)
+async def test_export_force_refuses_skipped_or_missing_results(monkeypatch, tmp_path, results):
+    """Only explicitly blocked files may use the audited force override."""
+    import server as srv
+
+    p = tmp_path / "export.txt"
+    p.write_text("not certified", encoding="utf-8")
+    doc = {
+        "id": "sid",
+        "status": "complete",
+        "export_paths": {"a": str(p)},
+        "guard_report": {"status": "clean", "results": results},
+    }
+    db = _StubDB(doc)
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+
+    response = await srv.session_export("sid", "a", force=True)
+
+    assert response.status_code == 403
+    assert db.updates == []
+
+
+
+
+@pytest.mark.asyncio
+async def test_export_force_override_still_records_blocked_download(monkeypatch, tmp_path):
+    """The audited override remains available only for blocked files."""
+    import server as srv
+
+    p = tmp_path / "blocked.txt"
+    p.write_text("operator-reviewed", encoding="utf-8")
+    doc = {
+        "id": "sid",
+        "status": "complete",
+        "export_paths": {"a": str(p)},
+        "guard_report": {
+            "status": "blocked",
+            "results": [{"file_id": "a", "status": "blocked"}],
+        },
+    }
+    db = _StubDB(doc)
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+
+    response = await srv.session_export("sid", "a", force=True)
+
+    assert getattr(response, "status_code", 200) == 200
+    assert len(db.updates) == 1
+    args, kwargs = db.updates[0]
+    assert args[0] == {"id": "sid"}
+    assert kwargs == {}
+    override = args[1]["$push"]["guard_overrides"]
+    assert override["file_id"] == "a"
+    assert override["overridden_at"]
+def test_bundle_omits_unclean_and_unreported_exports(tmp_path):
+    """Only per-file clean Guard results may enter the shareable bundle."""
+    from phi_core.bundle import BundleOptions, build_bundle
+
+    clean = tmp_path / "clean.csv"
+    blocked = tmp_path / "blocked.csv"
+    skipped = tmp_path / "skipped.csv"
+    conflicted = tmp_path / "conflicted.csv"
+    unreported = tmp_path / "unreported.csv"
+    clean.write_text("safe", encoding="utf-8")
+    blocked.write_text("unsafe", encoding="utf-8")
+    skipped.write_text("unscanned", encoding="utf-8")
+    conflicted.write_text("ambiguous", encoding="utf-8")
+    unreported.write_text("stale", encoding="utf-8")
+    session = {
+        "id": "sid",
+        "export_paths": {
+            "clean": str(clean),
+            "blocked": str(blocked),
+            "skipped": str(skipped),
+            "conflicted": str(conflicted),
+            "unreported": str(unreported),
+        },
+        "files": [
+            {"file_id": "clean", "kind": "dataset", "original_name": "clean.csv"},
+            {"file_id": "blocked", "kind": "dataset", "original_name": "blocked.csv"},
+            {"file_id": "skipped", "kind": "dataset", "original_name": "skipped.csv"},
+            {"file_id": "conflicted", "kind": "dataset", "original_name": "conflicted.csv"},
+            {"file_id": "unreported", "kind": "dataset", "original_name": "unreported.csv"},
+        ],
+        "guard_report": {
+            "status": "clean",
+            "results": [
+                {"file_id": "clean", "status": "clean"},
+                {"file_id": "blocked", "status": "blocked"},
+                {"file_id": "skipped", "status": "skipped"},
+                {"file_id": "conflicted", "status": "clean"},
+                {"file_id": "conflicted", "status": "blocked"},
+            ],
+        },
+    }
+
+    data, _ = build_bundle(session, BundleOptions())
+
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        names = set(archive.namelist())
+    assert "safe_to_share/datasets/clean.csv" in names
+    assert "safe_to_share/datasets/blocked.csv" not in names
+    assert "safe_to_share/datasets/unreported.csv" not in names
+    assert "safe_to_share/datasets/skipped.csv" not in names
+    assert "safe_to_share/datasets/conflicted.csv" not in names

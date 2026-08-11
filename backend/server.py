@@ -490,10 +490,10 @@ async def session_export(sid: str, file_id: str, force: bool = False):
     """Download the PHI-handled export.
 
     GOAL boundary: this is the point where 'input PHI data' becomes 'output
-    ready to share publicly'. Refuse the download unless the Publish Guard
-    marked this specific file 'clean' or 'skipped'. Set ``?force=true`` to
-    override (recorded on the session document; use only after the operator
-    has manually reviewed the findings).
+    ready to share publicly'. Refuse the download unless exactly one Publish
+    Guard result marked this specific file 'clean'. ``?force=true`` is an
+    audited override only when that single result is `blocked`, after the
+    operator has manually reviewed the findings.
     """
     db = get_db()
     session = await db.sessions.find_one({"id": sid}, {"_id": 0})
@@ -503,14 +503,17 @@ async def session_export(sid: str, file_id: str, force: bool = False):
     if not path or not Path(path).exists():
         raise HTTPException(404, "export not ready")
     guard = session.get("guard_report") or {}
-    per_file = next((r for r in (guard.get("results") or []) if r.get("file_id") == file_id), None)
-    status = (per_file or {}).get("status") if per_file else None
-    # SEC-001 fix: fail-closed. Serve only if this file has a per-file
-    # guard result of `clean` (or `skipped` where the guard could not
-    # scan the format but the pipeline still produced the file). Missing
-    # or `blocked` results refuse — `?force=true` overrides but only when
-    # the operator has manually reviewed the guard findings.
-    if status not in ("clean", "skipped"):
+    matching_results = [
+        r for r in (guard.get("results") or [])
+        if r.get("file_id") == file_id
+    ]
+    per_file = matching_results[0] if len(matching_results) == 1 else None
+    status = per_file.get("status") if per_file else None
+    # SEC-001 fix: fail-closed. Serve only if this file has exactly one
+    # per-file guard result of `clean`. Missing, duplicate, `skipped`, or
+    # `blocked` results refuse — `?force=true` overrides only a single
+    # `blocked` result after manual review.
+    if status != "clean":
         if force and status == "blocked":
             # Record the override on the session so the audit trail keeps it.
             await db.sessions.update_one(

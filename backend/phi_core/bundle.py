@@ -500,7 +500,20 @@ def build_bundle(session: dict[str, Any], opts: BundleOptions) -> tuple[bytes, s
         # --- safe_to_share/ contents --------------------------------------
         export_paths = session.get("export_paths") or {}
         files_meta = {f["file_id"]: f for f in (session.get("files") or [])}
+        guard_results = ((session.get("guard_report") or {}).get("results") or [])
+        clean_ids = {
+            r.get("file_id")
+            for r in guard_results
+            if r.get("status") == "clean"
+        }
+        clean_ids = {
+            file_id
+            for file_id in clean_ids
+            if sum(r.get("file_id") == file_id for r in guard_results) == 1
+        }
         for file_id, ep in export_paths.items():
+            if file_id not in clean_ids:
+                continue
             if not ep or not Path(ep).exists():
                 continue
             src = Path(ep)
