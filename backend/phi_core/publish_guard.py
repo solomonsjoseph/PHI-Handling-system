@@ -145,9 +145,8 @@ def scan_export_file(
     column_categories: dict[str, str] | None = None,
     jurisdiction: str = "us",
 ) -> GuardResult:
-    """Scan a single exported file. Only CSV/TSV/XLSX/TXT are inspected;
-    anything else is marked ``skipped`` so we do not falsely block PDFs
-    whose scrub happened at the raw-text layer.
+    """Scan a single exported file. Only CSV/TSV/XLSX/TXT are inspected.
+    Files that cannot be scanned are blocked.
 
     ``column_categories`` maps CSV/XLSX header names to the pipeline's
     per-column HIPAA category letter ("A".."R"). Used by conditional
@@ -173,13 +172,17 @@ def scan_export_file(
                                detail=f"read failed: {e}", findings=[])
         findings = _scan_csv_text(text, file_id, path.name, column_categories or {}, patterns)
     elif ext in ("txt", "md"):
-        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            return GuardResult(file_id=file_id, file_path=str(path), status="blocked",
+                               detail=f"read failed: {e}", findings=[])
         findings = _scan_text(text, file_id, path.name, patterns)
     elif ext in ("xlsx", "xls"):
         findings = _scan_xlsx(file_id, path, column_categories or {}, patterns)
     else:
-        return GuardResult(file_id=file_id, file_path=str(path), status="skipped",
-                           detail=f"extension {ext!r} not scanned")
+        return GuardResult(file_id=file_id, file_path=str(path), status="blocked",
+                           detail=f"extension {ext!r} cannot be scanned")
     if findings:
         return GuardResult(file_id=file_id, file_path=str(path), status="blocked",
                            findings=[asdict(f) for f in findings],
@@ -233,41 +236,66 @@ def _scan_xlsx(
     column_categories: dict[str, str],
     patterns: tuple[GuardPattern, ...],
 ) -> list[Finding]:
+    unavailable = [Finding(
+        file=path.name, pattern_id="GUARD_UNAVAILABLE", hipaa_category="",
+        sample="", line=0,
+    )]
     try:
         import openpyxl  # local dep, already installed
     except ImportError:
-        return []
+        return unavailable
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+    except Exception:
+        return unavailable
+
     findings: list[Finding] = []
     seen: set[tuple[str, str]] = set()
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    ws = wb[wb.sheetnames[0]]
-    headers: list[str] = []
-    for lineno, row in enumerate(ws.iter_rows(values_only=True), start=1):
-        if lineno == 1:
-            headers = ["" if v is None else str(v) for v in row]
-            continue
-        for col_idx, cell in enumerate(row):
-            if cell is None:
-                continue
-            cell = str(cell)
-            col_name = headers[col_idx] if col_idx < len(headers) else ""
-            col_cat = column_categories.get(col_name)
-            for p in patterns:
-                m = p.regex.search(cell)
-                if not m:
+    try:
+        for ws in wb.worksheets:
+            headers: list[str] = []
+            for lineno, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                if lineno == 1:
+                    headers = ["" if v is None else str(v) for v in row]
                     continue
-                if not should_fire(p, m.group(0), cell, col_cat):
-                    continue
-                key = (p.pid, m.group(0))
-                if key in seen:
-                    continue
-                seen.add(key)
-                findings.append(Finding(
-                    file=path.name, pattern_id=p.pid, hipaa_category=p.category,
-                    sample=_sanitise_sample(m.group(0)), line=lineno,
-                ))
+                for col_idx, cell in enumerate(row):
+                    if cell is None:
+                        continue
+                    cell = str(cell)
+                    col_name = headers[col_idx] if col_idx < len(headers) else ""
+                    col_cat = column_categories.get(col_name)
+                    for p in patterns:
+                        m = p.regex.search(cell)
+                        if not m:
+                            continue
+                        if not should_fire(p, m.group(0), cell, col_cat):
+                            continue
+                        key = (p.pid, m.group(0))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        findings.append(Finding(
+                            file=path.name, pattern_id=p.pid, hipaa_category=p.category,
+                            sample=_sanitise_sample(m.group(0)), line=lineno,
+                        ))
+                        if len(findings) >= MAX_FINDINGS_PER_FILE:
+                            break
+                    if len(findings) >= MAX_FINDINGS_PER_FILE:
+                        break
                 if len(findings) >= MAX_FINDINGS_PER_FILE:
-                    return findings
+                    break
+            if len(findings) >= MAX_FINDINGS_PER_FILE:
+                break
+    except Exception:
+        try:
+            wb.close()
+        except Exception:
+            pass
+        return unavailable
+    try:
+        wb.close()
+    except Exception:
+        return unavailable
     return findings
 
 

@@ -1,5 +1,9 @@
 """Publish Guard tests — the boundary between 'input PHI data' and
 'output ready to share publicly'."""
+import builtins
+
+import pytest
+
 from pathlib import Path
 
 from phi_core.publish_guard import (
@@ -40,11 +44,12 @@ def test_header_row_names_do_not_trip_guard(tmp_path: Path):
     assert r.status == "clean"
 
 
-def test_pdf_extension_is_skipped(tmp_path: Path):
+def test_unscannable_extension_is_blocked(tmp_path: Path):
     p = tmp_path / "consent.pdf"
     p.write_bytes(b"%PDF-1.4\n")
     r = scan_export_file("f1", p)
-    assert r.status == "skipped"
+    assert r.status == "blocked"
+    assert r.detail == "extension 'pdf' cannot be scanned"
 
 
 # ---------- BLOCKED cases (must return 'blocked' with findings) ------------
@@ -117,6 +122,159 @@ def test_findings_bounded(tmp_path: Path):
     assert r.status == "blocked"
     assert len(r.findings) <= MAX_FINDINGS_PER_FILE
 
+
+def test_xlsx_second_sheet_ssn_blocks_export(tmp_path: Path):
+    import openpyxl
+
+    p = tmp_path / "workbook.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.append(["measure"])
+    wb.active.append(["normal"])
+    sensitive = wb.create_sheet("supplement")
+    sensitive.append(["ssn"])
+    sensitive.append(["111-22-3333"])
+    wb.save(p)
+
+    r = scan_export_file("f1", p)
+
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "SSN" for f in r.findings)
+
+
+def test_xlsx_import_failure_blocks_export(tmp_path: Path, monkeypatch):
+    p = tmp_path / "workbook.xlsx"
+    p.write_bytes(b"not a workbook")
+    original_import = builtins.__import__
+
+    def unavailable_openpyxl(name, *args, **kwargs):
+        if name == "openpyxl":
+            raise ImportError("openpyxl unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", unavailable_openpyxl)
+
+    r = scan_export_file("f1", p)
+
+    assert r.status == "blocked"
+    assert [f["pattern_id"] for f in r.findings] == ["GUARD_UNAVAILABLE"]
+
+
+def test_garbage_xls_blocks_export(tmp_path: Path):
+    p = tmp_path / "legacy.xls"
+    p.write_bytes(b"not a workbook")
+
+    r = scan_export_file("f1", p)
+
+    assert r.status == "blocked"
+    assert [f["pattern_id"] for f in r.findings] == ["GUARD_UNAVAILABLE"]
+
+
+@pytest.mark.parametrize("failure_site", ["worksheets", "iter_rows", "cell", "close"])
+def test_xlsx_scan_or_close_failure_blocks_with_safe_finding(
+    tmp_path: Path, monkeypatch, failure_site: str,
+):
+    import openpyxl
+
+    p = tmp_path / "workbook.xlsx"
+    p.write_bytes(b"placeholder")
+
+    class UnreadableCell:
+        def __str__(self):
+            raise OSError("cell read failed")
+
+    class FailingSheet:
+        def iter_rows(self, values_only: bool):
+            if failure_site == "iter_rows":
+                raise OSError("row read failed")
+            cell = UnreadableCell() if failure_site == "cell" else "normal"
+            return iter([("value",), (cell,)])
+
+    class FailingWorkbook:
+        @property
+        def worksheets(self):
+            if failure_site == "worksheets":
+                raise OSError("worksheet read failed")
+            return [FailingSheet()]
+
+        def close(self):
+            if failure_site == "close":
+                raise OSError("close failed")
+
+    monkeypatch.setattr(openpyxl, "load_workbook", lambda *args, **kwargs: FailingWorkbook())
+
+    r = scan_export_file("f1", p)
+
+    assert r.status == "blocked"
+    assert r.findings == [{
+        "file": p.name,
+        "pattern_id": "GUARD_UNAVAILABLE",
+        "hipaa_category": "",
+        "sample": "",
+        "line": 0,
+    }]
+
+
+def test_xlsx_findings_cap_is_shared_across_sheets(tmp_path: Path):
+    import openpyxl
+
+    p = tmp_path / "many-findings.xlsx"
+    wb = openpyxl.Workbook()
+    for sheet_index, ws in enumerate([wb.active, wb.create_sheet("supplement")]):
+        ws.append(["email"])
+        for row_index in range(MAX_FINDINGS_PER_FILE):
+            ws.append([f"user{sheet_index}_{row_index}@example.test"])
+    wb.save(p)
+
+    r = scan_export_file("f1", p)
+
+    assert r.status == "blocked"
+    assert len(r.findings) == MAX_FINDINGS_PER_FILE
+    assert {finding["pattern_id"] for finding in r.findings} == {"EMAIL"}
+
+
+def test_xlsx_findings_are_deduplicated_across_sheets(tmp_path: Path):
+    import openpyxl
+
+    p = tmp_path / "duplicate-findings.xlsx"
+    wb = openpyxl.Workbook()
+    for ws in [wb.active, wb.create_sheet("supplement")]:
+        ws.append(["ssn"])
+        ws.append(["111-22-3333"])
+    wb.save(p)
+
+    r = scan_export_file("f1", p)
+
+    assert r.status == "blocked"
+    assert [finding["pattern_id"] for finding in r.findings] == ["SSN"]
+
+
+@pytest.mark.parametrize("extension", ["txt", "md"])
+def test_unreadable_text_export_is_blocked(tmp_path: Path, monkeypatch, extension: str):
+    p = tmp_path / f"notes.{extension}"
+    p.write_text("safe text")
+    original_read_text = Path.read_text
+
+    def unreadable_text(self, *args, **kwargs):
+        if self == p:
+            raise OSError("permission denied")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable_text)
+
+    r = scan_export_file("f1", p)
+
+    assert r.status == "blocked"
+    assert r.detail == "read failed: permission denied"
+
+
+
+def test_unavailable_export_path_remains_skipped():
+    report = scan_all_exports({"f1": ""})
+
+    assert report.status == "clean"
+    assert report.scanned == 0
+    assert report.results[0]["status"] == "skipped"
+    assert report.results[0]["detail"] == "path unavailable"
 
 # ---------- Aggregate scan -----------------------------------------------
 
