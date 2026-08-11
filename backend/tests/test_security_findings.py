@@ -179,6 +179,34 @@ async def test_export_refuses_conflicting_per_file_guard_results(monkeypatch, tm
 
 
 @pytest.mark.asyncio
+async def test_export_refuses_duplicate_clean_per_file_results(monkeypatch, tmp_path):
+    """Duplicate clean rows are stale report data, not certification."""
+    import server as srv
+
+    p = tmp_path / "export.txt"
+    p.write_text("duplicate clean", encoding="utf-8")
+    doc = {
+        "id": "sid",
+        "status": "complete",
+        "export_paths": {"a": str(p)},
+        "guard_report": {
+            "status": "clean",
+            "results": [
+                {"file_id": "a", "status": "clean"},
+                {"file_id": "a", "status": "clean"},
+            ],
+        },
+    }
+    db = _StubDB(doc)
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+
+    response = await srv.session_export("sid", "a", force=False)
+
+    assert response.status_code == 403
+    assert db.updates == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "results",
     [
@@ -197,6 +225,36 @@ async def test_export_force_refuses_skipped_or_missing_results(monkeypatch, tmp_
         "status": "complete",
         "export_paths": {"a": str(p)},
         "guard_report": {"status": "clean", "results": results},
+    }
+    db = _StubDB(doc)
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+
+    response = await srv.session_export("sid", "a", force=True)
+
+    assert response.status_code == 403
+    assert db.updates == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "results",
+    [
+        [{"file_id": "a", "status": "blocked"}, {"file_id": "a", "status": "blocked"}],
+        [{"file_id": "a", "status": "blocked"}, {"file_id": "a", "status": "clean"}],
+        [{"file_id": "a", "status": "clean"}, {"file_id": "a", "status": "blocked"}],
+    ],
+)
+async def test_export_force_refuses_duplicate_or_conflicting_results(monkeypatch, tmp_path, results):
+    """Force cannot override malformed Guard results or create an audit record."""
+    import server as srv
+
+    p = tmp_path / "export.txt"
+    p.write_text("ambiguous", encoding="utf-8")
+    doc = {
+        "id": "sid",
+        "status": "complete",
+        "export_paths": {"a": str(p)},
+        "guard_report": {"status": "blocked", "results": results},
     }
     db = _StubDB(doc)
     monkeypatch.setattr(srv, "get_db", lambda: db)
@@ -245,11 +303,13 @@ def test_bundle_omits_unclean_and_unreported_exports(tmp_path):
     clean = tmp_path / "clean.csv"
     blocked = tmp_path / "blocked.csv"
     skipped = tmp_path / "skipped.csv"
+    duplicate_clean = tmp_path / "duplicate_clean.csv"
     conflicted = tmp_path / "conflicted.csv"
     unreported = tmp_path / "unreported.csv"
     clean.write_text("safe", encoding="utf-8")
     blocked.write_text("unsafe", encoding="utf-8")
     skipped.write_text("unscanned", encoding="utf-8")
+    duplicate_clean.write_text("ambiguous", encoding="utf-8")
     conflicted.write_text("ambiguous", encoding="utf-8")
     unreported.write_text("stale", encoding="utf-8")
     session = {
@@ -258,6 +318,7 @@ def test_bundle_omits_unclean_and_unreported_exports(tmp_path):
             "clean": str(clean),
             "blocked": str(blocked),
             "skipped": str(skipped),
+            "duplicate_clean": str(duplicate_clean),
             "conflicted": str(conflicted),
             "unreported": str(unreported),
         },
@@ -265,6 +326,11 @@ def test_bundle_omits_unclean_and_unreported_exports(tmp_path):
             {"file_id": "clean", "kind": "dataset", "original_name": "clean.csv"},
             {"file_id": "blocked", "kind": "dataset", "original_name": "blocked.csv"},
             {"file_id": "skipped", "kind": "dataset", "original_name": "skipped.csv"},
+            {
+                "file_id": "duplicate_clean",
+                "kind": "dataset",
+                "original_name": "duplicate_clean.csv",
+            },
             {"file_id": "conflicted", "kind": "dataset", "original_name": "conflicted.csv"},
             {"file_id": "unreported", "kind": "dataset", "original_name": "unreported.csv"},
         ],
@@ -274,6 +340,8 @@ def test_bundle_omits_unclean_and_unreported_exports(tmp_path):
                 {"file_id": "clean", "status": "clean"},
                 {"file_id": "blocked", "status": "blocked"},
                 {"file_id": "skipped", "status": "skipped"},
+                {"file_id": "duplicate_clean", "status": "clean"},
+                {"file_id": "duplicate_clean", "status": "clean"},
                 {"file_id": "conflicted", "status": "clean"},
                 {"file_id": "conflicted", "status": "blocked"},
             ],
@@ -289,3 +357,4 @@ def test_bundle_omits_unclean_and_unreported_exports(tmp_path):
     assert "safe_to_share/datasets/unreported.csv" not in names
     assert "safe_to_share/datasets/skipped.csv" not in names
     assert "safe_to_share/datasets/conflicted.csv" not in names
+    assert "safe_to_share/datasets/duplicate_clean.csv" not in names
