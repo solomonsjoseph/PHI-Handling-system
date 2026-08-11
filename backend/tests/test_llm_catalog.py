@@ -71,3 +71,41 @@ def test_web_search_tool_selection_per_family():
     assert web_search_tool_for("openai") is None
     assert web_search_tool_for("openrouter") is None
     assert web_search_tool_for("bogus-family") is None
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        ({"EMERGENT_LLM_KEY": "key"}, "emergent"),
+        ({"ANTHROPIC_API_KEY": "key"}, "anthropic"),
+        ({"OPENAI_API_KEY": "key"}, "openai"),
+        ({"GEMINI_API_KEY": "key"}, "gemini"),
+        ({"OPENROUTER_API_KEY": "key"}, "openrouter"),
+    ],
+)
+def test_environment_key_selects_provider_without_selecting_model(
+    monkeypatch, environment, expected
+):
+    from phi_core.agents.llm import LlmConfig, _default_provider
+
+    for key in (
+        "EMERGENT_LLM_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENROUTER_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+
+    assert _default_provider() == expected
+    with pytest.raises(ValueError, match="select a model"):
+        LlmConfig.from_dict({})
+
+
+def test_explicit_model_configuration_is_preserved():
+    from phi_core.agents.llm import LlmConfig
+
+    cfg = LlmConfig.from_dict({"provider": "openai", "model": "gpt-5.2"})
+    assert (cfg.provider, cfg.model) == ("openai", "gpt-5.2")

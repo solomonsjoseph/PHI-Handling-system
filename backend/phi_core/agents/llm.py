@@ -72,7 +72,7 @@ def _chatgpt_account_connected() -> bool:
 @dataclass
 class LlmConfig:
     provider: str = ""           # "" -> resolved from env at from_dict time
-    model: str = "claude-sonnet-4-5-20250929"
+    model: str = ""
     api_key: str = ""
     base_url: str = ""           # for openai_compatible
     temperature: float = 0.1
@@ -81,10 +81,12 @@ class LlmConfig:
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "LlmConfig":
         d = d or {}
-        provider = d.get("provider") or _default_provider()
+        model = str(d.get("model") or "").strip()
+        if not model:
+            raise ValueError("select a model before running the pipeline")
         return cls(
-            provider=provider,
-            model=d.get("model", "claude-sonnet-4-5-20250929"),
+            provider=d.get("provider") or _default_provider(),
+            model=model,
             api_key=d.get("api_key", ""),
             base_url=d.get("base_url", ""),
             temperature=float(d.get("temperature", 0.1)),

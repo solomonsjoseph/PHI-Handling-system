@@ -77,7 +77,7 @@ def test_llm_settings_default(api):
     assert r.status_code == 200
     d = r.json()
     assert d["provider"] == "emergent"
-    assert d["model"] == "claude-sonnet-4-5-20250929"
+    assert d["model"] == ""
     # `openai_compatible` is opt-in via ALLOWED_LLM_BASE_URL_HOSTS env var
     # so the endpoint hides it from the default provider list. This is a
     # SSRF-defence design decision (see phi_core/security.py:52).

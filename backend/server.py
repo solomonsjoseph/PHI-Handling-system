@@ -567,7 +567,7 @@ from typing import Literal
 
 class LlmSettings(BaseModel):
     provider: Literal["emergent", "anthropic", "openai", "gemini", "openrouter", "openai_compatible", "chatgpt"] = "emergent"
-    model: str = "claude-sonnet-4-5-20250929"
+    model: str = ""
     api_key: str = ""
     base_url: str = ""
     temperature: float = 0.1
@@ -921,6 +921,8 @@ async def corpus_study_verify(sid: str):
 
 @app.post("/api/settings/llm", dependencies=[Depends(require_api_token)])
 async def set_llm_settings(body: LlmSettings):
+    if not body.model.strip():
+        raise HTTPException(422, "select a model before saving LLM settings")
     validate_llm_provider(body.provider)
     validate_llm_base_url(body.base_url, body.provider)
     if body.provider == "chatgpt" and chatgpt_auth.read_auth() is None:
