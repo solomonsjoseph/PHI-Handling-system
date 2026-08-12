@@ -1,5 +1,0 @@
-patient_id,visit_date,provider_name,visit_notes
-P4f455ade,2026,Pfec9d59c,[A] returned complaining of headache. Prescribed acetaminophen.
-P4f455ade,2026,Pfec9d59c,Follow-up call at [D]; patient stable.
-P704cdf81,2026,P6877b847,Blood pressure [C] for [A].
-Pa6ac40d0,2026,Pfec9d59c,Guardian [A] picked up medication list.

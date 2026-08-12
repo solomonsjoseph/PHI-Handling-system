@@ -1,6 +1,0 @@
-patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
-MRN647339,Aditya García,1976-05-06,415-555-9850,pwong.15@example.edu,03641,102,107,111,STD 881,Contact at 415-555-9218 between 9am and 5pm PST.
-MRN941350,Priya Nguyễn,1947-09-02,415-555-3291,mjones.20@example.edu,69252,93,105,125,ARM 317,Contact at 415-555-7712 between 9am and 5pm PST.
-MRN185840,Lin Silva,2011-10-05,415-555-7695,pwong.3@example.edu,87957,91,108,132,STD 052,Contact at 415-555-8819 between 9am and 5pm PST.
-MRN493036,Diego Smith,1981-04-04,415-555-4503,mjones.68@example.edu,83117,98,64,135,STD 198,Contact at 415-555-9734 between 9am and 5pm PST.
-MRN680366,Peter García,2014-05-12,415-555-6224,mjones.43@example.edu,10283,98,81,85,ARM 772,Contact at 415-555-6701 between 9am and 5pm PST.

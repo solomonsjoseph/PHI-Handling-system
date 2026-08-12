@@ -1,7 +1,0 @@
-patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
-P116a9805,,1965,,,000,90+,90,86,ARM 224,Patient [A] enrolled on [C]; contact via phone.
-Pa159e862,,1955,,,000,90+,90,133,HB 715,Patient [A] enrolled on [C]; contact via phone.
-Pe47bc403,,1973,,,000,90+,90,131,INT 550,Patient [A] enrolled on [C]; contact via phone.
-P50d258e7,,2010,,,000,90+,94,90,HB 888,Patient [A] enrolled on [C]; contact via phone.
-P7af8daf1,,1950,,,000,90+,98,131,HB 168,Patient [A] enrolled on [C]; contact via phone.
-P364011ef,,1971,,,000,90+,99,141,STD 218,Patient [A] enrolled on [C]; contact via phone.

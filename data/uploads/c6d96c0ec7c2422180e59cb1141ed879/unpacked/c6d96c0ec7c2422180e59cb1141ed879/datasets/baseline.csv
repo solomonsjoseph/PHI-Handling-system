@@ -1,9 +1,0 @@
-subject_id,full_name,date_of_birth,home_phone,home_zip,age_years,hba1c_percent,glucose_mgdl,bmi,study_visit_notes
-MRN770487,Mary Smith,1965-04-08,415-555-3286,23434,87,6.1,178,18.8,Vitals stable; continue current regimen.
-MRN329258,Sarah Kaur,2007-01-18,415-555-4257,95181,87,8.4,184,32.1,Vitals stable; continue current regimen.
-MRN895667,Peter Nguyễn,1973-05-05,415-555-4527,54118,31,6.1,94,26.6,Reports mild fatigue; no new symptoms.
-MRN733052,Michael Smith,1988-09-04,415-555-7201,20328,88,7.6,162,31.9,Vitals stable; continue current regimen.
-MRN148050,Sarah García,1940-04-28,415-555-2654,59823,53,8.7,163,21.9,Reports mild fatigue; no new symptoms.
-MRN319684,Michael Jones,2007-11-06,415-555-9751,42087,38,8.7,139,41.7,"Post-op day 2, wound healing normally."
-MRN817870,Priya Smith,1959-01-26,415-555-6168,62581,52,6.0,150,23.1,HbA1c improved from 8.2 to 7.4 over 3 months.
-MRN514850,Fatima Wong,1963-03-08,415-555-9830,44438,72,11.8,172,26.7,"Post-op day 2, wound healing normally."

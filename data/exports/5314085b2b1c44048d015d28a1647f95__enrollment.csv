@@ -1,6 +1,0 @@
-patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
-Pe9002c44,,1976,,,000,90+,107,111,STD 881,Contact at [X] between [C] 5pm PST.
-Pcaecca88,,1947,,,000,90+,105,125,ARM 317,Contact at [D] between [C] 5pm PST.
-P28acca55,,2011,,,000,90+,108,132,STD 052,Contact at [D] between [C].
-Pf9e9b6f5,,1981,,,000,90+,64,135,STD 198,Contact at [D] between [C].
-P63ed8265,,2014,,,000,90+,81,85,ARM 772,Contact at [D] between [C] 5pm PST.

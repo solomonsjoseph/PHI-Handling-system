@@ -769,10 +769,6 @@ async def corpus_study_generate(body: CorpusStudyGenerateBody):
     }
     await db.sessions.insert_one(session_doc)
 
-    # Stash the zip bytes in a temp path so /intake can pick it up.
-    tmp_path = Path("/app/data/corpus") / f"{sid}.zip"
-    tmp_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path.write_bytes(art.zip_bytes)
 
     return {
         "session_id": sid,
@@ -781,7 +777,6 @@ async def corpus_study_generate(body: CorpusStudyGenerateBody):
         "edge_case_tags": body.edge_case_tags,
         "summary": art.ground_truth_summary,
         "corpus_zip_size_bytes": len(art.zip_bytes),
-        "corpus_zip_path": str(tmp_path),
     }
 
 

@@ -1,6 +1,0 @@
-patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
-MRN194728,Sarah Wong,1968-02-24,415-555-4010,pwong.12@example.edu,83194,105,94,109,INT 516,Contact at 415-555-7647 between 9am and 5pm PST.
-MRN433694,Aditya Kaur,2010-01-21,415-555-5214,jsmith.30@example.edu,89311,104,74,88,INT 238,Contact at 415-555-2451 between 9am and 5pm PST.
-MRN626354,Aditya Patel,1959-04-14,415-555-3786,pwong.43@example.edu,03623,103,79,105,STD 634,Contact at 415-555-4327 between 9am and 5pm PST.
-MRN352155,Fatima Wong,1951-04-10,415-555-3655,ppatel.27@example.edu,82391,94,104,130,INT 846,Contact at 415-555-8695 between 9am and 5pm PST.
-MRN714317,Diego Jones,1981-11-03,415-555-5166,jsmith.90@example.edu,82148,100,77,93,ARM 615,Contact at 415-555-7785 between 9am and 5pm PST.

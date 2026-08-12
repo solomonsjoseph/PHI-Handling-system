@@ -1,5 +1,0 @@
-patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
-MRN770487,Mary Smith,1965-04-08,415-555-3286,jsmith.87@example.edu,06385,103,90,86,ARM 224,Patient Sarah Kaur enrolled on 2024-03-15; contact via phone.
-MRN731262,James Kaur,1955-12-21,415-555-9928,ppatel.29@example.edu,88485,98,90,133,HB 715,Patient Aditya O'Brien enrolled on 2024-03-15; contact via phone.
-MRN391369,Peter Patel,1973-02-03,415-555-7224,jsmith.46@example.edu,83187,98,90,131,INT 550,Patient Mary Nguyễn enrolled on 2024-03-15; contact via phone.
-MRN182627,Lin García,2010-10-28,415-555-6925,mjones.91@example.edu,06315,97,94,90,HB 888,Patient Mary Nguyễn enrolled on 2024-03-15; contact via phone.

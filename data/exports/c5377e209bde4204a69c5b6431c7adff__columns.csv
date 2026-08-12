@@ -1,5 +1,0 @@
-column_name,description,[A]
-patient_id,Study-assigned identifier (real value linked to [A]),Y
-patient_name,Full patient name,Y
-dob,Date of birth,Y
-notes,Free-text clinician notes possibly [X] PHI [D] example,N

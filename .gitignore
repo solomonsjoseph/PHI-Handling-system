@@ -71,3 +71,26 @@ tmp/
 .phi-local-*
 *.env
 .credentials
+
+# ------------------------------------------------------------------
+# Generated / regenerable output. NEVER commit. See CLAUDE.md
+# "Generated artifacts and cleanup". Anything a command can recreate
+# belongs here, today and for every future run.
+# ------------------------------------------------------------------
+# Test and campaign reports (pytest --junitxml, phi_corpus.generate --campaign)
+test_reports/
+coverage.xml
+.coverage.*
+
+# Corpus generator output
+data/corpus/
+*.groundtruth.json
+
+# Node dependency tree
+node_modules/
+
+# Agent and harness scratch state
+.superpowers/
+.impeccable/
+.phi-build-status
+intake-v3-final

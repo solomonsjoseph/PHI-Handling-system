@@ -1,6 +1,0 @@
-patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
-Pf8a7fb81,,1965,,,000,90+,62,86,ARM 224,Contact at [D] between [C] 5pm PST.
-Pd543e2bc,,2001,,,000,90+,60,133,HB 715,Contact at [X] between [C].
-P56bdecb5,,1957,,,000,90+,62,131,INT 550,Contact at [D] between [C] 5pm PST.
-P70d0c3fa,,1967,,,000,90+,109,103,ARM 876,Contact at [D] between [C].
-P4adbb594,,1988,,,000,90+,104,144,ARM 624,Contact at [D] between [C].

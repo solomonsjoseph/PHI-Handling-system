@@ -1,6 +1,0 @@
-patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
-22fc9dfb4047ed61,,2011,,,000,90+,110,85,ARM 380,Contact at [D] between [C].
-ed0660746876fd39,,1959,,,000,90+,94,116,ARM 665,Contact at [D] between [C].
-94f94e960af2cdf0,,1945,,,000,90+,102,87,INT 887,Contact at [D] between [C].
-38b0b465a5283804,,2014,,,000,90+,72,106,HB 909,Contact at [D] between [C].
-d839bd5ec0b76273,,1987,,,000,90+,70,130,INT 003,Contact at [D] between [C] 5pm PST.

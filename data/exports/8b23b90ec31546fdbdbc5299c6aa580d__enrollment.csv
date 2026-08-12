@@ -1,5 +1,0 @@
-patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
-5214153e19acadbf,,1965,,,814,29,97,112,ARM 031,Vitals stable; continue current regimen.
-d31662c1bb2ec690,,2007,,,688,53,60,133,HB 715,HbA1c improved from 8.2 to 7.4 over [C].
-a360f3fe742b5e4e,,1957,,,570,62,98,101,ARM 748,HbA1c improved from 8.2 to 7.4 over [C].
-05d3cdcd6edafefa,,1940,,,191,23,102,99,STD 082,"Post-op day 2, wound healing normally."

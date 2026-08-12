@@ -1,4 +1,0 @@
-patient_id,name,dob,phone,zip,age,notes
-P001,James Smith,1975-03-15,415-555-1234,94103,50,Enrolled at UCSF
-P002,Mary Jones,1982-07-22,415-555-9876,94104,43,Screened at Kaiser
-P003,Peter Wong,1990-11-01,415-555-5555,94105,35,Withdrew after 2 visits

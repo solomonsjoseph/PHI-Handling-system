@@ -1,6 +1,0 @@
-patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
-MRN272962,Aditya Nguyễn,2011-05-16,415-555-4539,ppatel.66@example.edu,55674,97,110,85,ARM 380,Contact at 415-555-8015 between 9am and 5pm PST.
-MRN172629,Peter Patel,1959-12-02,415-555-8157,ppatel.79@example.edu,88414,100,94,116,ARM 665,Contact at 415-555-7036 between 9am and 5pm PST.
-MRN124352,Peter Jones,1945-01-15,415-555-3639,pwong.52@example.edu,89029,95,102,87,INT 887,Contact at 415-555-4848 between 9am and 5pm PST.
-MRN178248,Sarah Patel,2014-10-24,415-555-2162,jsmith.72@example.edu,89081,102,72,106,HB 909,Contact at 415-555-9778 between 9am and 5pm PST.
-MRN529498,Michael O'Brien,1987-09-13,415-555-6209,ppatel.50@example.edu,82113,92,70,130,INT 003,Contact at 415-555-9053 between 9am and 5pm PST.

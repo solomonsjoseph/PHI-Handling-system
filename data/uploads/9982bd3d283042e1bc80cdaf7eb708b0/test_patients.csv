@@ -1,4 +1,0 @@
-patient_name,dob,ssn,mrn,phone,email,notes
-James Smith,03/15/1975,123-45-6789,MRN-12345678,(415) 555-1234,james.smith@example.com,Patient reports mild headache
-Mary Johnson,07/22/1982,987-65-4321,MRN-98765432,(212) 555-9876,mary.j@clinic.org,Followup for hypertension
-Robert Brown,11/08/1968,456-78-9012,MRN-45678901,(303) 555-3456,rbrown@example.edu,Diabetic monitoring

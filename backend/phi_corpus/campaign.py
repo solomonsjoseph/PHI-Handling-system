@@ -12,6 +12,7 @@ each worker pays a one-off spaCy/Presidio import (~13s here).
 from __future__ import annotations
 
 import asyncio
+import shutil
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -69,8 +70,9 @@ def _run_one(args: tuple[LadderEntry, str, str]) -> dict[str, Any]:
 
 
 def run_offline(entries: Sequence[LadderEntry], *, jobs: int = 4,
-                 workdir: Path | None = None, unmatched: str = "human_review") -> CampaignResult:
+                workdir: Path | None = None, unmatched: str = "human_review") -> CampaignResult:
     jobs = max(1, jobs)
+    owns_workdir = workdir is None
     work = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="phi_corpus_campaign_"))
     work.mkdir(parents=True, exist_ok=True)
 
@@ -78,17 +80,24 @@ def run_offline(entries: Sequence[LadderEntry], *, jobs: int = 4,
     t0 = time.time()
     args = [(e, str(work), unmatched) for e in entries]
 
-    if jobs == 1:
-        results = [_run_one(a) for a in args]
-    else:
-        with ProcessPoolExecutor(max_workers=jobs) as ex:
-            results = list(ex.map(_run_one, args))
+    try:
+        if jobs == 1:
+            results = [_run_one(a) for a in args]
+        else:
+            with ProcessPoolExecutor(max_workers=jobs) as ex:
+                results = list(ex.map(_run_one, args))
 
-    return CampaignResult(
-        corpus_version=corpus_version(), mode="deterministic_replay",
-        started_at=started_at, elapsed_s=round(time.time() - t0, 3), jobs=jobs,
-        entries=results, rollup=_rollup(results),
-    )
+        return CampaignResult(
+            corpus_version=corpus_version(), mode="deterministic_replay",
+            started_at=started_at, elapsed_s=round(time.time() - t0, 3), jobs=jobs,
+            entries=results, rollup=_rollup(results),
+        )
+    finally:
+        # Scratch replay trees are worthless once the report is built. Python 3.9
+        # has no TemporaryDirectory(ignore_cleanup_errors=...), so tear down
+        # explicitly and never block a campaign on a stale handle.
+        if owns_workdir:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def _column_hipaa_categories(entry: LadderEntry) -> dict[str, str]:

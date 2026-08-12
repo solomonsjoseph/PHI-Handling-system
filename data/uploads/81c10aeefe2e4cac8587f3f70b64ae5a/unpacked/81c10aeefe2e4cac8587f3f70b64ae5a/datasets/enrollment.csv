@@ -1,4 +1,0 @@
-patient_id,patient_name,dob,zip,age,notes
-P001,James Smith,1975-03-15,94103,50,Enrolled by James Smith at UCSF. Call 415-555-1234 or email james.smith@example.edu.
-P002,Mary Johnson,1982-07-22,94110,43,Screened at SF General; contact Mary Johnson via 212-555-9876.
-P003,Robert Doe,1930-01-01,94107,95,Elderly patient; guardian is Robert Doe Jr. SSN 111-22-3333 shared for billing.

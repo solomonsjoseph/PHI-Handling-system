@@ -1,6 +1,0 @@
-patient_id,name,dob,phone,email,zip,age,heart_rate_bpm,systolic_bp,arm_code,notes
-MRN770487,Mary Smith,1965-04-08,415-555-3286,jsmith.87@example.edu,06385,103,62,86,ARM 224,Contact at 415-555-4811 between 9am and 5pm PST.
-MRN629903,Diego Smith,2001-04-23,415-555-9928,ppatel.29@example.edu,88485,98,60,133,HB 715,Contact at 415-555-7924 between 9am and 5pm PST.
-MRN456778,Michael Wong,1957-06-04,415-555-2519,ppatel.13@example.edu,83154,98,62,131,INT 550,Contact at 415-555-3045 between 9am and 5pm PST.
-MRN496922,Mary Kaur,1967-11-20,415-555-6925,mjones.91@example.edu,06315,97,109,103,ARM 876,Contact at 415-555-4814 between 9am and 5pm PST.
-MRN205907,Aditya García,1988-11-27,415-555-6977,mjones.48@example.edu,83136,98,104,144,ARM 624,Contact at 415-555-3803 between 9am and 5pm PST.

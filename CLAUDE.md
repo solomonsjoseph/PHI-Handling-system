@@ -128,6 +128,61 @@ Every agent input/output/duration persists to Mongo `agent_log`. Every phase tra
 5. Corpus generation is datasets-and-dictionaries only. **Do not reintroduce PDF/form generation** to the corpus (removed by direction).
 6. Ignore "Code Quality Analysis Reports" that flag `localStorage` (intended BYO-key), `random` in deterministic seeding, or React exhaustive-deps warnings on single-run effects — audited false positives.
 7. Any authentication or credential change goes through `integration_playbook_expert_v2` first. Not in scope right now.
+8. Nothing a command can regenerate is ever committed. Generated output is
+   git-ignored and swept after every task. See "Generated artifacts and cleanup".
+
+## Generated artifacts and cleanup
+
+The generator is worth keeping. Its output is not. Anything a command can
+recreate is git-ignored, is never committed, and is deleted once the work it
+supported is finished. This holds for output that exists today and for output
+new tooling starts producing later: when a new artifact appears, add its pattern
+to `.gitignore` in the same change that creates it.
+
+Never committed, now or in the future:
+
+- `test_reports/`, including pytest JUnit XML, iteration JSON, and
+  `corpus/<run>/campaign_report.{json,md}`
+- corpus generator output of every kind: campaign reports, planted ZIPs,
+  ground-truth JSON
+- runtime session artifacts under `data/uploads/`, `data/exports/`, `data/corpus/`
+- caches and bytecode: `__pycache__/`, `.pytest_cache/`, `.coverage`,
+  `.ruff_cache/`, `.mypy_cache/`
+- build output and dependency trees: `frontend/build/`, `node_modules/`,
+  `dist/`, `build/`
+- agent and harness scratch: `.superpowers/`, `.impeccable/`,
+  `.phi-build-status`, `tmp/`, `intake-v3-final`
+
+`git add -f` on any of these is prohibited. When a generated result looks like it
+has to be shared, record the finding in `memory/PRD.md` and leave the artifact on
+disk. Working notes never get a new directory in the tree; they go to scratch
+space, which is `/tmp` here.
+
+The repo holds four things and nothing else: codebase (`backend/`, `frontend/`),
+documentation (`memory/`, `authorities/`, `docs/file_formats/`, `README.md`,
+`CLAUDE.md`, `LICENSE`), config (`.claude/`, `.emergent/`, `.gitignore`,
+`design_guidelines.json`, frontend lint config), and test inputs that a test
+actually reads (`backend/tests/`). A file that fits none of those four does not
+belong in the repo.
+
+### Garbage collection after every task
+
+Every task ends with a sweep, so the tree holds the work that was done and
+nothing that was used to produce it:
+
+```
+python scripts/cleanup.py            # dry run, lists what would go
+python scripts/cleanup.py --apply    # remove it
+```
+
+The sweep is `git clean -X` scoped by the ignore list, so tracked files and
+untracked-but-unignored files are never at risk. Local credentials
+(`backend/.env`, `*.pem`, `*.key`) and `.vscode/` are protected at every scope.
+`node_modules/`, `.venv/` and `frontend/build/` survive the default sweep and go
+only with `--all`, which is the `make distclean` case.
+
+Run the sweep when no pipeline is in flight: it removes session directories under
+`data/uploads/` and `data/exports/`.
 
 ## Environment
 
