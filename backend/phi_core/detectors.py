@@ -98,7 +98,7 @@ RULES: list[Rule] = [
     Rule("FAX_LABEL", re.compile(r"\bfax[:\s]+\(?\d{3}\)?[\s\-]?\d{3}-\d{4}\b", re.IGNORECASE), "FAX", "E"),
     Rule("AGE_OVER_89", re.compile(r"\bage\s+(?:90\+|9\d|1\d{2})\b", re.IGNORECASE), "AGE_OVER_89", "C"),
     # ZIP requires either explicit label "ZIP" nearby, or preceding US state code.
-    Rule("US_ZIP_LABELED", re.compile(r"(?:(?<=ZIP\s)|(?<=ZIP:\s)|(?<=[A-Z][A-Z]\s))\d{5}(?:-\d{4})?\b"), "ZIP", "B"),
+    Rule("US_ZIP_LABELED", re.compile(r"(?:(?<=ZIP\s)|(?<=ZIP:\s)|(?<=[A-Z][A-Z]\s))\d{5}(?:-\d{4})?\b", re.IGNORECASE), "ZIP", "B"),
 ]
 
 

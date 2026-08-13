@@ -8,8 +8,8 @@ Two tiers:
 
 * **Publication add-on** (opt-in) — everything above plus a ``publication/``
   folder with the coverage matrix rendered as CSV + PNG, the Herald paper
-  drafts (abstract/methods/results), placeholder benchmark scaffolding, and
-  a manifest.
+  drafts (abstract/methods/results), the real per-dataset benchmark report
+  (markdown/JSON/CSV/figures) for corpus runs, and a manifest.
 
 The bundle is streamed via a normal ZIP so the operator gets one artefact
 they can hand to a reviewer.
@@ -161,6 +161,7 @@ def _attestation_payload(session: dict[str, Any], file_hashes: dict[str, str]) -
     # Reviewer trail: prefer session_review; fall back to the most recent
     # per-decision reviewer for older sessions run before the session-level
     # invariant landed.
+    from .security import scrub_persisted_text as _scrub_text
     reviewer = review.get("reviewer") or None
     reviewer_comment = review.get("comment") or None
     reviewed_at = review.get("reviewed_at") or None
@@ -174,6 +175,8 @@ def _attestation_payload(session: dict[str, Any], file_hashes: dict[str, str]) -
                 if d.get("actual_knowledge_ack") is True:
                     actual_knowledge_ack = True
                 break
+    if reviewer_comment:
+        reviewer_comment = _scrub_text(reviewer_comment)
     return {
         "attestation_version": BUNDLE_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -245,7 +248,8 @@ def _attestation_text(att: dict[str, Any]) -> str:
         "  (b) Every emitted file passed the deterministic Publish Guard.",
         "  (c) BYO API keys used during processing are Fernet-encrypted at rest.",
         "  (d) Clinical / epidemiological signal preserved by Safe Harbor transforms.",
-        "  (e) Cross-file pseudonym linkage is exact-match, salted per study.",
+        "  (e) Cross-file pseudonym linkage is exact-match, salted per study under a",
+        "      server-held key that is never included in this bundle.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -488,8 +492,11 @@ absent from prior work:
 # Public entry point
 # ------------------------------------------------------------------------
 
-def build_bundle(session: dict[str, Any], opts: BundleOptions) -> tuple[bytes, str]:
-    """Return (zip_bytes, filename)."""
+def build_bundle(session: dict[str, Any], opts: BundleOptions,
+                  agent_log: list[dict[str, Any]] | None = None) -> tuple[bytes, str]:
+    """Return (zip_bytes, filename). ``agent_log`` unlocks the real
+    per-dataset benchmark's context_hygiene section in the publication
+    add-on; omit it and that section reports itself unavailable."""
     sid = session.get("id") or "session"
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     buf = io.BytesIO()
@@ -526,11 +533,18 @@ def build_bundle(session: dict[str, Any], opts: BundleOptions) -> tuple[bytes, s
             zf.writestr(arcname, data)
             file_hashes[arcname] = _sha256_of_bytes(data)
 
+        from .crypto import sign_bytes, signing_public_key_pem
         att = _attestation_payload(session, file_hashes)
+        pubkey_pem = signing_public_key_pem()
+        att["signed"] = pubkey_pem is not None
         att_json = json.dumps(att, indent=2).encode("utf-8")
         att_txt = _attestation_text(att).encode("utf-8")
         zf.writestr("safe_to_share/attestation.json", att_json)
         zf.writestr("safe_to_share/attestation.txt", att_txt)
+        if pubkey_pem is not None:
+            sig = sign_bytes(att_json)
+            zf.writestr("safe_to_share/attestation.sig", sig)
+            zf.writestr("safe_to_share/attestation_pubkey.pem", pubkey_pem)
         zf.writestr("safe_to_share/README.md",
                     _readme(sid, att["jurisdiction"]).encode("utf-8"))
 
@@ -556,13 +570,23 @@ def build_bundle(session: dict[str, Any], opts: BundleOptions) -> tuple[bytes, s
                             str(herald["abstract"]).encode("utf-8"))
             zf.writestr("publication/paper/references.bib",
                         _references_bib().encode("utf-8"))
-            # Benchmark scaffold (real F1 unlocked when a gold corpus is loaded).
-            zf.writestr("publication/benchmark/README.md",
-                        (
-                            "Populate this folder with a gold-annotated corpus, then grade the\n"
-                            "pipeline with POST /api/corpus/study/run plus GET\n"
-                            "/api/corpus/study/verify/{sid} for per-plant grading, and GET\n"
-                            "/api/classification-accuracy for per-category P/R/F1.\n"
-                        ).encode("utf-8"))
+            # Benchmark: real per-column figures when this is a corpus run;
+            # otherwise a one-line note, since the benchmark needs planted
+            # ground truth to grade against.
+            from phi_corpus.benchmark import report_from_session, write as _write_benchmark
+            bench_report = report_from_session(session, agent_log)
+            if bench_report is not None:
+                import tempfile as _tempfile
+                with _tempfile.TemporaryDirectory(prefix="phi-bundle-bench-") as _bdir:
+                    written = _write_benchmark(bench_report, Path(_bdir))
+                    for _key, _path in written.items():
+                        zf.writestr(f"publication/benchmark/{Path(_path).name}", Path(_path).read_bytes())
+            else:
+                zf.writestr("publication/benchmark/README.md",
+                            (
+                                "This session has no planted ground truth (not a corpus run), "
+                                "so the per-dataset benchmark report does not apply. Generate a "
+                                "corpus via POST /api/corpus/study/run to unlock it.\n"
+                            ).encode("utf-8"))
 
     return buf.getvalue(), f"phi_console_{sid[:12]}_{ts}.zip"

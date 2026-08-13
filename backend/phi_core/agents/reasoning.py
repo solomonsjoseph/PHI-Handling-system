@@ -34,6 +34,45 @@ ACTION_TYPES = {
 SUBJECT_TYPES = {"participant", "staff", "specimen", "site", "study"}
 
 
+_VALID_PHI_CATEGORIES = {chr(c) for c in range(ord("A"), ord("R") + 1)} | {"NONE", "QUASI", None, ""}
+
+
+def validate_decisions(
+    decisions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Coerce model-proposed decisions into the executable vocabulary.
+    Returns (safe_decisions, rejections). Never raises on bad model output;
+    an unusable action becomes human_review, which is the fail-closed answer."""
+    safe: list[dict[str, Any]] = []
+    rejections: list[dict[str, Any]] = []
+    for d in decisions:
+        file_id = d.get("file_id") or ""
+        column = d.get("column") or ""
+        if not file_id or not column:
+            rejections.append({"file_id": file_id, "column": column, "field": "column/file_id", "proposed": None})
+            continue
+        d = dict(d)
+        action = d.get("action")
+        norm_action = str(action).strip().lower() if action is not None else ""
+        if norm_action not in ACTION_TYPES:
+            rejections.append({"file_id": file_id, "column": column, "field": "action", "proposed": action})
+            d["action"] = "human_review"
+            d["reason"] = f"model proposed unknown action {action!r}; routed to human review"
+            d["confidence"] = 0.0
+        else:
+            d["action"] = norm_action
+        subject = d.get("subject")
+        if subject not in SUBJECT_TYPES:
+            rejections.append({"file_id": file_id, "column": column, "field": "subject", "proposed": subject})
+            d["subject"] = "study"
+        phi_category = d.get("phi_category")
+        if phi_category not in _VALID_PHI_CATEGORIES:
+            rejections.append({"file_id": file_id, "column": column, "field": "phi_category", "proposed": phi_category})
+            d["phi_category"] = None
+        safe.append(d)
+    return safe, rejections
+
+
 # --- Sentinel hard-rule table ---------------------------------------------
 #
 # Deterministic column-header -> allow-list mapping for known direct
@@ -297,7 +336,9 @@ class Judge(Agent):
                 f"{prior_feedback}\n"
             )
         prompt += "\nRespond with JSON only."
-        return await self.call_json(prompt, phase="judge.decide", default={"decisions": []})
+        return await self.call_json(
+            prompt, phase="judge.decide", default={"decisions": []},
+            expect_key="decisions", min_items=len(schema.get("columns") or []))
 
 
 class Sentinel(Agent):
@@ -349,6 +390,9 @@ class Executor(Agent):
 
     async def run(self, files: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> dict[str, Any]:
         """Apply decisions to each file. Returns {"exports": {file_id: path}}."""
+        pending = [(d.get("file_id", ""), d.get("column", "")) for d in decisions if d.get("action") == "human_review"]
+        if pending:
+            raise ValueError(f"unresolved human_review deferrals cannot be executed: {pending}")
         await self._log("executor.begin", "info", {"decision_count": len(decisions)})
         exports: dict[str, str] = {}
         by_file: dict[str, list[dict[str, Any]]] = {}
@@ -356,8 +400,9 @@ class Executor(Agent):
             by_file.setdefault(d.get("file_id", ""), []).append(d)
 
         # Study-scoped pseudonym registry: exact real-value -> same pseudonym across all files.
-        # Salted by session_id so pseudonyms cannot be joined across different studies.
-        registry = PseudonymRegistry(salt=self.session_id)
+        # Salted by an HMAC of the session id under a server-held key, so the salt cannot be
+        # reproduced from anything published in the bundle (the session id is public there).
+        registry = PseudonymRegistry(salt=pseudonym_salt(self.session_id))
 
         for f in files:
             src = Path(f["stored_path"])
@@ -443,8 +488,10 @@ import csv as _csv
 import openpyxl as _openpyxl
 import re as _re
 import hashlib as _hashlib
+import hmac as _hmac
 
 from ..detectors import detect_text as _detect_text
+from ..crypto import pseudonym_salt
 
 
 _RESTRICTED_ZIP3 = {"036","059","063","102","203","556","692","790","821","823","830","831","878","879","884","890","893"}
@@ -471,6 +518,12 @@ class PseudonymRegistry:
         token = f"P{digest}"
         self._map[value] = token
         return token
+
+    def digest(self, column: str, value: str) -> str:
+        """Keyed digest for the `hash` action. HMAC over 'column:value' under
+        the per-study salt, so the output cannot be reproduced without the
+        server-held key even when the salt input (session id) is public."""
+        return _hmac.new(self._salt.encode(), f"{column}:{value}".encode(), _hashlib.sha256).hexdigest()[:16]
 
 
 def _scrub_text_cell(value: str) -> str:
@@ -514,16 +567,30 @@ def _apply_action(value: str, action: str, column: str, registry: "PseudonymRegi
             return "000"
         return z.ljust(3, "0")
     if action == "hash":
-        return _hashlib.sha256(f"{column}:{value}".encode()).hexdigest()[:16]
+        if registry is not None:
+            return registry.digest(column, value)
+        return "[HASH]"
     if action == "pseudonymize":
         if registry is not None:
             return registry.get(value)
-        h = _hashlib.sha256(f"{column}:{value}".encode()).hexdigest()[:8]
-        return f"P{h}"
+        return "[PSEUDONYM]"
     if action == "scrub_text":
         return _scrub_text_cell(value)
     if action == "human_review":
         return "[HUMAN_REVIEW_PENDING]"
+    raise ValueError(f"unhandled action {action!r} for column {column!r}")
+
+
+_FORMULA_LEAD_CHARS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _neutralise_formula(value: str) -> str:
+    """Prefix a spreadsheet-formula-shaped value with a leading apostrophe
+    so a cell beginning with ``=``, ``+``, ``-``, ``@``, tab, or carriage
+    return lands as inert text rather than an executable formula when the
+    recipient opens the export in a spreadsheet application."""
+    if value and value[0] in _FORMULA_LEAD_CHARS:
+        return "'" + value
     return value
 
 
@@ -559,7 +626,8 @@ def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: l
             for row in reader:
                 for col in fieldnames:
                     d = _decision_for(col)
-                    row[col] = _apply_action(row.get(col) or "", d.get("action", "drop"), col, registry)
+                    transformed = _apply_action(row.get(col) or "", d.get("action", "drop"), col, registry)
+                    row[col] = _neutralise_formula(transformed)
                 writer.writerow(row)
     elif ext in ("xlsx", "xls"):
         wb = _openpyxl.load_workbook(src)
@@ -572,8 +640,9 @@ def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: l
             for j, col in enumerate(headers, start=1):
                 d = _decision_for(col)
                 cell = ws.cell(row=i, column=j)
-                cell.value = _apply_action(str(cell.value) if cell.value is not None else "",
+                transformed = _apply_action(str(cell.value) if cell.value is not None else "",
                                            d.get("action", "drop"), col, registry)
+                cell.value = _neutralise_formula(transformed)
         wb.save(dst)
     else:
         # Unknown extension - SEC-004 fail closed: refuse to emit verbatim.

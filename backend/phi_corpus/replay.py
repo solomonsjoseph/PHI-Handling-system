@@ -14,7 +14,7 @@ import csv
 import io
 import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ from phi_core.agents.reasoning import (
     PseudonymRegistry,
     apply_column_actions_to_dataset,
     apply_sentinel_hard_rules,
+    validate_decisions,
     verify_keep_decisions,
 )
 # Private by convention in phi_core; imported here (not promoted) because
@@ -42,6 +43,7 @@ class ReplayResult:
     file_name_map: dict[str, str]
     llm_dependent_columns: list[dict[str, str]]
     elapsed_s: float
+    model_output_rejections: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _zip_names(zip_bytes: bytes) -> list[str]:
@@ -104,6 +106,7 @@ def replay(artifact: CorpusArtifact, workdir: Path, *,
             dictionary_files.append(name.split("/", 1)[1])
 
     decisions, _overrides = apply_sentinel_hard_rules(decisions)
+    decisions, model_output_rejections = validate_decisions(decisions)
 
     expected_index: dict[tuple[str, str], str] = {}
     for cell in artifact.ground_truth.get("planted", []):
@@ -163,4 +166,5 @@ def replay(artifact: CorpusArtifact, workdir: Path, *,
         file_name_map=file_name_map,
         llm_dependent_columns=llm_dependent_columns,
         elapsed_s=time.time() - t0,
+        model_output_rejections=model_output_rejections,
     )

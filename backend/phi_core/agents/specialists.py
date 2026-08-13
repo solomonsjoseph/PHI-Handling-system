@@ -20,6 +20,7 @@ except Exception:  # pragma: no cover
     PdfReader = None
 
 from .base import Agent
+from ..anonymizer import scrub_for_prompt
 
 
 class Lexicon(Agent):
@@ -29,17 +30,23 @@ class Lexicon(Agent):
         "datasets. Given the full text of a dictionary or mapping table, produce a JSON object: "
         '{"columns": [{"name": str, "description": str, "phi_flag_hint": bool|null, '
         '"clinical_utility": "low|medium|high", "notes": str}], "notes": str}. '
+        "Identifiers arrive pre-redacted as [REDACTED:<category>:<entity>] tokens; treat such a "
+        "token as evidence the column carries PHI, never as a literal column value. "
         "phi_flag_hint reflects only what the dictionary itself indicates, not your own judgement. "
         "Never invent columns. Cite 45 CFR 164.514 in notes when applicable."
     )
 
     async def run(self, dict_files: list[dict[str, Any]]) -> dict[str, Any]:
         aggregated: list[dict[str, Any]] = []
+        self.scrub_count = 0
         for f in dict_files:
             text = _read_table_flat(Path(f["stored_path"]))
+            scrubbed, n_removed = scrub_for_prompt(text[:8000])
+            self.scrub_count += n_removed
+            await self._log(f"lexicon.scrub:{f['file_id']}", "info", {"identifiers_removed": n_removed})
             reply = await self.call_json(
                 f"Filename: {f['original_name']}\nComponent: {f.get('component')}\n"
-                f"Full content (rows are metadata about a schema; no patient PHI expected):\n{text[:8000]}\n"
+                f"Full content (rows are metadata about a schema):\n{scrubbed}\n"
                 "Respond with JSON only.",
                 phase=f"lexicon.read:{f['file_id']}",
                 default={"columns": [], "notes": ""},
@@ -83,6 +90,7 @@ class Schema(Agent):
                 "Respond with JSON only.",
                 phase=f"schema.classify:{f['file_id']}",
                 default={"columns": []},
+                expect_key="columns", min_items=len(headers),
             )
             for c in reply.get("columns", []):
                 c["_file_id"] = f["file_id"]
@@ -103,6 +111,7 @@ class Instrument(Agent):
 
     async def run(self, form_files: list[dict[str, Any]]) -> dict[str, Any]:
         aggregated: list[dict[str, Any]] = []
+        self.scrub_count = 0
         for f in form_files:
             path = Path(f["stored_path"])
             text = ""
@@ -112,8 +121,11 @@ class Instrument(Agent):
                     text = "\n\n".join((p.extract_text() or "") for p in reader.pages)
                 except Exception:
                     text = ""
+            scrubbed, n_removed = scrub_for_prompt(text[:6000])
+            self.scrub_count += n_removed
+            await self._log(f"instrument.scrub:{f['file_id']}", "info", {"identifiers_removed": n_removed})
             reply = await self.call_json(
-                f"Form: {f['original_name']}\nExtracted text (first 6000 chars):\n{text[:6000]}\n"
+                f"Form: {f['original_name']}\nExtracted text:\n{scrubbed}\n"
                 "Respond with JSON only.",
                 phase=f"instrument.read:{f['file_id']}",
                 default={"fields": []},
@@ -187,37 +199,14 @@ def _read_docx_tables(path: Path) -> str:
         lines.extend(prose[:40])   # cap at 40 paragraphs to keep prompt bounded
     return "\n".join(lines)
 
-
-def _read_xls_tables(path: Path) -> str:
-    """Extract .xls (legacy Excel) sheets.
-
-    Uses openpyxl when the file is actually xlsx-shaped (some data
-    stewards rename .xlsx -> .xls). We do NOT ship xlrd as a runtime
-    dependency; legitimate BIFF-format .xls files return "" and Lexicon
-    just receives no dictionary text rather than crashing. This is
-    intentional -- Sir's spec is docx (small) or xlsx (large); real
-    legacy .xls is out of scope.
-    """
-    try:
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    except Exception:
-        return ""
-    lines = []
-    for ws in wb.worksheets:
-        lines.append(f"# sheet: {ws.title}")
-        for row in ws.iter_rows(values_only=True):
-            lines.append(",".join("" if v is None else str(v) for v in row))
-    wb.close()
-    return "\n".join(lines)
-
-
 def _read_table_flat(path: Path) -> str:
     """Flatten a small dictionary/mapping table to text for the LLM.
 
-    Supports .csv/.tsv (raw read), .xlsx (openpyxl), .xls (openpyxl for
-    mis-named files, xlrd for real BIFF), and .docx (Word tables via
-    stdlib zipfile + ET). Sir Q "dictionary is word doc here but if
-    large then it would be excel workbook -- align it accordingly".
+    Supports .csv/.tsv (raw read), .xlsx (openpyxl), and .docx (Word
+    tables via stdlib zipfile + ET). Legacy .xls is rejected outright at
+    intake (4.19); this dispatcher never sees that extension. Sir Q
+    "dictionary is word doc here but if large then it would be excel
+    workbook -- align it accordingly".
     """
     ext = path.suffix.lower()
     if ext in {".csv", ".tsv"}:
@@ -237,8 +226,6 @@ def _read_table_flat(path: Path) -> str:
             return "\n".join(lines)
         except Exception:
             return ""
-    if ext == ".xls":
-        return _read_xls_tables(path)
     if ext == ".docx":
         return _read_docx_tables(path)
     return ""

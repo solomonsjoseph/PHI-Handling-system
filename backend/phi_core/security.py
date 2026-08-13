@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import os
 import re
@@ -23,7 +24,7 @@ import socket
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import Header, HTTPException
+from fastapi import Cookie, Header, HTTPException
 
 
 ALLOWED_PROVIDERS_DEFAULT = {"emergent", "anthropic", "openai", "gemini", "openrouter", "chatgpt"}
@@ -232,7 +233,7 @@ def scrub_nested(value: Any, _key: str = "") -> Any:
     but the operational cost of scrubbing them outweighs the small risk.
     """
     _AUDIT_KEYS = {
-        "reviewer", "reviewer_comment", "reviewed_at",
+        "reviewer", "reviewed_at",
         "session_review", "citation", "id", "session_id", "file_id",
         "ts", "updated_at", "created_at",
     }
@@ -258,23 +259,98 @@ def scrub_decision(decision: dict[str, Any]) -> dict[str, Any]:
             out[k] = scrub_persisted_text(v)
     return out
 
-
 async def require_api_token(
     x_api_token: str | None = Header(default=None),
-    token: str | None = None,  # query fallback for EventSource which cannot set headers
+    phi_session: str | None = Cookie(default=None),
 ) -> None:
-    """Gate every mutating endpoint. No-op when API_TOKEN is unset.
+    """Gate every mutating endpoint. No-op when no token is configured.
 
-    Accepts the token via the ``X-API-Token`` header (preferred) or the
-    ``token`` query parameter (only path EventSource can use because the
-    browser SSE API does not allow custom headers).
+    Accepts the token via the ``X-API-Token`` header (scripted/test
+    clients) or the ``phi_session`` cookie (the browser UI, set by
+    ``POST /api/auth/session``).
     """
-    required = os.environ.get("API_TOKEN", "").strip()
-    if not required:
+    principals = token_principals()
+    if not principals:
         return
-    provided = x_api_token or token
-    if not provided or provided != required:
-        raise HTTPException(401, "invalid or missing X-API-Token")
+    if x_api_token and any(hmac.compare_digest(x_api_token, tok) for tok in principals):
+        return
+    from .crypto import verify_principal_cookie
+    if phi_session and verify_principal_cookie(phi_session) is not None:
+        return
+    raise HTTPException(401, "invalid or missing credential")
+
+
+def token_principals() -> dict[str, str]:
+    """Parse ``API_TOKENS`` (``name:token,name2:token2``) plus the legacy
+    bare ``API_TOKEN`` (mapped to principal ``operator``) into token ->
+    principal name. Returns an empty dict when no token is configured at
+    all, which callers treat as "auth disabled" (dev convenience)."""
+    out: dict[str, str] = {}
+    raw = os.environ.get("API_TOKENS", "").strip()
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair or ":" not in pair:
+            continue
+        name, _, tok = pair.partition(":")
+        name, tok = name.strip(), tok.strip()
+        if name and tok:
+            out[tok] = name
+    legacy = os.environ.get("API_TOKEN", "").strip()
+    if legacy:
+        out.setdefault(legacy, "operator")
+    return out
+
+
+async def resolve_principal(
+    x_api_token: str | None = Header(default=None),
+    phi_session: str | None = Cookie(default=None),
+) -> str:
+    """Resolve the calling principal's name from the request credential.
+
+    Reads, in order: the ``phi_session`` cookie (browser UI), then the
+    ``X-API-Token`` header (scripted and test clients). In ``PHI_ENV=dev``
+    with no token configured at all, returns the fixed principal ``"dev"``
+    so local development needs no setup. Otherwise a missing or
+    unrecognised credential is a 401 -- this is the identity gate every
+    owner-scoped route depends on.
+    """
+    principals = token_principals()
+    if not principals:
+        if os.environ.get("PHI_ENV", "production") == "dev":
+            return "dev"
+        raise HTTPException(401, "no API token configured")
+    from .crypto import verify_principal_cookie
+    if phi_session:
+        principal = verify_principal_cookie(phi_session)
+        if principal is not None:
+            return principal
+    if x_api_token:
+        for tok, name in principals.items():
+            if hmac.compare_digest(x_api_token, tok):
+                return name
+    raise HTTPException(401, "invalid or missing credential")
+
+
+def resolve_principal_soft(x_api_token: str | None, phi_session: str | None) -> str | None:
+    """Best-effort variant of :func:`resolve_principal` for rate-limit
+    keying (4.20): returns the resolved principal name or ``None`` instead
+    of raising, so a request without credentials still gets a rate-limit
+    bucket (keyed by client address by the caller) rather than a 401 from
+    the limiter itself -- authorization stays exclusively the job of
+    :func:`resolve_principal` / :func:`require_api_token` on the route."""
+    principals = token_principals()
+    if not principals:
+        return "dev" if os.environ.get("PHI_ENV", "production") == "dev" else None
+    from .crypto import verify_principal_cookie
+    if phi_session:
+        principal = verify_principal_cookie(phi_session)
+        if principal is not None:
+            return principal
+    if x_api_token:
+        for tok, name in principals.items():
+            if hmac.compare_digest(x_api_token, tok):
+                return name
+    return None
 
 
 async def enforce_upload_size(file, max_bytes: int) -> int:

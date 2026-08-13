@@ -340,8 +340,12 @@ def scan_all_exports(
             blocked += 1
         if r.status != "skipped":
             scanned += 1
+    if not export_paths:
+        results.append(GuardResult(file_id="", file_path="", status="blocked",
+                                   detail="no exports to scan"))
+    status = "clean" if (blocked == 0 and scanned > 0) else "blocked"
     return GuardReport(
-        status="clean" if blocked == 0 else "blocked",
+        status=status,
         results=[r.to_dict() for r in results],
         scanned=scanned,
         blocked=blocked,

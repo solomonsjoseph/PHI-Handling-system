@@ -465,7 +465,7 @@ def plant(
     scenario_id: str,
     jurisdiction: str = "us",
     edge_case_tags: list[str] | None = None,
-    row_count: int = 8,
+    row_count: int = 12,
     seed: int = 42,
     *,
     profile: str = "",

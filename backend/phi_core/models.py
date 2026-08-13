@@ -23,6 +23,7 @@ def _now() -> str:
 SessionStatus = Literal[
     "created", "intake", "reading", "classifying", "anonymizing",
     "awaiting_human_review", "complete", "cancelled", "failed",
+    "blocked", "corpus_ready", "intake_failed",
 ]
 
 
@@ -65,6 +66,7 @@ class Session(BaseModel):
     created_at: str = Field(default_factory=_now)
     updated_at: str = Field(default_factory=_now)
     status: SessionStatus = "created"
+    owner: str = ""
     jurisdiction: str = "us"
     intake_status: Literal["none", "ready", "review_required", "failed"] = "none"
     intake_exit_code: int = 0
@@ -74,5 +76,6 @@ class Session(BaseModel):
     progress: list[ProgressEvent] = []
     export_paths: dict[str, str] = {}
     error: str = ""
+    error_id: str = ""  # 4.23: correlation id for a "pipeline failed" error; log holds detail
 
 

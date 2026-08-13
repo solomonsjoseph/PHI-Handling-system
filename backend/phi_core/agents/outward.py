@@ -95,8 +95,10 @@ class Ledger:
     the same shape the old monolithic Ledger returned."""
     NAME = "Ledger"
 
-    def __init__(self, session_id: str, llm, db, emit=None) -> None:
-        self._common = dict(session_id=session_id, llm=llm, db=db, emit=emit)
+    def __init__(self, session_id: str, llm, db, emit=None, audit_prompts: bool = False,
+                manager=None) -> None:
+        self._common = dict(session_id=session_id, llm=llm, db=db, emit=emit,
+                            audit_prompts=audit_prompts, manager=manager)
 
     async def run(self, decisions: list[dict[str, Any]], audit: dict[str, Any],
                   scout: dict[str, Any], benchmark_result: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -201,8 +203,10 @@ class Herald:
     the publication bundle is never empty."""
     NAME = "Herald"
 
-    def __init__(self, session_id: str, llm, db, emit=None) -> None:
-        self._common = dict(session_id=session_id, llm=llm, db=db, emit=emit)
+    def __init__(self, session_id: str, llm, db, emit=None, audit_prompts: bool = False,
+                manager=None) -> None:
+        self._common = dict(session_id=session_id, llm=llm, db=db, emit=emit,
+                            audit_prompts=audit_prompts, manager=manager)
 
     async def run(self, ledger: dict[str, Any], audit: dict[str, Any],
                   target_venue: str = "JAMIA Open") -> dict[str, Any]:

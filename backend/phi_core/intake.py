@@ -7,11 +7,13 @@ workbook. Datasets is always mandatory; at least one of dictionary or forms must
 accompany it.
 
 Rules (fail-closed):
-  - `datasets/` required. Extensions: .csv, .xls, .xlsx. Single sheet only for xlsx.
-    .json / .jsonl NOT accepted here.
-  - At least one of `forms/` (.pdf) or `dictionary/` (.csv, .xlsx, .xls, .docx) must accompany datasets.
-  - Any unsupported suffix, multi-sheet xlsx dataset, unreadable xls, empty
-    file, cross-component duplicate content, or symlink -> `_unclassified`
+  - `datasets/` required. Extensions: .csv, .xlsx. Single sheet only for xlsx.
+    .json / .jsonl NOT accepted here. Legacy `.xls` is refused outright: no
+    `xlrd` dependency is shipped, so an `.xls` dataset previously silently
+    parsed to an empty dictionary instead of failing loudly.
+  - At least one of `forms/` (.pdf) or `dictionary/` (.csv, .xlsx, .docx) must accompany datasets.
+  - Any unsupported suffix, multi-sheet xlsx dataset, empty file,
+    cross-component duplicate content, or symlink -> `_unclassified`
     review bucket recording only `{path, reason, blocking}` (never row values).
   - Blocking review item holds the entire study.
 
@@ -33,9 +35,9 @@ import openpyxl
 
 
 COMPONENT_SUFFIXES: dict[str, set[str]] = {
-    "datasets":   {".csv", ".xls", ".xlsx"},
+    "datasets":   {".csv", ".xlsx"},
     "forms":      {".pdf"},
-    "dictionary": {".csv", ".xlsx", ".xls", ".docx"},
+    "dictionary": {".csv", ".xlsx", ".docx"},
 }
 COMPONENTS = tuple(COMPONENT_SUFFIXES)
 MANDATORY = {"datasets"}
@@ -274,12 +276,16 @@ def scan_intake(root: Path) -> tuple[list[IntakeEntry], list[str]]:
             continue
         allowed = COMPONENT_SUFFIXES[component]
         if ext not in allowed:
+            if ext == ".xls":
+                reason = f"legacy .xls format not supported in {component!r}; save as .xlsx and re-upload"
+            else:
+                reason = f"extension {ext!r} not allowed in {component!r} (expected {sorted(allowed)})"
             entries.append(IntakeEntry(
                 component="_unclassified",
                 relpath=str(rel),
                 stored_path=str(path),
                 size_bytes=size,
-                reason=f"extension {ext!r} not allowed in {component!r} (expected {sorted(allowed)})",
+                reason=reason,
             ))
             continue
         if size == 0:

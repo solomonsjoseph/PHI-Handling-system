@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from .file_readers import iter_dataset_rows
-from .agents.reasoning import _apply_action
+from .agents.reasoning import _apply_action, PseudonymRegistry
+from .crypto import pseudonym_salt
 
 
 MAX_SAMPLES_PER_FILE = 5
@@ -56,6 +57,7 @@ def build_preview(
     for d in decisions:
         by_key[(d.get("file_id", ""), d.get("column", ""))] = d
 
+    registry = PseudonymRegistry(salt=pseudonym_salt(session.get("id", "")))
     out_files: list[dict[str, Any]] = []
     for f in files:
         if f.get("kind") != "dataset":
@@ -81,13 +83,19 @@ def build_preview(
                     if not d:
                         continue
                     action = d.get("action", "keep")
-                    redacted = _apply_action(str(val), action, col, registry=None)
+                    if action == "keep":
+                        redacted = _mask_original(str(val))
+                        masked = True
+                    else:
+                        redacted = _apply_action(str(val), action, col, registry=registry)
+                        masked = False
                     samples.append({
                         "column": col,
                         "action": action,
                         "row_index": row_idx,
                         "original_masked": _mask_original(str(val)),
                         "redacted": redacted,
+                        "masked": masked,
                     })
                     per_column_count[col] = per_column_count.get(col, 0) + 1
         except Exception as e:
@@ -105,6 +113,8 @@ def build_preview(
         "max_samples_per_file": max_samples_per_file,
         "note": (
             "Original cell values are partial-masked for reviewer safety; "
-            "redacted column shows the exact export string that will be written."
+            "redacted column shows the exact export string that will be written, "
+            "except for kept columns, whose redacted value is also masked so a "
+            "reviewer confirming a kept column is clinical only sees the shape."
         ),
     }

@@ -30,3 +30,13 @@ def apply_to_text(text: str, spans: list[DetectedSpan]) -> str:
         out = out[:s.start] + _tag(s) + out[s.end:]
     return out
 
+
+def scrub_for_prompt(text: str) -> tuple[str, int]:
+    """Deterministically redact every detected identifier before text enters
+    an LLM prompt. Returns (scrubbed_text, span_count)."""
+    from .detectors import detect_text
+    spans = detect_text(text)
+    for sp in spans:
+        sp.review_status = "accepted"
+    return apply_to_text(text, spans), len(spans)
+

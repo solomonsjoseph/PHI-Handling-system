@@ -300,7 +300,6 @@ class ColumnSpec:
 class DatasetSpec:
     filename: str
     columns: tuple[ColumnSpec, ...]
-    n_rows: int = 8
     link_column: str = ""       # column name shared/reused across datasets for linkage
     rows_per_subject: int = 1   # emit N rows per roster subject (visits/events tables)
 
@@ -346,7 +345,6 @@ _ONCOLOGY = Scenario(
                 ColumnSpec("arm_code", "NONE", "keep", gen_arm_code),
                 ColumnSpec("notes", "NONE", "scrub_text", gen_notes_clinical_only),
             ),
-            n_rows=8,
         ),
     ),
     dictionary=(
@@ -386,7 +384,6 @@ _DIABETES = Scenario(
                 ColumnSpec("bmi", "NONE", "keep", lambda r: f"{r.uniform(18, 42):.1f}"),
                 ColumnSpec("study_visit_notes", "NONE", "scrub_text", gen_notes_clinical_only),
             ),
-            n_rows=8,
         ),
     ),
     dictionary=(
@@ -428,7 +425,6 @@ _PEDIATRIC = Scenario(
                 ColumnSpec("cbcl_total_score", "NONE", "keep", lambda r: str(r.randint(20, 90))),
                 ColumnSpec("interview_notes", "NONE", "scrub_text", gen_notes_clinical_only),
             ),
-            n_rows=8,
         ),
     ),
     dictionary=(
@@ -516,7 +512,6 @@ _HIPAA_MAX = Scenario(
                 ColumnSpec("barcode", "NONE", "keep", gen_barcode),
                 ColumnSpec("notes", "NONE", "scrub_text", gen_notes_clinical_only),
             ),
-            n_rows=8,
         ),
     ),
     dictionary=(

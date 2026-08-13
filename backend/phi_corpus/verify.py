@@ -221,6 +221,13 @@ def _resolve_export_key(file_name: str, export_paths: dict[str, str],
 def _check_expectation(actual: str, expectation: dict[str, Any], cell: dict[str, Any],
                         link_maps: dict[str, dict[str, set]]) -> bool:
     stripped = actual.rstrip()
+    if stripped.startswith("'"):
+        # 4.18: the executor prefixes formula-shaped values with a leading
+        # apostrophe before writing them to disk (CSV/XLSX formula-injection
+        # neutralisation). Compare against the pre-escape value so a planted
+        # 'keep' cell whose value happens to start with =/+/-/@ still scores
+        # as preserved.
+        stripped = stripped[1:]
     kind = expectation.get("kind")
     if kind == "literal":
         return stripped == expectation.get("literal", "")

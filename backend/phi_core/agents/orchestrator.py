@@ -30,6 +30,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from .base import AgentMessage, ITERATION_CAP
 from .experts import Praxis, Statute
 from .llm import LlmConfig
+from .manager import Manager
 from .outward import Herald, Ledger, Scout
 from .reasoning import (
     Auditor,
@@ -37,8 +38,10 @@ from .reasoning import (
     Judge,
     Sentinel,
     apply_sentinel_hard_rules,
+    validate_decisions,
     verify_keep_decisions,
 )
+from ..paths import cleanup_session_unpacked
 from ..security import scrub_decision, scrub_persisted_text
 from .specialists import Instrument, Lexicon, Schema
 
@@ -108,6 +111,7 @@ async def run_pipeline(
         _last_phase["t0"] = now
         payload = dict(payload or {})
         payload["_elapsed_s"] = round(now - _run_started, 3)
+        await manager.note_phase(phase, now - _run_started)
         await _original_on_phase(phase, payload)
 
     async def close_last_phase() -> None:
@@ -129,7 +133,16 @@ async def run_pipeline(
     iteration_cap = int(session.get("iteration_cap") or ITERATION_CAP)
     iteration_cap = max(1, min(iteration_cap, ITERATION_CAP))
 
-    common = dict(session_id=sid, llm=llm_cfg, db=db, emit=emit)
+    manager = Manager(session_id=sid, llm=llm_cfg, db=db, emit=emit)
+    await manager.run(
+        roster=["Lexicon", "Schema", "Instrument", "Statute", "Praxis", "Judge",
+                "Sentinel", "Executor", "Auditor", "Scout", "Ledger", "Herald"],
+        phase_plan=["specialists", "statute", "praxis", "judge_iter", "sentinel_iter",
+                    "executor", "publish_guard", "auditor_scout", "ledger", "herald"],
+    )
+    common = dict(session_id=sid, llm=llm_cfg, db=db, emit=emit,
+                  audit_prompts=bool(session.get("corpus_ground_truth")),
+                  manager=manager)
 
     # 1+2+2b. Specialists, Statute, and Praxis kicked off IN PARALLEL.
     #
@@ -161,11 +174,17 @@ async def run_pipeline(
 
     # Specialists: Lexicon must finish before Schema (Schema enriches its
     # prompt with the dictionary columns). Instrument is independent.
-    lex_task = Lexicon(**common).run(dict_files=dict_files) if dict_files else _empty({"columns": []})
-    inst_task = Instrument(**common).run(form_files=form_files) if form_files else _empty({"fields": []})
+    lexicon_agent = Lexicon(**common) if dict_files else None
+    instrument_agent = Instrument(**common) if form_files else None
+    lex_task = lexicon_agent.run(dict_files=dict_files) if lexicon_agent else _empty({"columns": []})
+    inst_task = instrument_agent.run(form_files=form_files) if instrument_agent else _empty({"fields": []})
     lexicon = await lex_task
     schema_task = Schema(**common).run(dataset_files=dataset_files, lexicon_columns=lexicon.get("columns", [])) if dataset_files else _empty({"columns": []})
     schema, instrument = await asyncio.gather(schema_task, inst_task)
+    prompt_scrub_counts = {
+        "lexicon": lexicon_agent.scrub_count if lexicon_agent else 0,
+        "instrument": instrument_agent.scrub_count if instrument_agent else 0,
+    }
 
     # Now await the parallel experts.
     statute = await statute_task
@@ -182,6 +201,10 @@ async def run_pipeline(
     prior_feedback = ""
     approved_decisions: list[dict[str, Any]] = []
     advisory_issues: list[dict[str, Any]] = []
+    all_sentinel_overrides: list[dict[str, Any]] = []
+    all_model_output_rejections: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+    manager_early_escalation = False
     for iteration in range(1, iteration_cap + 1):
         await _check_cancel(db, sid, on_phase)
         await on_phase(f"judge_iter_{iteration}", {"iteration": iteration})
@@ -189,11 +212,17 @@ async def run_pipeline(
                             statute=statute, praxis=praxis_methods,
                             prior_feedback=prior_feedback)
         decisions = j.get("decisions", [])
+        # 2.10: coerce any model-proposed action/subject/category outside the
+        # executable vocabulary to the fail-closed default before the hard-rule
+        # table or Sentinel ever see it.
+        decisions, rejections = validate_decisions(decisions)
+        all_model_output_rejections.extend(rejections)
         # Sentinel deterministic hard-rules: force known direct identifiers off
         # 'human_review' before invoking the LLM Sentinel. Closes the accuracy
         # gap where Judge routes obvious PHI to human review out of caution.
         decisions, overrides = apply_sentinel_hard_rules(decisions)
         if overrides:
+            all_sentinel_overrides.extend(overrides)
             await on_phase(f"sentinel_hard_rules_iter_{iteration}",
                            {"iteration": iteration, "overrides": overrides})
         await _check_cancel(db, sid, on_phase)
@@ -217,6 +246,24 @@ async def run_pipeline(
             s["verdict"] = "approved"
             break
         prior_feedback = _summarise_issues(blocking)
+        if iteration < iteration_cap:
+            advice = await manager.consult(
+                agent_name="Judge", phase=f"judge_sentinel_iter_{iteration}",
+                signal={"iteration": iteration, "iteration_cap": iteration_cap,
+                        "blocking_count": len(blocking),
+                        "advisory_count": len(advisory_issues),
+                        "decision_count": len(decisions),
+                        "judge_call_failures": judge.call_failures,
+                        "sentinel_call_failures": sentinel.call_failures})
+            if advice.action == "escalate_human_review":
+                manager_early_escalation = True
+                break
+
+    llm_failures = {
+        "judge": judge.call_failures,
+        "sentinel": sentinel.call_failures,
+        "empty_decisions": not decisions,
+    }
 
     if not approved_decisions:
         approved_decisions = []
@@ -238,16 +285,31 @@ async def run_pipeline(
         for k in ("summary", "reason", "notes"):
             if isinstance(s.get(k), str):
                 s[k] = scrub_persisted_text(s[k])
-    # Human review is required only when either (a) a decision itself
-    # routes to human_review, or (b) Sentinel still has unresolved
-    # BLOCKING issues after ITERATION_CAP iterations. Advisory issues
-    # are logged and never force human review.
+    # Human review is required when a decision routes to human_review, an
+    # agent exhausted supervised retries, Sentinel still has unresolved
+    # BLOCKING issues after the iteration cap, or the Manager advises early
+    # escalation because the Judge/Sentinel loop is not converging.
+    reasons: list[str] = []
     human_needed = any(d.get("action") == "human_review" for d in approved_decisions)
+    if human_needed:
+        reasons.append("decision_routed_human_review")
+    if judge.call_failures or sentinel.call_failures or not decisions:
+        human_needed = True
+        if judge.call_failures:
+            reasons.append("judge_call_failure")
+        if sentinel.call_failures:
+            reasons.append("sentinel_call_failure")
+        if not decisions:
+            reasons.append("empty_decisions")
     if _blocking_issues(s):
         human_needed = True
+        reasons.append("sentinel_blocking_after_cap")
         await on_phase("human_review_required",
                        {"reason": "sentinel still has blocking issues after cap",
                         "blocking_count": len(_blocking_issues(s))})
+    if manager_early_escalation:
+        human_needed = True
+        reasons.append("manager_advisory_early_escalation")
 
     # 4. Human review gate (persist and pause if needed)
     await db.sessions.update_one(
@@ -257,22 +319,21 @@ async def run_pipeline(
             "agent_sentinel_last": s,
             "agent_statute": statute,
             "agent_specialists": {"schema": schema, "instrument": instrument, "lexicon": lexicon},
+            "agent_praxis": praxis_methods,
+            "sentinel_overrides": all_sentinel_overrides,
+            "keep_demotions": keep_demotions,
+            "prompt_scrub_counts": prompt_scrub_counts,
+            "llm_failures": llm_failures,
+            "model_output_rejections": all_model_output_rejections,
             "human_review_required": human_needed,
         }},
     )
     if human_needed:
-        await close_last_phase()
-        await db.sessions.update_one(
-            session_filter,
-            {"$set": {"status": "awaiting_human_review",
-                      "updated_at": datetime.now(timezone.utc).isoformat(),
-                      "phase_timings": _phase_timings,
-                      "run_elapsed_s": time.perf_counter() - _run_started}},
-        )
-        return {"status": "awaiting_human_review",
-                "decisions": approved_decisions,
-                "sentinel": s,
-                "phase_timings": _phase_timings}
+        return await manager.escalate_to_human_review(
+            session_filter=session_filter, reasons=reasons,
+            close_last_phase=close_last_phase, phase_timings=_phase_timings,
+            run_elapsed_s=time.perf_counter() - _run_started,
+            approved_decisions=approved_decisions, sentinel_report=s)
 
     # 5. Executor
     await on_phase("executor", {"decision_count": len(approved_decisions)})
@@ -286,6 +347,26 @@ async def run_pipeline(
     await on_phase("publish_guard", {"status": guard_report["status"],
                                      "scanned": guard_report["scanned"],
                                      "blocked": guard_report["blocked"]})
+
+    if guard_report["status"] != "clean":
+        await close_last_phase()
+        manager_report = await manager.close_run("blocked")
+        await db.sessions.update_one(
+            session_filter,
+            {"$set": {
+                "status": "blocked",
+                "guard_report": guard_report,
+                "export_paths": exec_out["exports"],
+                "agent_decisions": approved_decisions,
+                "phase_timings": _phase_timings,
+                "run_elapsed_s": round(time.perf_counter() - _run_started, 3),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "manager_report": manager_report,
+            }},
+        )
+        cleanup_session_unpacked(sid)
+        return {"status": "blocked", "guard": guard_report,
+                "decisions": approved_decisions, "phase_timings": _phase_timings}
 
     await _check_cancel(db, sid, on_phase)
 
@@ -315,6 +396,7 @@ async def run_pipeline(
                                         target_venue=session.get("target_venue") or "JAMIA Open")
 
     await close_last_phase()
+    manager_report = await manager.close_run("complete")
     result = {
         "status": "complete",
         "decisions": approved_decisions,
@@ -328,6 +410,7 @@ async def run_pipeline(
         "phase_timings": _phase_timings,
         "run_elapsed_s": round(time.perf_counter() - _run_started, 3),
         "iteration_cap": iteration_cap,
+        "manager_report": manager_report,
     }
     completion_update = {
         "$set": {
@@ -343,9 +426,11 @@ async def run_pipeline(
             "run_elapsed_s": result["run_elapsed_s"],
             "iteration_cap": iteration_cap,
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            "manager_report": manager_report,
         },
     }
     await db.sessions.update_one(session_filter, completion_update)
+    cleanup_session_unpacked(sid)
     return result
 
 

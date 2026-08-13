@@ -1,10 +1,15 @@
 """FastAPI server for PHI handling console.
 
-Endpoints (all under /api):
-  GET  /api/health
+Endpoints (all under /api unless noted):
+  GET  /api/health                         -> mongo/llm/tesseract/signing-key readiness
+  GET  /api/version                        -> service banner
+  POST /api/auth/session                   -> exchange an API token for the phi_session cookie
+  POST /api/auth/logout                    -> clear the phi_session cookie
+  GET  /api/auth/whoami                    -> resolved principal for the current credential
   POST /api/sessions                       -> create session
   GET  /api/sessions                       -> list sessions
   GET  /api/sessions/{id}                  -> session state
+  DELETE /api/sessions/{id}                -> right-to-erasure: delete session, files, logs
   POST /api/sessions/{id}/intake           -> upload manifest-v3 ZIP, run intake
   GET  /api/sessions/{id}/intake/receipt   -> redacted intake receipt
   GET  /api/intake/spec                    -> intake-manifest/v3 spec
@@ -22,8 +27,11 @@ Endpoints (all under /api):
   GET  /api/corpus/study/catalog           -> available corpus scenarios
   POST /api/corpus/study/research          -> discover a scenario via CorpusResearcher
   POST /api/corpus/study/generate          -> generate a corpus, attach to a session
+  GET  /api/corpus/study/{id}/zip          -> download the generated/run intake ZIP
   POST /api/corpus/study/run               -> create session, plant corpus, run pipeline
   GET  /api/corpus/study/verify/{id}       -> grade decisions against planted ground truth
+  GET  /api/corpus/study/benchmark/{id}          -> per-dataset benchmark report
+  GET  /api/corpus/study/benchmark/{id}/download -> benchmark artefact bundle ZIP
   GET  /api/settings/llm                   -> current LLM settings
   POST /api/settings/llm                   -> update LLM settings
   GET  /api/settings/llm/catalog           -> multi-provider model catalog
@@ -34,13 +42,18 @@ Endpoints (all under /api):
   GET  /api/settings/chatgpt/login/{id}    -> poll device-code login status (one poll)
   GET  /api/settings/chatgpt/status        -> current ChatGPT connection status
   DELETE /api/settings/chatgpt             -> disconnect the ChatGPT account
+
+Everything else (/, /static/...) is the built frontend SPA, mounted last
+(4.15) so no API route above is ever shadowed.
 """
 from __future__ import annotations
 
 import asyncio
 import uuid
 import json
+import logging
 import os
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -48,7 +61,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+_log = logging.getLogger("phi_console")
+
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
@@ -60,7 +75,7 @@ from phi_core.intake import (
 )
 from phi_core.jurisdictions import get_pack
 from phi_core.models import FileArtifact, ProgressEvent, Session
-from phi_core.paths import UnsafePath, UPLOAD_DIR, safe_join, CHATGPT_TOKEN_DIR
+from phi_core.paths import UnsafePath, UPLOAD_DIR, cleanup_session_unpacked, safe_join, CHATGPT_TOKEN_DIR
 
 # Redirect litellm's ChatGPT-provider Authenticator to the pinned token
 # directory (backend/phi_core/paths.py) rather than the per-user home
@@ -69,11 +84,44 @@ from phi_core.paths import UnsafePath, UPLOAD_DIR, safe_join, CHATGPT_TOKEN_DIR
 # than in an on_event("startup") hook.
 os.environ.setdefault("CHATGPT_TOKEN_DIR", str(CHATGPT_TOKEN_DIR))
 from phi_core.security import (
-    allowed_providers, require_api_token, validate_llm_base_url, validate_llm_provider,
+    allowed_providers, require_api_token, resolve_principal, resolve_principal_soft,
+    scrub_decision, token_principals, validate_llm_base_url, validate_llm_provider,
 )
 from phi_core.agents import AgentMessage, LlmConfig, run_pipeline as run_agent_pipeline
 from phi_core import chatgpt_auth
 
+
+def _refuse_to_boot_insecure() -> None:
+    """Refuse to start with an insecure production configuration.
+
+    A no-op in ``PHI_ENV=dev``. Otherwise collects every violated
+    requirement before raising, so an operator fixes everything in one
+    pass instead of restarting five times to discover each failure.
+    """
+    if os.environ.get("PHI_ENV", "production") == "dev":
+        return
+    problems: list[str] = []
+    if not token_principals():
+        problems.append("API_TOKENS (or legacy API_TOKEN) must be set")
+    cors_raw = os.environ.get("CORS_ALLOWED_ORIGINS", "").strip()
+    if not cors_raw or "*" in {o.strip() for o in cors_raw.split(",")}:
+        problems.append("CORS_ALLOWED_ORIGINS must be set to a specific origin list, not '*'")
+    mongo_url = os.environ.get("MONGO_URL", "")
+    if "@" not in mongo_url:
+        problems.append("MONGO_URL must include authentication credentials (mongodb://user:pass@host/...)")
+    if not os.environ.get("APP_ENCRYPTION_KEY", "").strip():
+        problems.append("APP_ENCRYPTION_KEY must be set")
+    if not os.environ.get("ATTESTATION_SIGNING_KEY", "").strip():
+        problems.append("ATTESTATION_SIGNING_KEY must be set")
+    if problems:
+        raise RuntimeError(
+            "Refusing to start with PHI_ENV=" + os.environ.get("PHI_ENV", "production")
+            + " and an insecure configuration:\n- " + "\n- ".join(problems)
+            + "\nSet PHI_ENV=dev for local development, or fix the above for production."
+        )
+
+
+_refuse_to_boot_insecure()
 
 app = FastAPI(title="PHI Handling Console", version="2.0.0")
 
@@ -86,6 +134,84 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 4.20: response headers. The app now owns its own headers (it serves the
+# built SPA itself, per 4.15) and set none before this.
+_HSTS = os.environ.get("PHI_ENV", "production") != "dev"
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
+        "base-uri 'none'; object-src 'none'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    if _HSTS:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
+# 4.20: rate limits. Process-local sliding window keyed by resolved
+# principal when one is present, else client address -- a single container
+# needs no shared store. Exceeding a limit returns 429 with Retry-After.
+_RATE_BUCKETS: dict[str, list[float]] = {}
+
+
+def _rate_limit_identity(request: Request) -> str:
+    principal = resolve_principal_soft(
+        request.headers.get("x-api-token"), request.cookies.get("phi_session"),
+    )
+    if principal:
+        return principal
+    return request.client.host if request.client else "unknown"
+
+
+def rate_limited(bucket: str, limit: int, window_seconds: int):
+    async def _dep(request: Request) -> None:
+        key = f"{bucket}:{_rate_limit_identity(request)}"
+        now = time.monotonic()
+        cutoff = now - window_seconds
+        hits = _RATE_BUCKETS.setdefault(key, [])
+        while hits and hits[0] < cutoff:
+            hits.pop(0)
+        if len(hits) >= limit:
+            retry_after = max(1, int(hits[0] + window_seconds - now))
+            raise HTTPException(
+                429, "rate limit exceeded; try again later",
+                headers={"Retry-After": str(retry_after)},
+            )
+        hits.append(now)
+    return _dep
+
+
+# 4.23: errors must not describe internals. FastAPI's default handler for
+# an uncaught exception returns a 500 with whatever the exception carried,
+# which can echo stack-trace-adjacent detail (file paths, library names,
+# occasionally an argument value) to the client. Every unhandled exception
+# gets a short correlation id, the full detail goes to the server log
+# against that id, and the client sees only the id. HTTPException already
+# has its own, more specific handler (FastAPI's default), so the
+# deliberately precise 4xx messages already in the code -- intake
+# validation errors, Publish Guard refusals, rate limits -- are untouched.
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    error_id = uuid.uuid4().hex[:12]
+    _log.error(
+        "unhandled exception [%s] on %s %s: %s: %s",
+        error_id, request.method, request.url.path, type(exc).__name__, exc,
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"error": {"code": "INTERNAL", "message": "unexpected error", "error_id": error_id}},
+    )
+
 
 # Hard cap on individual upload bytes (defense in depth alongside intake ZIP caps).
 _MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 250 * 1024 * 1024))
@@ -128,7 +254,7 @@ _progress_subscribers: dict[str, int] = {}
 
 # Terminal statuses that guarantee the pipeline is done and no more
 # events will arrive on the SSE queue.
-_SETTLED_STATUSES = frozenset({"complete", "failed", "cancelled",
+_SETTLED_STATUSES = frozenset({"complete", "failed", "cancelled", "blocked",
                                 "intake_failed", "awaiting_human_review"})
 
 # Cap of concurrent SSE subscribers per session. 4 is enough for the
@@ -136,6 +262,47 @@ _SETTLED_STATUSES = frozenset({"complete", "failed", "cancelled",
 # that we refuse new subscribers (returns HTTP 429) to prevent an
 # attacker from opening thousands of streams and pinning memory.
 _MAX_STREAM_SUBSCRIBERS_PER_SESSION = 4
+
+# Admission control: cap concurrent pipeline runs on this process. Each
+# run holds an LLM connection open for up to the 15-minute wall-clock
+# ceiling; without a cap an operator can queue unbounded background tasks.
+# `/handle` and the human-review resume worker both check this at launch
+# and return 429 immediately rather than queueing past the cap.
+_MAX_CONCURRENT_PIPELINES = int(os.environ.get("MAX_CONCURRENT_PIPELINES", "2"))
+_active_pipeline_count = 0
+
+# 4.21: bound the width of a single study. Prompt sizes are already capped
+# per column (specialists.py), but the column count itself was not, so a
+# wide dataset could still produce an unbounded Judge prompt and decision
+# list. Checked after header hydration in session_handle, before any LLM
+# call is made.
+_MAX_COLUMNS_PER_STUDY = int(os.environ.get("MAX_COLUMNS_PER_STUDY", "500"))
+
+
+def _enforce_column_cap(files: list[dict]) -> int:
+    """4.21: sum dataset columns across a study and raise when it exceeds
+    ``_MAX_COLUMNS_PER_STUDY``. Returns the total on success so the caller
+    can log/report it if useful."""
+    total_columns = sum(len(f.get("columns") or []) for f in files if f.get("kind") == "dataset")
+    if total_columns > _MAX_COLUMNS_PER_STUDY:
+        raise ValueError(
+            f"study has {total_columns} dataset columns, exceeding the "
+            f"{_MAX_COLUMNS_PER_STUDY}-column-per-study limit"
+        )
+    return total_columns
+
+
+def _admit_pipeline_run() -> bool:
+    global _active_pipeline_count
+    if _active_pipeline_count >= _MAX_CONCURRENT_PIPELINES:
+        return False
+    _active_pipeline_count += 1
+    return True
+
+
+def _release_pipeline_run() -> None:
+    global _active_pipeline_count
+    _active_pipeline_count = max(0, _active_pipeline_count - 1)
 
 
 def _queue_for(session_id: str) -> asyncio.Queue:
@@ -170,27 +337,136 @@ async def _emit(session_id: str, ev: ProgressEvent, run_id: str | None = None) -
     await _queue_for(session_id).put(ev)
 
 
+async def _fail_session_correlated(db, sid: str, run_filter: dict, e: Exception, *, run_id: str | None) -> None:
+    """4.23: mark a pipeline worker's session failed without persisting or
+    streaming raw exception text. Full detail (exception type, message,
+    traceback) goes to the server log against a short correlation id; the
+    stored session and the SSE client see only a fixed message plus that
+    id, matching the global unhandled-exception handler's contract."""
+    error_id = uuid.uuid4().hex[:12]
+    _log.error(
+        "session %s pipeline worker failure [%s]: %s: %s",
+        sid, error_id, type(e).__name__, e, exc_info=True,
+    )
+    await db.sessions.update_one(run_filter, {"$set": {"status": "failed", "error": "pipeline failed", "error_id": error_id}})
+    cleanup_session_unpacked(sid)
+    await _emit(sid, ProgressEvent(phase="failed", message=f"pipeline error (id {error_id}); see server logs"), run_id=run_id)
+
+
 # --- Health ----------------------------------------------------------------
 
 @app.get("/api/health")
 async def health():
-    return {
-        "status": "ok",
+    from phi_core.crypto import signing_public_key_pem
+    import shutil as _shutil
+
+    mongo_ok = False
+    try:
+        await asyncio.wait_for(get_db().command("ping"), timeout=2.0)
+        mongo_ok = True
+    except Exception:
+        mongo_ok = False
+
+    llm_doc = {}
+    try:
+        llm_doc = await get_db().settings.find_one({"_id": "llm"}, {"_id": 0}) or {}
+    except Exception:
+        llm_doc = {}
+    provider = llm_doc.get("provider", "")
+    if provider == "chatgpt":
+        llm_provider_ok = chatgpt_auth.read_auth() is not None
+    elif provider == "emergent":
+        llm_provider_ok = True
+    else:
+        llm_provider_ok = bool(llm_doc.get("api_key"))
+
+    checks = {
+        "mongo": mongo_ok,
+        "llm_provider": llm_provider_ok,
+        "tesseract": _shutil.which("tesseract") is not None,
+        "pdftoppm": _shutil.which("pdftoppm") is not None,
+        "signing_key": signing_public_key_pem() is not None,
+    }
+    body = {
+        "status": "ok" if mongo_ok else "degraded",
         "version": "2.0.0",
         "hipaa_categories": get_pack("us").identifier_categories,
         "supported_jurisdictions": ["us"],
+        "checks": checks,
     }
+    if not mongo_ok:
+        return JSONResponse(status_code=503, content=body)
+    return body
+
+
+# --- Cookie-based auth (SEC hardening 4.3) ----------------------------------
+#
+# The operator token never lives in localStorage or a URL query string.
+# The browser POSTs it once to exchange it for an httponly, samesite=strict
+# cookie; every subsequent request authenticates via that cookie. Scripted
+# clients keep using the X-API-Token header directly.
+
+class AuthSessionBody(BaseModel):
+    token: str
+
+
+@app.post("/api/auth/session", dependencies=[Depends(rate_limited("auth_session", 10, 900))])
+async def auth_session(body: AuthSessionBody):
+    from phi_core.security import token_principals
+    from phi_core.crypto import sign_principal_cookie
+    import hmac as _hmac
+    principals = token_principals()
+    principal = None
+    for tok, name in principals.items():
+        if _hmac.compare_digest(body.token, tok):
+            principal = name
+            break
+    if principal is None:
+        raise HTTPException(401, "invalid token")
+    resp = JSONResponse({"principal": principal})
+    resp.set_cookie(
+        "phi_session", sign_principal_cookie(principal),
+        httponly=True,
+        secure=os.environ.get("PHI_ENV", "production") != "dev",
+        samesite="strict", max_age=43200, path="/",
+    )
+    return resp
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("phi_session", path="/")
+    return resp
+
+
+@app.get("/api/auth/whoami")
+async def auth_whoami(principal: str = Depends(resolve_principal)):
+    return {"principal": principal}
 
 
 # --- Sessions --------------------------------------------------------------
+
+def _owned_filter(sid: str, principal: str) -> dict:
+    return {"id": sid, "owner": principal}
+
+
+async def _owned_session(sid: str, principal: str, projection: dict | None = None) -> dict:
+    """Load a session the caller owns, or 404. Never 403: a wrong owner and a
+    missing id are indistinguishable, so session ids stay unguessable."""
+    doc = await get_db().sessions.find_one(_owned_filter(sid, principal), projection)
+    if not doc:
+        raise HTTPException(404, "session not found")
+    return doc
+
 
 class SessionCreate(BaseModel):
     jurisdiction: str = "us"
 
 
-@app.post("/api/sessions", dependencies=[Depends(require_api_token)])
-async def session_create(body: SessionCreate):
-    s = Session(jurisdiction=body.jurisdiction)
+@app.post("/api/sessions")
+async def session_create(body: SessionCreate, principal: str = Depends(resolve_principal)):
+    s = Session(jurisdiction=body.jurisdiction, owner=principal)
     await get_db().sessions.insert_one(s.model_dump())
     return s.model_dump()
 
@@ -203,9 +479,11 @@ def _scrub_session_document(doc: dict) -> dict:
     have echoed into agent notes. Uses recursive `scrub_nested` so PHI
     hiding in nested dicts/lists is caught too.
     """
-    from phi_core.security import scrub_nested as _scrub_nested
+    from phi_core.security import scrub_nested as _scrub_nested, scrub_persisted_text as _scrub_text
     if not doc:
         return doc
+    if isinstance(doc.get("error"), str) and doc["error"]:
+        doc["error"] = _scrub_text(doc["error"])
     for f in doc.get("files", []) or []:
         f.pop("stored_path", None)
     if "export_paths" in doc:
@@ -218,6 +496,12 @@ def _scrub_session_document(doc: dict) -> dict:
     # it out prevents an attacker from post-hoc grading their own attempt.
     doc.pop("corpus_ground_truth", None)
     doc.pop("_pipeline_run_id", None)
+    doc.pop("corpus_zip_path", None)
+    guard_report = doc.get("guard_report")
+    if isinstance(guard_report, dict):
+        for r in guard_report.get("results") or []:
+            if isinstance(r, dict) and "file_path" in r:
+                r["file_path"] = ""
 
     for k in (
         "agent_decisions", "agent_herald", "agent_ledger",
@@ -229,25 +513,42 @@ def _scrub_session_document(doc: dict) -> dict:
     return doc
 
 
-@app.get("/api/sessions/{sid}", dependencies=[Depends(require_api_token)])
-async def session_get(sid: str):
-    doc = await get_db().sessions.find_one({"id": sid}, {"_id": 0})
-    if not doc:
-        raise HTTPException(404, "session not found")
+@app.get("/api/sessions/{sid}")
+async def session_get(sid: str, principal: str = Depends(resolve_principal)):
+    doc = await _owned_session(sid, principal, {"_id": 0})
     return _scrub_session_document(doc)
 
 
-@app.get("/api/sessions", dependencies=[Depends(require_api_token)])
-async def session_list():
-    cursor = get_db().sessions.find({}, {"_id": 0, "progress": 0}).sort("created_at", -1).limit(50)
+@app.get("/api/sessions")
+async def session_list(principal: str = Depends(resolve_principal)):
+    cursor = get_db().sessions.find({"owner": principal}, {"_id": 0, "progress": 0}).sort("created_at", -1).limit(50)
     out = []
     async for s in cursor:
         out.append(_scrub_session_document(s))
     return {"sessions": out}
 
 
-@app.post("/api/sessions/{sid}/intake", dependencies=[Depends(require_api_token)])
-async def session_intake(sid: str, file: UploadFile = File(...)):
+@app.delete("/api/sessions/{sid}")
+async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
+    """Right-to-erasure: remove the session document, its agent_log rows,
+    its UPLOAD_DIR/<sid> tree, and every path in export_paths."""
+    import shutil
+    db = get_db()
+    doc = await _owned_session(sid, principal, {"_id": 0, "export_paths": 1})
+    for p in (doc.get("export_paths") or {}).values():
+        if p:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except OSError:
+                pass
+    shutil.rmtree(UPLOAD_DIR / sid, ignore_errors=True)
+    await db.agent_log.delete_many({"session_id": sid})
+    await db.sessions.delete_one(_owned_filter(sid, principal))
+    return {"deleted": True}
+
+
+@app.post("/api/sessions/{sid}/intake", dependencies=[Depends(rate_limited("session_intake", 20, 3600))])
+async def session_intake(sid: str, file: UploadFile = File(...), principal: str = Depends(resolve_principal)):
     """Default entry: upload a ZIP with intake-manifest/v3 structure.
 
     ZIP must contain top-level `datasets/`, `forms/`, and one of
@@ -255,9 +556,14 @@ async def session_intake(sid: str, file: UploadFile = File(...)):
     unsupported files.
     """
     db = get_db()
-    session = await db.sessions.find_one({"id": sid})
-    if not session:
-        raise HTTPException(404, "session not found")
+    session = await _owned_session(sid, principal)
+    _LIVE_STATUSES = ("classifying", "anonymizing", "awaiting_human_review")
+    if session.get("status") in _LIVE_STATUSES:
+        raise HTTPException(
+            409,
+            f"session has a pipeline run in progress (status={session.get('status')}); "
+            "cancel it before re-uploading",
+        )
     if not (file.filename or "").lower().endswith(".zip"):
         raise HTTPException(400, "intake requires a .zip archive")
     session_dir = UPLOAD_DIR / sid
@@ -290,9 +596,21 @@ async def session_intake(sid: str, file: UploadFile = File(...)):
             component=e.component,
         ))
 
+    # SEC hardening 4.4: raw uploaded PHI bytes are no longer needed once
+    # build_manifest has unpacked and classified them; unpacked/ stays
+    # because the Executor reads stored_path from it later.
+    try:
+        zip_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
     # Re-intake resets downstream state (files, spans, progress, exports).
-    await db.sessions.update_one(
-        {"id": sid},
+    # Conditional on the session still being idle: a claim taken by /handle
+    # between the check above and here must not be silently overwritten.
+    intake_claim_filter = dict(_owned_filter(sid, principal))
+    intake_claim_filter["status"] = {"$nin": list(_LIVE_STATUSES)}
+    reset = await db.sessions.update_one(
+        intake_claim_filter,
         {"$set": {
             "files": [f.model_dump() for f in accepted],
             "progress": [],
@@ -309,6 +627,8 @@ async def session_intake(sid: str, file: UploadFile = File(...)):
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }},
     )
+    if not getattr(reset, "matched_count", 0):
+        raise HTTPException(409, "session has a pipeline run in progress; cancel it before re-uploading")
 
     return {
         "study": sid,
@@ -333,17 +653,14 @@ async def session_intake(sid: str, file: UploadFile = File(...)):
     }
 
 
-@app.get("/api/sessions/{sid}/intake/receipt", dependencies=[Depends(require_api_token)])
-async def session_intake_receipt(sid: str):
+@app.get("/api/sessions/{sid}/intake/receipt")
+async def session_intake_receipt(sid: str, principal: str = Depends(resolve_principal)):
     """CLI-style redacted receipt (never leaks entry paths).
 
     Mirrors the `phi_engine intake` stdout contract from
     feat/v2-multi-jurisdiction: {study, status, linked, review, errors, manifest}.
     """
-    db = get_db()
-    session = await db.sessions.find_one({"id": sid}, {"_id": 0})
-    if not session:
-        raise HTTPException(404, "session not found")
+    session = await _owned_session(sid, principal, {"_id": 0})
     review = session.get("intake_review") or []
     return {
         "study": sid,
@@ -383,16 +700,13 @@ async def intake_spec():
     }
 
 
-@app.get("/api/sessions/{sid}/stream", dependencies=[Depends(require_api_token)])
-async def session_stream(sid: str):
+@app.get("/api/sessions/{sid}/stream")
+async def session_stream(sid: str, principal: str = Depends(resolve_principal)):
     # SEC-002 fix: refuse new subscribers for already-settled sessions so
     # attackers cannot open thousands of streams to random ids and pin a
     # queue per id. Settled sessions serve their history over the regular
     # GET endpoints; there is nothing more to stream.
-    db = get_db()
-    doc = await db.sessions.find_one({"id": sid}, {"status": 1})
-    if not doc:
-        raise HTTPException(404, "session not found")
+    doc = await _owned_session(sid, principal, {"status": 1})
     if doc.get("status") in _SETTLED_STATUSES:
         raise HTTPException(status_code=409,
                             detail=f"session already settled ({doc.get('status')}); "
@@ -440,24 +754,33 @@ async def coverage_matrix_endpoint():
     return {"rows": COVERAGE, "tools": TOOLS, "counts": coverage_counts()}
 
 
-@app.get("/api/classification-accuracy")
+_classification_accuracy_cache: dict[str, Any] | None = None
+
+
+@app.get("/api/classification-accuracy", dependencies=[Depends(require_api_token)])
 async def classification_accuracy_endpoint(details: bool = False):
     """Run the deterministic hard-rule layer over the shipped labelled corpus
     and return per-category precision/recall/F1 + method-appropriateness.
 
     Query params:
       - details=1 : include per-column predictions (useful for regression debugging).
+
+    The full validation corpus never changes at runtime, so the result is
+    memoised for the process lifetime rather than recomputed per request.
     """
-    from phi_core.validation import run_validation
-    rep = run_validation()
-    body = rep.to_dict()
+    global _classification_accuracy_cache
+    if _classification_accuracy_cache is None:
+        from phi_core.validation import run_validation
+        _classification_accuracy_cache = run_validation().to_dict()
+    body = dict(_classification_accuracy_cache)
     if not details:
         body.pop("predictions", None)
     return body
 
 
-@app.get("/api/sessions/{sid}/bundle", dependencies=[Depends(require_api_token)])
-async def session_bundle(sid: str, publication: bool = False, attestation_pdf: bool = False):
+@app.get("/api/sessions/{sid}/bundle")
+async def session_bundle(sid: str, publication: bool = False, attestation_pdf: bool = False,
+                         principal: str = Depends(resolve_principal)):
     """Assemble and stream the shareable bundle.
 
     Query params:
@@ -467,9 +790,7 @@ async def session_bundle(sid: str, publication: bool = False, attestation_pdf: b
     """
     from phi_core.bundle import BundleOptions, build_bundle
     db = get_db()
-    session = await db.sessions.find_one({"id": sid}, {"_id": 0})
-    if not session:
-        raise HTTPException(404, "session not found")
+    session = await _owned_session(sid, principal, {"_id": 0})
     if session.get("status") != "complete":
         raise HTTPException(
             403,
@@ -489,9 +810,12 @@ async def session_bundle(sid: str, publication: bool = False, attestation_pdf: b
             f"(status={guard_status or 'missing'}). Re-run the pipeline "
             "so the last-mile PHI scan populates a passing guard report.",
         )
+    agent_log_msgs = None
+    if publication and session.get("corpus_ground_truth"):
+        agent_log_msgs = await db.agent_log.find({"session_id": sid}, {"_id": 0}).to_list(length=None)
     data, filename = build_bundle(session, BundleOptions(
         include_publication=publication, include_attestation_pdf=attestation_pdf,
-    ))
+    ), agent_log=agent_log_msgs)
     return Response(
         content=data,
         media_type="application/zip",
@@ -499,8 +823,9 @@ async def session_bundle(sid: str, publication: bool = False, attestation_pdf: b
     )
 
 
-@app.get("/api/sessions/{sid}/export/{file_id}", dependencies=[Depends(require_api_token)])
-async def session_export(sid: str, file_id: str, force: bool = False):
+@app.get("/api/sessions/{sid}/export/{file_id}")
+async def session_export(sid: str, file_id: str, force: bool = False,
+                         principal: str = Depends(resolve_principal)):
     """Download the PHI-handled export.
 
     GOAL boundary: this is the point where 'input PHI data' becomes 'output
@@ -510,9 +835,7 @@ async def session_export(sid: str, file_id: str, force: bool = False):
     operator has manually reviewed the findings.
     """
     db = get_db()
-    session = await db.sessions.find_one({"id": sid}, {"_id": 0})
-    if not session:
-        raise HTTPException(404, "session not found")
+    session = await _owned_session(sid, principal, {"_id": 0})
     if session.get("status") != "complete":
         return JSONResponse(status_code=403, content={
             "error": "publish_guard_not_certified",
@@ -541,7 +864,7 @@ async def session_export(sid: str, file_id: str, force: bool = False):
         if force and status == "blocked":
             # Record the override on the session so the audit trail keeps it.
             await db.sessions.update_one(
-                {"id": sid},
+                _owned_filter(sid, principal),
                 {"$push": {"guard_overrides": {
                     "file_id": file_id,
                     "overridden_at": datetime.now(timezone.utc).isoformat(),
@@ -627,20 +950,25 @@ def _providers_payload() -> dict:
     }
 
 
-@app.get("/api/settings/llm")
+@app.get("/api/settings/llm", dependencies=[Depends(require_api_token)])
 async def get_llm_settings():
+    from phi_core.crypto import KeyRotated
     db = get_db()
     doc = await db.settings.find_one({"_id": "llm"}, {"_id": 0})
     if not doc:
         return _first_boot_llm_defaults() | _providers_payload()
     # never leak the api_key back verbatim
     if doc.get("api_key"):
+        try:
+            decrypt_api_key(doc["api_key"])
+        except KeyRotated:
+            raise HTTPException(409, "provider key cannot be decrypted; re-enter it in Settings")
         doc["api_key_set"] = True
         doc["api_key"] = ""
     return doc | _providers_payload()
 
 
-@app.get("/api/settings/llm/catalog")
+@app.get("/api/settings/llm/catalog", dependencies=[Depends(require_api_token)])
 async def get_llm_catalog():
     """Curated multi-provider model catalog for the Settings UI.
 
@@ -661,7 +989,7 @@ async def get_llm_catalog():
 # document only (Sir's Q1(iii)) — it is never persisted to disk.
 
 
-@app.get("/api/corpus/study/catalog")
+@app.get("/api/corpus/study/catalog", dependencies=[Depends(require_api_token)])
 async def corpus_study_catalog():
     from phi_corpus.scenarios import list_scenarios
     from phi_corpus.edge_cases import EDGE_CASES, HIPAA_MAX_EDGE_CASE_TAGS
@@ -697,7 +1025,7 @@ class CorpusStudyResearchBody(BaseModel):
     domain: str
 
 
-@app.post("/api/corpus/study/research", dependencies=[Depends(require_api_token)])
+@app.post("/api/corpus/study/research", dependencies=[Depends(require_api_token), Depends(rate_limited("corpus_research", 5, 3600))])
 async def corpus_study_research(body: CorpusStudyResearchBody):
     """Run the CorpusResearcher agent to discover a real-life scenario
     for the requested study domain and persist it to the ``corpus_scenarios``
@@ -730,12 +1058,12 @@ class CorpusStudyGenerateBody(BaseModel):
     scenario_id: str
     jurisdiction: str = "us"
     edge_case_tags: list[str] = []
-    row_count: int = 8
+    row_count: int = 12
     seed: int = 42
 
 
-@app.post("/api/corpus/study/generate", dependencies=[Depends(require_api_token)])
-async def corpus_study_generate(body: CorpusStudyGenerateBody):
+@app.post("/api/corpus/study/generate", dependencies=[Depends(rate_limited("corpus_generate", 20, 3600))])
+async def corpus_study_generate(body: CorpusStudyGenerateBody, principal: str = Depends(resolve_principal)):
     """Generate a corpus in memory and attach it to a fresh session so the
     intake -> handle -> verify flow can run entirely from a single call.
 
@@ -749,7 +1077,7 @@ async def corpus_study_generate(body: CorpusStudyGenerateBody):
         scenario_id=body.scenario_id,
         jurisdiction=body.jurisdiction,
         edge_case_tags=body.edge_case_tags,
-        row_count=max(1, min(int(body.row_count or 8), 100)),
+        row_count=max(10, min(int(body.row_count or 12), 100)),
         seed=int(body.seed or 42),
     )
     # Reuse the existing session-create flow to get a canonical session
@@ -757,15 +1085,21 @@ async def corpus_study_generate(body: CorpusStudyGenerateBody):
     sid = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
     db = get_db()
+    session_dir = UPLOAD_DIR / sid
+    session_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = safe_join(session_dir, "intake.zip", fallback="intake.zip")
+    zip_path.write_bytes(art.zip_bytes)
     session_doc = {
         "id": sid,
         "created_at": now,
         "status": "corpus_ready",
+        "owner": principal,
         "jurisdiction": body.jurisdiction,
         "files": [],
         "agent_decisions": [],
         "corpus_ground_truth": art.ground_truth,
         "corpus_summary": art.ground_truth_summary,
+        "corpus_zip_path": str(zip_path),
     }
     await db.sessions.insert_one(session_doc)
 
@@ -779,12 +1113,28 @@ async def corpus_study_generate(body: CorpusStudyGenerateBody):
         "corpus_zip_size_bytes": len(art.zip_bytes),
     }
 
+@app.get("/api/corpus/study/{sid}/zip")
+async def corpus_study_zip(sid: str, principal: str = Depends(resolve_principal)):
+    """Download the intake ZIP produced by a corpus generate/run, so the
+    described handoff (generate, then feed the ZIP to the pipeline) is
+    actually possible rather than only computing a byte count."""
+    doc = await _owned_session(sid, principal, {"_id": 0})
+    zip_path = doc.get("corpus_zip_path")
+    if not zip_path or not Path(zip_path).exists():
+        raise HTTPException(404, "corpus zip not found")
+    scenario_id = (doc.get("corpus_ground_truth") or {}).get("scenario_id", "corpus")
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=f"corpus_{scenario_id}_{sid[:8]}.zip",
+    )
+
 
 class CorpusStudyRunBody(BaseModel):
     scenario_id: str
     jurisdiction: str = "us"
     edge_case_tags: list[str] = []
-    row_count: int = 8
+    row_count: int = 12
     seed: int = 42
     # Same rigor selector the Wizard exposes. Balanced (2) is the default
     # so corpus runs match a typical operator run's iteration count
@@ -792,8 +1142,8 @@ class CorpusStudyRunBody(BaseModel):
     iteration_cap: int = 2
 
 
-@app.post("/api/corpus/study/run", dependencies=[Depends(require_api_token)])
-async def corpus_study_run(body: CorpusStudyRunBody):
+@app.post("/api/corpus/study/run", dependencies=[Depends(rate_limited("corpus_run", 20, 3600))])
+async def corpus_study_run(body: CorpusStudyRunBody, principal: str = Depends(resolve_principal)):
     """One-shot: create session, plant corpus, run intake + pipeline.
 
     Piggybacks on the existing intake + orchestrator paths so the corpus
@@ -808,7 +1158,7 @@ async def corpus_study_run(body: CorpusStudyRunBody):
         scenario_id=body.scenario_id,
         jurisdiction=body.jurisdiction,
         edge_case_tags=body.edge_case_tags,
-        row_count=max(1, min(int(body.row_count or 8), 100)),
+        row_count=max(10, min(int(body.row_count or 12), 100)),
         seed=int(body.seed or 42),
     )
     sid = uuid.uuid4().hex
@@ -817,7 +1167,7 @@ async def corpus_study_run(body: CorpusStudyRunBody):
 
     # Persist session with ground truth first (idempotent).
     await db.sessions.insert_one({
-        "id": sid, "created_at": now, "status": "intake",
+        "id": sid, "created_at": now, "status": "intake", "owner": principal,
         "jurisdiction": body.jurisdiction,
         "files": [], "agent_decisions": [],
         "corpus_ground_truth": art.ground_truth,
@@ -851,7 +1201,7 @@ async def corpus_study_run(body: CorpusStudyRunBody):
         ))
 
     await db.sessions.update_one(
-        {"id": sid},
+        _owned_filter(sid, principal),
         {"$set": {
             "files": [f.model_dump() for f in accepted],
             "intake_status": manifest.status,
@@ -867,7 +1217,7 @@ async def corpus_study_run(body: CorpusStudyRunBody):
 
     # Delegate to the existing /handle endpoint so the corpus goes through
     # the exact same 12-agent pipeline path as an operator-uploaded run.
-    await session_handle(sid, iteration_cap=body.iteration_cap)
+    await session_handle(sid, iteration_cap=body.iteration_cap, principal=principal)
 
     return {
         "session_id": sid, "status": "started",
@@ -882,16 +1232,13 @@ async def corpus_study_run(body: CorpusStudyRunBody):
 _CORPUS_STUDY_TASKS: dict[str, asyncio.Task] = {}
 
 
-@app.get("/api/corpus/study/verify/{sid}", dependencies=[Depends(require_api_token)])
-async def corpus_study_verify(sid: str):
+@app.get("/api/corpus/study/verify/{sid}")
+async def corpus_study_verify(sid: str, principal: str = Depends(resolve_principal)):
     """Compare the pipeline's actual decisions against the corpus ground
     truth stored on the session document. Returns the full scored report
     from :func:`phi_corpus.verify.verify`."""
     from phi_corpus.verify import verify as _verify
-    db = get_db()
-    doc = await db.sessions.find_one({"id": sid}, {"_id": 0})
-    if not doc:
-        raise HTTPException(404, "session not found")
+    doc = await _owned_session(sid, principal, {"_id": 0})
     gt = doc.get("corpus_ground_truth")
     if not gt:
         raise HTTPException(400, "session has no corpus_ground_truth (not a corpus run)")
@@ -912,6 +1259,47 @@ async def corpus_study_verify(sid: str):
     report["session_id"] = sid
     report["status"] = doc.get("status")
     return report
+
+
+def _build_corpus_benchmark_report(doc: dict, agent_log_msgs: list[dict]) -> dict:
+    """Thin HTTP wrapper around :func:`phi_corpus.benchmark.report_from_session`,
+    which does the actual file_id-to-file_name remap and report assembly.
+    Shared with the publication bundle (phi_core.bundle)."""
+    from phi_corpus.benchmark import report_from_session
+
+    report = report_from_session(doc, agent_log_msgs)
+    if report is None:
+        raise HTTPException(400, "session has no corpus_ground_truth (not a corpus run)")
+    return report
+
+
+@app.get("/api/corpus/study/benchmark/{sid}")
+async def corpus_study_benchmark(sid: str, principal: str = Depends(resolve_principal)):
+    """Per-dataset benchmark report for a corpus run: per column, the
+    method chosen, why, how, confidence, gold verdict, plus headline
+    leak/precision/autonomy figures. See :func:`phi_corpus.benchmark.build_report`."""
+    db = get_db()
+    doc = await _owned_session(sid, principal, {"_id": 0})
+    agent_log_msgs = await db.agent_log.find({"session_id": sid}, {"_id": 0}).to_list(length=None)
+    return _build_corpus_benchmark_report(doc, agent_log_msgs)
+
+
+@app.get("/api/corpus/study/benchmark/{sid}/download")
+async def corpus_study_benchmark_download(sid: str, principal: str = Depends(resolve_principal)):
+    """Download the six benchmark artefacts (markdown, JSON, CSV, three
+    PNGs) as one ZIP."""
+    from phi_corpus.benchmark import bundle_zip
+
+    db = get_db()
+    doc = await _owned_session(sid, principal, {"_id": 0})
+    agent_log_msgs = await db.agent_log.find({"session_id": sid}, {"_id": 0}).to_list(length=None)
+    report = _build_corpus_benchmark_report(doc, agent_log_msgs)
+    scenario_id = (doc.get("corpus_ground_truth") or {}).get("scenario_id", "corpus")
+    zip_bytes = bundle_zip(report)
+    return Response(
+        content=zip_bytes, media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="benchmark_{scenario_id}_{sid[:8]}.zip"'},
+    )
 
 
 @app.post("/api/settings/llm", dependencies=[Depends(require_api_token)])
@@ -937,6 +1325,7 @@ async def set_llm_settings(body: LlmSettings):
 
 
 async def _current_llm_cfg() -> LlmConfig:
+    from phi_core.crypto import KeyRotated
     db = get_db()
     doc = await db.settings.find_one({"_id": "llm"}, {"_id": 0}) or {}
     if doc.get("provider") == "chatgpt":
@@ -944,7 +1333,13 @@ async def _current_llm_cfg() -> LlmConfig:
         # auth file; nothing is persisted in the settings document for it.
         doc = {**doc, "api_key": "", "base_url": ""}
     elif doc.get("api_key"):
-        doc["api_key"] = decrypt_api_key(doc["api_key"])
+        try:
+            doc["api_key"] = decrypt_api_key(doc["api_key"])
+        except KeyRotated:
+            # Background workers cannot surface a 409 to a browser; degrade
+            # to an empty key so the call fails at the provider auth
+            # boundary with a clear error, same as no key configured.
+            doc["api_key"] = ""
     return LlmConfig.from_dict(doc)
 
 
@@ -990,7 +1385,7 @@ async def chatgpt_login_poll(login_id: str) -> ChatGptLoginPollOut:
     return ChatGptLoginPollOut(status=login.status, detail=login.detail, account_id=account_id)
 
 
-@app.get("/api/settings/chatgpt/status")
+@app.get("/api/settings/chatgpt/status", dependencies=[Depends(require_api_token)])
 async def chatgpt_status():
     return chatgpt_auth.auth_status()
 
@@ -1039,7 +1434,7 @@ async def _run_warmup(db, cfg) -> dict:
     }
 
 
-@app.post("/api/settings/warmup", dependencies=[Depends(require_api_token)])
+@app.post("/api/settings/warmup", dependencies=[Depends(require_api_token), Depends(rate_limited("settings_warmup", 5, 3600))])
 async def settings_warmup():
     """Prime the Statute + Praxis caches for supported jurisdictions.
 
@@ -1159,10 +1554,75 @@ async def _start_warmup_scheduler():
     asyncio.create_task(_warmup_scheduler_loop())
 
 
+RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "30"))
+
+
+async def _purge_settled_sessions_loop():
+    """Hourly: delete settled sessions older than RETENTION_DAYS, together
+    with their UPLOAD_DIR/<sid> tree, their export_paths files, and their
+    agent_log rows. Runs forever; a single bad iteration backs off and
+    retries rather than killing the loop."""
+    import shutil
+    while True:
+        try:
+            db = get_db()
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
+            cursor = db.sessions.find(
+                {"status": {"$in": ["complete", "failed", "cancelled", "blocked", "intake_failed"]},
+                 "updated_at": {"$lt": cutoff}},
+                {"_id": 0, "id": 1, "export_paths": 1},
+            )
+            async for doc in cursor:
+                sid = doc.get("id")
+                if not sid:
+                    continue
+                shutil.rmtree(UPLOAD_DIR / sid, ignore_errors=True)
+                for p in (doc.get("export_paths") or {}).values():
+                    if p:
+                        try:
+                            Path(p).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                await db.agent_log.delete_many({"session_id": sid})
+                await db.sessions.delete_one({"id": sid})
+        except asyncio.CancelledError:  # pragma: no cover - shutdown
+            raise
+        except Exception:  # pragma: no cover - defensive
+            pass
+        await asyncio.sleep(3600)
+
+
+@app.on_event("startup")
+async def _startup_maintenance():
+    """Idempotent boot-time maintenance: indexes, orphaned-run reconciliation,
+    and the retention purge loop. Never raises -- a down Mongo at boot
+    should not crash the process; the health check already reports that."""
+    try:
+        db = get_db()
+        await db.sessions.create_index("id", unique=True)
+        await db.sessions.create_index("owner")
+        await db.agent_log.create_index("session_id")
+        await db.agent_log.create_index("ts", expireAfterSeconds=RETENTION_DAYS * 86400)
+
+        # Reconcile orphaned runs: an in-process asyncio.create_task pipeline
+        # dies silently on restart, leaving the session stuck outside a
+        # settled status forever (/handle 409s on a non-terminal status).
+        orphan_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=900)).isoformat()
+        await db.sessions.update_many(
+            {"status": {"$nin": list(_SETTLED_STATUSES)}, "updated_at": {"$lt": orphan_cutoff}},
+            {"$set": {"status": "failed", "error": "orphaned by process restart"},
+             "$unset": {"_pipeline_run_id": ""}},
+        )
+    except Exception:  # pragma: no cover - infrastructure dependent
+        pass
+    asyncio.create_task(_purge_settled_sessions_loop())
+
+
 # --- Agent-driven PHI handling -------------------------------------------
 
-@app.post("/api/sessions/{sid}/handle", dependencies=[Depends(require_api_token)])
-async def session_handle(sid: str, iteration_cap: int | None = None):
+@app.post("/api/sessions/{sid}/handle")
+async def session_handle(sid: str, iteration_cap: int | None = None,
+                         principal: str = Depends(resolve_principal)):
     """Run the full 12-agent PHI handling pipeline for this study.
 
     Optional ``iteration_cap`` (1..3) selects the Judge<->Sentinel rigor:
@@ -1171,13 +1631,16 @@ async def session_handle(sid: str, iteration_cap: int | None = None):
       3 = thorough (max defensibility, longest wallclock)
     """
     db = get_db()
-    session = await db.sessions.find_one({"id": sid})
-    if not session:
-        raise HTTPException(404, "session not found")
+    session = await _owned_session(sid, principal)
     if session.get("intake_status") not in ("ready",):
         raise HTTPException(400, f"intake not ready (status={session.get('intake_status')})")
+    if not _admit_pipeline_run():
+        raise HTTPException(
+            429,
+            f"pipeline capacity exhausted ({_MAX_CONCURRENT_PIPELINES} concurrent runs); retry shortly",
+            headers={"Retry-After": "30"},
+        )
     cfg = await _current_llm_cfg()
-
 
     cap = max(1, min(int(iteration_cap), 3)) if iteration_cap is not None else None
     run_id = uuid.uuid4().hex
@@ -1191,6 +1654,7 @@ async def session_handle(sid: str, iteration_cap: int | None = None):
     claim = await db.sessions.update_one(
         {
             "id": sid,
+            "owner": principal,
             "intake_status": "ready",
             "status": {"$in": ("intake", "complete", "failed", "cancelled")},
         },
@@ -1205,7 +1669,8 @@ async def session_handle(sid: str, iteration_cap: int | None = None):
         },
     )
     if not getattr(claim, "matched_count", 0):
-        current = await db.sessions.find_one({"id": sid}, {"intake_status": 1, "status": 1})
+        _release_pipeline_run()
+        current = await db.sessions.find_one(_owned_filter(sid, principal), {"intake_status": 1, "status": 1})
         if not current:
             raise HTTPException(404, "session not found")
         if current.get("intake_status") != "ready":
@@ -1258,6 +1723,10 @@ async def session_handle(sid: str, iteration_cap: int | None = None):
             session["files"] = files_hydrated
             await db.sessions.update_one(run_filter, {"$set": {"files": files_hydrated}})
 
+            # 4.21: refuse an oversized study rather than sending an
+            # unbounded Judge prompt / decision list.
+            _enforce_column_cap(files_hydrated)
+
             # HANG PROTECTION: hard 15-minute wall-clock ceiling. If the
             # pipeline burns beyond this the worker is cancelled with a
             # clear "timeout" reason -- no orphaned tasks, no infinite
@@ -1274,6 +1743,7 @@ async def session_handle(sid: str, iteration_cap: int | None = None):
                 {"$set": {"status": "failed",
                           "error": "pipeline exceeded 15-minute wall-clock ceiling"}},
             )
+            cleanup_session_unpacked(sid)
             await _emit(sid, ProgressEvent(
                 phase="failed",
                 message="Pipeline hit the 15-minute wall-clock ceiling. "
@@ -1290,23 +1760,24 @@ async def session_handle(sid: str, iteration_cap: int | None = None):
                     {"$set": {"status": "cancelled",
                               "cancelled_at": datetime.now(timezone.utc).isoformat()}},
                 )
+                cleanup_session_unpacked(sid)
                 await _emit(sid, ProgressEvent(
                     phase="cancelled",
                     message="Pipeline cancelled by operator.",
                     payload={"reason": "operator_cancel"},
                 ), run_id=run_id)
             else:
-                await db.sessions.update_one(run_filter, {"$set": {"status": "failed", "error": f"{type(e).__name__}: {e}"}})
-                await _emit(sid, ProgressEvent(phase="failed", message=f"pipeline error: {e}"), run_id=run_id)
+                await _fail_session_correlated(db, sid, run_filter, e, run_id=run_id)
         finally:
+            _release_pipeline_run()
             await _emit(sid, ProgressEvent(phase="__end__", message="stream end"), run_id=run_id)
 
     asyncio.create_task(worker())
     return {"status": "started", "llm": {"provider": cfg.provider, "model": cfg.model}}
 
 
-@app.post("/api/sessions/{sid}/cancel", dependencies=[Depends(require_api_token)])
-async def session_cancel(sid: str):
+@app.post("/api/sessions/{sid}/cancel")
+async def session_cancel(sid: str, principal: str = Depends(resolve_principal)):
     """Request cancellation of a running pipeline.
 
     The pipeline worker checks the ``cancel_requested`` flag between
@@ -1315,13 +1786,11 @@ async def session_cancel(sid: str):
     ``base.Agent``) but no further calls are issued. Idempotent.
     """
     db = get_db()
-    doc = await db.sessions.find_one({"id": sid}, {"status": 1})
-    if not doc:
-        raise HTTPException(404, "session not found")
-    if doc.get("status") in ("complete", "failed", "cancelled"):
+    doc = await _owned_session(sid, principal, {"status": 1})
+    if doc.get("status") in ("complete", "failed", "cancelled", "blocked"):
         return {"status": doc.get("status"), "already_settled": True}
     await db.sessions.update_one(
-        {"id": sid},
+        _owned_filter(sid, principal),
         {"$set": {
             "cancel_requested": True,
             "cancel_requested_at": datetime.now(timezone.utc).isoformat(),
@@ -1343,23 +1812,23 @@ class HumanReviewSubmit(BaseModel):
     actual_knowledge_ack: bool = False
 
 
-@app.post("/api/sessions/{sid}/human-review", dependencies=[Depends(require_api_token)])
-async def session_human_review(sid: str, body: HumanReviewSubmit):
+@app.post("/api/sessions/{sid}/human-review")
+async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str = Depends(resolve_principal)):
     """Operator resolves human_review decisions and resumes the pipeline tail
     (Executor -> Auditor -> Scout -> Ledger -> Herald).
 
     Per GOAL "human review invariant": every human decision must carry
-    reviewer id + comment + timestamp. `reviewer` is required non-empty.
+    reviewer id + comment + timestamp. The reviewer identity is the
+    authenticated principal, not an operator-supplied field, so a
+    completed review can always be attributed to a real credential.
     Per HHS §164.514(b)(2)(ii): the reviewer must attest actual-knowledge
     that the remaining information alone or in combination cannot identify
     an individual. `actual_knowledge_ack` must be true.
     """
-    from phi_core.agents.reasoning import Executor, Auditor
+    from phi_core.agents.reasoning import Executor, Auditor, validate_decisions
     from phi_core.agents.outward import Scout, Ledger, Herald
 
-    reviewer = (body.reviewer or "").strip()
-    if not reviewer:
-        raise HTTPException(400, "reviewer identity is required (GOAL human review invariant)")
+    reviewer = principal
     if not body.actual_knowledge_ack:
         raise HTTPException(
             400,
@@ -1369,11 +1838,10 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
         )
 
     db = get_db()
-    session = await db.sessions.find_one({"id": sid})
-    if not session:
-        raise HTTPException(404, "session not found")
+    session = await _owned_session(sid, principal)
     prior_run_id = session.get("_pipeline_run_id")
-    review_filter = {"id": sid, "status": "awaiting_human_review"}
+    review_filter = _owned_filter(sid, principal)
+    review_filter["status"] = "awaiting_human_review"
     if prior_run_id is None:
         review_filter["_pipeline_run_id"] = {"$exists": False}
     else:
@@ -1398,6 +1866,13 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
             d["actual_knowledge_ack"] = True  # HHS 164.514(b)(2)(ii) — gated at endpoint
             per_decision_reviewed = True
 
+    resolved_keys = set(by_key.keys())
+    resolved_now = [d for d in decisions
+                    if (d.get("file_id", ""), d.get("column", "")) in resolved_keys]
+    _, resolution_rejections = validate_decisions(resolved_now)
+    bad_action_cols = sorted({r["column"] for r in resolution_rejections if r.get("field") == "action"})
+    if bad_action_cols:
+        raise HTTPException(422, f"invalid resolution action for column(s): {', '.join(bad_action_cols)}")
     # GOAL human review invariant: capture reviewer + comment + timestamp on
     # the session even when the operator accepted Sentinel-flagged decisions
     # globally without changing any individual action.
@@ -1419,7 +1894,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
         )
         if getattr(update, "matched_count", 0):
             return {"status": "still_awaiting", "unresolved": len(unresolved)}
-        current = await db.sessions.find_one({"id": sid}, {"status": 1})
+        current = await db.sessions.find_one(_owned_filter(sid, principal), {"status": 1})
         if not current:
             raise HTTPException(404, "session not found")
         raise HTTPException(
@@ -1429,6 +1904,12 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
 
     files = session.get("files", [])
     cfg = await _current_llm_cfg()
+    if not _admit_pipeline_run():
+        raise HTTPException(
+            429,
+            f"pipeline capacity exhausted ({_MAX_CONCURRENT_PIPELINES} concurrent runs); retry shortly",
+            headers={"Retry-After": "30"},
+        )
     resume_run_id = uuid.uuid4().hex
     claim = await db.sessions.update_one(
         review_filter,
@@ -1440,7 +1921,8 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
         }},
     )
     if not getattr(claim, "matched_count", 0):
-        current = await db.sessions.find_one({"id": sid}, {"status": 1})
+        _release_pipeline_run()
+        current = await db.sessions.find_one(_owned_filter(sid, principal), {"status": 1})
         if not current:
             raise HTTPException(404, "session not found")
         raise HTTPException(
@@ -1459,15 +1941,27 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
         await _emit(sid, ev, run_id=resume_run_id)
 
     async def worker():
-        try:
+        async def _run_tail():
             common = dict(session_id=sid, llm=cfg, db=db, emit=emit_msg)
-            exec_out = await Executor(**common).run(files=files, decisions=decisions)
+            scrubbed_decisions = [scrub_decision(d) for d in decisions]
+            exec_out = await Executor(**common).run(files=files, decisions=scrubbed_decisions)
             # Publish Guard on the fresh exports before we mark complete.
             from phi_core.publish_guard import scan_all_exports as _scan_all_exports
-            guard_report = _scan_all_exports(exec_out["exports"], decisions=decisions, jurisdiction=session.get("jurisdiction", "us")).to_dict()
-            audit = await Auditor(**common).run(decisions=decisions, exports=exec_out["exports"], files=files)
+            guard_report = _scan_all_exports(exec_out["exports"], decisions=scrubbed_decisions, jurisdiction=session.get("jurisdiction", "us")).to_dict()
+            if guard_report["status"] != "clean":
+                await db.sessions.update_one(run_filter, {"$set": {
+                    "status": "blocked",
+                    "guard_report": guard_report,
+                    "export_paths": exec_out["exports"],
+                    "agent_decisions": scrubbed_decisions,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }})
+                cleanup_session_unpacked(sid)
+                await _emit(sid, ProgressEvent(phase="blocked", message="publish guard blocked this run", percent=100.0), run_id=resume_run_id)
+                return
+            audit = await Auditor(**common).run(decisions=scrubbed_decisions, exports=exec_out["exports"], files=files)
             scout = await Scout(**common).run()
-            ledger = await Ledger(**common).run(decisions=decisions, audit=audit, scout=scout, benchmark_result=None)
+            ledger = await Ledger(**common).run(decisions=scrubbed_decisions, audit=audit, scout=scout, benchmark_result=None)
             herald = await Herald(**common).run(ledger=ledger, audit=audit,
                                                 target_venue=session.get("target_venue") or "JAMIA Open")
             completion_update = {
@@ -1484,25 +1978,40 @@ async def session_human_review(sid: str, body: HumanReviewSubmit):
                 },
             }
             await db.sessions.update_one(run_filter, completion_update)
+            cleanup_session_unpacked(sid)
             await _emit(sid, ProgressEvent(phase="complete", message="pipeline complete after human review", percent=100.0), run_id=resume_run_id)
+
+        try:
+            await asyncio.wait_for(_run_tail(), timeout=900)
+        except asyncio.TimeoutError:
+            await db.sessions.update_one(run_filter, {"$set": {
+                "status": "failed",
+                "error": "resume worker exceeded 15-minute wall-clock ceiling",
+            }})
+            cleanup_session_unpacked(sid)
+            await _emit(sid, ProgressEvent(phase="failed", message="Resume hit the 15-minute wall-clock ceiling."), run_id=resume_run_id)
         except Exception as e:
-            await db.sessions.update_one(run_filter, {"$set": {"status": "failed", "error": f"{type(e).__name__}: {e}"}})
-            await _emit(sid, ProgressEvent(phase="failed", message=f"pipeline error: {e}"), run_id=resume_run_id)
+            await _fail_session_correlated(db, sid, run_filter, e, run_id=resume_run_id)
         finally:
+            _release_pipeline_run()
             await _emit(sid, ProgressEvent(phase="__end__", message="stream end"), run_id=resume_run_id)
 
     asyncio.create_task(worker())
     return {"status": "resuming"}
 
 
-@app.get("/api/sessions/{sid}/agent-trace", dependencies=[Depends(require_api_token)])
-async def session_agent_trace(sid: str, limit: int = 200):
+@app.get("/api/sessions/{sid}/agent-trace")
+async def session_agent_trace(sid: str, limit: int = 200, principal: str = Depends(resolve_principal)):
     """Return the audit log of every agent message on this session."""
     from phi_core.security import scrub_nested as _scrub_nested
     db = get_db()
+    await _owned_session(sid, principal, {"id": 1})
     cursor = db.agent_log.find({"session_id": sid}, {"_id": 0}).sort("ts", 1).limit(limit)
     msgs: list[dict] = []
     async for m in cursor:
+        ts = m.get("ts")
+        if hasattr(ts, "isoformat"):
+            m["ts"] = ts.isoformat()
         # SEC-006: agent-trace payloads are nested dicts (`prompt_preview`,
         # `reply_preview`) that echo dictionary/form PHI. Scrub every
         # string leaf recursively rather than only top-level string fields.
@@ -1510,8 +2019,8 @@ async def session_agent_trace(sid: str, limit: int = 200):
     return {"messages": msgs}
 
 
-@app.get("/api/sessions/{sid}/preview", dependencies=[Depends(require_api_token)])
-async def session_preview(sid: str, samples: int = 5):
+@app.get("/api/sessions/{sid}/preview")
+async def session_preview(sid: str, samples: int = 5, principal: str = Depends(resolve_principal)):
     """Row-level review preview (Phase D).
 
     Returns up to ``samples`` (original-masked, redacted) cell pairs per
@@ -1521,21 +2030,15 @@ async def session_preview(sid: str, samples: int = 5):
     will be written to the export.
     """
     from phi_core.preview import build_preview, MAX_SAMPLES_PER_FILE
-    db = get_db()
-    doc = await db.sessions.find_one({"id": sid}, {"_id": 0})
-    if not doc:
-        raise HTTPException(404, "session not found")
+    doc = await _owned_session(sid, principal, {"_id": 0})
     n = max(1, min(int(samples or MAX_SAMPLES_PER_FILE), 20))
     return build_preview(doc, max_samples_per_file=n)
 
 
-@app.get("/api/sessions/{sid}/results", dependencies=[Depends(require_api_token)])
-async def session_results(sid: str):
+@app.get("/api/sessions/{sid}/results")
+async def session_results(sid: str, principal: str = Depends(resolve_principal)):
     """Consolidated agent outputs (decisions, audit, ledger, herald)."""
-    db = get_db()
-    doc = await db.sessions.find_one({"id": sid}, {"_id": 0})
-    if not doc:
-        raise HTTPException(404, "session not found")
+    doc = await _owned_session(sid, principal, {"_id": 0})
     scrubbed = _scrub_session_document(doc)
     return {
         "status": scrubbed.get("status"),
@@ -1551,7 +2054,37 @@ async def session_results(sid: str):
     }
 
 
-# Root health for quick check
-@app.get("/")
-async def root():
+@app.get("/api/version")
+async def version():
     return {"service": "phi-handling-console", "version": app.version}
+
+
+# 4.15: serve the built frontend from this same process, same origin. Must
+# be the very last statement in the module -- a mount at "/" shadows any
+# route registered after it. Guarded so a source checkout without a built
+# frontend still starts and still serves /api.
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+
+class _SPAStaticFiles(StaticFiles):
+    """`StaticFiles(html=True)` only serves index.html for a directory
+    match ("/") or a literal 404.html; a React Router deep link like
+    `/sessions/<id>` has no matching file on disk and would 404 on a hard
+    refresh. Every request that reaches this mount has already missed
+    every /api/* route (those are registered first and matched before the
+    mount), so any 404 here means "client-side route, let the SPA's own
+    router resolve it" -- fall back to index.html rather than a bare 404.
+    """
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
+
+
+_FRONTEND_BUILD_DIR = Path(__file__).resolve().parent.parent / "frontend" / "build"
+if _FRONTEND_BUILD_DIR.exists():
+    app.mount("/", _SPAStaticFiles(directory=str(_FRONTEND_BUILD_DIR), html=True), name="ui")

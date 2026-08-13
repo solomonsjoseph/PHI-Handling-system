@@ -49,7 +49,7 @@ def _cli(argv: list[str]) -> int:
     p.add_argument("--jurisdiction", default="us")
     p.add_argument("--edge-cases", default="",
                    help=f"comma-separated tags. Available: {','.join(sorted(all_tags()))}")
-    p.add_argument("--rows", type=int, default=8)
+    p.add_argument("--rows", type=int, default=12)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out", help="output ZIP path (required outside --campaign)")
     p.add_argument("--ground-truth", default="",

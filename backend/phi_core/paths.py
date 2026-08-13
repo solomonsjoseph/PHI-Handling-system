@@ -75,6 +75,22 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 UPLOAD_DIR = DATA_DIR / "uploads"
 EXPORT_DIR = DATA_DIR / "exports"
 CHATGPT_TOKEN_DIR = DATA_DIR / "chatgpt"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-CHATGPT_TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+for _d in (UPLOAD_DIR, EXPORT_DIR, CHATGPT_TOKEN_DIR):
+    _d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(_d, 0o700)
+
+
+def cleanup_session_unpacked(sid: str) -> None:
+    """Delete the hydrated raw-file tree for a settled session.
+
+    Called once a pipeline run reaches a terminal status (complete,
+    failed, cancelled, blocked). ``unpacked/`` holds the per-file
+    decrypted PHI the Executor read from; once the run has settled there
+    is nothing left that needs it. ``intake.zip`` is deliberately left
+    alone here: the operator-upload path already unlinks it right after
+    ``build_manifest`` hydrates the manifest, and the corpus generator
+    path keeps it so `GET /api/corpus/study/{sid}/zip` can still serve
+    the reproducible input after the run completes.
+    """
+    import shutil
+    shutil.rmtree(UPLOAD_DIR / sid / "unpacked", ignore_errors=True)
