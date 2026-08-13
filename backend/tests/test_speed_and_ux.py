@@ -94,7 +94,7 @@ async def test_cancel_endpoint_registered_and_token_gated():
           if getattr(r, "path", "") == "/api/sessions/{sid}/cancel"]
     assert rs, "cancel endpoint not registered"
     dep_fns = {d.call.__name__ for d in rs[0].dependant.dependencies}
-    assert "require_api_token" in dep_fns
+    assert "resolve_principal" in dep_fns
 
 
 # ---- Ledger + Herald split ---------------------------------------------

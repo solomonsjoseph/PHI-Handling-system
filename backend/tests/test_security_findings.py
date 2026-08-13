@@ -39,7 +39,7 @@ def test_scrub_strips_corpus_ground_truth_but_keeps_summary():
 
 
 def test_corpus_verify_endpoint_is_token_gated():
-    """Sibling reads carry require_api_token; corpus verify must match."""
+    """Sibling reads carry an identity dependency; corpus verify must match."""
     from server import app
     # Find the route function for GET /api/corpus/study/verify/{sid}
     matching = [
@@ -48,8 +48,8 @@ def test_corpus_verify_endpoint_is_token_gated():
     ]
     assert matching, "corpus verify route not registered"
     dep_fns = {d.call.__name__ for d in matching[0].dependant.dependencies}
-    assert "require_api_token" in dep_fns, (
-        "SEC-002: /api/corpus/study/verify/{sid} is not token-gated"
+    assert "resolve_principal" in dep_fns, (
+        "SEC-002: /api/corpus/study/verify/{sid} is not owner-scoped"
     )
 
 
@@ -286,16 +286,18 @@ async def test_export_force_override_still_records_blocked_download(monkeypatch,
     db = _StubDB(doc)
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
-    response = await srv.session_export("sid", "a", force=True)
+    response = await srv.session_export("sid", "a", force=True, principal="op1")
 
     assert getattr(response, "status_code", 200) == 200
     assert len(db.updates) == 1
     args, kwargs = db.updates[0]
-    assert args[0] == {"id": "sid"}
+    assert args[0] == {"id": "sid", "owner": "op1"}
     assert kwargs == {}
     override = args[1]["$push"]["guard_overrides"]
     assert override["file_id"] == "a"
     assert override["overridden_at"]
+
+
 def test_bundle_omits_unclean_and_unreported_exports(tmp_path):
     """Only per-file clean Guard results may enter the shareable bundle."""
     from phi_core.bundle import BundleOptions, build_bundle

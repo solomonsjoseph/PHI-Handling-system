@@ -59,6 +59,19 @@ def test_planter_no_pdf_generation_module():
         importlib.import_module("phi_corpus.forms")
 
 
+def test_planter_default_row_count_meets_floor():
+    """Called with no `row_count`, plant() must default to at least 10 data
+    rows in every dataset CSV member, matching the HTTP floor."""
+    from phi_corpus.planters import plant
+    art = plant(scenario_id="oncology_v1")
+    assert art.ground_truth["row_count"] >= 10
+    z = zipfile.ZipFile(io.BytesIO(art.zip_bytes))
+    for n in z.namelist():
+        if n.startswith("datasets/"):
+            rows = list(csv.reader(z.read(n).decode("utf-8").splitlines()))
+            assert len(rows) - 1 >= 10, f"{n} has fewer than 10 data rows"
+
+
 def test_planter_edge_case_tag_persists_into_ground_truth():
     from phi_corpus.planters import plant
     art = plant(scenario_id="oncology_v1",

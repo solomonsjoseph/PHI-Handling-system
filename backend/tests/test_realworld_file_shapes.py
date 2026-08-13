@@ -82,13 +82,14 @@ def test_read_docx_tables_rejects_oversize_document_xml(tmp_path):
     compressed archive. The reader must refuse it rather than allocate
     unbounded RAM in ET.parse. Return "" so Lexicon just sees no
     dictionary text; no crash, no OOM."""
-    from phi_core.agents.specialists import _read_docx_tables, _DOCX_XML_MAX_BYTES
+    from phi_core.agents.specialists import _read_docx_tables
+    from phi_core.docx_safe import DOCX_XML_MAX_BYTES
     import zipfile as _zip
     p = tmp_path / "bomb.docx"
     with _zip.ZipFile(p, "w", _zip.ZIP_DEFLATED) as z:
         # Compressible payload > cap
         big = (b"<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
-               b"<w:body>" + b" " * (_DOCX_XML_MAX_BYTES + 500_000) + b"</w:body></w:document>")
+               b"<w:body>" + b" " * (DOCX_XML_MAX_BYTES + 500_000) + b"</w:body></w:document>")
         z.writestr("word/document.xml", big)
     assert p.stat().st_size < 200_000, "test setup: outer archive should be small"
     assert _read_docx_tables(p) == "", "oversized inner xml must be rejected"
@@ -180,30 +181,22 @@ def test_read_table_flat_dispatches_docx(tmp_path):
 def test_intake_accepts_docx_dictionary():
     from phi_core.intake import COMPONENT_SUFFIXES
     assert ".docx" in COMPONENT_SUFFIXES["dictionary"]
-    # xls stays supported too (Sir: "if large then it would be excel workbook")
     assert ".xlsx" in COMPONENT_SUFFIXES["dictionary"]
-    assert ".xls" in COMPONENT_SUFFIXES["dictionary"]
+    # 4.19: legacy .xls is refused outright, not silently accepted -- no
+    # xlrd dependency ships, so a real BIFF .xls previously parsed to an
+    # empty dictionary instead of failing loudly.
+    assert ".xls" not in COMPONENT_SUFFIXES["dictionary"]
+    assert ".xls" not in COMPONENT_SUFFIXES["datasets"]
 
 
-def test_read_xls_tables_handles_xlsx_disguised_as_xls(tmp_path):
-    """Some data stewards rename .xlsx to .xls. The reader must NOT
-    crash regardless of what actually landed on disk. Without xlrd
-    installed and with openpyxl refusing the .xls suffix, the reader
-    returns an empty string (Lexicon just receives no table text)."""
-    from openpyxl import Workbook
-    from phi_core.agents.specialists import _read_xls_tables
-    p_xlsx = tmp_path / "dict.xlsx"
-    wb = Workbook()
-    ws = wb.active
-    ws.append(["Column", "Type", "What it represents"])
-    ws.append(["patient_id", "ID", "Unique patient identifier"])
-    wb.save(str(p_xlsx))
+def test_read_table_flat_returns_empty_for_xls(tmp_path):
+    """4.19: `_read_xls_tables` is gone; the dispatcher no longer has an
+    .xls branch at all, so it falls through to the empty-string default
+    regardless of what bytes are actually on disk."""
+    from phi_core.agents.specialists import _read_table_flat
     p_xls = tmp_path / "dict.xls"
-    p_xls.write_bytes(p_xlsx.read_bytes())
-    # Must not raise. xlrd may or may not be installed; either way, the
-    # function is contract-bound to return a string, never None.
-    out = _read_xls_tables(p_xls)
-    assert isinstance(out, str)
+    p_xls.write_bytes(b"anything")
+    assert _read_table_flat(p_xls) == ""
 
 
 def test_metadata_xlsx_scrubs_every_sheet_and_intake_rejects_multisheet_dictionary(tmp_path):
@@ -276,9 +269,8 @@ def test_read_export_rows_includes_every_xlsx_worksheet(tmp_path):
     assert _read_export_rows(str(export)) == [["first"], ["one"], ["second"], ["two"]]
 
 
-def test_intake_accepted_xls_metadata_is_withheld_at_scannable_path(tmp_path):
-    """Legacy dictionary XLS files must be withheld without openpyxl parsing."""
-    from phi_core.agents.reasoning import _redact_metadata_file
+def test_intake_rejects_xls_dictionary_naming_the_fix(tmp_path):
+    """4.19: legacy dictionary XLS files are refused at intake, not parsed."""
     from phi_core.intake import scan_intake
 
     src = tmp_path / "dictionary" / "legacy.xls"
@@ -289,13 +281,10 @@ def test_intake_accepted_xls_metadata_is_withheld_at_scannable_path(tmp_path):
     (datasets / "study.csv").write_text("study_id\n1\n", encoding="utf-8")
 
     entries, _ = scan_intake(tmp_path)
-    accepted = [entry for entry in entries if entry.relpath == "dictionary/legacy.xls"]
-    assert len(accepted) == 1
-    assert accepted[0].component == "dictionary"
-
-    actual = _redact_metadata_file(src, tmp_path / "legacy.xls")
-    assert actual == tmp_path / "legacy.withheld.txt"
-    assert actual.read_text(encoding="utf-8").startswith("[REDACTED]")
+    rejected = [entry for entry in entries if entry.relpath == "dictionary/legacy.xls"]
+    assert len(rejected) == 1
+    assert rejected[0].component == "_unclassified"
+    assert "save as .xlsx" in rejected[0].reason
 
 
 def test_executor_publishes_withheld_metadata_at_its_scannable_path(tmp_path, monkeypatch):

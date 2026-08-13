@@ -20,7 +20,14 @@ from pathlib import Path
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://quality-enhance-9.preview.emergentagent.com").rstrip("/")
+if not os.environ.get("PHI_TEST_BASE_URL"):
+    pytest.skip(
+        "test_agent_pipeline.py hits a live server over the network; "
+        "set PHI_TEST_BASE_URL to opt in (a bare `pytest` must never call the internet)",
+        allow_module_level=True,
+    )
+
+BASE_URL = os.environ.get("PHI_TEST_BASE_URL", "").rstrip("/")
 FIXTURE_ZIP = Path("/root/fixtures/study1.zip")
 
 TIMEOUT = 30

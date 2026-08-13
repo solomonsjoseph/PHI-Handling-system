@@ -12,7 +12,9 @@ class _StubDB:
     def __init__(self, doc: dict):
         self.doc = doc
         self.sessions = self
+        self.agent_log = self
         self.updates: list[tuple[tuple, dict]] = []
+        self.inserted: list[dict] = []
 
     async def find_one(self, *_args, **_kwargs):
         return self.doc
@@ -23,6 +25,9 @@ class _StubDB:
         self.doc.update(update.get("$set", {}))
         for key in update.get("$unset", {}):
             self.doc.pop(key, None)
+
+    async def insert_one(self, doc):
+        self.inserted.append(doc)
 
 
 @pytest.mark.asyncio
@@ -178,6 +183,7 @@ async def test_handle_claim_revokes_old_exports_before_worker_runs(monkeypatch, 
     export.write_text("old export", encoding="utf-8")
     db = _ConditionalStubDB({
         "id": "sid",
+        "owner": "reviewer",
         "intake_status": "ready",
         "status": "complete",
         "files": [],
@@ -200,16 +206,16 @@ async def test_handle_claim_revokes_old_exports_before_worker_runs(monkeypatch, 
     monkeypatch.setattr(srv, "_current_llm_cfg", fake_cfg)
     monkeypatch.setattr(srv.asyncio, "create_task", hold_worker)
 
-    assert (await srv.session_handle("sid"))["status"] == "started"
+    assert (await srv.session_handle("sid", principal="reviewer"))["status"] == "started"
     assert db.doc["status"] == "classifying"
     assert "guard_report" not in db.doc
     assert "export_paths" not in db.doc
     assert len(scheduled) == 1
 
-    assert (await srv.session_export("sid", "dataset", force=False)).status_code == 403
-    assert (await srv.session_export("sid", "dataset", force=True)).status_code == 403
+    assert (await srv.session_export("sid", "dataset", force=False, principal="reviewer")).status_code == 403
+    assert (await srv.session_export("sid", "dataset", force=True, principal="reviewer")).status_code == 403
     with pytest.raises(HTTPException) as excinfo:
-        await srv.session_bundle("sid", publication=False, attestation_pdf=False)
+        await srv.session_bundle("sid", publication=False, attestation_pdf=False, principal="reviewer")
     assert excinfo.value.status_code == 403
 
 
@@ -221,6 +227,7 @@ async def test_overlapping_handles_claim_only_one_worker(monkeypatch):
 
     db = _ConditionalStubDB({
         "id": "sid",
+        "owner": "reviewer",
         "intake_status": "ready",
         "status": "complete",
         "files": [],
@@ -239,8 +246,8 @@ async def test_overlapping_handles_claim_only_one_worker(monkeypatch):
     monkeypatch.setattr(srv.asyncio, "create_task", hold_worker)
 
     first, second = await asyncio.gather(
-        srv.session_handle("sid"),
-        srv.session_handle("sid"),
+        srv.session_handle("sid", principal="reviewer"),
+        srv.session_handle("sid", principal="reviewer"),
         return_exceptions=True,
     )
 
@@ -265,7 +272,7 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
 
     class EmptyAgent:
         def __init__(self, **_kwargs):
-            pass
+            self.call_failures = 0
 
         async def run(self, **_kwargs):
             return {}
@@ -376,6 +383,7 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
 
     db = _ConditionalStubDB({
         "id": "sid",
+        "owner": "reviewer",
         "intake_status": "ready",
         "status": "awaiting_human_review",
         "_pipeline_run_id": "classification-claim",
@@ -410,6 +418,7 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
                 "action": "drop",
             }],
         ),
+        principal="reviewer",
     )
 
     assert response == {"status": "resuming"}
@@ -417,7 +426,7 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
     assert db.doc["_pipeline_run_id"] != "classification-claim"
     assert len(scheduled) == 1
     with pytest.raises(HTTPException) as excinfo:
-        await srv.session_handle("sid")
+        await srv.session_handle("sid", principal="reviewer")
     assert excinfo.value.status_code == 409
 
 

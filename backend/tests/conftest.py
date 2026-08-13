@@ -22,3 +22,27 @@ except Exception:
 # Sensible defaults for local unit tests when the .env file is absent.
 os.environ.setdefault("DB_NAME", "phi_handling")
 os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
+os.environ.setdefault("PHI_ENV", "dev")
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_pipeline_admission_control():
+    """Tests that stub out asyncio.create_task (e.g. `hold_worker` patterns
+    that `coro.close()` a scheduled worker instead of running it) never
+    reach the worker's `finally: _release_pipeline_run()`. Without a reset,
+    server._active_pipeline_count leaks upward across the whole test
+    session and later tests see phantom 429 capacity-exhausted errors."""
+    try:
+        import server as srv
+        srv._active_pipeline_count = 0
+    except Exception:
+        pass
+    yield
+    try:
+        import server as srv
+        srv._active_pipeline_count = 0
+    except Exception:
+        pass

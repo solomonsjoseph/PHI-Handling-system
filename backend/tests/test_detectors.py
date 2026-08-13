@@ -43,3 +43,11 @@ def test_rule_detect_negative_clinical_text():
 def test_luhn_npi_checksum():
     assert luhn("80840" + "1234567893") is True
     assert luhn("80840" + "1234567892") is False
+
+
+def test_rule_detect_zip_label_is_case_insensitive():
+    """Real dictionary/form text does not always capitalise the label
+    ("zip: 86387", not just "ZIP 94110"); the detector must catch both."""
+    for probe in ("zip: 86387", "Zip: 86387", "ZIP: 86387", "zip 86387"):
+        hits = rule_detect(probe)
+        assert any(h.hipaa_category == "B" for h in hits), f"no ZIP hit for {probe!r}"

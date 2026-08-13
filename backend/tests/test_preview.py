@@ -120,6 +120,33 @@ def test_preview_redacted_reflects_chosen_action(tmp_path: Path):
     assert by_col["patient_id"]["redacted"].startswith("P")
 
 
+
+def test_preview_keep_action_masks_redacted_value(tmp_path: Path):
+    """A `keep` decision must not leak the raw cell through `redacted`;
+    the reviewer only needs the shape, and `masked` must say so."""
+    p = _write_csv(tmp_path, "clinical.csv", [
+        ["heart_rate_bpm"],
+        ["oo88oo"],
+    ])
+    session = {
+        "id": "sess-preview-004",
+        "files": [{
+            "file_id": "f_keep",
+            "original_name": "clinical.csv",
+            "kind": "dataset",
+            "subtype": "csv",
+            "stored_path": str(p),
+        }],
+        "agent_decisions": [
+            {"file_id": "f_keep", "column": "heart_rate_bpm", "action": "keep"},
+        ],
+    }
+    prev = build_preview(session, max_samples_per_file=5)
+    for s in prev["files"][0]["samples"]:
+        assert s["redacted"] != "oo88oo", "keep action leaked the raw cell via preview"
+        assert s["masked"] is True
+
+
 def test_preview_skips_non_dataset_files(tmp_path: Path):
     """Metadata and narrative files should not appear in preview."""
     p = tmp_path / "consent.txt"

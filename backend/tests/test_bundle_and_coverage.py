@@ -5,6 +5,8 @@ import io
 import json
 import zipfile
 
+import pytest
+
 from phi_core.bundle import BundleOptions, build_bundle
 from phi_core.coverage_matrix import COVERAGE, TOOLS, coverage_counts
 
@@ -138,3 +140,60 @@ def test_bundle_empty_exports_still_produces_attestation(tmp_path):
         names = zf.namelist()
     assert "safe_to_share/attestation.json" in names
     assert "safe_to_share/README.md" in names
+
+
+def _generate_signing_key_b64() -> str:
+    import base64
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption
+    k = Ed25519PrivateKey.generate()
+    der = k.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
+    return base64.b64encode(der).decode()
+
+
+def test_bundle_attestation_signature_verifies_against_shipped_pubkey(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATTESTATION_SIGNING_KEY", _generate_signing_key_b64())
+    sess = _fake_session(tmp_path)
+    data, _ = build_bundle(sess, BundleOptions())
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        att_json = zf.read("safe_to_share/attestation.json")
+        sig_b64 = zf.read("safe_to_share/attestation.sig")
+        pubkey_pem = zf.read("safe_to_share/attestation_pubkey.pem")
+        att = json.loads(att_json)
+    assert att["signed"] is True
+
+    import base64
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key
+    pub = load_pem_public_key(pubkey_pem)
+    pub.verify(base64.b64decode(sig_b64), att_json)  # raises on failure
+
+
+def test_bundle_attestation_signature_fails_after_tamper(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATTESTATION_SIGNING_KEY", _generate_signing_key_b64())
+    sess = _fake_session(tmp_path)
+    data, _ = build_bundle(sess, BundleOptions())
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        att_json = zf.read("safe_to_share/attestation.json")
+        sig_b64 = zf.read("safe_to_share/attestation.sig")
+        pubkey_pem = zf.read("safe_to_share/attestation_pubkey.pem")
+
+    tampered = att_json[:-1] + (b"0" if att_json[-1:] != b"0" else b"1")
+
+    import base64
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key
+    pub = load_pem_public_key(pubkey_pem)
+    with pytest.raises(InvalidSignature):
+        pub.verify(base64.b64decode(sig_b64), tampered)
+
+
+def test_bundle_attestation_unsigned_when_no_key(tmp_path, monkeypatch):
+    monkeypatch.delenv("ATTESTATION_SIGNING_KEY", raising=False)
+    sess = _fake_session(tmp_path)
+    data, _ = build_bundle(sess, BundleOptions())
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = zf.namelist()
+        att = json.loads(zf.read("safe_to_share/attestation.json"))
+    assert att["signed"] is False
+    assert "safe_to_share/attestation.sig" not in names
+    assert "safe_to_share/attestation_pubkey.pem" not in names

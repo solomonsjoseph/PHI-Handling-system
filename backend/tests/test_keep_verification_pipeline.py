@@ -20,9 +20,14 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
         async def update_one(self, *_args, **_kwargs):
             self.updates.append(_args[1])
 
+    class FakeAgentLog:
+        async def insert_one(self, *_args, **_kwargs):
+            return None
+
     class FakeDb:
         def __init__(self):
             self.sessions = FakeSessions()
+            self.agent_log = FakeAgentLog()
 
     class FakeStatute:
         def __init__(self, **_kwargs):
@@ -54,7 +59,7 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
 
     class FakeJudge:
         def __init__(self, **_kwargs):
-            pass
+            self.call_failures = 0
 
         async def run(self, **_kwargs):
             return {"decisions": [{
@@ -66,7 +71,7 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
 
     class FakeSentinel:
         def __init__(self, **_kwargs):
-            pass
+            self.call_failures = 0
 
         async def run(self, **_kwargs):
             return {"issues": []}

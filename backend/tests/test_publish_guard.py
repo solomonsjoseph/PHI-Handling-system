@@ -271,7 +271,7 @@ def test_unreadable_text_export_is_blocked(tmp_path: Path, monkeypatch, extensio
 def test_unavailable_export_path_remains_skipped():
     report = scan_all_exports({"f1": ""})
 
-    assert report.status == "clean"
+    assert report.status == "blocked"
     assert report.scanned == 0
     assert report.results[0]["status"] == "skipped"
     assert report.results[0]["detail"] == "path unavailable"
@@ -289,7 +289,7 @@ def test_scan_all_exports_mixes_clean_and_blocked(tmp_path: Path):
 
 def test_scan_all_empty_export_map():
     rep = scan_all_exports({})
-    assert rep.status == "clean"
+    assert rep.status == "blocked"
     assert rep.scanned == 0
     assert rep.blocked == 0
 
