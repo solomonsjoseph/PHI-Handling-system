@@ -19,12 +19,22 @@ Study data with every PHI variable HANDLED per the applicable jurisdiction such 
 
 ## Core inviolable constraint
 
-The AI/LLM never reads dataset row values. Only column HEADERS. Full content permitted for
-forms and dictionary/mappings because those are collection instruments and code definitions,
-not the PHI-carrying rows. Context for header classification comes from:
+Two parts, both enforced deterministically before anything reaches a model, never left to
+model judgment:
+1. **Dataset row values never reach a model at all.** Only column HEADERS are ever placed in
+   an LLM prompt. Detection on cell values is regex/Presidio pattern matching in-process; no
+   cell value crosses the process boundary into a prompt, ever.
+2. **Dictionary and form text reaches a model only after deterministic redaction.** These
+   files can themselves name PHI (a code label reading "Patient Jane Doe's home phone", a
+   consent form printing a real address). Before either is placed in a prompt, the same
+   Presidio + regex detector that scans dataset cells runs over the free text and replaces
+   every identifier span with a HIPAA-category token (`scrub_for_prompt`). The model sees
+   structure and category tokens, never the original identifier substring.
+
+Context for header classification comes from:
 1. The column header token itself.
-2. The form the column was collected from.
-3. The dictionary/mapping row that describes the column.
+2. The (redacted) form the column was collected from.
+3. The (redacted) dictionary/mapping row that describes the column.
 
 ## Handling policy (not just redaction)
 
@@ -57,6 +67,25 @@ reason. The human decision is applied on the next iteration.
 - **Benchmark** computes precision, recall, F1, per HIPAA category, per jurisdiction. Numbers
   + plots for paper publication. Compares against open baselines (Presidio, spaCy). Stubs
   for commercial baselines when credentials are available.
+- **Per-run benchmark report** (one per corpus run, `phi_corpus/benchmark.py`): for every
+  column, the method chosen, why it was chosen, how it was applied, the Judge's confidence,
+  and the gold verdict (correct / over_block / under_block / deferred). Headline figures:
+  leak rate (planted identifiers that survived into an export), method-exact rate (chosen
+  method matches the gold-annotated expected method), and autonomy rate (share of columns
+  decided without a human_review deferral).
+
+## Corpus generator contract
+
+A generated corpus is a ZIP holding exactly:
+- One or more `datasets/*.csv` files, each at least ten data rows (`n_rows` floor).
+- One `dictionary/columns.csv` data dictionary describing every dataset column.
+- No PDFs and no other file kinds. The generator's job is a red-team torture-test rig for
+  the pipeline, not a forms/OCR fixture generator.
+
+Every cell in every dataset carries planted-PHI ground truth: which HIPAA category (or none)
+was planted, the exact value planted, and the expected handling. The ground truth is kept in
+memory and on the session document; it is never written into the ZIP itself and never served
+back to a client that could use it to grade its own attempt.
 
 ## Human review invariant
 

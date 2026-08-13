@@ -21,7 +21,10 @@ Both paths block the thing researchers actually want: to share study data with m
 
 ## 3. Our answer
 
-**The LLM never reads a dataset row.** It reads column headers, the collection form the column came from, and the data dictionary or mapping row that describes it. Nothing more.
+**Dataset row values never reach a model at all.** The model reads column headers. It also
+reads the collection form the column came from and the data dictionary or mapping row that
+describes it, but only after a deterministic detector has replaced every identifier span in
+that text with a HIPAA-category token. Nothing more, and nothing unredacted.
 
 Handling decisions are made on that context alone, applied deterministically to the rows by a non-LLM Executor, and re-verified by a deterministic Publish Guard at the download boundary. The result is a study bundle that is:
 
@@ -31,7 +34,10 @@ Handling decisions are made on that context alone, applied deterministically to 
 
 ## 4. Non-negotiable principles
 
-1. **Zero-row-read.** The LLM sees headers and context. Ever seeing a raw cell is a bug, not a trade-off.
+1. **Zero-row-read, redacted-context-only.** The LLM never sees a raw dataset row. It sees
+   headers, plus dictionary and form text only after deterministic redaction has replaced
+   every identifier in that text with a category token. Ever seeing a raw cell, or raw
+   identifier text from a dictionary or form, is a bug, not a trade-off.
 2. **Signal preservation over blanket redaction.** Age 87 stays. Age 96 becomes "90+". Dates truncate to year. ZIP truncates to ZIP3 (with the 17 restricted ZIP3s further blocked). Diagnoses, procedures, vitals, labs stay.
 3. **Deterministic at the boundary.** Every irreversible decision (write to disk, expose in bundle) is executed by non-LLM code with hard rules. LLMs advise; deterministic code decides.
 4. **Fail-closed.** Missing jurisdiction rulebook, missing mandatory input, unknown Judge action — none of these silently downgrade. They exit non-zero.
@@ -66,7 +72,9 @@ We consider the vision met when a stranger can:
 2. Run our pipeline and any competitor's pipeline against it.
 3. Read the shipped attestation and see, per HIPAA category, exactly which plants were caught, which were missed, and what transformation was applied.
 4. Reproduce the numbers we publish, to the digit.
-5. Conclude, without our help, that ours is the only pipeline that never read a row.
+5. Read the benchmark's `context_hygiene.literals_found_in_prompts` figure and confirm it is
+   zero against a nonzero `prompts_audited` count, meaning every prompt sent to a model was
+   captured and searched for every planted identifier, and none was found.
 
 ## 8. What we are explicitly not building
 
@@ -83,6 +91,12 @@ We consider the vision met when a stranger can:
 - **Zero-row-read invariant** (verified by static analysis of agent inputs; any agent that reads a row value is a P0 defect).
 - **Time-to-attestation** on a real study package (target: minutes, not hours).
 - **IRB acceptance rate** of the attestation, once we start collecting it.
+- **Autonomy rate** on the shipped corpus: the share of columns the pipeline decides without
+  a `human_review` deferral (target: high, without trading away the zero-leak invariant to
+  get there).
+- **Attestation integrity**: every shipped attestation's Ed25519 signature verifies against
+  the public key shipped beside it, and a single-byte edit to the attestation makes
+  verification fail.
 
 ## 10. The bet
 

@@ -42,6 +42,24 @@ sudo supervisorctl restart backend frontend
 # frontend :3000
 ```
 
+## Deploy with Docker
+
+```
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env
+# edit backend/.env: set PHI_ENV=production, API_TOKENS, CORS_ALLOWED_ORIGINS,
+# APP_ENCRYPTION_KEY, ATTESTATION_SIGNING_KEY, and one LLM provider key
+# (backend/.env.example documents how to generate each key)
+export MONGO_ROOT_PASSWORD=<a strong password>
+docker compose up --build
+```
+
+Open `http://localhost:8001`. The container serves both the API and the
+built React console from one process on one port; `backend/.env` supplies
+everything except `MONGO_URL`, which compose points at the bundled,
+authenticated `mongo` service. See `backend/.env.example` for every
+variable and what refuses to boot without it (4.1).
+
 ## Workflow
 
 1. Create session, upload files.

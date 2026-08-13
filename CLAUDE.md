@@ -43,15 +43,16 @@ operational spec, `/app/memory/PRD.md` for the delivery log.
       publish_guard.py             Deterministic residual-PHI scan at download boundary
       security.py                  scrub_decision, scrub_persisted_text, providers allow-list
       bundle.py                    Publication + attestation bundles
-      benchmark.py                 Precision / recall / F1 per HIPAA category
+      crypto.py                    Fernet key/BYO-key encryption, Ed25519 attestation signing
       jurisdictions.py             Rulebook packs. US-HIPAA active; others = stubs.
       llm_catalog.py               Multi-provider model catalog for /settings
       db.py                        Motor MongoDB access
       models.py                    Pydantic Session, ProgressEvent
     phi_corpus/                    Adversarial corpus (datasets + dictionaries only)
-      planters.py, scenarios.py, edge_cases.py, verify.py
-    tests/                         210+ regression tests
-    .env                           MONGO_URL, DB_NAME, EMERGENT_LLM_KEY
+      planters.py, scenarios.py, edge_cases.py, generate.py, verify.py
+      benchmark.py                  Per-run benchmark report: build_report, to_json/markdown/csv, render_figures
+    tests/                         340+ regression tests
+    .env                           MONGO_URL, DB_NAME, EMERGENT_LLM_KEY, APP_ENCRYPTION_KEY, ATTESTATION_SIGNING_KEY
   frontend/
     src/pages/
       Wizard.jsx                   3-step intake + rigor selector (iteration_cap)
@@ -94,20 +95,24 @@ Every agent input/output/duration persists to Mongo `agent_log`. Every phase tra
 
 ## Key API endpoints
 
-- `POST /api/sessions` — create session (jurisdiction).
-- `POST /api/sessions/{sid}/upload` — chunked ZIP upload.
-- `POST /api/sessions/{sid}/intake` — manifest v3 validation, fail-closed.
-- `POST /api/sessions/{sid}/handle?iteration_cap={1|2|3}` — launch 12-agent pipeline. Rigor selector; default 2.
-- `POST /api/sessions/{sid}/cancel` — operator STOP.
-- `POST /api/sessions/{sid}/human-review` — resolve blocking cases, resume tail.
-- `GET  /api/sessions/{sid}/stream` — SSE progress + agent trace.
-- `GET  /api/sessions/{sid}/agent-trace` — full agent audit log.
-- `GET  /api/sessions/{sid}/results` — decisions, audit, ledger, herald, phase_timings.
-- `GET  /api/sessions/{sid}/bundle` — publication + attestation download (Publish Guard clean only).
-- `POST /api/corpus/study/run` — adversarial red-team run.
-- `GET  /api/corpus/study/verify/{sid}` — per-plant grading.
-- `GET  /api/settings/llm`, `POST /api/settings/llm` — BYO LLM config.
-- `POST /api/settings/warmup` — pre-run Statute + all 17 Praxis categories to prime cache.
+- `POST /api/auth/session`, `POST /api/auth/logout`, `GET /api/auth/whoami` -- cookie auth (SEC 4.3).
+- `POST /api/sessions` -- create session (jurisdiction).
+- `DELETE /api/sessions/{sid}` -- right-to-erasure: session, files, agent_log rows.
+- `POST /api/sessions/{sid}/intake` -- manifest v3 validation, fail-closed.
+- `POST /api/sessions/{sid}/handle?iteration_cap={1|2|3}` -- launch 12-agent pipeline. Rigor selector; default 2.
+- `POST /api/sessions/{sid}/cancel` -- operator STOP.
+- `POST /api/sessions/{sid}/human-review` -- resolve blocking cases, resume tail.
+- `GET  /api/sessions/{sid}/stream` -- SSE progress + agent trace.
+- `GET  /api/sessions/{sid}/agent-trace` -- full agent audit log.
+- `GET  /api/sessions/{sid}/results` -- decisions, audit, ledger, herald, phase_timings.
+- `GET  /api/sessions/{sid}/bundle` -- publication + attestation download (Publish Guard clean only).
+- `POST /api/corpus/study/generate`, `POST /api/corpus/study/run` -- synthetic corpus, attached to a session.
+- `GET  /api/corpus/study/{sid}/zip` -- download the generated/run intake ZIP.
+- `GET  /api/corpus/study/verify/{sid}` -- per-plant grading against ground truth.
+- `GET  /api/corpus/study/benchmark/{sid}`, `GET .../benchmark/{sid}/download` -- per-dataset benchmark report + artefact ZIP.
+- `GET  /api/settings/llm`, `POST /api/settings/llm` -- BYO LLM config.
+- `POST /api/settings/warmup` -- pre-run Statute + all 17 Praxis categories to prime cache.
+- `GET  /api/health` -- mongo/llm/tesseract/signing-key readiness. `GET /api/version` -- service banner.
 
 ## Recent (Feb 2026)
 
@@ -126,7 +131,11 @@ Every agent input/output/duration persists to Mongo `agent_log`. Every phase tra
 3. Every human-review decision is recorded with timestamp and reviewer identity.
 4. No real PHI committed or logged. Sessions are transient; the bundle is the receipt.
 5. Corpus generation is datasets-and-dictionaries only. **Do not reintroduce PDF/form generation** to the corpus (removed by direction).
-6. Ignore "Code Quality Analysis Reports" that flag `localStorage` (intended BYO-key), `random` in deterministic seeding, or React exhaustive-deps warnings on single-run effects — audited false positives.
+6. Ignore "Code Quality Analysis Reports" that flag `localStorage` (UI-preference keys only --
+   `phi_reviewer_id`, `phi_reviewer_comment`, `phi_output_options`; the operator credential
+   moved to an httponly `phi_session` cookie in 4.3 and is never stored client-side), `random`
+   in deterministic seeding, or React exhaustive-deps warnings on single-run effects --
+   audited false positives.
 7. Any authentication or credential change goes through `integration_playbook_expert_v2` first. Not in scope right now.
 8. Nothing a command can regenerate is ever committed. Generated output is
    git-ignored and swept after every task. See "Generated artifacts and cleanup".
