@@ -1,0 +1,13 @@
+# Dev/test-only tooling for the PHI Console backend: linters, formatter,
+# type checker, parallel pytest runner, and reportlab (used only by the
+# manual tests/live/intake_audit.py script, never by the shipped app).
+# Not installed in the production image.
+-r requirements.txt
+black==26.5.1
+flake8==7.3.0
+isort==8.0.1
+mypy==2.3.0
+pytest==9.1.1
+pytest-xdist==3.8.0
+reportlab==5.0.0
+ruff==0.16.0
