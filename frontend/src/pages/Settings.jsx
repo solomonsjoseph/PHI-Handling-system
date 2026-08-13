@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import axios from 'axios';
-import { API, getApiToken, setApiToken } from '../lib/api';
+import { API, setApiToken } from '../lib/api';
 import { Btn, Panel, Tag } from '../components/ui';
 
 // Turn an ISO timestamp into "Mon 10 Feb 09:00 UTC (~2d 4h)" so operators
@@ -45,7 +45,7 @@ export default function Settings() {
   const [warming, setWarming] = useState(false);
   const [warmupResult, setWarmupResult] = useState(null);
   const [autoWarmup, setAutoWarmup] = useState({ enabled: false, last_run_at: null, last_run_status: null, next_run_at: null });
-  const [opToken, setOpToken] = useState(getApiToken());
+  const [opToken, setOpToken] = useState('');
   const [chatgptStatus, setChatgptStatus] = useState({ connected: false, account_id: '' });
   const [chatgptLogin, setChatgptLogin] = useState(null);
   const [chatgptBusy, setChatgptBusy] = useState(false);
@@ -129,9 +129,13 @@ export default function Settings() {
     } finally { setChatgptBusy(false); }
   };
 
-  const saveOpToken = () => {
-    setApiToken(opToken);
-    toast(opToken ? 'Operator API token saved locally' : 'Operator API token cleared');
+  const saveOpToken = async () => {
+    try {
+      await setApiToken(opToken);
+      toast(opToken ? 'Signed in' : 'Signed out');
+    } catch (e) {
+      toast.error(`sign-in failed: ${e?.response?.data?.detail || e.message}`);
+    }
   };
   const save = async () => {
     setBusy(true);
@@ -228,16 +232,16 @@ export default function Settings() {
         Pick the AI/LLM every one of the twelve agents will use. Zero-setup via the Emergent Universal Key or bring your own key.
       </p>
 
-      <Panel title="Operator token" cite="only required when API_TOKEN is set on the server" testId="settings-token-panel">
+      <Panel title="Sign in" cite="only required when API_TOKENS is set on the server" testId="settings-token-panel">
         <div className="grid grid-cols-2 gap-x-16 gap-y-6">
-          <Field label={<>X-API-Token {opToken && <Tag color="accept">set</Tag>}</>}
-                 hint="Stored in browser localStorage. Sent with every mutating call.">
+          <Field label="Operator token"
+                 hint="Exchanged once for an httponly session cookie; never stored in the browser.">
             <input type="password" value={opToken} onChange={e => setOpToken(e.target.value)}
-                   placeholder="paste the server-side API_TOKEN"
+                   placeholder="paste the server-side API token"
                    data-testid="settings-op-token" className={input}/>
           </Field>
           <div className="flex items-end">
-            <Btn variant="primary" onClick={saveOpToken} testId="btn-save-token">Save token</Btn>
+            <Btn variant="primary" onClick={saveOpToken} testId="btn-save-token">Sign in</Btn>
           </div>
         </div>
       </Panel>
