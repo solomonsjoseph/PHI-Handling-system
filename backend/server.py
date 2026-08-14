@@ -372,11 +372,26 @@ async def health():
         llm_doc = await get_db().settings.find_one({"_id": "llm"}, {"_id": 0}) or {}
     except Exception:
         llm_doc = {}
-    provider = llm_doc.get("provider", "")
+    provider = (llm_doc.get("provider") or "").strip()
+    if not provider:
+        from phi_core.agents.llm import _default_provider
+        provider = _default_provider()
     if provider == "chatgpt":
         llm_provider_ok = chatgpt_auth.read_auth() is not None
     elif provider == "emergent":
-        llm_provider_ok = True
+        llm_provider_ok = bool(os.environ.get("EMERGENT_LLM_KEY"))
+    elif provider == "openai":
+        llm_provider_ok = bool(llm_doc.get("api_key") or os.environ.get("OPENAI_API_KEY"))
+    elif provider == "anthropic":
+        llm_provider_ok = bool(llm_doc.get("api_key") or os.environ.get("ANTHROPIC_API_KEY"))
+    elif provider == "gemini":
+        llm_provider_ok = bool(
+            llm_doc.get("api_key")
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY")
+        )
+    elif provider == "openrouter":
+        llm_provider_ok = bool(llm_doc.get("api_key") or os.environ.get("OPENROUTER_API_KEY"))
     else:
         llm_provider_ok = bool(llm_doc.get("api_key"))
 
@@ -889,7 +904,12 @@ from typing import Literal
 
 
 class LlmSettings(BaseModel):
-    provider: Literal["emergent", "anthropic", "openai", "gemini", "openrouter", "openai_compatible", "chatgpt"] = "emergent"
+    # Settings UI advertises openrouter|openai|anthropic|gemini only.
+    # Legacy values remain accepted so existing Mongo docs still load.
+    provider: Literal[
+        "openrouter", "openai", "anthropic", "gemini",
+        "emergent", "openai_compatible", "chatgpt",
+    ] = "openai"
     model: str = ""
     api_key: str = ""
     base_url: str = ""
@@ -900,63 +920,74 @@ class LlmSettings(BaseModel):
 def _first_boot_llm_defaults() -> dict:
     """First-boot defaults resolved from the environment.
 
-    So a deploy with only ``ANTHROPIC_API_KEY`` set gets an Anthropic
-    default instead of the ``emergent`` factory default, without the
-    operator touching Settings.
+    So a deploy with only ``OPENAI_API_KEY`` (or Anthropic / Gemini /
+    OpenRouter) gets a matching provider + catalog model without the
+    operator touching Settings first.
     """
     from phi_core.agents.llm import _default_provider
-    return LlmSettings(provider=_default_provider()).model_dump()
+    from phi_core.llm_catalog import default_model_for
+    provider = _default_provider()
+    # Settings no longer advertises emergent / ChatGPT-OAuth; map those
+    # defaults onto the four UI providers.
+    if provider == "emergent":
+        provider = "anthropic"
+    elif provider == "chatgpt":
+        provider = "openai"
+    return LlmSettings(
+        provider=provider,
+        model=default_model_for(provider),
+    ).model_dump()
 
 
 def _env_available_providers() -> list[str]:
     """Return the providers whose credentials are present in the environment.
 
-    Sir Q "Ensure it is not locked to emergent only". If a self-hosted
-    deploy only sets ``ANTHROPIC_API_KEY``, the Settings UI should not
-    invite the user to pick ``emergent`` and crash on first call.
+    Order matches Settings UI: Open Router, ChatGPT, Claude, Gemini.
     """
     out: list[str] = []
-    if os.environ.get("EMERGENT_LLM_KEY"):
-        out.append("emergent")
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        out.append("anthropic")
-    if os.environ.get("OPENAI_API_KEY"):
-        out.append("openai")
-    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
-        out.append("gemini")
     if os.environ.get("OPENROUTER_API_KEY"):
         out.append("openrouter")
+    if os.environ.get("OPENAI_API_KEY"):
+        out.append("openai")
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        out.append("anthropic")
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        out.append("gemini")
     return out
 
 
 def _providers_payload() -> dict:
     """Compose the providers block for /api/settings/llm.
 
-    ``providers`` = providers the operator MAY configure. Excludes
-    ``emergent`` when EMERGENT_LLM_KEY is not set in the pod (no BYO
-    path exists for it). All other providers stay listed because they
-    can be configured by pasting a BYO key.
-
+    ``providers`` = the four Settings UI providers (stable order).
     ``env_providers`` = subset with credentials already present in the
     pod environment (zero-setup path).
     """
+    from phi_core.llm_catalog import UI_PROVIDERS
     env = _env_available_providers()
-    listed = set(allowed_providers())
-    if "emergent" in listed and "emergent" not in env:
-        listed.discard("emergent")
+    listed = [pid for pid, _label in UI_PROVIDERS if pid in allowed_providers()]
     return {
-        "providers": sorted(listed),
-        "env_providers": env,
+        "providers": listed,
+        "env_providers": [p for p in listed if p in env],
     }
 
 
 @app.get("/api/settings/llm", dependencies=[Depends(require_api_token)])
 async def get_llm_settings():
     from phi_core.crypto import KeyRotated
+    from phi_core.llm_catalog import default_model_for
     db = get_db()
     doc = await db.settings.find_one({"_id": "llm"}, {"_id": 0})
     if not doc:
         return _first_boot_llm_defaults() | _providers_payload()
+    # Normalize legacy provider ids + fill a missing model so the UI and
+    # pipeline both have something runnable without a forced re-save.
+    if doc.get("provider") == "emergent":
+        doc["provider"] = "anthropic"
+    elif doc.get("provider") == "chatgpt":
+        doc["provider"] = "openai"
+    if not str(doc.get("model") or "").strip():
+        doc["model"] = default_model_for(doc.get("provider") or "openai")
     # never leak the api_key back verbatim
     if doc.get("api_key"):
         try:
@@ -1328,6 +1359,12 @@ async def _current_llm_cfg() -> LlmConfig:
     from phi_core.crypto import KeyRotated
     db = get_db()
     doc = await db.settings.find_one({"_id": "llm"}, {"_id": 0}) or {}
+    if not doc or not str(doc.get("model") or "").strip():
+        # First pipeline run before Settings save: seed from env + catalog.
+        seeded = _first_boot_llm_defaults()
+        doc = {**seeded, **{k: v for k, v in doc.items() if v not in (None, "")}}
+    if doc.get("provider") == "emergent":
+        doc["provider"] = "anthropic"
     if doc.get("provider") == "chatgpt":
         # ChatGPTConfig supplies both api_key and base_url from the OAuth
         # auth file; nothing is persisted in the settings document for it.

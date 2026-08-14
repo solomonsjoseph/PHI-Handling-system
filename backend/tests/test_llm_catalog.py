@@ -10,26 +10,38 @@ def test_catalog_shape():
     assert "providers" in payload
     assert "models" in payload
     assert "default_model_id" in payload
-    # Every provider family declares whether web_search is available
+    # Settings advertises exactly the four UI providers, in order.
+    assert [p["id"] for p in payload["providers"]] == [
+        "openrouter", "openai", "anthropic", "gemini",
+    ]
     for p in payload["providers"]:
         assert "id" in p and "label" in p
         assert "web_search_available" in p
         assert "via_emergent_key" in p
-    # Every model row carries the fields the UI depends on
     for m in payload["models"]:
         for key in ("id", "label", "provider_family", "tier",
                     "supports_web_search", "via_emergent_key"):
             assert key in m, f"model {m!r} missing key {key!r}"
 
 
-def test_catalog_covers_the_three_provider_families_reachable_via_emergent_key():
-    """Anthropic + OpenAI + Gemini must all be reachable through the
-    Emergent Universal Key so the operator has a real menu to pick from."""
-    from phi_core.llm_catalog import CATALOG
-    families_via_emergent = {
-        m["provider_family"] for m in CATALOG if m["via_emergent_key"]
-    }
-    assert {"anthropic", "openai", "gemini"} <= families_via_emergent
+def test_catalog_covers_ui_provider_families():
+    """Every Settings provider must have at least one flagship and one fast model."""
+    from phi_core.llm_catalog import CATALOG, UI_PROVIDERS
+    for fam, _label in UI_PROVIDERS:
+        rows = [m for m in CATALOG if m["provider_family"] == fam]
+        assert rows, f"no models for {fam}"
+        tiers = {m["tier"] for m in rows}
+        assert "flagship" in tiers or "balanced" in tiers
+        assert "fast" in tiers
+
+
+def test_default_model_for_each_ui_provider():
+    from phi_core.llm_catalog import UI_PROVIDERS, default_model_for, CATALOG
+    ids = {m["id"] for m in CATALOG}
+    for fam, _ in UI_PROVIDERS:
+        mid = default_model_for(fam)
+        assert mid in ids
+        assert any(m["id"] == mid and m["provider_family"] == fam for m in CATALOG)
 
 
 @pytest.mark.parametrize("model_id,expected_family", [
@@ -66,20 +78,19 @@ def test_web_search_tool_selection_per_family():
         "type": "web_search_20250305", "name": "web_search"
     }
     assert web_search_tool_for("gemini") == {"googleSearch": {}}
-    # OpenAI + others do not expose a native web_search tool through the
-    # Emergent proxy today; the caller falls back to a plain LLM call.
     assert web_search_tool_for("openai") is None
     assert web_search_tool_for("openrouter") is None
     assert web_search_tool_for("bogus-family") is None
 
+
 @pytest.mark.parametrize(
     ("environment", "expected"),
     [
-        ({"EMERGENT_LLM_KEY": "key"}, "emergent"),
-        ({"ANTHROPIC_API_KEY": "key"}, "anthropic"),
-        ({"OPENAI_API_KEY": "key"}, "openai"),
-        ({"GEMINI_API_KEY": "key"}, "gemini"),
         ({"OPENROUTER_API_KEY": "key"}, "openrouter"),
+        ({"OPENAI_API_KEY": "key"}, "openai"),
+        ({"ANTHROPIC_API_KEY": "key"}, "anthropic"),
+        ({"GEMINI_API_KEY": "key"}, "gemini"),
+        ({"EMERGENT_LLM_KEY": "key"}, "emergent"),
     ],
 )
 def test_environment_key_selects_provider_without_selecting_model(

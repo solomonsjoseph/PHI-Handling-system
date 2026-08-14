@@ -285,24 +285,6 @@ function StepUpload({ onNext, setSid, sid, corpusMode, setCorpusMode, setCorpusR
 // ---------- STEP 2 --------------------------------------------------------
 
 function StepConfigure({ onNext, onBack, sid, config, setConfig }) {
-  const [providers, setProviders] = useState([]);
-  useEffect(() => {
-    axios.get(`${API}/settings/llm`)
-      .then(r => {
-        const list = r.data.providers || [];
-        setProviders(list);
-        // Seed the picker with the environment-detected provider (or the
-        // first advertised one) so the wizard doesn't display an empty
-        // dropdown on self-hosted deploys.
-        if (!config.provider && list.length > 0) {
-          const seed = (r.data.env_providers && r.data.env_providers[0]) || r.data.provider || list[0];
-          setConfig(prev => ({ ...prev, provider: seed }));
-        }
-      })
-      .catch(err => console.warn('load providers failed:', err));
-    // Empty dep array intentional: fetch once on mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
   const canNext = config.reviewer.trim().length >= 2;
 
   // Sir Q "Sentinel Iteration Cap Tuner": three-lane rigor selector.
@@ -320,9 +302,9 @@ function StepConfigure({ onNext, onBack, sid, config, setConfig }) {
       <div className="kicker">Step two</div>
       <h1 className="font-display text-display-lg text-ink mt-2">Configure the run.</h1>
       <p className="text-body text-ink-2 mt-4 max-w-2xl">
-        Three settings shape how the pipeline handles your data. Everything else
+        These settings shape how the pipeline handles your data. Everything else
         is deterministic — the same input plus the same reviewer produces the same
-        bundle every time.
+        bundle every time. Provider and model live under Settings.
       </p>
 
       <div className="mt-14 grid grid-cols-2 gap-x-16 gap-y-10">
@@ -337,18 +319,6 @@ function StepConfigure({ onNext, onBack, sid, config, setConfig }) {
             <option value="us">United States — HIPAA Safe Harbor 45 CFR 164.514(b)(2)(i)</option>
           </select>
           <div className="text-[12px] text-ink-muted mt-2">Additional jurisdictions ship in the next release.</div>
-        </div>
-        <div>
-          <div className="kicker">LLM provider</div>
-          <select
-            data-testid="config-provider"
-            value={config.provider}
-            onChange={e => setConfig({ ...config, provider: e.target.value })}
-            className="mt-3 w-full h-11 bg-transparent border-b border-ink text-ink text-lg font-display focus:border-oxblood"
-          >
-            {providers.map(p => <option key={p} value={p}>{p}</option>)}
-          </select>
-          <div className="text-[12px] text-ink-muted mt-2">Default: Emergent proxy · headers only, no row data.</div>
         </div>
         <div>
           <div className="kicker">Reviewer identity <span className="text-oxblood">(required)</span></div>
@@ -498,11 +468,7 @@ export default function Wizard() {
   const [step, setStep] = useState(1);
   const [sid, setSid] = useState(null);
   const [config, setConfig] = useState({
-    // Provider defaults to '' so the fetched providers list in Step 2
-    // can seed the first available option (env-detected). Prevents the
-    // dropdown from showing 'emergent' on self-hosted deploys where
-    // EMERGENT_LLM_KEY is not set.
-    jurisdiction: 'us', provider: '',
+    jurisdiction: 'us',
     reviewer: (typeof window !== 'undefined' && window.localStorage.getItem('phi_reviewer_id')) || '',
     comment: '',
     iteration_cap: 2,

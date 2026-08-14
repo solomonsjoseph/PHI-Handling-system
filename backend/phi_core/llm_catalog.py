@@ -1,42 +1,37 @@
 """Curated multi-provider LLM model catalog.
 
-The Wizard/Settings UI should present operators with a picker of REAL,
-current model IDs (grouped by provider) rather than a free-form text box
-where a typo means every agent silently switches to a stale default.
+The Settings UI presents operators with a picker of REAL model IDs
+grouped by provider (Open Router, ChatGPT, Claude, Gemini). Provider
+selection filters the model list; temperature and max tokens are the
+only other controls.
 
 Each entry declares:
   * ``id``   — model ID accepted by the underlying provider SDK
   * ``label``— human-readable display name
-  * ``provider`` — one of emergent|anthropic|openai|gemini|openrouter
-  * ``tier``  — flagship|balanced|fast|reasoning (rough tier for the UI)
-  * ``supports_web_search`` — whether the provider exposes a native
-    web-search tool that the agent layer can invoke. True today for
-    Anthropic (``web_search_20250305``) and Gemini (``googleSearch``).
-    OpenAI's web_search is only available via the Responses API path
-    which the Emergent proxy does not currently plumb through, so it is
-    marked False and the agent falls back to LLM-only knowledge.
-  * ``via_emergent_key`` — usable through the Emergent Universal Key
-    (zero-setup). Otherwise a BYOK is required.
+  * ``provider_family`` — openrouter|openai|anthropic|gemini
+  * ``tier``  — flagship|balanced|fast|reasoning
+  * ``supports_web_search`` — native web-search tool available
+  * ``via_emergent_key`` — legacy flag kept for catalog shape / tests
 
-Kept small and hand-curated: showing 60 models overwhelms the operator,
-and stale entries erode trust. Add rows here when new flagship models ship.
+Statute + Praxis web search works today for Anthropic
+(``web_search_20250305``) and Gemini (``googleSearch``).
 """
 from __future__ import annotations
 
 from typing import Any
 
 
+# UI order and labels for Settings / Wizard. Backend ids stay stable.
+UI_PROVIDERS: list[tuple[str, str]] = [
+    ("openrouter", "Open Router"),
+    ("openai", "ChatGPT"),
+    ("anthropic", "Claude"),
+    ("gemini", "Gemini"),
+]
+
+
 CATALOG: list[dict[str, Any]] = [
-    # ---- Anthropic (Claude) --------------------------------------------
-    {
-        "id": "claude-sonnet-4-5-20250929",
-        "label": "Claude Sonnet 4.5",
-        "provider_family": "anthropic",
-        "tier": "balanced",
-        "supports_web_search": True,
-        "via_emergent_key": True,
-        "notes": "Default. Best regulation-fidelity trade-off; native web search.",
-    },
+    # ---- Claude (Anthropic) --------------------------------------------
     {
         "id": "claude-opus-4-20250929",
         "label": "Claude Opus 4",
@@ -47,6 +42,24 @@ CATALOG: list[dict[str, Any]] = [
         "notes": "Highest reasoning quality; recommended for adversarial PHI.",
     },
     {
+        "id": "claude-sonnet-4-5-20250929",
+        "label": "Claude Sonnet 4.5",
+        "provider_family": "anthropic",
+        "tier": "balanced",
+        "supports_web_search": True,
+        "via_emergent_key": True,
+        "notes": "Default. Best regulation-fidelity trade-off; native web search.",
+    },
+    {
+        "id": "claude-sonnet-4-20250514",
+        "label": "Claude Sonnet 4",
+        "provider_family": "anthropic",
+        "tier": "balanced",
+        "supports_web_search": True,
+        "via_emergent_key": True,
+        "notes": "Prior Sonnet generation; still strong for classification.",
+    },
+    {
         "id": "claude-haiku-4-5-20250929",
         "label": "Claude Haiku 4.5",
         "provider_family": "anthropic",
@@ -55,17 +68,17 @@ CATALOG: list[dict[str, Any]] = [
         "via_emergent_key": True,
         "notes": "Fastest / cheapest Claude. Good for high-throughput classification.",
     },
-
-    # ---- OpenAI (GPT) --------------------------------------------------
     {
-        "id": "gpt-5.2",
-        "label": "GPT-5.2",
-        "provider_family": "openai",
-        "tier": "balanced",
-        "supports_web_search": False,
+        "id": "claude-3-5-haiku-20241022",
+        "label": "Claude 3.5 Haiku",
+        "provider_family": "anthropic",
+        "tier": "fast",
+        "supports_web_search": True,
         "via_emergent_key": True,
-        "notes": "Latest general-purpose GPT via Emergent proxy.",
+        "notes": "Lower-cost Haiku for light workloads.",
     },
+
+    # ---- ChatGPT (OpenAI API) ------------------------------------------
     {
         "id": "gpt-5.4",
         "label": "GPT-5.4",
@@ -76,6 +89,15 @@ CATALOG: list[dict[str, Any]] = [
         "notes": "Highest-quality GPT; slower / more expensive.",
     },
     {
+        "id": "gpt-5.2",
+        "label": "GPT-5.2",
+        "provider_family": "openai",
+        "tier": "balanced",
+        "supports_web_search": False,
+        "via_emergent_key": True,
+        "notes": "Latest general-purpose GPT.",
+    },
+    {
         "id": "gpt-5.4-mini",
         "label": "GPT-5.4 Mini",
         "provider_family": "openai",
@@ -84,8 +106,44 @@ CATALOG: list[dict[str, Any]] = [
         "via_emergent_key": True,
         "notes": "Fast, cheap GPT for high-throughput classification.",
     },
+    {
+        "id": "gpt-4.1",
+        "label": "GPT-4.1",
+        "provider_family": "openai",
+        "tier": "balanced",
+        "supports_web_search": False,
+        "via_emergent_key": True,
+        "notes": "Strong prior-generation general-purpose model.",
+    },
+    {
+        "id": "gpt-4.1-mini",
+        "label": "GPT-4.1 Mini",
+        "provider_family": "openai",
+        "tier": "fast",
+        "supports_web_search": False,
+        "via_emergent_key": True,
+        "notes": "Lower-cost 4.1 variant.",
+    },
+    {
+        "id": "gpt-4o",
+        "label": "GPT-4o",
+        "provider_family": "openai",
+        "tier": "balanced",
+        "supports_web_search": False,
+        "via_emergent_key": True,
+        "notes": "Widely available multimodal GPT.",
+    },
+    {
+        "id": "gpt-4o-mini",
+        "label": "GPT-4o Mini",
+        "provider_family": "openai",
+        "tier": "fast",
+        "supports_web_search": False,
+        "via_emergent_key": True,
+        "notes": "Cheapest OpenAI option for volume runs.",
+    },
 
-    # ---- Google (Gemini) -----------------------------------------------
+    # ---- Gemini --------------------------------------------------------
     {
         "id": "gemini-3-pro",
         "label": "Gemini 3 Pro",
@@ -104,180 +162,187 @@ CATALOG: list[dict[str, Any]] = [
         "via_emergent_key": True,
         "notes": "Fast, cheap Gemini with native Google Search grounding.",
     },
+    {
+        "id": "gemini-2.5-pro",
+        "label": "Gemini 2.5 Pro",
+        "provider_family": "gemini",
+        "tier": "flagship",
+        "supports_web_search": True,
+        "via_emergent_key": True,
+        "notes": "Prior Pro generation with Search grounding.",
+    },
+    {
+        "id": "gemini-2.5-flash",
+        "label": "Gemini 2.5 Flash",
+        "provider_family": "gemini",
+        "tier": "balanced",
+        "supports_web_search": True,
+        "via_emergent_key": True,
+        "notes": "Balanced speed / quality for Gemini 2.5.",
+    },
+    {
+        "id": "gemini-2.0-flash",
+        "label": "Gemini 2.0 Flash",
+        "provider_family": "gemini",
+        "tier": "fast",
+        "supports_web_search": True,
+        "via_emergent_key": True,
+        "notes": "Lower-cost Flash for high-throughput.",
+    },
 
-    # ---- OpenRouter (BYOK, any model) ----------------------------------
+    # ---- Open Router ---------------------------------------------------
+    {
+        "id": "openrouter/anthropic/claude-opus-4",
+        "label": "Claude Opus 4",
+        "provider_family": "openrouter",
+        "tier": "flagship",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "OpenRouter route to Claude Opus 4.",
+    },
     {
         "id": "openrouter/anthropic/claude-sonnet-4.5",
-        "label": "OpenRouter → Claude Sonnet 4.5",
+        "label": "Claude Sonnet 4.5",
         "provider_family": "openrouter",
         "tier": "balanced",
         "supports_web_search": False,
         "via_emergent_key": False,
-        "notes": "BYOK required. No web-search tool through OpenRouter proxy.",
+        "notes": "OpenRouter route to Claude Sonnet 4.5.",
+    },
+    {
+        "id": "openrouter/anthropic/claude-haiku-4.5",
+        "label": "Claude Haiku 4.5",
+        "provider_family": "openrouter",
+        "tier": "fast",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "OpenRouter route to Claude Haiku 4.5.",
+    },
+    {
+        "id": "openrouter/openai/gpt-5.4",
+        "label": "GPT-5.4",
+        "provider_family": "openrouter",
+        "tier": "flagship",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "OpenRouter route to GPT-5.4.",
     },
     {
         "id": "openrouter/openai/gpt-5.2",
-        "label": "OpenRouter → GPT-5.2",
+        "label": "GPT-5.2",
         "provider_family": "openrouter",
         "tier": "balanced",
         "supports_web_search": False,
         "via_emergent_key": False,
-        "notes": "BYOK required.",
+        "notes": "OpenRouter route to GPT-5.2.",
     },
-
-    # ---- ChatGPT subscription (OAuth device-code, no API key) ----------
     {
-        "id": "chatgpt/gpt-5.4",
-        "label": "GPT-5.4 (ChatGPT)",
-        "provider_family": "chatgpt",
+        "id": "openrouter/openai/gpt-4o-mini",
+        "label": "GPT-4o Mini",
+        "provider_family": "openrouter",
+        "tier": "fast",
+        "supports_web_search": False,
+        "via_emergent_key": False,
+        "notes": "OpenRouter lower-cost GPT route.",
+    },
+    {
+        "id": "openrouter/google/gemini-3-pro",
+        "label": "Gemini 3 Pro",
+        "provider_family": "openrouter",
         "tier": "flagship",
         "supports_web_search": False,
         "via_emergent_key": False,
-        "notes": "Latest general-purpose GPT via ChatGPT subscription. No web search.",
+        "notes": "OpenRouter route to Gemini 3 Pro.",
     },
     {
-        "id": "chatgpt/gpt-5.4-pro",
-        "label": "GPT-5.4 Pro (ChatGPT)",
-        "provider_family": "chatgpt",
-        "tier": "flagship",
-        "supports_web_search": False,
-        "via_emergent_key": False,
-        "notes": "Highest-quality GPT via ChatGPT subscription; slower / more expensive.",
-    },
-    {
-        "id": "chatgpt/gpt-5.3-codex",
-        "label": "GPT-5.3 Codex (ChatGPT)",
-        "provider_family": "chatgpt",
-        "tier": "reasoning",
-        "supports_web_search": False,
-        "via_emergent_key": False,
-        "notes": "Codex-tuned reasoning model via ChatGPT subscription.",
-    },
-    {
-        "id": "chatgpt/gpt-5.3-codex-spark",
-        "label": "GPT-5.3 Codex Spark (ChatGPT)",
-        "provider_family": "chatgpt",
+        "id": "openrouter/google/gemini-2.5-flash",
+        "label": "Gemini 2.5 Flash",
+        "provider_family": "openrouter",
         "tier": "fast",
         "supports_web_search": False,
         "via_emergent_key": False,
-        "notes": "Lightweight Codex variant for high-throughput classification.",
-    },
-    {
-        "id": "chatgpt/gpt-5.3-instant",
-        "label": "GPT-5.3 Instant (ChatGPT)",
-        "provider_family": "chatgpt",
-        "tier": "fast",
-        "supports_web_search": False,
-        "via_emergent_key": False,
-        "notes": "Fastest ChatGPT-subscription model.",
-    },
-    {
-        "id": "chatgpt/gpt-5.3-chat-latest",
-        "label": "GPT-5.3 Chat Latest (ChatGPT)",
-        "provider_family": "chatgpt",
-        "tier": "balanced",
-        "supports_web_search": False,
-        "via_emergent_key": False,
-        "notes": "Rolling chat-tuned GPT-5.3 via ChatGPT subscription.",
-    },
-    {
-        "id": "chatgpt/gpt-5.2-codex",
-        "label": "GPT-5.2 Codex (ChatGPT)",
-        "provider_family": "chatgpt",
-        "tier": "reasoning",
-        "supports_web_search": False,
-        "via_emergent_key": False,
-        "notes": "Prior-generation Codex-tuned reasoning model.",
-    },
-    {
-        "id": "chatgpt/gpt-5.2",
-        "label": "GPT-5.2 (ChatGPT)",
-        "provider_family": "chatgpt",
-        "tier": "balanced",
-        "supports_web_search": False,
-        "via_emergent_key": False,
-        "notes": "Prior-generation general-purpose GPT via ChatGPT subscription.",
-    },
-    {
-        "id": "chatgpt/gpt-5.1-codex-max",
-        "label": "GPT-5.1 Codex Max (ChatGPT)",
-        "provider_family": "chatgpt",
-        "tier": "reasoning",
-        "supports_web_search": False,
-        "via_emergent_key": False,
-        "notes": "Highest-reasoning Codex variant of GPT-5.1.",
-    },
-    {
-        "id": "chatgpt/gpt-5.1-codex-mini",
-        "label": "GPT-5.1 Codex Mini (ChatGPT)",
-        "provider_family": "chatgpt",
-        "tier": "fast",
-        "supports_web_search": False,
-        "via_emergent_key": False,
-        "notes": "Smallest, cheapest Codex variant of GPT-5.1.",
+        "notes": "OpenRouter lower-cost Gemini route.",
     },
 ]
 
 
 PROVIDER_FAMILIES: dict[str, dict[str, Any]] = {
+    "openrouter": {
+        "label": "Open Router",
+        "web_search_tool": None,
+    },
+    "openai": {
+        "label": "ChatGPT",
+        "web_search_tool": None,
+    },
     "anthropic": {
-        "label": "Anthropic — Claude",
+        "label": "Claude",
         "web_search_tool": {"type": "web_search_20250305",
                             "name": "web_search"},
     },
-    "openai": {
-        "label": "OpenAI — GPT",
-        "web_search_tool": None,  # not exposed through Emergent proxy today
-    },
     "gemini": {
-        "label": "Google — Gemini",
+        "label": "Gemini",
         "web_search_tool": {"googleSearch": {}},
     },
-    "openrouter": {
-        "label": "OpenRouter — any model, one key",
-        "web_search_tool": None,
-    },
+    # Kept for backend allow-list / SSRF / legacy settings docs only.
+    # Not advertised in Settings UI_PROVIDERS.
     "openai_compatible": {
         "label": "Custom OpenAI-compatible endpoint",
         "web_search_tool": None,
     },
     "chatgpt": {
         "label": "ChatGPT subscription",
-        "web_search_tool": None,  # Responses-API surface behind chatgpt.com/backend-api/codex
-                                  # is not the Anthropic tool schema; see agents/llm.py B4 note.
+        "web_search_tool": None,
     },
 }
 
 
-def catalog_for_ui() -> dict[str, Any]:
-    """Payload for ``GET /api/settings/llm/catalog``.
+DEFAULT_MODEL_ID = "claude-sonnet-4-5-20250929"
 
-    Returns:
-        {
-          "providers": [
-             {"id": "anthropic", "label": "Anthropic — Claude",
-              "via_emergent_key": True, "supports_web_search": True},
-             ...
-          ],
-          "models": [ ... CATALOG ... ],
-          "default_model_id": "claude-sonnet-4-5-20250929",
-        }
-    """
+
+def models_for_provider(provider_family: str) -> list[dict[str, Any]]:
+    """Catalog rows for a single provider family, flagship → fast."""
+    tier_rank = {"flagship": 0, "reasoning": 1, "balanced": 2, "fast": 3}
+    rows = [m for m in CATALOG if m["provider_family"] == provider_family]
+    return sorted(rows, key=lambda m: (tier_rank.get(m.get("tier", ""), 9), m["label"]))
+
+
+def default_model_for(provider: str) -> str:
+    """Pick a sensible default model id for a provider family."""
+    fam = provider
+    if fam == "emergent":
+        fam = "anthropic"
+    if fam == "chatgpt":
+        # OAuth ChatGPT path is separate; Settings "ChatGPT" maps to openai.
+        fam = "openai"
+    rows = models_for_provider(fam)
+    if not rows:
+        return DEFAULT_MODEL_ID
+    # Prefer balanced, then first sorted row.
+    for m in rows:
+        if m.get("tier") == "balanced":
+            return m["id"]
+    return rows[0]["id"]
+
+
+def catalog_for_ui() -> dict[str, Any]:
+    """Payload for ``GET /api/settings/llm/catalog``."""
     providers = [
         {
             "id": fam,
-            "label": PROVIDER_FAMILIES[fam]["label"],
+            "label": label,
             "web_search_available": PROVIDER_FAMILIES[fam]["web_search_tool"] is not None,
             "via_emergent_key": any(
                 m["provider_family"] == fam and m["via_emergent_key"] for m in CATALOG
             ),
         }
-        for fam in PROVIDER_FAMILIES
+        for fam, label in UI_PROVIDERS
+        if fam in PROVIDER_FAMILIES
     ]
     return {
         "providers": providers,
         "models": CATALOG,
-        "default_model_id": "claude-sonnet-4-5-20250929",
+        "default_model_id": DEFAULT_MODEL_ID,
     }
 
 

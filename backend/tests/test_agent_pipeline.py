@@ -83,13 +83,12 @@ def test_llm_settings_default(api):
     r = api.get(f"{BASE_URL}/api/settings/llm", timeout=TIMEOUT)
     assert r.status_code == 200
     d = r.json()
-    assert d["provider"] == "emergent"
-    assert d["model"] == ""
-    # `openai_compatible` is opt-in via ALLOWED_LLM_BASE_URL_HOSTS env var
-    # so the endpoint hides it from the default provider list. This is a
-    # SSRF-defence design decision (see phi_core/security.py:52).
-    for p in ("emergent", "anthropic", "openai", "gemini", "openrouter"):
-        assert p in d["providers"], f"missing {p}: {d['providers']}"
+    # First-boot seeds provider + model from env / catalog so a run works
+    # before the operator opens Settings.
+    assert d["provider"] in ("openrouter", "openai", "anthropic", "gemini")
+    assert d["model"]
+    # Settings advertises exactly the four UI providers (no emergent).
+    assert d["providers"] == ["openrouter", "openai", "anthropic", "gemini"]
 
 
 def test_llm_settings_post_persist(api):
@@ -109,10 +108,11 @@ def test_llm_settings_post_persist(api):
     assert d["temperature"] == 0.2
     assert d.get("api_key", "") == ""
     assert d.get("api_key_set") is True
-    # Reset to emergent default so the pipeline test uses EMERGENT_LLM_KEY
+    # Reset to env-default ChatGPT/OpenAI so subsequent pipeline tests use
+    # OPENAI_API_KEY when that is what the pod has configured.
     api.post(f"{BASE_URL}/api/settings/llm", json={
-        "provider": "emergent",
-        "model": "claude-sonnet-4-5-20250929",
+        "provider": "openai",
+        "model": "gpt-5.2",
         "api_key": "",
         "base_url": "",
         "temperature": 0.1,

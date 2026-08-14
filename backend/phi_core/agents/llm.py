@@ -39,21 +39,23 @@ def _default_provider() -> str:
     environment actually exposes, so a deploy with an Anthropic key gets
     an Anthropic default without editing config.
     """
-    if os.environ.get("EMERGENT_LLM_KEY"):
-        return "emergent"
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return "anthropic"
-    if _chatgpt_account_connected():
-        return "chatgpt"
-    if os.environ.get("OPENAI_API_KEY"):
-        return "openai"
-    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
-        return "gemini"
+    # Prefer the four Settings UI providers. Emergent / ChatGPT-OAuth
+    # remain callable if configured, but defaults map into the simple menu.
     if os.environ.get("OPENROUTER_API_KEY"):
         return "openrouter"
-    # No key at all: still return emergent so the UI renders; the first
-    # LLM call will surface a helpful error rather than crashing silently.
-    return "emergent"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        return "gemini"
+    if os.environ.get("EMERGENT_LLM_KEY"):
+        return "emergent"
+    if _chatgpt_account_connected():
+        return "chatgpt"
+    # No key at all: ChatGPT/OpenAI is the Settings default; the first
+    # LLM call surfaces a clear auth error rather than crashing silently.
+    return "openai"
 
 
 def _chatgpt_account_connected() -> bool:
