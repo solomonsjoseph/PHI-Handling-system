@@ -51,7 +51,21 @@ function StepUpload({ onNext, setSid, sid, corpusMode, setCorpusMode, setCorpusR
   const [corpusBusy, setCorpusBusy] = useState(false);
   const [corpusPreset, setCorpusPreset] = useState('hipaa_max_adversarial');
   const [rowCount, setRowCount] = useState(6);
+  const [studyPackages, setStudyPackages] = useState([]);
+  const [studyPackageId, setStudyPackageId] = useState('');
+  const [studyBusy, setStudyBusy] = useState(false);
   const inputRef = useRef(null);
+
+  useEffect(() => {
+    axios.get(`${API}/corpus/study-data`)
+      .then(r => {
+        const pkgs = r.data.packages || [];
+        setStudyPackages(pkgs);
+        if (pkgs.length && !studyPackageId) setStudyPackageId(pkgs[0].id);
+      })
+      .catch(() => { /* curated packages are optional */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const openPicker = () => inputRef.current?.click();
 
@@ -80,6 +94,20 @@ function StepUpload({ onNext, setSid, sid, corpusMode, setCorpusMode, setCorpusR
     } catch (e) {
       toast.error(`Intake failed: ${e?.response?.data?.detail || e.message}`);
     } finally { setBusy(false); }
+  };
+
+  const loadCuratedPackage = async () => {
+    if (!studyPackageId) return;
+    setStudyBusy(true);
+    try {
+      const zr = await axios.get(`${API}/corpus/study-data/${studyPackageId}/zip`, {
+        responseType: 'blob',
+      });
+      const f = new File([zr.data], `${studyPackageId}.zip`, { type: 'application/zip' });
+      await onFile(f);
+    } catch (e) {
+      toast.error(`Curated package failed: ${e?.response?.data?.detail || e.message}`);
+    } finally { setStudyBusy(false); }
   };
 
   const runCorpus = async () => {
@@ -211,6 +239,40 @@ function StepUpload({ onNext, setSid, sid, corpusMode, setCorpusMode, setCorpusR
           </div>
         )}
       </div>
+
+      {!corpusMode && studyPackages.length > 0 && (
+        <div className="mt-10 rule-top pt-6" data-testid="curated-study-panel">
+          <div className="kicker">Optional · curated study package</div>
+          <div className="font-display text-[19px] text-ink mt-1">
+            Load a reviewed fixture instead of uploading a ZIP.
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-6 items-end">
+            <div>
+              <div className="kicker">Package</div>
+              <select
+                data-testid="curated-study-select"
+                value={studyPackageId}
+                onChange={e => setStudyPackageId(e.target.value)}
+                className="mt-2 w-full h-10 bg-transparent border-b border-ink text-ink font-display focus:border-oxblood"
+              >
+                {studyPackages.map(p => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <Btn
+                variant="secondary"
+                onClick={loadCuratedPackage}
+                disabled={studyBusy || busy || !studyPackageId}
+                testId="btn-load-curated-study"
+              >
+                {studyBusy || busy ? 'Loading…' : 'Load curated package'}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
 
       {!corpusMode && (
         <div

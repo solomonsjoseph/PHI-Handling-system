@@ -57,7 +57,7 @@ operational spec, `/app/memory/PRD.md` for the delivery log.
     src/pages/
       Wizard.jsx                   3-step intake + rigor selector (iteration_cap)
       SessionDetail.jsx            Progress bar, live trace with agent meta + deep-links, review, downloads
-      Settings.jsx                 BYO-key config + cold-cache warmup
+      Settings.jsx                 LLM provider / model / temperature / max tokens
       Corpus.jsx                   Adversarial corpus runner + verifier
   memory/
     VISION.md, GOAL.md, PRD.md, test_credentials.md
@@ -110,8 +110,10 @@ Every agent input/output/duration persists to Mongo `agent_log`. Every phase tra
 - `GET  /api/corpus/study/{sid}/zip` -- download the generated/run intake ZIP.
 - `GET  /api/corpus/study/verify/{sid}` -- per-plant grading against ground truth.
 - `GET  /api/corpus/study/benchmark/{sid}`, `GET .../benchmark/{sid}/download` -- per-dataset benchmark report + artefact ZIP.
-- `GET  /api/settings/llm`, `POST /api/settings/llm` -- BYO LLM config.
-- `POST /api/settings/warmup` -- pre-run Statute + all 17 Praxis categories to prime cache.
+- `GET  /api/settings/llm`, `POST /api/settings/llm` -- LLM provider/model/temperature/max_tokens.
+- `GET  /api/settings/llm/catalog` -- curated Open Router / ChatGPT / Claude / Gemini model menu.
+- `GET  /api/corpus/study-data`, `GET /api/corpus/study-data/{id}/zip` -- curated static study packages.
+- `POST /api/settings/warmup` -- pre-run Statute + all 17 Praxis categories to prime cache (API; not on Settings UI).
 - `GET  /api/health` -- mongo/llm/tesseract/signing-key readiness. `GET /api/version` -- service banner.
 
 ## Recent (Feb 2026)
@@ -120,7 +122,7 @@ Every agent input/output/duration persists to Mongo `agent_log`. Every phase tra
 - **Live wallclock:** `session.phase_timings` (start_s, end_s, duration_ms per phase) + `run_elapsed_s` persisted at pipeline exit. Rendered under the progress bar and inline on the current phase.
 - **Rigor selector:** wizard step 2 exposes Fast (cap=1) / Balanced (cap=2, default) / Thorough (cap=3). Persisted on the session, honoured by the Judge<->Sentinel loop.
 - **Trace deep-links:** every agent row has `id="trace-{Agent}"` + a "# copy link" affordance in the meta panel. `#trace-Judge` on the URL auto-expands and scrolls to that row.
-- **Cold-cache warmup:** `POST /api/settings/warmup` (button on `/settings`) pre-primes Statute + all 17 Praxis methods with an ephemeral session id.
+- **Cold-cache warmup:** `POST /api/settings/warmup` pre-primes Statute + all 17 Praxis methods with an ephemeral session id (API / campaign; Settings UI is provider/model only).
 - **Agent trace meta:** every expanded row shows `role · what · why · how` for the 13 agents (Lexicon, Schema, Instrument, Statute, Praxis, Judge, Sentinel, Executor, Publish Guard, Auditor, Scout, Ledger, Herald).
 - **PipelineProgressBar:** phase %, current-phase label + blurb, elapsed seconds, expandable per-phase timing table.
 

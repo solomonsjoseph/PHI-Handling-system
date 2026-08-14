@@ -987,11 +987,8 @@ async def get_llm_settings():
     if doc.get("provider") == "chatgpt":
         doc["provider"] = "openai"
     elif doc.get("provider") == "emergent":
-        if os.environ.get("EMERGENT_LLM_KEY"):
-            # Present as Claude so the Settings dropdown stays valid.
-            doc["provider"] = "anthropic"
-        else:
-            doc["provider"] = "anthropic"
+        # Present as Claude so the Settings dropdown stays valid.
+        doc["provider"] = "anthropic"
     if not str(doc.get("model") or "").strip():
         doc["model"] = default_model_for(doc.get("provider") or "openai")
     # never leak the api_key back verbatim
@@ -1016,6 +1013,30 @@ async def get_llm_catalog():
     """
     from phi_core.llm_catalog import catalog_for_ui
     return catalog_for_ui()
+
+
+@app.get("/api/corpus/study-data", dependencies=[Depends(require_api_token)])
+async def corpus_study_data_list():
+    """List hand-curated static study packages under ``phi_corpus/study_data/``."""
+    from phi_corpus.study_data import list_packages
+    return {"packages": list_packages()}
+
+
+@app.get("/api/corpus/study-data/{package_id}/zip", dependencies=[Depends(require_api_token)])
+async def corpus_study_data_zip(package_id: str):
+    """Download a curated package as a manifest-v3 intake ZIP."""
+    from phi_corpus.study_data import build_intake_zip
+    try:
+        zip_bytes = build_intake_zip(package_id)
+    except FileNotFoundError:
+        raise HTTPException(404, f"unknown study-data package: {package_id}")
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{package_id}.zip"',
+        },
+    )
 
 
 # --- Corpus generator + verifier -------------------------------------------
