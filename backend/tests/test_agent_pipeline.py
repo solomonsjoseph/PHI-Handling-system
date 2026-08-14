@@ -213,6 +213,12 @@ def test_human_review_and_export(api, session_id):
     session = api.get(f"{BASE_URL}/api/sessions/{session_id}", timeout=TIMEOUT).json()
 
     if res.get("human_review_required") or session.get("status") == "awaiting_human_review":
+        # Server-side gate requires at least one dataset-file download before
+        # any non-defer resolution is accepted.
+        dataset_file = next(f for f in session.get("files", []) if f.get("kind") == "dataset")
+        dl = api.get(f"{BASE_URL}/api/sessions/{session_id}/dataset-file/{dataset_file['file_id']}", timeout=TIMEOUT)
+        assert dl.status_code == 200, dl.text
+
         # Round 1: comment-resolve every pending column (Judge interprets the
         # free text into a concrete action; the old client-supplied `action`
         # field no longer exists on the wire).

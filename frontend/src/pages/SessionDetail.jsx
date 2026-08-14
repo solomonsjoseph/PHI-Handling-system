@@ -652,15 +652,30 @@ export default function SessionDetail() {
   const [notFound, setNotFound] = useState(false);
   const esRef = useRef(null);
   const traceCursorRef = useRef(null);
+  const traceFetchInFlightRef = useRef(false);
+  const traceFetchPendingRef = useRef(false);
 
   // Tier 3: cursor-paginated, appended incrementally rather than a full
   // refetch on every SSE tick -- the trace now carries full, uncapped
   // prompt/reply text, so a full-history refetch per message would grow
   // unbounded over a long run.
+  //
+  // A live pipeline run emits several SSE ticks per second, each calling
+  // `refresh()` -> `fetchTracePage()` unthrottled. Two overlapping calls
+  // would both read the same stale `traceCursorRef.current`, both fetch
+  // the same page, and both append it, duplicating rows (which then
+  // double-counts durations/method counts in `_groupTrace`). Guard with an
+  // in-flight flag and coalesce at most one trailing call so a tick that
+  // arrives mid-fetch is never silently dropped.
   const fetchTracePage = async () => {
-    const params = new URLSearchParams({ limit: '500' });
-    if (traceCursorRef.current) params.set('after', traceCursorRef.current);
+    if (traceFetchInFlightRef.current) {
+      traceFetchPendingRef.current = true;
+      return;
+    }
+    traceFetchInFlightRef.current = true;
     try {
+      const params = new URLSearchParams({ limit: '500' });
+      if (traceCursorRef.current) params.set('after', traceCursorRef.current);
       const { data } = await axios.get(`${API}/sessions/${sid}/agent-trace?${params.toString()}`);
       const page = data.messages || [];
       if (page.length > 0) {
@@ -669,6 +684,12 @@ export default function SessionDetail() {
       }
     } catch (err) {
       console.warn('agent-trace fetch failed:', err);
+    } finally {
+      traceFetchInFlightRef.current = false;
+      if (traceFetchPendingRef.current) {
+        traceFetchPendingRef.current = false;
+        fetchTracePage();
+      }
     }
   };
 
@@ -698,6 +719,8 @@ export default function SessionDetail() {
 
   useEffect(() => {
     traceCursorRef.current = null;
+    traceFetchInFlightRef.current = false;
+    traceFetchPendingRef.current = false;
     setTrace([]);
     refresh();
     const es = new EventSource(streamUrl(sid));

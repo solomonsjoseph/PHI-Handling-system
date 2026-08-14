@@ -486,6 +486,34 @@ class Sentinel(Agent):
         return out
 
 
+def _read_dataset_headers(src: Path, ext: str) -> set[str]:
+    """Best-effort real on-disk header read, used only as a fallback when
+    intake's cached ``columns`` metadata is missing. Never raises -- an
+    unreadable/malformed file just yields an empty set, which leaves the
+    caller's fully-deferred-file shortcut un-triggered (falls through to
+    the normal, still-leak-safe column-omission path) rather than crashing
+    the pipeline over a cosmetic optimization.
+    """
+    try:
+        if ext in ("csv", "tsv"):
+            import csv as _csv_local
+            delim = "\t" if ext == "tsv" else ","
+            with src.open("r", encoding="utf-8", errors="replace", newline="") as fin:
+                reader = _csv_local.reader(fin, delimiter=delim)
+                header = next(reader, [])
+            return set(header)
+        if ext in ("xlsx", "xls"):
+            import openpyxl as _openpyxl_local
+            wb = _openpyxl_local.load_workbook(src, read_only=True)
+            ws = wb[wb.sheetnames[0]]
+            for r in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+                return {str(c) for c in r if c is not None}
+            return set()
+    except Exception:
+        pass
+    return set()
+
+
 class Executor(Agent):
     NAME = "Executor"
     PROMPT = ""  # deterministic; no LLM call needed for execution
@@ -532,6 +560,15 @@ class Executor(Agent):
             elif f["kind"] == "dataset":
                 omit_cols = omit_by_file.get(f["file_id"], set())
                 known_cols = set(f.get("columns") or [])
+                if omit_cols and not known_cols:
+                    # Intake's column-cache read failed for this file (rare;
+                    # see server.py's try/except around the schema-read
+                    # phase) -- fall back to the real on-disk header so a
+                    # fully-deferred file still gets skipped cleanly instead
+                    # of falling through to a near-empty, zero-surviving-
+                    # column export that leaks nothing but row-count
+                    # metadata.
+                    known_cols = _read_dataset_headers(src, f["subtype"])
                 if omit_cols and known_cols and known_cols <= omit_cols:
                     await self._log("executor.dataset_fully_deferred", "info",
                                     {"file_id": f["file_id"], "column_count": len(known_cols)})

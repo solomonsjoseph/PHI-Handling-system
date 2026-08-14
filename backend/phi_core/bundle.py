@@ -156,21 +156,32 @@ def _render_coverage_counts_bar() -> bytes:
 
 def _attestation_payload(session: dict[str, Any], file_hashes: dict[str, str]) -> dict[str, Any]:
     """Machine-readable attestation. All values plain JSON."""
-    review = session.get("session_review") or {}
+    review_history = session.get("session_review") or {}
     # session_review is append-only (list of per-submission entries) as of
     # the conversational human-review redesign; a bare dict is the legacy
     # single-submission shape from before that change.
-    if isinstance(review, list):
-        review = review[-1] if review else {}
+    if isinstance(review_history, list):
+        review = review_history[-1] if review_history else {}
+    else:
+        review_history = [review_history] if review_history else []
+        review = review_history[-1] if review_history else {}
     guard = session.get("guard_report") or {}
     # Reviewer trail: prefer session_review; fall back to the most recent
     # per-decision reviewer for older sessions run before the session-level
-    # invariant landed.
+    # invariant landed. `reviewer`/`comment`/`reviewed_at` reflect the most
+    # recent round for display; `actual_knowledge_ack` is a compliance
+    # boolean that must NOT reset to false just because a later round only
+    # deferred more columns (session_human_review only ever stores ack=True
+    # on a round that actually resolved something, and only after the
+    # client's own ack was validated -- so any historical True is still a
+    # true attestation for the columns that round exported).
     from .security import scrub_persisted_text as _scrub_text
     reviewer = review.get("reviewer") or None
     reviewer_comment = review.get("comment") or None
     reviewed_at = review.get("reviewed_at") or None
-    actual_knowledge_ack = bool(review.get("actual_knowledge_ack", False))
+    actual_knowledge_ack = any(
+        bool(entry.get("actual_knowledge_ack")) for entry in review_history if isinstance(entry, dict)
+    )
     if not reviewer:
         for d in reversed(session.get("agent_decisions") or []):
             if isinstance(d, dict) and d.get("reviewer"):

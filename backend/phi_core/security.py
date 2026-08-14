@@ -234,7 +234,7 @@ def scrub_nested(value: Any, _key: str = "") -> Any:
     """
     _AUDIT_KEYS = {
         "reviewer", "reviewed_at",
-        "session_review", "citation", "id", "session_id", "file_id",
+        "session_review", "id", "session_id", "file_id",
         "ts", "updated_at", "created_at",
     }
     if _key in _AUDIT_KEYS and isinstance(value, str):

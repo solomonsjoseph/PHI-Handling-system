@@ -1561,14 +1561,25 @@ async def _purge_settled_sessions_loop():
     """Hourly: delete settled sessions older than RETENTION_DAYS, together
     with their UPLOAD_DIR/<sid> tree, their export_paths files, and their
     agent_log rows. Runs forever; a single bad iteration backs off and
-    retries rather than killing the loop."""
+    retries rather than killing the loop.
+
+    ``partially_complete`` is deliberately excluded from this set. A
+    partially-complete session still has pending_review columns a reviewer
+    may resolve on a later round, and the resume path (session_human_review)
+    depends on both the session document and the unpacked originals under
+    UPLOAD_DIR/<sid> surviving until that happens -- deleting either one
+    silently destroys the only path back to a resolvable session, along
+    with its session_review audit history and attestations. It only leaves
+    this purge loop through an explicit terminal status (complete, failed,
+    cancelled, blocked, intake_failed).
+    """
     import shutil
     while True:
         try:
             db = get_db()
             cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
             cursor = db.sessions.find(
-                {"status": {"$in": ["complete", "failed", "cancelled", "blocked", "intake_failed", "partially_complete"]},
+                {"status": {"$in": ["complete", "failed", "cancelled", "blocked", "intake_failed"]},
                  "updated_at": {"$lt": cutoff}},
                 {"_id": 0, "id": 1, "export_paths": 1},
             )
@@ -1789,7 +1800,15 @@ async def session_cancel(sid: str, principal: str = Depends(resolve_principal)):
     """
     db = get_db()
     doc = await _owned_session(sid, principal, {"status": 1})
-    if doc.get("status") in ("complete", "failed", "cancelled", "blocked", "partially_complete"):
+    # partially_complete and awaiting_human_review are both "paused,
+    # awaiting a human-review submission" states -- every other status
+    # comparison in this module (review_filter, _LIVE_STATUSES) treats them
+    # as equivalent. Only the two of them stay cancellable here; a
+    # cancel-requested flag on either is a no-op today (the resume tail
+    # built in session_human_review does not consult it, unlike the initial
+    # orchestrator run), but the eligibility check itself must not diverge
+    # between two states the rest of the codebase treats as interchangeable.
+    if doc.get("status") in ("complete", "failed", "cancelled", "blocked", "intake_failed"):
         return {"status": doc.get("status"), "already_settled": True}
     await db.sessions.update_one(
         _owned_filter(sid, principal),
@@ -1877,6 +1896,14 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
 
     db = get_db()
     session = await _owned_session(sid, principal)
+    has_dataset_files = any(f.get("kind") == "dataset" for f in (session.get("files") or []))
+    if any_resolution and has_dataset_files and not (session.get("dataset_file_downloads") or []):
+        raise HTTPException(
+            400,
+            "at least one dataset file must be downloaded via GET .../dataset-file/{file_id} "
+            "before resolving any column: the actual-knowledge attestation is only meaningful "
+            "if the reviewer has actually opened the original data.",
+        )
     prior_run_id = session.get("_pipeline_run_id")
     review_filter = _owned_filter(sid, principal)
     review_filter["status"] = {"$in": ["awaiting_human_review", "partially_complete"]}
@@ -1912,6 +1939,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         for key, reply in await asyncio.gather(*[_resolve(d) for d in comment_targets]):
             comment_results[key] = reply
 
+    live_keys = {(d.get("file_id", ""), d.get("column", "")) for d in decisions if d.get("action") == "human_review"}
     for d in decisions:
         key = (d.get("file_id", ""), d.get("column", ""))
         if d.get("action") != "human_review" or key not in by_key:
@@ -2001,12 +2029,19 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     decisions, keep_demotions = verify_keep_decisions(decisions, dataset_paths, jurisdiction=session.get("jurisdiction", "us"))
     decisions = annotate_pending_review(decisions, dictionary_by_column)
 
+    # `by_key` reflects raw client submission -- a resubmission for an
+    # already-resolved or nonexistent (file_id, column) pair must not be
+    # recorded as newly resolved/deferred in the permanent audit trail;
+    # only entries that matched a live human_review decision this round did
+    # anything, so scope the audit entry to `live_keys` (the same filter
+    # the per-decision mutation loop above already applies).
+    acted_keys = live_keys & by_key.keys()
     session_review_entry = {
         "reviewer": reviewer,
         "comment": scrub_persisted_text(body.comment) if body.comment else "",
         "reviewed_at": ts,
-        "resolved_columns": [{"file_id": k[0], "column": k[1]} for k, r in by_key.items() if r.get("mode") != "defer"],
-        "deferred_columns": [{"file_id": k[0], "column": k[1]} for k, r in by_key.items() if r.get("mode") == "defer"],
+        "resolved_columns": [{"file_id": k[0], "column": k[1]} for k in acted_keys if by_key[k].get("mode") != "defer"],
+        "deferred_columns": [{"file_id": k[0], "column": k[1]} for k in acted_keys if by_key[k].get("mode") == "defer"],
         "actual_knowledge_ack": bool(any_resolution and body.actual_knowledge_ack),
         "actual_knowledge_cite": "45 CFR 164.514(b)(2)(ii)",
     }

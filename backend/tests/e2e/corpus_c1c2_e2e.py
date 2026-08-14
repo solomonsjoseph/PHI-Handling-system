@@ -46,6 +46,13 @@ def main() -> int:
     assert st != "failed"
 
     if st == "awaiting_human_review":
+        # Server-side gate requires at least one dataset-file download before
+        # any non-defer resolution is accepted (the actual-knowledge
+        # attestation must reflect a reviewer who actually opened the file).
+        sess = requests.get(f"{BASE}/api/sessions/{sid}", timeout=TIMEOUT).json()
+        dataset_file = next(f for f in sess["files"] if f.get("kind") == "dataset")
+        dr = requests.get(f"{BASE}/api/sessions/{sid}/dataset-file/{dataset_file['file_id']}", timeout=TIMEOUT)
+        dr.raise_for_status()
         # Accept everything so we get to complete
         r = requests.get(f"{BASE}/api/sessions/{sid}/results", timeout=TIMEOUT).json()
         pending = [d for d in r.get("decisions", []) if d.get("action") == "human_review"]
