@@ -40,6 +40,11 @@ except Exception:  # pragma: no cover
     pytesseract = None
     convert_from_path = None
 
+try:
+    import pdfplumber  # type: ignore
+except Exception:  # pragma: no cover
+    pdfplumber = None
+
 
 # Phase C: threshold below which we treat a PDF as image-only and run OCR.
 # Real-world scanned CRFs / consent forms yield near-zero text via `pypdf`.
@@ -169,6 +174,66 @@ def read_pdf(path: Path) -> str:
         # (which is what a purely-image PDF would have been anyway).
         pass
     return text
+
+
+def read_pdf_form_fields(path: Path) -> list[dict[str, str | None]] | None:
+    """Tier-1 deterministic extraction for true fillable (AcroForm) PDFs.
+
+    Returns ``None`` when the PDF carries no AcroForm fields -- the caller
+    should fall back to LLM extraction on flattened/OCR'd text (``read_pdf``)
+    for flat or scanned forms, which have no widgets to read.
+
+    Each real field name comes straight from the PDF's own AcroForm
+    dictionary via ``pypdf`` -- never inferred, never guessed. The printed
+    label is the nearest line of extracted text directly above the field's
+    widget, matched by page position via ``pdfplumber``. Adapted from the
+    annotation-geometry proximity-matching technique in
+    ``solomonsjoseph/RePORT-AI-Portal`` (``PHI_handing_review`` branch,
+    ``plugins/report-ai-study-pipeline/skills/sot-lean-generator/scripts/
+    generate_pdf_aware_candidate.py``) -- that script's per-study alias
+    tables and field overrides are not reused, only the general technique.
+    """
+    if PdfReader is None or pdfplumber is None:
+        return None
+    raw_fields = PdfReader(str(path)).get_fields()
+    if not raw_fields:
+        return None
+
+    fields: list[dict[str, str | None]] = []
+    with pdfplumber.open(str(path)) as doc:
+        for page in doc.pages:
+            words = sorted(
+                page.extract_words(x_tolerance=1, y_tolerance=3) or [],
+                key=lambda w: (float(w.get("top") or 0), float(w.get("x0") or 0)),
+            )
+            for annot in page.annots or []:
+                data = annot.get("data") or {}
+                name = data.get("T")
+                if name is None:
+                    continue
+                name = name.decode("utf-8", "replace") if isinstance(name, bytes) else str(name)
+                ax = (float(annot["x0"]) + float(annot["x1"])) / 2
+                ay = (float(annot["top"]) + float(annot["bottom"])) / 2
+                fields.append({"label": _nearest_label(words, ax, ay), "collected_variable": name})
+    return fields or None
+
+
+def _nearest_label(words: list[dict], ax: float, ay: float) -> str | None:
+    """Nearest line of text above (falling back to left of) a widget's
+    center point, joined left-to-right. Simple line-grouping by shared
+    ``top`` within a small tolerance, not the reference script's full
+    per-segment scoring -- adequate for a single label per widget; a form
+    with dense multi-column layouts may need the fuller algorithm later."""
+    above = [w for w in words if 0 < ay - float(w.get("top") or 0) < 40]
+    same_row = [w for w in words if abs(ay - float(w.get("top") or 0)) < 6 and float(w.get("x1") or 0) <= ax]
+    candidates = above or same_row
+    if not candidates:
+        return None
+    target_top = float(candidates[-1].get("top") or 0)
+    line = [w for w in candidates if abs(float(w.get("top") or 0) - target_top) < 4]
+    line.sort(key=lambda w: float(w.get("x0") or 0))
+    text = " ".join(str(w.get("text") or "") for w in line).strip()
+    return text or None
 
 
 # SEC-001 (audit iter_22): narrative-path docx bomb defence lives in

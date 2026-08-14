@@ -31,11 +31,19 @@ def apply_to_text(text: str, spans: list[DetectedSpan]) -> str:
     return out
 
 
-def scrub_for_prompt(text: str) -> tuple[str, int]:
+def scrub_for_prompt(text: str, detectors: tuple[str, ...] = ("presidio", "rule")) -> tuple[str, int]:
     """Deterministically redact every detected identifier before text enters
-    an LLM prompt. Returns (scrubbed_text, span_count)."""
+    an LLM prompt. Returns (scrubbed_text, span_count).
+
+    ``detectors`` defaults to presidio+rule (free prose: agent notes, dictionary
+    descriptions). Callers scrubbing static form/template text -- Title-Case
+    labels with no sentence context -- should pass ``("rule",)`` only: presidio's
+    NER model false-positives heavily on capitalized label words ("Last Name",
+    "Diagnosis", "Registration") with no surrounding prose to disambiguate,
+    while rule-based regex (SSN/phone/date patterns) still catches genuine
+    identifiers if real values were typed onto the form."""
     from .detectors import detect_text
-    spans = detect_text(text)
+    spans = detect_text(text, detectors=detectors)
     for sp in spans:
         sp.review_status = "accepted"
     return apply_to_text(text, spans), len(spans)

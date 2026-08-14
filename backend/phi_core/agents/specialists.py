@@ -21,6 +21,7 @@ except Exception:  # pragma: no cover
 
 from .base import Agent
 from ..anonymizer import scrub_for_prompt
+from ..file_readers import read_pdf_form_fields
 
 
 class Lexicon(Agent):
@@ -104,11 +105,14 @@ class Instrument(Agent):
     NAME = "Instrument"
     PROMPT = (
         "You are Instrument, a specialist in PDF data-collection forms used in clinical studies. "
-        "Given the extracted text of a form, identify which fields collect PHI and their categories. "
+        "Given the extracted text of a form, list every field it asks a person to fill in. "
         "Return JSON: "
-        '{"fields": [{"label": str, "collected_variable": str|null, '
-        '"phi_category": "A|B|C|D|E|F|G|H|I|J|K|L|M|N|O|P|Q|R|QUASI|NONE"}]}. '
-        "Cite the exact form section text in `context` if helpful."
+        '{"fields": [{"label": str, "collected_variable": str|null}]}. '
+        "`collected_variable` is the machine-readable variable name ONLY if one is literally "
+        "printed on the form next to the label (e.g. in brackets or parentheses, REDCap-style). "
+        "Most fields on a form have no such annotation -- for those, `collected_variable` MUST be "
+        "null. Never infer, guess, or construct a variable name that is not literally printed on "
+        "the form, even if it seems like an obvious snake_case name for the field."
     )
 
     async def run(self, form_files: list[dict[str, Any]]) -> dict[str, Any]:
@@ -116,6 +120,25 @@ class Instrument(Agent):
         self.scrub_count = 0
         for f in form_files:
             path = Path(f["stored_path"])
+
+            # Tier 1: true fillable (AcroForm) PDF -- real field names read
+            # straight off the PDF, zero LLM call, zero fabrication risk.
+            acroform_fields = None
+            if path.suffix.lower() == ".pdf":
+                try:
+                    acroform_fields = read_pdf_form_fields(path)
+                except Exception:
+                    acroform_fields = None
+            if acroform_fields:
+                await self._log(
+                    f"instrument.acroform:{f['file_id']}", "info",
+                    {"fields_found": len(acroform_fields)},
+                )
+                aggregated.extend(acroform_fields)
+                continue
+
+            # Tier 2: flat/scanned form -- extraction-only LLM call on the
+            # (OCR-fallback-capable) extracted text.
             text = ""
             if PdfReader is not None and path.suffix.lower() == ".pdf":
                 try:
@@ -123,7 +146,7 @@ class Instrument(Agent):
                     text = "\n\n".join((p.extract_text() or "") for p in reader.pages)
                 except Exception:
                     text = ""
-            scrubbed, n_removed = scrub_for_prompt(text[:6000])
+            scrubbed, n_removed = scrub_for_prompt(text[:6000], detectors=("rule",))
             self.scrub_count += n_removed
             await self._log(f"instrument.scrub:{f['file_id']}", "info", {"identifiers_removed": n_removed})
             reply = await self.call_json(
