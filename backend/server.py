@@ -927,15 +927,15 @@ def _first_boot_llm_defaults() -> dict:
     from phi_core.agents.llm import _default_provider
     from phi_core.llm_catalog import default_model_for
     provider = _default_provider()
-    # Settings no longer advertises emergent / ChatGPT-OAuth; map those
-    # defaults onto the four UI providers.
-    if provider == "emergent":
-        provider = "anthropic"
-    elif provider == "chatgpt":
+    # Settings no longer advertises Emergent / ChatGPT-OAuth. Map ChatGPT
+    # OAuth onto the OpenAI API provider. Keep ``emergent`` when that is
+    # the only credential so first-boot runs still hit EMERGENT_LLM_KEY;
+    # GET /settings/llm presents it as Claude in the four-provider menu.
+    if provider == "chatgpt":
         provider = "openai"
     return LlmSettings(
         provider=provider,
-        model=default_model_for(provider),
+        model=default_model_for("anthropic" if provider == "emergent" else provider),
     ).model_dump()
 
 
@@ -980,12 +980,18 @@ async def get_llm_settings():
     doc = await db.settings.find_one({"_id": "llm"}, {"_id": 0})
     if not doc:
         return _first_boot_llm_defaults() | _providers_payload()
-    # Normalize legacy provider ids + fill a missing model so the UI and
-    # pipeline both have something runnable without a forced re-save.
-    if doc.get("provider") == "emergent":
-        doc["provider"] = "anthropic"
-    elif doc.get("provider") == "chatgpt":
+    # Normalize legacy provider ids for the four-provider Settings menu
+    # without stranding Emergent-only pods (those keep provider=emergent
+    # in the response only when EMERGENT_LLM_KEY is set; the UI maps the
+    # label to Claude via catalog filtering on model family).
+    if doc.get("provider") == "chatgpt":
         doc["provider"] = "openai"
+    elif doc.get("provider") == "emergent":
+        if os.environ.get("EMERGENT_LLM_KEY"):
+            # Present as Claude so the Settings dropdown stays valid.
+            doc["provider"] = "anthropic"
+        else:
+            doc["provider"] = "anthropic"
     if not str(doc.get("model") or "").strip():
         doc["model"] = default_model_for(doc.get("provider") or "openai")
     # never leak the api_key back verbatim
@@ -1363,13 +1369,20 @@ async def _current_llm_cfg() -> LlmConfig:
         # First pipeline run before Settings save: seed from env + catalog.
         seeded = _first_boot_llm_defaults()
         doc = {**seeded, **{k: v for k, v in doc.items() if v not in (None, "")}}
-    if doc.get("provider") == "emergent":
-        doc["provider"] = "anthropic"
+
+    # Settings "ChatGPT" is the OpenAI API. Legacy OAuth ``chatgpt`` docs
+    # keep the OAuth path only while a live auth file remains.
     if doc.get("provider") == "chatgpt":
-        # ChatGPTConfig supplies both api_key and base_url from the OAuth
-        # auth file; nothing is persisted in the settings document for it.
-        doc = {**doc, "api_key": "", "base_url": ""}
-    elif doc.get("api_key"):
+        if chatgpt_auth.read_auth() is None:
+            doc = {**doc, "provider": "openai"}
+        else:
+            doc = {**doc, "api_key": "", "base_url": ""}
+    # Keep Emergent runnable when EMERGENT_LLM_KEY is the only credential;
+    # otherwise fold legacy ``emergent`` docs onto Claude/Anthropic.
+    elif doc.get("provider") == "emergent" and not os.environ.get("EMERGENT_LLM_KEY"):
+        doc = {**doc, "provider": "anthropic"}
+
+    if doc.get("provider") != "chatgpt" and doc.get("api_key"):
         try:
             doc["api_key"] = decrypt_api_key(doc["api_key"])
         except KeyRotated:
@@ -1378,6 +1391,7 @@ async def _current_llm_cfg() -> LlmConfig:
             # boundary with a clear error, same as no key configured.
             doc["api_key"] = ""
     return LlmConfig.from_dict(doc)
+
 
 
 class ChatGptLoginPollOut(BaseModel):

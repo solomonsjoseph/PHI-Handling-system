@@ -304,6 +304,12 @@ def call_llm_with_web_search(system: str, user: str,
     if cfg.provider == "emergent":
         return _emergent_call_with_web_search(system, user, cfg, max_uses=max_uses)
     if cfg.provider == "anthropic":
+        if (
+            not cfg.api_key
+            and not os.environ.get("ANTHROPIC_API_KEY")
+            and os.environ.get("EMERGENT_LLM_KEY")
+        ):
+            return _emergent_call_with_web_search(system, user, cfg, max_uses=max_uses)
         return _litellm_call_with_web_search(system, user, cfg, max_uses=max_uses)
     return _litellm_call(system, user, cfg), []
 
@@ -356,6 +362,16 @@ def call_llm(system: str, user: str, cfg: LlmConfig | None = None) -> str:
         _require_chatgpt_connected()
         return _litellm_call(system, user, cfg)
     if cfg.provider == "emergent":
+        return _emergent_call(system, user, cfg)
+    # Settings maps Emergent-only deploys onto Claude/Anthropic in the UI.
+    # If the operator saved anthropic without ANTHROPIC_API_KEY but the
+    # pod still has EMERGENT_LLM_KEY, bridge through the Emergent path.
+    if (
+        cfg.provider == "anthropic"
+        and not cfg.api_key
+        and not os.environ.get("ANTHROPIC_API_KEY")
+        and os.environ.get("EMERGENT_LLM_KEY")
+    ):
         return _emergent_call(system, user, cfg)
     return _litellm_call(system, user, cfg)
 
