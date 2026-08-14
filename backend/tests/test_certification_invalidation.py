@@ -273,6 +273,7 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
     class EmptyAgent:
         def __init__(self, **_kwargs):
             self.call_failures = 0
+            self.last_message_id = None
 
         async def run(self, **_kwargs):
             return {}
@@ -392,6 +393,8 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
             "file_id": "dataset",
             "column": "subject_id",
             "action": "human_review",
+            "suggested_action": "drop",
+            "suggested_reason": "direct identifier",
         }],
     })
     scheduled = []
@@ -415,7 +418,7 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
             resolutions=[{
                 "file_id": "dataset",
                 "column": "subject_id",
-                "action": "drop",
+                "mode": "approve",
             }],
         ),
         principal="reviewer",
@@ -438,7 +441,7 @@ async def test_stale_unresolved_human_review_cannot_overwrite_claimed_tail(monke
 
     decisions = [{
         "file_id": "dataset",
-        "column": "subject_id",
+        "column": "custom_flagged_field",
         "action": "human_review",
     }]
     db = _ConditionalStubDB({

@@ -371,7 +371,8 @@ class Manager(Agent):
                           default=str)
         try:
             parsed = await self.call_json(body, phase=f"manager.{task}", default={},
-                                          timeout_s=self.DECISION_TIMEOUT_S)
+                                          timeout_s=self.DECISION_TIMEOUT_S,
+                                          status_text=f"Manager checking in on {task}")
         except Exception:
             parsed = {}
         action = parsed.get("action") if isinstance(parsed, dict) else None

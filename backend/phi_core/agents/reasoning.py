@@ -61,6 +61,23 @@ def validate_decisions(
             d["confidence"] = 0.0
         else:
             d["action"] = norm_action
+        # Normalize Judge's optional best-guess fallback (only meaningful
+        # when the column is actually deferred to a human).
+        if d["action"] == "human_review":
+            sugg = d.get("suggested_action")
+            norm_sugg = str(sugg).strip().lower() if sugg is not None else ""
+            d["suggested_action"] = norm_sugg if norm_sugg in (ACTION_TYPES - {"human_review"}) else None
+            try:
+                conf = d.get("suggested_confidence")
+                d["suggested_confidence"] = max(0.0, min(1.0, float(conf))) if conf is not None else None
+            except (TypeError, ValueError):
+                d["suggested_confidence"] = None
+            reason = d.get("suggested_reason")
+            d["suggested_reason"] = str(reason).strip() if isinstance(reason, str) and reason.strip() else None
+        else:
+            d["suggested_action"] = None
+            d["suggested_confidence"] = None
+            d["suggested_reason"] = None
         subject = d.get("subject")
         if subject not in SUBJECT_TYPES:
             rejections.append({"file_id": file_id, "column": column, "field": "subject", "proposed": subject})
@@ -71,6 +88,55 @@ def validate_decisions(
             d["phi_category"] = None
         safe.append(d)
     return safe, rejections
+
+
+# Free-text narrative column names -- the same words Judge's own PROMPT
+# above instructs it to route to `scrub_text`. Kept here as real, queryable
+# data (rather than re-parsing the prompt string) so `needs_file_glance`
+# can be computed deterministically with no extra LLM call.
+_FREE_TEXT_COLUMN_PATTERNS = ("comment", "note", "remark", "other_specify",
+                              "reason", "description", "narrative", "free_text")
+
+
+def _needs_file_glance(column: str, suggested_action: str | None) -> bool:
+    """True only for columns where a human would need to open the actual
+    file to judge free text, not just read the header/dictionary context."""
+    norm = (column or "").strip().lower()
+    if suggested_action == "scrub_text":
+        return True
+    return any(pat in norm for pat in _FREE_TEXT_COLUMN_PATTERNS)
+
+
+def _reviewer_prompt_for(d: dict[str, Any], dictionary_by_column: dict[str, str] | None = None) -> str:
+    """Plain-language sentence built in Python from column name, dictionary
+    description, and Judge's suggestion -- no LLM call."""
+    col = d.get("column") or "this column"
+    desc = (dictionary_by_column or {}).get(col, "")
+    desc_clause = f' ("{desc}")' if desc else ""
+    suggested = d.get("suggested_action")
+    reason = d.get("suggested_reason") or d.get("reason") or \
+        "the automated classifiers were not confident enough to decide on their own"
+    if suggested:
+        return (f"I'm not confident enough to decide '{col}'{desc_clause} on my own. "
+                f"My best guess is {suggested}: {reason} Does that look right?")
+    return (f"I'm not confident enough to decide '{col}'{desc_clause} on my own: {reason} "
+            "What should happen to this column?")
+
+
+def annotate_pending_review(decisions: list[dict[str, Any]],
+                            dictionary_by_column: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """Attach `reviewer_prompt` and `needs_file_glance` to every decision
+    still routed to a human. Deterministic, Python-only, safe to call
+    repeatedly (e.g. again after a keep-verification demotion adds a new
+    column to the queue)."""
+    out: list[dict[str, Any]] = []
+    for d in decisions:
+        d = dict(d)
+        if d.get("action") == "human_review":
+            d["reviewer_prompt"] = _reviewer_prompt_for(d, dictionary_by_column)
+            d["needs_file_glance"] = _needs_file_glance(d.get("column", ""), d.get("suggested_action"))
+        out.append(d)
+    return out
 
 
 # --- Sentinel hard-rule table ---------------------------------------------
@@ -305,7 +371,12 @@ class Judge(Agent):
         '{"decisions": [{"file_id": str, "column": str, "phi_category": str|null, '
         '"subject": "participant|staff|specimen|site|study", '
         '"action": "keep|drop|cap_age_90|year_only|zip3_truncate|hash|pseudonymize|scrub_text|human_review", '
-        '"reason": str, "confidence": 0..1, "citation": str}]}. '
+        '"reason": str, "confidence": 0..1, "citation": str, '
+        '"suggested_action": str|null, "suggested_confidence": 0..1|null, "suggested_reason": str|null}]}. '
+        "When action='human_review', also fill suggested_action/suggested_confidence/suggested_reason "
+        "with your best guess if you HAD to decide directly -- a human reviewer uses this as a "
+        "one-click starting point, never as the final decision. Leave all three null when action "
+        "is anything other than human_review.\n"
         "Preserve clinically-needed non-PHI (diagnoses, procedures, vitals, labs)."
     )
 
@@ -338,7 +409,37 @@ class Judge(Agent):
         prompt += "\nRespond with JSON only."
         return await self.call_json(
             prompt, phase="judge.decide", default={"decisions": []},
-            expect_key="decisions", min_items=len(schema.get("columns") or []))
+            expect_key="decisions", min_items=len(schema.get("columns") or []),
+            status_text="Deciding how to handle every flagged column")
+
+    async def resolve_comment(self, column: str, description: str, suggested_action: str | None,
+                              suggested_reason: str | None, comment: str) -> dict[str, Any]:
+        """Re-invoke Judge for ONE column a human flagged with a free-text comment.
+
+        Never sees a dataset row value: only the column header, the dictionary
+        description (if any), Judge's own prior suggestion, and the human's
+        comment -- itself scrubbed of any identifier shapes before it enters
+        this prompt, exactly like dictionary/form text.
+        """
+        from ..anonymizer import scrub_for_prompt
+        scrubbed_comment, _ = scrub_for_prompt(comment)
+        prompt = (
+            f"A human reviewer is resolving one column that was routed to human_review.\n"
+            f"Column: {column}\n"
+            f"Dictionary description: {description or '(none)'}\n"
+            f"Judge's own prior suggestion: {suggested_action or '(none)'} "
+            f"({suggested_reason or 'no reason recorded'})\n"
+            f"Reviewer comment: {scrubbed_comment}\n\n"
+            "Interpret the comment as an instruction for this ONE column and return JSON: "
+            '{"action": "keep|drop|cap_age_90|year_only|zip3_truncate|hash|pseudonymize|scrub_text", '
+            '"reason": str, "confidence": 0..1}. '
+            "Never propose human_review here -- the reviewer is actively resolving this column now. "
+            "If the comment is too vague to map to one action confidently, still return your best "
+            "single guess with a low confidence score rather than refusing."
+        )
+        return await self.call_json(
+            prompt, phase="judge.resolve_comment", default={"action": "human_review", "reason": "", "confidence": 0.0},
+            status_text=f"Reading your comment on '{column}'")
 
 
 class Sentinel(Agent):
@@ -361,14 +462,18 @@ class Sentinel(Agent):
         "Nitpick sparingly and only where it materially reduces PHI risk."
     )
 
-    async def run(self, decisions: list[dict[str, Any]], statute: dict, instrument: dict) -> dict[str, Any]:
+    async def run(self, decisions: list[dict[str, Any]], statute: dict, instrument: dict,
+                  parent_id: str | None = None) -> dict[str, Any]:
         prompt = (
             f"Judge decisions: {decisions}\n\n"
             f"Statute rules: {statute}\n\n"
             f"Instrument fields: {instrument}\n"
             "Respond with JSON only. Remember: only 'blocking' severity triggers another iteration."
         )
-        out = await self.call_json(prompt, phase="sentinel.review", default={"verdict": "approved", "issues": []})
+        out = await self.call_json(prompt, phase="sentinel.review",
+                                   default={"verdict": "approved", "issues": []},
+                                   parent_id=parent_id,
+                                   status_text="Cross-checking Judge's decisions against Statute and Instrument")
         # Deterministic post-processing: if there are no blocking issues,
         # force verdict='approved' regardless of what the LLM wrote. This
         # closes the "Sentinel nitpicks endlessly" pathology observed on
@@ -388,11 +493,22 @@ class Executor(Agent):
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
 
-    async def run(self, files: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> dict[str, Any]:
-        """Apply decisions to each file. Returns {"exports": {file_id: path}}."""
+    async def run(self, files: list[dict[str, Any]], decisions: list[dict[str, Any]],
+                  omit_by_file: dict[str, set[str]] | None = None) -> dict[str, Any]:
+        """Apply decisions to each file. Returns {"exports": {file_id: path}}.
+
+        ``omit_by_file`` (file_id -> deferred column names) is the partial-
+        export channel: those columns are excluded from the written file
+        entirely rather than routed through SEC-004's fail-closed default.
+        A dataset file whose EVERY known column is deferred is skipped
+        entirely -- excluded from ``exports`` -- rather than written as a
+        headerless file, so Publish Guard never has to reason about it and
+        the manifest can record it as fully deferred (see server.py).
+        """
         pending = [(d.get("file_id", ""), d.get("column", "")) for d in decisions if d.get("action") == "human_review"]
         if pending:
             raise ValueError(f"unresolved human_review deferrals cannot be executed: {pending}")
+        omit_by_file = omit_by_file or {}
         await self._log("executor.begin", "info", {"decision_count": len(decisions)})
         exports: dict[str, str] = {}
         by_file: dict[str, list[dict[str, Any]]] = {}
@@ -414,7 +530,14 @@ class Executor(Agent):
                 # verbatim.
                 dst = _redact_metadata_file(src, dst)
             elif f["kind"] == "dataset":
-                apply_column_actions_to_dataset(src, dst, f["subtype"], by_file.get(f["file_id"], []), registry)
+                omit_cols = omit_by_file.get(f["file_id"], set())
+                known_cols = set(f.get("columns") or [])
+                if omit_cols and known_cols and known_cols <= omit_cols:
+                    await self._log("executor.dataset_fully_deferred", "info",
+                                    {"file_id": f["file_id"], "column_count": len(known_cols)})
+                    continue
+                apply_column_actions_to_dataset(src, dst, f["subtype"], by_file.get(f["file_id"], []),
+                                                registry, omit_columns=omit_cols)
             else:
                 dst = EXPORT_DIR / f"{f['file_id']}__{Path(f['original_name']).stem}.redacted.txt"
                 try:
@@ -476,10 +599,11 @@ class Auditor(Agent):
         prompt = (
             f"File summary counts (no row values): {summary_by_file}\n\n"
             f"Files: {file_meta}\n\nExports: {list(exports.keys())}\n"
-            "Verify the mix looks sane. JSON only."
+            "Respond with JSON only."
         )
         return await self.call_json(prompt, phase="auditor.verify",
-                                    default={"verdict": "clean", "issues": [], "metrics": {}, "summary": ""})
+                                    default={"verdict": "clean", "issues": [], "metrics": {}, "summary": ""},
+                                    status_text="Verifying the executor output against decisions")
 
 
 # --- deterministic dataset transformer ------------------------------------
@@ -595,15 +719,23 @@ def _neutralise_formula(value: str) -> str:
 
 
 def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: list[dict[str, Any]],
-                                    registry: "PseudonymRegistry | None" = None) -> None:
+                                    registry: "PseudonymRegistry | None" = None,
+                                    omit_columns: set[str] | None = None) -> None:
     """Apply per-column actions to CSV or XLSX with an optional study-wide pseudonym registry.
 
     SEC-004 fail-closed: any column present in the source but WITHOUT a
     Judge/Sentinel decision is treated as ``drop`` (empty) rather than passed
     through verbatim. Override via env ``PHI_UNMAPPED_COLUMN_ACTION`` to
     ``scrub_text`` if the operator prefers redacted-in-place free-text.
+
+    ``omit_columns`` (deferred human-review columns) are excluded from the
+    output entirely -- never routed through ``_apply_action``, never
+    written. For XLSX this deletes the column before any row is read, so a
+    deferred cell's value is never even loaded into memory, not merely left
+    unwritten.
     """
     import os as _os
+    omit_columns = set(omit_columns or ())
     action_by_col: dict[str, dict[str, Any]] = {d.get("column", ""): d for d in decisions}
     _default_action = _os.environ.get("PHI_UNMAPPED_COLUMN_ACTION", "drop").strip() or "drop"
     if _default_action not in {"drop", "scrub_text"}:
@@ -621,14 +753,16 @@ def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: l
              dst.open("w", encoding="utf-8", newline="") as fout:
             reader = _csv.DictReader(fin, delimiter=delim)
             fieldnames = reader.fieldnames or []
-            writer = _csv.DictWriter(fout, fieldnames=fieldnames, delimiter=delim)
+            surviving = [c for c in fieldnames if c not in omit_columns]
+            writer = _csv.DictWriter(fout, fieldnames=surviving, delimiter=delim)
             writer.writeheader()
             for row in reader:
-                for col in fieldnames:
+                out_row: dict[str, str] = {}
+                for col in surviving:
                     d = _decision_for(col)
                     transformed = _apply_action(row.get(col) or "", d.get("action", "drop"), col, registry)
-                    row[col] = _neutralise_formula(transformed)
-                writer.writerow(row)
+                    out_row[col] = _neutralise_formula(transformed)
+                writer.writerow(out_row)
     elif ext in ("xlsx", "xls"):
         wb = _openpyxl.load_workbook(src)
         ws = wb[wb.sheetnames[0]]
@@ -636,6 +770,14 @@ def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: l
         for r in ws.iter_rows(min_row=1, max_row=1, values_only=True):
             headers = [str(c) if c is not None else "" for c in r]
             break
+        if omit_columns:
+            omit_positions = sorted(
+                (j for j, col in enumerate(headers, start=1) if col in omit_columns),
+                reverse=True,
+            )
+            for pos in omit_positions:
+                ws.delete_cols(pos, 1)
+            headers = [c for c in headers if c not in omit_columns]
         for i in range(2, (ws.max_row or 1) + 1):
             for j, col in enumerate(headers, start=1):
                 d = _decision_for(col)

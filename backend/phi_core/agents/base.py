@@ -15,6 +15,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
 from .llm import LlmConfig, call_llm, call_llm_with_web_search, parse_json
+from ..anonymizer import scrub_for_prompt
 
 if TYPE_CHECKING:                       # runtime import would be circular:
     from .manager import Manager        # manager.py imports Agent from here
@@ -63,6 +64,8 @@ class AgentMessage(BaseModel):
     direction: str        # "in" | "out" | "info"
     payload: dict[str, Any] = Field(default_factory=dict)
     duration_ms: float = 0.0
+    parent_id: str | None = None   # id of the AgentMessage that caused this call
+    status_text: str = ""          # short plain-language narration for tier-1 live status
 
 
 class Agent:
@@ -76,25 +79,33 @@ class Agent:
         llm: LlmConfig,
         db: AsyncIOMotorDatabase,
         emit: Optional[Callable[[AgentMessage], Awaitable[None]]] = None,
-        audit_prompts: bool = False,
         manager: Optional["Manager"] = None,
     ):
         self.session_id = session_id
         self.llm = llm
         self.db = db
         self.emit = emit
-        self.audit_prompts = audit_prompts
         self.call_failures = 0
         self.manager = manager
+        # id of the most recent completed ("out") AgentMessage this agent
+        # logged -- callers read this explicitly to set `parent_id` on a
+        # call they are about to make that was provoked by this one. Never
+        # an ambient/contextvar pointer: concurrent calls (asyncio.gather)
+        # would misattribute parentage under an ambient scheme.
+        self.last_message_id: str | None = None
 
-    async def _log(self, phase: str, direction: str, payload: dict[str, Any], duration_ms: float = 0.0) -> None:
+    async def _log(self, phase: str, direction: str, payload: dict[str, Any], duration_ms: float = 0.0,
+                   *, parent_id: str | None = None, status_text: str = "") -> None:
         msg = AgentMessage(
             session_id=self.session_id, agent=self.NAME, phase=phase,
             direction=direction, payload=payload, duration_ms=duration_ms,
+            parent_id=parent_id, status_text=status_text,
         )
         await self.db.agent_log.insert_one(msg.model_dump())
         if self.emit:
             await self.emit(msg)
+        if direction == "out":
+            self.last_message_id = msg.id
 
     async def call(
         self, user_prompt: str, phase: str, *,
@@ -102,15 +113,18 @@ class Agent:
         validate: Optional[Callable[[str], dict[str, Any] | None]] = None,
         allow_web_search_escalation: bool = True,
         web_search_max_uses: int = 3,
+        parent_id: str | None = None,
+        status_text: str = "",
     ) -> str:
         """LLM call with logging, hard timeout, and -- when self.manager is set --
         Manager-supervised recovery on timeout / exception / empty / invalid /
         off-task replies."""
         base_timeout = PLAIN_TIMEOUT_S if timeout_s is None else timeout_s
-        in_payload: dict[str, Any] = {"prompt_preview": user_prompt[:400]}
-        if self.audit_prompts:
-            in_payload["prompt_full"] = user_prompt
-        await self._log(phase, "in", in_payload)
+        # Full untruncated text always persisted (tier-3 requirement); a
+        # write-time scrub pass is defense-in-depth on top of the scrubbing
+        # each call site already does to its own inputs before this point.
+        in_payload: dict[str, Any] = {"prompt_text": scrub_for_prompt(user_prompt)[0]}
+        await self._log(phase, "in", in_payload, parent_id=parent_id, status_text=status_text)
 
         async def attempt_plain(system_prompt: str, extended: bool) -> str:
             return await asyncio.wait_for(
@@ -131,10 +145,10 @@ class Agent:
             except asyncio.TimeoutError:
                 self.call_failures += 1
                 dur = (time.perf_counter() - t0) * 1000
-                await self._log(phase, "out", {"error": f"llm timeout after {base_timeout:.0f}s"}, dur)
+                await self._log(phase, "out", {"error": f"llm timeout after {base_timeout:.0f}s"}, dur, parent_id=parent_id)
                 return ""
             dur = (time.perf_counter() - t0) * 1000
-            await self._log(phase, "out", {"reply_preview": reply[:400]}, dur)
+            await self._log(phase, "out", {"reply_text": scrub_for_prompt(reply)[0]}, dur, parent_id=parent_id)
             return reply
 
         reply, ok, error_kind = await self.manager.run_supervised(
@@ -145,22 +159,25 @@ class Agent:
         )
         dur = (time.perf_counter() - t0) * 1000
         if ok:
-            await self._log(phase, "out", {"reply_preview": reply[:400]}, dur)
+            await self._log(phase, "out", {"reply_text": scrub_for_prompt(reply)[0]}, dur, parent_id=parent_id)
             return reply
         self.call_failures += 1
-        await self._log(phase, "out", {"error": error_kind}, dur)
+        await self._log(phase, "out", {"error": error_kind}, dur, parent_id=parent_id)
         return ""
 
     async def call_json(self, user_prompt: str, phase: str, default: Any = None, *,
                         timeout_s: float | None = None,
-                        expect_key: str | None = None, min_items: int = 0) -> Any:
+                        expect_key: str | None = None, min_items: int = 0,
+                        parent_id: str | None = None, status_text: str = "") -> Any:
         reply = await self.call(user_prompt, phase, timeout_s=timeout_s,
-                                validate=_json_validator(expect_key, min_items))
+                                validate=_json_validator(expect_key, min_items),
+                                parent_id=parent_id, status_text=status_text)
         return parse_json(reply, default)
 
     async def call_with_web_search(
         self, user_prompt: str, phase: str, max_uses: int = 3,
         *, validate: Optional[Callable[[str], dict[str, Any] | None]] = None,
+        parent_id: str | None = None, status_text: str = "",
     ) -> tuple[str, list[dict[str, Any]]]:
         """LLM call with Claude's provider-hosted web_search tool.
 
@@ -175,13 +192,11 @@ class Agent:
         Mongo persistence.
         """
         in_payload = {
-            "prompt_preview": user_prompt[:400],
+            "prompt_text": scrub_for_prompt(user_prompt)[0],
             "tool": "web_search_20250305",
             "max_uses": max_uses,
         }
-        if self.audit_prompts:
-            in_payload["prompt_full"] = user_prompt
-        await self._log(phase, "in", in_payload)
+        await self._log(phase, "in", in_payload, parent_id=parent_id, status_text=status_text)
         citations_box: list[list[dict[str, Any]]] = [[]]
 
         async def attempt(system_prompt: str, extended: bool) -> str:
@@ -200,7 +215,7 @@ class Agent:
                 self.call_failures += 1
                 dur = (time.perf_counter() - t0) * 1000
                 await self._log(phase, "out",
-                                {"error": "web_search timeout after 180s"}, dur)
+                                {"error": "web_search timeout after 180s"}, dur, parent_id=parent_id)
                 return "", []
             ok, error_kind = True, None
         else:
@@ -210,22 +225,24 @@ class Agent:
         dur = (time.perf_counter() - t0) * 1000
         if ok:
             await self._log(phase, "out", {
-                "reply_preview": reply[:400],
+                "reply_text": scrub_for_prompt(reply)[0],
                 "citations_count": len(citations_box[0]),
                 "citations": citations_box[0][:20],
-            }, dur)
+            }, dur, parent_id=parent_id)
             return reply, citations_box[0]
         self.call_failures += 1
-        await self._log(phase, "out", {"error": error_kind}, dur)
+        await self._log(phase, "out", {"error": error_kind}, dur, parent_id=parent_id)
         return "", []
 
     async def call_json_with_web_search(
         self, user_prompt: str, phase: str,
         default: Any = None, max_uses: int = 3,
         *, expect_key: str | None = None, min_items: int = 0,
+        parent_id: str | None = None, status_text: str = "",
     ) -> tuple[Any, list[dict[str, Any]]]:
         reply, citations = await self.call_with_web_search(
-            user_prompt, phase, max_uses, validate=_json_validator(expect_key, min_items))
+            user_prompt, phase, max_uses, validate=_json_validator(expect_key, min_items),
+            parent_id=parent_id, status_text=status_text)
         return parse_json(reply, default), citations
 
     async def run(self, **kwargs) -> dict[str, Any]:

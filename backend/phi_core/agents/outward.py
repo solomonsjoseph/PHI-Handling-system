@@ -35,6 +35,7 @@ class Scout(Agent):
         reply = await self.call_json(
             "Compile the competitive landscape of PHI detection and de-identification systems. JSON only.",
             phase="scout.compile", default={"systems": [], "summary": ""},
+            status_text="Compiling the competitive landscape",
         )
         await cache_put(self.db, "competitor_landscape", "generic", json.dumps(reply), source="llm")
         return reply
@@ -61,7 +62,8 @@ class LedgerCompare(Agent):
             "Respond with JSON only."
         )
         return await self.call_json(prompt, phase="ledger.compare",
-                                    default={"comparisons": []})
+                                    default={"comparisons": []},
+                                    status_text="Comparing against competitor systems")
 
 
 class LedgerAggregate(Agent):
@@ -86,7 +88,8 @@ class LedgerAggregate(Agent):
         )
         return await self.call_json(prompt, phase="ledger.aggregate",
                                     default={"headline": "", "our_system": {}, "metrics_narrative": "",
-                                             "recommendations": []})
+                                             "recommendations": []},
+                                    status_text="Rolling up benchmark metrics")
 
 
 class Ledger:
@@ -95,10 +98,8 @@ class Ledger:
     the same shape the old monolithic Ledger returned."""
     NAME = "Ledger"
 
-    def __init__(self, session_id: str, llm, db, emit=None, audit_prompts: bool = False,
-                manager=None) -> None:
-        self._common = dict(session_id=session_id, llm=llm, db=db, emit=emit,
-                            audit_prompts=audit_prompts, manager=manager)
+    def __init__(self, session_id, llm, db, emit=None, manager=None) -> None:
+        self._common = dict(session_id=session_id, llm=llm, db=db, emit=emit, manager=manager)
 
     async def run(self, decisions: list[dict[str, Any]], audit: dict[str, Any],
                   scout: dict[str, Any], benchmark_result: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -163,7 +164,8 @@ class HeraldAbstract(Agent):
         return await self.call_json(prompt, phase="herald.abstract",
                                     default={"title": "", "abstract": "",
                                              "methods": {"heading": "Methods", "body": ""},
-                                             "references": []})
+                                             "references": []},
+                                    status_text="Drafting the publication abstract")
 
 
 class HeraldSections(Agent):
@@ -189,7 +191,8 @@ class HeraldSections(Agent):
             "Draft results, discussion, limitations, conclusion. JSON only."
         )
         return await self.call_json(prompt, phase="herald.sections",
-                                    default={"sections": [], "alt_venues": []})
+                                    default={"sections": [], "alt_venues": []},
+                                    status_text="Drafting results, discussion, and limitations")
 
 
 class Herald:
@@ -203,10 +206,8 @@ class Herald:
     the publication bundle is never empty."""
     NAME = "Herald"
 
-    def __init__(self, session_id: str, llm, db, emit=None, audit_prompts: bool = False,
-                manager=None) -> None:
-        self._common = dict(session_id=session_id, llm=llm, db=db, emit=emit,
-                            audit_prompts=audit_prompts, manager=manager)
+    def __init__(self, session_id, llm, db, emit=None, manager=None) -> None:
+        self._common = dict(session_id=session_id, llm=llm, db=db, emit=emit, manager=manager)
 
     async def run(self, ledger: dict[str, Any], audit: dict[str, Any],
                   target_venue: str = "JAMIA Open") -> dict[str, Any]:

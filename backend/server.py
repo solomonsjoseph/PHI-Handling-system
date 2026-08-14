@@ -18,7 +18,7 @@ Endpoints (all under /api unless noted):
   POST /api/sessions/{id}/cancel           -> request pipeline cancellation
   POST /api/sessions/{id}/human-review     -> resolve human_review decisions
   GET  /api/sessions/{id}/agent-trace      -> per-message audit log
-  GET  /api/sessions/{id}/preview          -> row-level review preview
+  GET  /api/sessions/{id}/dataset-file/{file_id} -> raw original dataset file, byte-identical
   GET  /api/sessions/{id}/results          -> consolidated agent outputs
   GET  /api/sessions/{id}/bundle           -> shareable bundle download
   GET  /api/sessions/{id}/export/{file_id} -> download one redacted file
@@ -255,7 +255,7 @@ _progress_subscribers: dict[str, int] = {}
 # Terminal statuses that guarantee the pipeline is done and no more
 # events will arrive on the SSE queue.
 _SETTLED_STATUSES = frozenset({"complete", "failed", "cancelled", "blocked",
-                                "intake_failed", "awaiting_human_review"})
+                                "intake_failed", "awaiting_human_review", "partially_complete"})
 
 # Cap of concurrent SSE subscribers per session. 4 is enough for the
 # operator + a couple of secondary viewers + one connection retry. Beyond
@@ -506,7 +506,7 @@ def _scrub_session_document(doc: dict) -> dict:
     for k in (
         "agent_decisions", "agent_herald", "agent_ledger",
         "agent_scout", "agent_audit", "agent_sentinel_last",
-        "agent_specialists", "agent_statute",
+        "agent_specialists", "agent_statute", "pending_review", "session_review",
     ):
         if k in doc:
             doc[k] = _scrub_nested(doc[k])
@@ -557,7 +557,7 @@ async def session_intake(sid: str, file: UploadFile = File(...), principal: str 
     """
     db = get_db()
     session = await _owned_session(sid, principal)
-    _LIVE_STATUSES = ("classifying", "anonymizing", "awaiting_human_review")
+    _LIVE_STATUSES = ("classifying", "anonymizing", "awaiting_human_review", "partially_complete")
     if session.get("status") in _LIVE_STATUSES:
         raise HTTPException(
             409,
@@ -791,7 +791,7 @@ async def session_bundle(sid: str, publication: bool = False, attestation_pdf: b
     from phi_core.bundle import BundleOptions, build_bundle
     db = get_db()
     session = await _owned_session(sid, principal, {"_id": 0})
-    if session.get("status") != "complete":
+    if session.get("status") not in ("complete", "partially_complete"):
         raise HTTPException(
             403,
             "Publish Guard has not certified this session as clean "
@@ -836,7 +836,7 @@ async def session_export(sid: str, file_id: str, force: bool = False,
     """
     db = get_db()
     session = await _owned_session(sid, principal, {"_id": 0})
-    if session.get("status") != "complete":
+    if session.get("status") not in ("complete", "partially_complete"):
         return JSONResponse(status_code=403, content={
             "error": "publish_guard_not_certified",
             "message": (
@@ -1568,7 +1568,7 @@ async def _purge_settled_sessions_loop():
             db = get_db()
             cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
             cursor = db.sessions.find(
-                {"status": {"$in": ["complete", "failed", "cancelled", "blocked", "intake_failed"]},
+                {"status": {"$in": ["complete", "failed", "cancelled", "blocked", "intake_failed", "partially_complete"]},
                  "updated_at": {"$lt": cutoff}},
                 {"_id": 0, "id": 1, "export_paths": 1},
             )
@@ -1688,7 +1688,9 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
         ev = ProgressEvent(
             phase=f"agent:{msg.agent}:{msg.direction}",
             message=f"{msg.agent} {msg.phase}",
-            payload={"agent": msg.agent, "phase_key": msg.phase, "direction": msg.direction, "duration_ms": msg.duration_ms},
+            payload={"agent": msg.agent, "phase_key": msg.phase, "direction": msg.direction,
+                     "duration_ms": msg.duration_ms, "status_text": msg.status_text,
+                     "parent_id": msg.parent_id, "id": msg.id},
         )
         await _emit(sid, ev, run_id=run_id)
 
@@ -1787,7 +1789,7 @@ async def session_cancel(sid: str, principal: str = Depends(resolve_principal)):
     """
     db = get_db()
     doc = await _owned_session(sid, principal, {"status": 1})
-    if doc.get("status") in ("complete", "failed", "cancelled", "blocked"):
+    if doc.get("status") in ("complete", "failed", "cancelled", "blocked", "partially_complete"):
         return {"status": doc.get("status"), "already_settled": True}
     await db.sessions.update_one(
         _owned_filter(sid, principal),
@@ -1804,96 +1806,237 @@ async def session_cancel(sid: str, principal: str = Depends(resolve_principal)):
 
 
 class HumanReviewSubmit(BaseModel):
-    resolutions: list[dict]   # [{column, file_id, action, reason?, confidence?}]
-    reviewer: str = ""        # required: identity of the reviewer (email / initials / handle)
-    comment: str = ""         # optional narrative for the audit trail
+    # Each resolution: {file_id, column, mode: "approve"|"comment"|"defer", comment?: str}.
+    # `action` is deliberately not client-supplied here -- "approve" always
+    # applies the server's own suggested_action / pending_confirmation.action
+    # for that column, never a value the client could smuggle in unvalidated.
+    resolutions: list[dict]
+    reviewer: str = ""        # unused; identity is the authenticated principal
+    comment: str = ""         # optional submission-level note for the audit trail
     # HHS §164.514(b)(2)(ii) "actual knowledge" attestation. IRB-required
     # procedural step separate from the technical Safe Harbor method.
+    # Required only when this submission resolves (approves/comments) at
+    # least one column -- a submission that only defers makes no
+    # actual-knowledge claim about anything.
     actual_knowledge_ack: bool = False
 
 
 @app.post("/api/sessions/{sid}/human-review")
 async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str = Depends(resolve_principal)):
-    """Operator resolves human_review decisions and resumes the pipeline tail
-    (Executor -> Auditor -> Scout -> Ledger -> Herald).
+    """Operator resolves human_review decisions conversationally and resumes
+    the pipeline tail (Executor -> Auditor -> Scout -> Ledger -> Herald).
 
-    Per GOAL "human review invariant": every human decision must carry
+    Three resolution modes per column:
+      - approve: apply the server's own suggested_action (Judge's original
+        guess, or a comment's interpreted action once confirmed).
+      - comment: free text is interpreted by Judge for that ONE column.
+        High confidence (>=0.60) applies directly; below that the
+        interpretation is held as `pending_confirmation` for the reviewer
+        to confirm (mode="approve") or refine (another mode="comment") on
+        a later submission.
+      - defer: excluded from this export round, tracked in
+        `pending_review`, resolvable on a later submission.
+
+    Per GOAL "human review invariant": every human decision carries
     reviewer id + comment + timestamp. The reviewer identity is the
-    authenticated principal, not an operator-supplied field, so a
-    completed review can always be attributed to a real credential.
-    Per HHS §164.514(b)(2)(ii): the reviewer must attest actual-knowledge
-    that the remaining information alone or in combination cannot identify
-    an individual. `actual_knowledge_ack` must be true.
+    authenticated principal, never an operator-supplied field.
+    Per HHS §164.514(b)(2)(ii): resolving any column requires an
+    actual-knowledge attestation, scoped to the columns resolved this
+    round -- never to columns this same submission defers.
     """
-    from phi_core.agents.reasoning import Executor, Auditor, validate_decisions
+    from phi_core.agents.reasoning import (
+        ACTION_TYPES, Auditor, Executor, Judge, annotate_pending_review,
+        apply_sentinel_hard_rules, validate_decisions, verify_keep_decisions,
+    )
     from phi_core.agents.outward import Scout, Ledger, Herald
+    from phi_core.paths import cleanup_session_unpacked
+    from phi_core.security import scrub_persisted_text
 
     reviewer = principal
-    if not body.actual_knowledge_ack:
+    ts = datetime.now(timezone.utc).isoformat()
+    resolvable_actions = ACTION_TYPES - {"human_review"}
+
+    by_key: dict[tuple[str, str], dict] = {}
+    for r in body.resolutions:
+        mode = r.get("mode")
+        if mode not in ("approve", "comment", "defer"):
+            raise HTTPException(422, f"resolution mode for column {r.get('column')!r} must be "
+                                     f"approve|comment|defer, got {mode!r}")
+        if mode == "comment" and not (r.get("comment") or "").strip():
+            raise HTTPException(422, f"comment mode requires non-empty comment for column {r.get('column')!r}")
+        by_key[(r.get("file_id", ""), r.get("column", ""))] = r
+    any_resolution = any(r.get("mode") != "defer" for r in by_key.values())
+    if any_resolution and not body.actual_knowledge_ack:
         raise HTTPException(
             400,
-            "actual-knowledge attestation is required (HHS 45 CFR 164.514(b)(2)(ii)): "
-            "reviewer must confirm no actual knowledge that the remaining information "
-            "alone or in combination could identify an individual.",
+            "actual-knowledge attestation is required (HHS 45 CFR 164.514(b)(2)(ii)) for any "
+            "approved or comment-resolved column this round: reviewer must confirm no actual "
+            "knowledge that the remaining information alone or in combination could identify "
+            "an individual. A submission that only defers does not require this attestation.",
         )
 
     db = get_db()
     session = await _owned_session(sid, principal)
     prior_run_id = session.get("_pipeline_run_id")
     review_filter = _owned_filter(sid, principal)
-    review_filter["status"] = "awaiting_human_review"
+    review_filter["status"] = {"$in": ["awaiting_human_review", "partially_complete"]}
     if prior_run_id is None:
         review_filter["_pipeline_run_id"] = {"$exists": False}
     else:
         review_filter["_pipeline_run_id"] = prior_run_id
 
-
-
     decisions = list(session.get("agent_decisions", []))
-    ts = datetime.now(timezone.utc).isoformat()
-    by_key = {(r.get("file_id",""), r.get("column","")): r for r in body.resolutions}
-    per_decision_reviewed = False
-    for d in decisions:
-        k = (d.get("file_id",""), d.get("column",""))
-        if d.get("action") == "human_review" and k in by_key:
-            r = by_key[k]
-            d["action"] = r.get("action", "human_review")
-            d["reason"] = f"human decision by {reviewer}: " + (r.get("reason") or body.comment or "")
-            d["confidence"] = 1.0
-            d["reviewer"] = reviewer
-            d["reviewer_comment"] = body.comment
-            d["reviewed_at"] = ts
-            d["actual_knowledge_ack"] = True  # HHS 164.514(b)(2)(ii) — gated at endpoint
-            per_decision_reviewed = True
+    dictionary_by_column = {c.get("name"): c.get("description", "")
+                            for c in (session.get("agent_specialists") or {}).get("lexicon", {}).get("columns", [])
+                            if c.get("name")}
 
-    resolved_keys = set(by_key.keys())
-    resolved_now = [d for d in decisions
-                    if (d.get("file_id", ""), d.get("column", "")) in resolved_keys]
+    # Resolve every mode="comment" row concurrently -- one Judge call per
+    # column, never a dataset cell value, always the scrubbed comment text.
+    comment_targets = [d for d in decisions
+                       if d.get("action") == "human_review"
+                       and by_key.get((d.get("file_id", ""), d.get("column", "")), {}).get("mode") == "comment"]
+    comment_results: dict[tuple[str, str], dict] = {}
+    if comment_targets:
+        cfg = await _current_llm_cfg()
+        judge = Judge(session_id=sid, llm=cfg, db=db, emit=None)
+        async def _resolve(d: dict) -> tuple[tuple[str, str], dict]:
+            key = (d.get("file_id", ""), d.get("column", ""))
+            reply = await judge.resolve_comment(
+                column=d.get("column", ""),
+                description=dictionary_by_column.get(d.get("column", ""), ""),
+                suggested_action=d.get("suggested_action"),
+                suggested_reason=d.get("suggested_reason"),
+                comment=by_key[key].get("comment") or "",
+            )
+            return key, reply
+        for key, reply in await asyncio.gather(*[_resolve(d) for d in comment_targets]):
+            comment_results[key] = reply
+
+    for d in decisions:
+        key = (d.get("file_id", ""), d.get("column", ""))
+        if d.get("action") != "human_review" or key not in by_key:
+            continue
+        r = by_key[key]
+        mode = r.get("mode")
+        row_comment = scrub_persisted_text((r.get("comment") or "").strip()) or None
+        if mode == "defer":
+            # Explicitly left as action="human_review" -- joins pending_review
+            # below. Never silently defaulted to drop/keep.
+            if row_comment:
+                d["reviewer_comment"] = row_comment
+                d["reviewer"] = reviewer
+                d["reviewed_at"] = ts
+            continue
+        if mode == "comment":
+            reply = comment_results.get(key) or {}
+            action = str(reply.get("action") or "").strip().lower()
+            reason = str(reply.get("reason") or "").strip()
+            try:
+                confidence = max(0.0, min(1.0, float(reply.get("confidence") or 0.0)))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if action not in resolvable_actions:
+                action = None
+            if action is None or confidence < 0.60:
+                # Held for confirmation -- stays on human_review, not resolved this round.
+                d["pending_confirmation"] = {"action": action, "reason": reason, "confidence": confidence}
+                d["reviewer_comment"] = row_comment
+                d["reviewer"] = reviewer
+                d["reviewed_at"] = ts
+                continue
+            d["action"] = action
+            d["reason"] = f"human comment (interpreted) by {reviewer}: {reason}"
+            d["confidence"] = confidence
+            d["reviewer_comment"] = row_comment
+            d["reviewer"] = reviewer
+            d["reviewed_at"] = ts
+            d["provenance"] = "human_comment_inferred"
+            d.pop("pending_confirmation", None)
+        elif mode == "approve":
+            pending = d.get("pending_confirmation")
+            if pending:
+                if not pending.get("action"):
+                    raise HTTPException(422, f"nothing to confirm for column {d.get('column')!r}: "
+                                             "the interpreted action was itself invalid; comment again")
+                action, reason, confidence = pending["action"], pending.get("reason") or "confirmed by reviewer", \
+                    pending.get("confidence") or 0.6
+                provenance = "human_comment_inferred"
+            else:
+                action = d.get("suggested_action")
+                if not action:
+                    raise HTTPException(422, f"cannot approve column {d.get('column')!r}: "
+                                             "no suggested action is available; use a comment instead")
+                action, reason, confidence = action, d.get("suggested_reason") or "approved by reviewer", 1.0
+                provenance = "human_explicit_action"
+            d["action"] = action
+            d["reason"] = f"human decision by {reviewer}: {reason}"
+            d["confidence"] = confidence
+            d["reviewer_comment"] = row_comment
+            d["reviewer"] = reviewer
+            d["reviewed_at"] = ts
+            d["provenance"] = provenance
+            d.pop("pending_confirmation", None)
+
+    resolved_now = [d for d in decisions if (d.get("file_id", ""), d.get("column", "")) in by_key
+                    and d.get("action") != "human_review"]
     _, resolution_rejections = validate_decisions(resolved_now)
     bad_action_cols = sorted({r["column"] for r in resolution_rejections if r.get("field") == "action"})
     if bad_action_cols:
         raise HTTPException(422, f"invalid resolution action for column(s): {', '.join(bad_action_cols)}")
-    # GOAL human review invariant: capture reviewer + comment + timestamp on
-    # the session even when the operator accepted Sentinel-flagged decisions
-    # globally without changing any individual action.
-    session_review = {
+
+    # session_human_review never previously re-ran the guardrails every
+    # other decision path passes through. Close that gap here: the hard-rule
+    # table can still force-correct an obvious direct identifier regardless
+    # of what the human chose, and keep-verification re-checks any decision
+    # left as "keep" against the real dataset values.
+    decisions, hard_rule_overrides = apply_sentinel_hard_rules(decisions)
+    for ov in hard_rule_overrides:
+        for d in decisions:
+            if d.get("file_id") == ov.get("file_id") and d.get("column") == ov.get("column"):
+                if d.get("provenance") in ("human_explicit_action", "human_comment_inferred"):
+                    d["human_overridden_action"] = ov.get("from")
+                    d["provenance"] = "human_overridden_by_hard_rule"
+                break
+    dataset_paths = {f["file_id"]: Path(f["stored_path"]) for f in session.get("files", []) if f.get("kind") == "dataset"}
+    decisions, keep_demotions = verify_keep_decisions(decisions, dataset_paths, jurisdiction=session.get("jurisdiction", "us"))
+    decisions = annotate_pending_review(decisions, dictionary_by_column)
+
+    session_review_entry = {
         "reviewer": reviewer,
-        "comment": body.comment,
+        "comment": scrub_persisted_text(body.comment) if body.comment else "",
         "reviewed_at": ts,
-        "changed_decisions": per_decision_reviewed,
-        "actual_knowledge_ack": True,  # gated at endpoint entry above
+        "resolved_columns": [{"file_id": k[0], "column": k[1]} for k, r in by_key.items() if r.get("mode") != "defer"],
+        "deferred_columns": [{"file_id": k[0], "column": k[1]} for k, r in by_key.items() if r.get("mode") == "defer"],
+        "actual_knowledge_ack": bool(any_resolution and body.actual_knowledge_ack),
         "actual_knowledge_cite": "45 CFR 164.514(b)(2)(ii)",
     }
+    session_review_history = list(session.get("session_review") or [])
+    if session_review_history and isinstance(session_review_history[0], dict) and "reviewer" not in session_review_history[0]:
+        session_review_history = []  # defensive: unexpected legacy shape, do not propagate
+    elif isinstance(session.get("session_review"), dict):
+        session_review_history = [session["session_review"]]  # migrate the old single-dict shape
+    session_review_history.append(session_review_entry)
 
-    # Any remaining unresolved?
-    unresolved = [d for d in decisions if d.get("action") == "human_review"]
-    if unresolved:
+    pending_review = [{"file_id": d.get("file_id"), "column": d.get("column")}
+                      for d in decisions if d.get("action") == "human_review"]
+    ever_resolved = any(d.get("action") != "human_review" for d in decisions)
+
+    if pending_review and not ever_resolved:
+        # Nothing has ever been resolved on this session -- persist the
+        # deferrals/pending-confirmations and wait; running the pipeline
+        # tail on a fully-empty decision set would produce nothing.
         update = await db.sessions.update_one(
             review_filter,
-            {"$set": {"agent_decisions": decisions}},
+            {"$set": {
+                "agent_decisions": decisions,
+                "pending_review": pending_review,
+                "session_review": session_review_history,
+                "keep_demotions": keep_demotions,
+                "human_review_required": True,
+            }},
         )
         if getattr(update, "matched_count", 0):
-            return {"status": "still_awaiting", "unresolved": len(unresolved)}
+            return {"status": "still_awaiting", "unresolved": len(pending_review)}
         current = await db.sessions.find_one(_owned_filter(sid, principal), {"status": 1})
         if not current:
             raise HTTPException(404, "session not found")
@@ -1916,7 +2059,9 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         {"$set": {
             "status": "anonymizing",
             "agent_decisions": decisions,
-            "human_review_required": False,
+            "pending_review": pending_review,
+            "keep_demotions": keep_demotions,
+            "human_review_required": bool(pending_review),
             "_pipeline_run_id": resume_run_id,
         }},
     )
@@ -1931,29 +2076,42 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         )
     run_filter = {"id": sid, "_pipeline_run_id": resume_run_id}
 
-
     async def emit_msg(msg: AgentMessage) -> None:
         ev = ProgressEvent(
             phase=f"agent:{msg.agent}:{msg.direction}",
             message=f"{msg.agent} {msg.phase}",
-            payload={"agent": msg.agent, "phase_key": msg.phase, "direction": msg.direction},
+            payload={"agent": msg.agent, "phase_key": msg.phase, "direction": msg.direction,
+                     "duration_ms": msg.duration_ms, "status_text": msg.status_text,
+                     "parent_id": msg.parent_id, "id": msg.id},
         )
         await _emit(sid, ev, run_id=resume_run_id)
 
     async def worker():
         async def _run_tail():
             common = dict(session_id=sid, llm=cfg, db=db, emit=emit_msg)
-            scrubbed_decisions = [scrub_decision(d) for d in decisions]
-            exec_out = await Executor(**common).run(files=files, decisions=scrubbed_decisions)
-            # Publish Guard on the fresh exports before we mark complete.
+            resolved_decisions = [d for d in decisions if d.get("action") != "human_review"]
+            scrubbed_decisions = [scrub_decision(d) for d in resolved_decisions]
+            omit_by_file: dict[str, set[str]] = {}
+            for entry in pending_review:
+                omit_by_file.setdefault(entry["file_id"], set()).add(entry["column"])
+            exec_out = await Executor(**common).run(files=files, decisions=scrubbed_decisions, omit_by_file=omit_by_file)
             from phi_core.publish_guard import scan_all_exports as _scan_all_exports
-            guard_report = _scan_all_exports(exec_out["exports"], decisions=scrubbed_decisions, jurisdiction=session.get("jurisdiction", "us")).to_dict()
+            if exec_out["exports"]:
+                guard_report = _scan_all_exports(exec_out["exports"], decisions=scrubbed_decisions,
+                                                 jurisdiction=session.get("jurisdiction", "us")).to_dict()
+            else:
+                # Nothing resolved into an exportable file yet this round
+                # (e.g. every column of the only dataset is still deferred).
+                # This is a legitimate empty-so-far state, not a leak --
+                # Publish Guard's own "no exports to scan" reading would
+                # otherwise report `blocked`, which is wrong here.
+                guard_report = {"status": "clean", "results": [], "scanned": 0, "blocked": 0}
             if guard_report["status"] != "clean":
                 await db.sessions.update_one(run_filter, {"$set": {
                     "status": "blocked",
                     "guard_report": guard_report,
                     "export_paths": exec_out["exports"],
-                    "agent_decisions": scrubbed_decisions,
+                    "agent_decisions": decisions,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }})
                 cleanup_session_unpacked(sid)
@@ -1964,6 +2122,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             ledger = await Ledger(**common).run(decisions=scrubbed_decisions, audit=audit, scout=scout, benchmark_result=None)
             herald = await Herald(**common).run(ledger=ledger, audit=audit,
                                                 target_venue=session.get("target_venue") or "JAMIA Open")
+            final_status = "partially_complete" if pending_review else "complete"
             completion_update = {
                 "$set": {
                     "agent_audit": audit,
@@ -1971,15 +2130,25 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                     "agent_herald": herald,
                     "agent_scout": scout,
                     "guard_report": guard_report,
-                    "session_review": session_review,
+                    "session_review": session_review_history,
+                    "pending_review": pending_review,
                     "export_paths": exec_out["exports"],
-                    "status": "complete",
+                    "status": final_status,
+                    "human_review_required": bool(pending_review),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
             }
             await db.sessions.update_one(run_filter, completion_update)
-            cleanup_session_unpacked(sid)
-            await _emit(sid, ProgressEvent(phase="complete", message="pipeline complete after human review", percent=100.0), run_id=resume_run_id)
+            if final_status == "complete":
+                # Only a fully-resolved session releases the original files --
+                # a partially_complete session keeps them so a later
+                # resolution round can resume Executor against them.
+                cleanup_session_unpacked(sid)
+            await _emit(sid, ProgressEvent(
+                phase=final_status,
+                message="pipeline complete after human review" if final_status == "complete"
+                        else f"partial export ready; {len(pending_review)} column(s) still pending review",
+                percent=100.0), run_id=resume_run_id)
 
         try:
             await asyncio.wait_for(_run_tail(), timeout=900)
@@ -2001,38 +2170,83 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
 
 
 @app.get("/api/sessions/{sid}/agent-trace")
-async def session_agent_trace(sid: str, limit: int = 200, principal: str = Depends(resolve_principal)):
-    """Return the audit log of every agent message on this session."""
+async def session_agent_trace(sid: str, limit: int = 200, after: str | None = None,
+                              principal: str = Depends(resolve_principal)):
+    """Return one page of the audit log of every agent message on this session.
+
+    Cursor-paginated: ``after`` is the ``ts`` (ISO-8601, as returned in a
+    prior page's last message) of the newest message the caller already
+    has; this page returns strictly newer messages only. Tier 3's full,
+    uncapped per-message text (see ``AgentMessage``) makes a naive
+    full-history refetch on every SSE tick expensive at scale; the frontend
+    appends pages incrementally instead (see ``SessionDetail.jsx``).
+    """
     from phi_core.security import scrub_nested as _scrub_nested
     db = get_db()
     await _owned_session(sid, principal, {"id": 1})
-    cursor = db.agent_log.find({"session_id": sid}, {"_id": 0}).sort("ts", 1).limit(limit)
+    query: dict[str, Any] = {"session_id": sid}
+    if after:
+        try:
+            query["ts"] = {"$gt": datetime.fromisoformat(after)}
+        except ValueError:
+            raise HTTPException(400, f"invalid cursor: {after!r} is not an ISO-8601 timestamp")
+    limit = max(1, min(int(limit), 2000))
+    cursor = db.agent_log.find(query, {"_id": 0}).sort("ts", 1).limit(limit)
     msgs: list[dict] = []
     async for m in cursor:
         ts = m.get("ts")
         if hasattr(ts, "isoformat"):
             m["ts"] = ts.isoformat()
-        # SEC-006: agent-trace payloads are nested dicts (`prompt_preview`,
-        # `reply_preview`) that echo dictionary/form PHI. Scrub every
+        # SEC-006: agent-trace payloads are nested dicts (`prompt_text`,
+        # `reply_text`) that echo dictionary/form/comment PHI. Scrub every
         # string leaf recursively rather than only top-level string fields.
         msgs.append(_scrub_nested(m))
-    return {"messages": msgs}
+    return {
+        "messages": msgs,
+        "next_cursor": msgs[-1]["ts"] if msgs else after,
+        "has_more": len(msgs) == limit,
+    }
 
 
-@app.get("/api/sessions/{sid}/preview")
-async def session_preview(sid: str, samples: int = 5, principal: str = Depends(resolve_principal)):
-    """Row-level review preview (Phase D).
+@app.get("/api/sessions/{sid}/dataset-file/{file_id}")
+async def session_dataset_file(sid: str, file_id: str, principal: str = Depends(resolve_principal)):
+    """Stream one dataset file's original uploaded bytes, byte-identical.
 
-    Returns up to ``samples`` (original-masked, redacted) cell pairs per
-    dataset file so the reviewer can spot-check that the pipeline's
-    per-column decisions are actually applied correctly. Original values
-    are partial-masked; only the redacted column carries the string that
-    will be written to the export.
+    Replaces the old masked row-level preview: rather than backend code
+    reading and partial-masking cell values on a reviewer's behalf, the
+    reviewer downloads the untouched original file and opens it in their
+    own tool. This code path does zero CSV/XLSX parsing -- it never reads
+    a single cell value -- and never opens the file itself; it only
+    resolves ``file_id`` against this session's own ``files`` list (never
+    a client-supplied path) and streams the bytes already on disk, exactly
+    like the existing export endpoint's own file_id lookup pattern.
+
+    Available at any session status the caller owns: a reviewer may want
+    to glance at the source file before, during, or after resolving the
+    flagged columns. Each download is recorded (principal + timestamp) so
+    the "I have opened and reviewed the original file" attestation has a
+    server-side fact behind it.
     """
-    from phi_core.preview import build_preview, MAX_SAMPLES_PER_FILE
-    doc = await _owned_session(sid, principal, {"_id": 0})
-    n = max(1, min(int(samples or MAX_SAMPLES_PER_FILE), 20))
-    return build_preview(doc, max_samples_per_file=n)
+    db = get_db()
+    session = await _owned_session(sid, principal, {"_id": 0})
+    matches = [f for f in (session.get("files") or []) if f.get("file_id") == file_id]
+    if not matches:
+        raise HTTPException(404, "no such file on this session")
+    f = matches[0]
+    if f.get("kind") != "dataset":
+        raise HTTPException(404, "only dataset files are served through this endpoint")
+    path = Path(f["stored_path"])
+    if not path.exists():
+        raise HTTPException(404, "original file is no longer available (session settled and cleaned up)")
+    await db.sessions.update_one(
+        _owned_filter(sid, principal),
+        {"$push": {"dataset_file_downloads": {
+            "file_id": file_id,
+            "downloaded_by": principal,
+            "downloaded_at": datetime.now(timezone.utc).isoformat(),
+        }}},
+    )
+    return FileResponse(path, filename=f.get("original_name") or path.name)
 
 
 @app.get("/api/sessions/{sid}/results")
@@ -2050,6 +2264,7 @@ async def session_results(sid: str, principal: str = Depends(resolve_principal))
         "scout": scrubbed.get("agent_scout"),
         "guard": scrubbed.get("guard_report"),
         "session_review": scrubbed.get("session_review"),
+        "pending_review": scrubbed.get("pending_review", []),
         "human_review_required": scrubbed.get("human_review_required", False),
     }
 

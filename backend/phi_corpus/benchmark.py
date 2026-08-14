@@ -129,7 +129,7 @@ def _context_hygiene(
     violations: list[dict[str, str]] = []
     for msg in agent_log or []:
         payload = msg.get("payload") or {}
-        text = payload.get("prompt_full") or payload.get("prompt_preview")
+        text = payload.get("prompt_text")
         if not text:
             continue
         prompts_audited += 1

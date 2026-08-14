@@ -79,6 +79,7 @@ class Statute(Agent):
                     "sources": [],
                 },
                 max_uses=3,
+                status_text=f"Researching {jurisdiction} data-protection law online",
             )
             # Merge tool citations if the LLM did not include them itself.
             if not reply.get("sources") and citations:
@@ -205,6 +206,7 @@ class Praxis(Agent):
                     "reference_paper": "", "sources": [],
                 },
                 max_uses=3,
+                status_text=f"Researching best-practice technique for {category} online",
             )
             if not reply.get("sources") and citations:
                 reply["sources"] = citations

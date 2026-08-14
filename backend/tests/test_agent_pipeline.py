@@ -213,8 +213,15 @@ def test_human_review_and_export(api, session_id):
     session = api.get(f"{BASE_URL}/api/sessions/{session_id}", timeout=TIMEOUT).json()
 
     if res.get("human_review_required") or session.get("status") == "awaiting_human_review":
+        # Round 1: comment-resolve every pending column (Judge interprets the
+        # free text into a concrete action; the old client-supplied `action`
+        # field no longer exists on the wire).
         pending = [d for d in res["decisions"] if d.get("action") == "human_review"]
-        resolutions = [{"file_id": d["file_id"], "column": d["column"], "action": "drop"} for d in pending]
+        resolutions = [
+            {"file_id": d["file_id"], "column": d["column"], "mode": "comment",
+             "comment": "this is a direct identifier with no research value; drop it"}
+            for d in pending
+        ]
         r = api.post(f"{BASE_URL}/api/sessions/{session_id}/human-review",
                      json={
                          "resolutions": resolutions,
@@ -223,6 +230,26 @@ def test_human_review_and_export(api, session_id):
                          "actual_knowledge_ack": True,
                      }, timeout=TIMEOUT)
         assert r.status_code == 200, r.text
+        state = _poll_until(api, session_id, {"complete", "partially_complete", "awaiting_human_review", "failed"})
+
+        # Round 2: a low-confidence interpretation from round 1 lands in
+        # `pending_confirmation` rather than applying outright -- confirm it.
+        if state.get("status") in ("awaiting_human_review", "partially_complete"):
+            res2 = api.get(f"{BASE_URL}/api/sessions/{session_id}/results", timeout=TIMEOUT).json()
+            still_pending = [d for d in res2["decisions"] if d.get("action") == "human_review"]
+            confirmable = [d for d in still_pending if d.get("pending_confirmation")]
+            if confirmable:
+                r = api.post(f"{BASE_URL}/api/sessions/{session_id}/human-review",
+                             json={
+                                 "resolutions": [
+                                     {"file_id": d["file_id"], "column": d["column"], "mode": "approve"}
+                                     for d in confirmable
+                                 ],
+                                 "reviewer": "test-suite@phi-console.local",
+                                 "comment": "confirming round-1 interpretation",
+                                 "actual_knowledge_ack": True,
+                             }, timeout=TIMEOUT)
+                assert r.status_code == 200, r.text
         _poll_until(api, session_id, {"complete", "failed"})
 
     final = api.get(f"{BASE_URL}/api/sessions/{session_id}", timeout=TIMEOUT).json()

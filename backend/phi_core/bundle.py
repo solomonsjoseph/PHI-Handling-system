@@ -157,6 +157,11 @@ def _render_coverage_counts_bar() -> bytes:
 def _attestation_payload(session: dict[str, Any], file_hashes: dict[str, str]) -> dict[str, Any]:
     """Machine-readable attestation. All values plain JSON."""
     review = session.get("session_review") or {}
+    # session_review is append-only (list of per-submission entries) as of
+    # the conversational human-review redesign; a bare dict is the legacy
+    # single-submission shape from before that change.
+    if isinstance(review, list):
+        review = review[-1] if review else {}
     guard = session.get("guard_report") or {}
     # Reviewer trail: prefer session_review; fall back to the most recent
     # per-decision reviewer for older sessions run before the session-level
@@ -177,6 +182,30 @@ def _attestation_payload(session: dict[str, Any], file_hashes: dict[str, str]) -
                 break
     if reviewer_comment:
         reviewer_comment = _scrub_text(reviewer_comment)
+    # Columns still awaiting review are never silently omitted from the
+    # export -- they are named explicitly here so a partial bundle's
+    # attestation cannot be mistaken for a complete run's once the
+    # human-readable manifest/README is separated from it.
+    withheld_columns = [
+        {"file_id": entry.get("file_id"), "column": entry.get("column")}
+        for entry in (session.get("pending_review") or [])
+        if isinstance(entry, dict)
+    ]
+    is_partial = bool(withheld_columns) or session.get("status") == "partially_complete"
+    if is_partial:
+        actual_knowledge_statement = (
+            "The reviewer has attested that they have no actual knowledge that the "
+            "information resolved in this submission -- excluding the columns listed "
+            "under `withheld_columns`, which remain pending human review and are not "
+            "covered by this statement -- alone or in combination with other reasonably "
+            "available information could be used to identify an individual."
+        )
+    else:
+        actual_knowledge_statement = (
+            "The reviewer has attested that they have no actual knowledge that "
+            "the remaining information alone or in combination with other reasonably "
+            "available information could be used to identify an individual."
+        )
     return {
         "attestation_version": BUNDLE_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -194,11 +223,9 @@ def _attestation_payload(session: dict[str, Any], file_hashes: dict[str, str]) -
         "reviewed_at": reviewed_at,
         "actual_knowledge_ack": actual_knowledge_ack,
         "actual_knowledge_cite": "45 CFR 164.514(b)(2)(ii)",
-        "actual_knowledge_statement": (
-            "The reviewer has attested that they have no actual knowledge that "
-            "the remaining information alone or in combination with other reasonably "
-            "available information could be used to identify an individual."
-        ),
+        "actual_knowledge_statement": actual_knowledge_statement,
+        "is_partial": is_partial,
+        "withheld_columns": withheld_columns,
         "files": file_hashes,
         "system": {
             "name": "PHI Console",
@@ -233,6 +260,16 @@ def _attestation_text(att: dict[str, Any]) -> str:
         "",
         f"Actual-knowledge attestation ({att.get('actual_knowledge_cite','45 CFR 164.514(b)(2)(ii)')}): {ak_ack}",
         f"  Statement: {att.get('actual_knowledge_statement','')}",
+    ]
+    if att.get("is_partial"):
+        lines += [
+            "",
+            "PARTIAL BUNDLE — the following column(s) are still pending human review",
+            "and are withheld entirely from this export (not defaulted, not blanked):",
+        ]
+        for w in att.get("withheld_columns") or []:
+            lines.append(f"  {w.get('file_id')} :: {w.get('column')}")
+    lines += [
         "",
         "Files included in this bundle (SHA-256):",
     ]

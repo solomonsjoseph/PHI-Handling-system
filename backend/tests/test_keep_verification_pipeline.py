@@ -60,7 +60,7 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
     class FakeJudge:
         def __init__(self, **_kwargs):
             self.call_failures = 0
-
+            self.last_message_id = None
         async def run(self, **_kwargs):
             return {"decisions": [{
                 "file_id": "dataset.csv",

@@ -438,7 +438,7 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
     class FakeJudge:
         def __init__(self, **_kwargs):
             self.call_failures = 0
-
+            self.last_message_id = None
         async def run(self, **_kwargs):
             return {"decisions": [{"file_id": "f", "column": "c",
                                    "action": "keep", "reason": "r",
@@ -482,10 +482,8 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
 def test_ledger_and_herald_accept_manager_kwarg():
     from phi_core.agents.outward import Herald, Ledger
 
-    ledger = Ledger(session_id="s", llm=None, db=None, emit=None,
-                    audit_prompts=False, manager=None)
-    herald = Herald(session_id="s", llm=None, db=None, emit=None,
-                    audit_prompts=False, manager=None)
+    ledger = Ledger(session_id="s", llm=None, db=None, emit=None, manager=None)
+    herald = Herald(session_id="s", llm=None, db=None, emit=None, manager=None)
 
     assert ledger._common["manager"] is None
     assert herald._common["manager"] is None

@@ -37,6 +37,7 @@ from .reasoning import (
     Executor,
     Judge,
     Sentinel,
+    annotate_pending_review,
     apply_sentinel_hard_rules,
     validate_decisions,
     verify_keep_decisions,
@@ -140,9 +141,7 @@ async def run_pipeline(
         phase_plan=["specialists", "statute", "praxis", "judge_iter", "sentinel_iter",
                     "executor", "publish_guard", "auditor_scout", "ledger", "herald"],
     )
-    common = dict(session_id=sid, llm=llm_cfg, db=db, emit=emit,
-                  audit_prompts=bool(session.get("corpus_ground_truth")),
-                  manager=manager)
+    common = dict(session_id=sid, llm=llm_cfg, db=db, emit=emit, manager=manager)
 
     # 1+2+2b. Specialists, Statute, and Praxis kicked off IN PARALLEL.
     #
@@ -227,7 +226,8 @@ async def run_pipeline(
                            {"iteration": iteration, "overrides": overrides})
         await _check_cancel(db, sid, on_phase)
         await on_phase(f"sentinel_iter_{iteration}", {"iteration": iteration, "decision_count": len(decisions)})
-        s = await sentinel.run(decisions=decisions, statute=statute, instrument=instrument)
+        s = await sentinel.run(decisions=decisions, statute=statute, instrument=instrument,
+                               parent_id=judge.last_message_id)
         blocking = _blocking_issues(s)
         # Every advisory issue stays in the audit trail even after early
         # approval (Sir Q1: 'nitpicks logged where required').
@@ -278,6 +278,9 @@ async def run_pipeline(
     )
     if keep_demotions:
         await on_phase("keep_verification", {"demotions": keep_demotions})
+    dictionary_by_column = {c.get("name"): c.get("description", "")
+                            for c in lexicon.get("columns", []) if c.get("name")}
+    approved_decisions = annotate_pending_review(approved_decisions, dictionary_by_column)
     if isinstance(s, dict):
         s = dict(s)
         if isinstance(s.get("issues"), list):

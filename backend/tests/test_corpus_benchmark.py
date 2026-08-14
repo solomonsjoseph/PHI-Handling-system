@@ -9,6 +9,7 @@ import pytest
 from phi_corpus.planters import plant
 from phi_corpus.benchmark import (
     ACTION_SPECS, build_report, to_json, to_markdown, per_column_csv, render_figures,
+    _context_hygiene,
 )
 
 
@@ -181,3 +182,30 @@ async def test_server_benchmark_route_remaps_pipeline_file_id(monkeypatch):
     for c in report["columns"]:
         assert c["decided_by"] != "unmapped_default", c
         assert c["schema_category"] is not None
+
+
+def test_context_hygiene_reads_renamed_prompt_text_field():
+    """The agent-trace redesign renamed `prompt_preview`/`prompt_full` to a
+    single always-full `prompt_text`. The context-hygiene metric MUST read
+    that field, not the old ones -- silently reading nothing here would
+    report a false-clean 0-audited result instead of catching a real leak."""
+    ground_truth = {"planted": [{"leak_literals": ["James Smith", "415-555-1234"]}]}
+    agent_log = [
+        {"agent": "Judge", "phase": "judge.decide",
+         "payload": {"prompt_text": "Column headers: name, phone. No row values."}},
+        {"agent": "Judge", "phase": "judge.decide",
+         "payload": {"prompt_text": "Leaked cell value: James Smith called from 415-555-1234."}},
+        {"agent": "Sentinel", "phase": "sentinel.review", "payload": {"error": "timeout"}},
+    ]
+    hygiene = _context_hygiene(agent_log, ground_truth, prompt_scrub_counts={"lexicon": 3})
+    assert hygiene["prompts_audited"] == 2, "must count every message carrying prompt_text"
+    assert hygiene["literals_found_in_prompts"] == 2, "must still detect literals via prompt_text"
+    assert hygiene["clean"] is False
+    assert hygiene["identifiers_removed_before_prompt"] == 3
+
+    # The old field names must no longer be read at all -- a message that
+    # only carries the legacy shape is silently skipped, not miscounted.
+    legacy_only_log = [{"agent": "Judge", "phase": "judge.decide",
+                        "payload": {"prompt_preview": "James Smith", "prompt_full": "James Smith"}}]
+    legacy_hygiene = _context_hygiene(legacy_only_log, ground_truth, prompt_scrub_counts={})
+    assert legacy_hygiene["prompts_audited"] == 0

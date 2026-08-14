@@ -39,12 +39,15 @@ def test_human_review_requires_reviewer():
 
 def test_human_review_requires_actual_knowledge_ack():
     """HHS §164.514(b)(2)(ii): endpoint must reject when reviewer omits or
-    denies actual-knowledge attestation, even with a valid reviewer id."""
+    denies actual-knowledge attestation, when the submission resolves at
+    least one column. A pure-defer submission with nothing resolved makes
+    no actual-knowledge claim and is exempt (see next test's sibling
+    behavior) -- this test exercises the resolving case."""
     fake_sid = uuid.uuid4().hex
     r = requests.post(
         f"{BASE_URL}/api/sessions/{fake_sid}/human-review",
         json={
-            "resolutions": [],
+            "resolutions": [{"file_id": "f1", "column": "c1", "mode": "approve"}],
             "reviewer": "jane.doe@lab.edu",
             "comment": "test",
             "actual_knowledge_ack": False,
@@ -53,6 +56,25 @@ def test_human_review_requires_actual_knowledge_ack():
     )
     assert r.status_code == 400, r.text
     assert "actual" in r.text.lower() and "knowledge" in r.text.lower()
+
+
+def test_human_review_pure_defer_exempt_from_actual_knowledge_ack():
+    """A submission that only defers (nothing approved or comment-resolved)
+    makes no actual-knowledge claim about anything, so the gate does not
+    apply: the request proceeds past it straight to the session lookup,
+    which 404s on a fake id rather than 400ing on the attestation gate."""
+    fake_sid = uuid.uuid4().hex
+    r = requests.post(
+        f"{BASE_URL}/api/sessions/{fake_sid}/human-review",
+        json={
+            "resolutions": [{"file_id": "f1", "column": "c1", "mode": "defer"}],
+            "reviewer": "jane.doe@lab.edu",
+            "comment": "not ready to decide yet",
+            "actual_knowledge_ack": False,
+        },
+        timeout=10,
+    )
+    assert r.status_code == 404, r.text
 
 
 def test_human_review_captures_session_review_when_provided():

@@ -94,9 +94,9 @@ async def test_unknown_client_resolution_action_rejected_with_422_leaves_session
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
     body = srv.HumanReviewSubmit(
-        resolutions=[{"file_id": "f1", "column": "notes", "action": "passthrough"}],
+        resolutions=[{"file_id": "f1", "column": "notes", "mode": "passthrough"}],
         reviewer="ignored-not-trusted-for-identity",
-        comment="attempted an action outside the executable vocabulary",
+        comment="attempted a mode outside the executable vocabulary",
         actual_knowledge_ack=True,
     )
 

@@ -155,7 +155,7 @@ _NAME_RE = re.compile(r"\b(?:Mr|Mrs|Ms|Dr)\.?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b
 
 # SEC-003 (audit iteration_18) broadening -- these patterns catch the
 # identifier shapes the LLM most commonly echoes back into `reason` /
-# `prompt_preview` / `reply_preview` from PDF forms or dictionaries.
+# `prompt_text` / `reply_text` from PDF forms or dictionaries.
 # Every pattern is scoped tight enough to avoid nuking clinical values
 # (heart rate, glucose, etc.).
 _DATE_RE = re.compile(
@@ -224,7 +224,7 @@ def scrub_nested(value: Any, _key: str = "") -> Any:
 
     Used by read endpoints that return LLM-authored blobs where PHI may
     hide inside arbitrarily nested payloads (e.g. agent-trace messages
-    where ``payload`` is a dict of ``prompt_preview``/``reply_preview``
+    where ``payload`` is a dict of ``prompt_text``/``reply_text``
     strings).
 
     An allow-list of ``_key`` names is kept UN-scrubbed because those fields
@@ -253,7 +253,7 @@ def scrub_nested(value: Any, _key: str = "") -> Any:
 def scrub_decision(decision: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of ``decision`` with any free-text fields scrubbed."""
     out = dict(decision)
-    for k in ("reason", "citation", "notes", "evidence"):
+    for k in ("reason", "citation", "notes", "evidence", "reviewer_comment"):
         v = out.get(k)
         if isinstance(v, str):
             out[k] = scrub_persisted_text(v)

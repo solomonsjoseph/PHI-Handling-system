@@ -51,7 +51,8 @@ def main() -> int:
         pending = [d for d in r.get("decisions", []) if d.get("action") == "human_review"]
         submission = {
             "resolutions": [
-                {"file_id": d["file_id"], "column": d["column"], "action": "drop"}
+                {"file_id": d["file_id"], "column": d["column"], "mode": "comment",
+                 "comment": "this column is a direct identifier with no research value; drop it"}
                 for d in pending
             ],
             "reviewer": "corpus-harness@lab.edu",

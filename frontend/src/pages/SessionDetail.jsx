@@ -5,11 +5,10 @@ import axios from 'axios';
 import { API, getSession, streamUrl } from '../lib/api';
 import { Btn, Panel, Tag } from '../components/ui';
 
-const ACTION_OPTIONS = ['keep','drop','cap_age_90','year_only','zip3_truncate','hash','pseudonymize','scrub_text'];
-
 function StatusChip({ status }) {
   const map = {
     complete: 'accept',
+    partially_complete: 'signal',
     awaiting_human_review: 'signal',
     classifying: 'signal',
     anonymizing: 'signal',
@@ -141,6 +140,11 @@ function _agentMetaFor(agent) {
 // agent decided what it did, without cluttering the default view.
 function _groupTrace(rawMessages) {
   const groups = new Map();
+  const order = [];
+  // Tier 3: message id -> the group key that message ended up in, so a
+  // child group's `parent_id` (another message's id) can be resolved to
+  // the PARENT GROUP once every message has been walked at least once.
+  const idToKey = new Map();
   for (const m of rawMessages || []) {
     // Sir Q "praxis trace overwhelm" -- collapse the 17 per-category Praxis
     // rows into a single "Praxis · N methods" group. Every category still
@@ -151,7 +155,8 @@ function _groupTrace(rawMessages) {
     } else {
       key = `${m.agent}::${m.phase}`;
     }
-    const existing = groups.get(key) || { agent: m.agent, phase: m.phase, ts: m.ts };
+    if (!groups.has(key)) order.push(key);
+    const existing = groups.get(key) || { key, agent: m.agent, phase: m.phase, ts: m.ts, parentMsgId: null };
     if (m.agent === 'Praxis') {
       // Override phase label with a per-group counter.
       existing.phase = 'praxis.methods';
@@ -160,13 +165,16 @@ function _groupTrace(rawMessages) {
       const catMatch = (m.phase || '').match(/:([A-Z]|[a-z_]+)$/);
       if (catMatch) existing.praxis_categories.push(catMatch[1]);
     }
+    if (m.id) idToKey.set(m.id, key);
+    if (m.parent_id && !existing.parentMsgId) existing.parentMsgId = m.parent_id;
     if (m.direction === 'in') {
-      existing.prompt_preview = m.payload?.prompt_preview || existing.prompt_preview;
+      existing.prompt_text = m.payload?.prompt_text || existing.prompt_text;
       existing.tool = m.payload?.tool || existing.tool;
+      existing.status_text = m.status_text || existing.status_text;
       existing.started = m.ts;
       existing.state = existing.state || 'running';
     } else if (m.direction === 'out') {
-      existing.reply_preview = m.payload?.reply_preview || existing.reply_preview;
+      existing.reply_text = m.payload?.reply_text || existing.reply_text;
       existing.error = m.payload?.error;
       // For collapsed Praxis, sum durations so "N s of LLM time" reflects total.
       if (m.agent === 'Praxis') {
@@ -182,13 +190,33 @@ function _groupTrace(rawMessages) {
     }
     groups.set(key, existing);
   }
-  return Array.from(groups.values()).sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+  const list = order.map(k => groups.get(k));
+  for (const g of list) {
+    if (g.parentMsgId) {
+      const parentKey = idToKey.get(g.parentMsgId);
+      // A parent id pointing outside this fetched page, or at itself,
+      // renders at the top level rather than being dropped or mis-nested.
+      g.parentGroupKey = parentKey && parentKey !== g.key ? parentKey : null;
+    } else {
+      g.parentGroupKey = null;
+    }
+  }
+  return list.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
 }
 
 function AgentTracePanel({ sid, trace, status, cancelRequested, advisory }) {
-  const [openIdx, setOpenIdx] = useState(null);
+  const [openKeys, setOpenKeys] = useState(() => new Set());
   const grouped = _groupTrace(trace);
-  const running = status && !['complete', 'awaiting_human_review', 'failed', 'cancelled', 'intake_failed'].includes(status);
+  const byKey = new Map(grouped.map(g => [g.key, g]));
+  const topLevel = grouped.filter(g => !g.parentGroupKey || !byKey.has(g.parentGroupKey));
+  const childrenByParent = new Map();
+  for (const g of grouped) {
+    if (g.parentGroupKey && byKey.has(g.parentGroupKey)) {
+      if (!childrenByParent.has(g.parentGroupKey)) childrenByParent.set(g.parentGroupKey, []);
+      childrenByParent.get(g.parentGroupKey).push(g);
+    }
+  }
+  const running = status && !['complete', 'awaiting_human_review', 'partially_complete', 'failed', 'cancelled', 'intake_failed'].includes(status);
   const totalMs = grouped.reduce((s, g) => s + (g.duration_ms || 0), 0);
 
   // Sir Q "Trace Meta Deep-Link": on mount, if the URL hash points at a
@@ -200,9 +228,9 @@ function AgentTracePanel({ sid, trace, status, cancelRequested, advisory }) {
     const m = hash.match(/^#trace-([A-Za-z]+)$/);
     if (!m) return;
     const wanted = m[1].toLowerCase();
-    const idx = grouped.findIndex(g => (g.agent || '').toLowerCase() === wanted);
-    if (idx >= 0) {
-      setOpenIdx(idx);
+    const target = grouped.find(g => (g.agent || '').toLowerCase() === wanted);
+    if (target) {
+      setOpenKeys(prev => new Set(prev).add(target.key));
       // Small toast so the operator knows why the page auto-scrolled and
       // which agent the shared link is citing (Sir Q "Deep-Link Anchor
       // Toast: linked from IRB reviewer").
@@ -231,6 +259,126 @@ function AgentTracePanel({ sid, trace, status, cancelRequested, advisory }) {
     }
   };
 
+  const toggle = (key) => setOpenKeys(prev => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+
+  const renderRow = (g, depth) => (
+    <div key={g.key} className={depth ? 'py-3 border-l-2 border-rule' : 'py-3'}
+         style={depth ? { marginLeft: `${depth * 20}px`, paddingLeft: '12px' } : undefined}
+         id={`trace-${g.agent}`} data-testid={`trace-row-${g.key}`}>
+      <button
+        className="w-full text-left flex items-center gap-4 hover:bg-paper-2 px-2 -mx-2 py-1 transition-colors"
+        onClick={() => toggle(g.key)}
+        data-testid={`trace-row-toggle-${g.key}`}
+      >
+        <div className="w-24 shrink-0">
+          <TraceStateBadge state={g.state} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-display text-ink text-[14px]">
+            <span className="text-oxblood">{g.agent}</span>
+            <span className="text-ink-muted mx-2">·</span>
+            <span className="font-mono text-[12px] text-ink-2">{g.phase}</span>
+            {g.praxis_count && (
+              <span className="ml-2 font-mono text-[11px] text-ink-muted">
+                {g.praxis_count} method{g.praxis_count === 1 ? '' : 's'}
+              </span>
+            )}
+          </div>
+          {g.status_text && (
+            <div className="text-[11px] text-ink-muted mt-0.5">{g.status_text}</div>
+          )}
+          {g.error && (
+            <div className="font-mono text-[11px] text-oxblood mt-0.5">{g.error}</div>
+          )}
+        </div>
+        <div className="text-right shrink-0">
+          <div className="font-mono text-[12px] text-ink">
+            {g.duration_ms ? `${(g.duration_ms / 1000).toFixed(1)} s` : (g.state === 'running' ? '…' : '')}
+          </div>
+          {g.tool && <div className="font-mono text-[10px] text-ink-muted">{g.tool}</div>}
+        </div>
+      </button>
+      {openKeys.has(g.key) && (
+        <div className="mt-3 pl-24 space-y-3" data-testid={`trace-row-details-${g.key}`}>
+          {(() => {
+            const meta = _agentMetaFor(g.agent);
+            if (!meta) return null;
+            return (
+              <div className="border-l-2 border-oxblood pl-3" data-testid={`trace-row-meta-${g.key}`}>
+                <div className="flex items-baseline justify-between gap-3">
+                  <div className="kicker text-oxblood">{g.agent} · {meta.role}</div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); copyDeepLink(g.agent); }}
+                    className="font-mono text-[10px] text-ink-muted hover:text-oxblood transition-colors"
+                    data-testid={`trace-row-copylink-${g.key}`}
+                    title={`Copy deep-link to ${g.agent}`}
+                  >
+                    # copy link
+                  </button>
+                </div>
+                <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-3 text-[12px] text-ink-2 leading-relaxed">
+                  <div>
+                    <div className="kicker text-ink-muted">What it does</div>
+                    <div className="mt-1">{meta.what}</div>
+                  </div>
+                  <div>
+                    <div className="kicker text-ink-muted">Why it does it</div>
+                    <div className="mt-1">{meta.why}</div>
+                  </div>
+                  <div>
+                    <div className="kicker text-ink-muted">How it does it</div>
+                    <div className="mt-1">{meta.how}</div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+          {g.praxis_categories && g.praxis_categories.length > 0 && (
+            <div>
+              <div className="kicker text-ink-muted">HIPAA categories consulted</div>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {g.praxis_categories.map((c, ci) => (
+                  <span key={ci} className="font-mono text-[10px] px-2 py-0.5 bg-paper-2 border border-rule">
+                    {c}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {g.prompt_text && (
+            <div>
+              <div className="kicker text-ink-muted">Prompt (full, uncapped)</div>
+              <pre className="mt-1 text-[11px] text-ink-2 whitespace-pre-wrap font-mono bg-paper-2 p-3 rounded border border-rule">
+                {g.prompt_text}
+              </pre>
+            </div>
+          )}
+          {g.reply_text && (
+            <div>
+              <div className="kicker text-ink-muted">Reply (full, uncapped)</div>
+              <pre className="mt-1 text-[11px] text-ink-2 whitespace-pre-wrap font-mono bg-paper-2 p-3 rounded border border-rule">
+                {g.reply_text}
+              </pre>
+            </div>
+          )}
+          {g.info && Object.keys(g.info).length > 0 && (
+            <div>
+              <div className="kicker text-ink-muted">Info</div>
+              <pre className="mt-1 text-[11px] text-ink-2 whitespace-pre-wrap font-mono bg-paper-2 p-3 rounded border border-rule">
+                {JSON.stringify(g.info, null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+      {(childrenByParent.get(g.key) || []).map(child => renderRow(child, depth + 1))}
+    </div>
+  );
+
   return (
     <div className="mt-10 rule-bottom pb-10" data-testid="agent-trace-panel">
       <div className="flex items-baseline justify-between">
@@ -255,113 +403,7 @@ function AgentTracePanel({ sid, trace, status, cancelRequested, advisory }) {
       )}
 
       <div className="mt-6 divide-y divide-rule">
-        {grouped.map((g, i) => (
-          <div key={i} className="py-3" id={`trace-${g.agent}`} data-testid={`trace-row-${i}`}>
-            <button
-              className="w-full text-left flex items-center gap-4 hover:bg-paper-2 px-2 -mx-2 py-1 transition-colors"
-              onClick={() => setOpenIdx(openIdx === i ? null : i)}
-              data-testid={`trace-row-toggle-${i}`}
-            >
-              <div className="w-24 shrink-0">
-                <TraceStateBadge state={g.state} />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="font-display text-ink text-[14px]">
-                  <span className="text-oxblood">{g.agent}</span>
-                  <span className="text-ink-muted mx-2">·</span>
-                  <span className="font-mono text-[12px] text-ink-2">{g.phase}</span>
-                  {g.praxis_count && (
-                    <span className="ml-2 font-mono text-[11px] text-ink-muted">
-                      {g.praxis_count} method{g.praxis_count === 1 ? '' : 's'}
-                    </span>
-                  )}
-                </div>
-                {g.error && (
-                  <div className="font-mono text-[11px] text-oxblood mt-0.5">{g.error}</div>
-                )}
-              </div>
-              <div className="text-right shrink-0">
-                <div className="font-mono text-[12px] text-ink">
-                  {g.duration_ms ? `${(g.duration_ms / 1000).toFixed(1)} s` : (g.state === 'running' ? '…' : '')}
-                </div>
-                {g.tool && <div className="font-mono text-[10px] text-ink-muted">{g.tool}</div>}
-              </div>
-            </button>
-            {openIdx === i && (
-              <div className="mt-3 pl-24 space-y-3" data-testid={`trace-row-details-${i}`}>
-                {(() => {
-                  const meta = _agentMetaFor(g.agent);
-                  if (!meta) return null;
-                  return (
-                    <div className="border-l-2 border-oxblood pl-3" data-testid={`trace-row-meta-${i}`}>
-                      <div className="flex items-baseline justify-between gap-3">
-                        <div className="kicker text-oxblood">{g.agent} · {meta.role}</div>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); copyDeepLink(g.agent); }}
-                          className="font-mono text-[10px] text-ink-muted hover:text-oxblood transition-colors"
-                          data-testid={`trace-row-copylink-${i}`}
-                          title={`Copy deep-link to ${g.agent}`}
-                        >
-                          # copy link
-                        </button>
-                      </div>
-                      <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-3 text-[12px] text-ink-2 leading-relaxed">
-                        <div>
-                          <div className="kicker text-ink-muted">What it does</div>
-                          <div className="mt-1">{meta.what}</div>
-                        </div>
-                        <div>
-                          <div className="kicker text-ink-muted">Why it does it</div>
-                          <div className="mt-1">{meta.why}</div>
-                        </div>
-                        <div>
-                          <div className="kicker text-ink-muted">How it does it</div>
-                          <div className="mt-1">{meta.how}</div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })()}
-                {g.praxis_categories && g.praxis_categories.length > 0 && (
-                  <div>
-                    <div className="kicker text-ink-muted">HIPAA categories consulted</div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {g.praxis_categories.map((c, ci) => (
-                        <span key={ci} className="font-mono text-[10px] px-2 py-0.5 bg-paper-2 border border-rule">
-                          {c}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {g.prompt_preview && (
-                  <div>
-                    <div className="kicker text-ink-muted">Prompt preview</div>
-                    <pre className="mt-1 text-[11px] text-ink-2 whitespace-pre-wrap font-mono bg-paper-2 p-3 rounded border border-rule">
-                      {g.prompt_preview}
-                    </pre>
-                  </div>
-                )}
-                {g.reply_preview && (
-                  <div>
-                    <div className="kicker text-ink-muted">Reply preview</div>
-                    <pre className="mt-1 text-[11px] text-ink-2 whitespace-pre-wrap font-mono bg-paper-2 p-3 rounded border border-rule">
-                      {g.reply_preview}
-                    </pre>
-                  </div>
-                )}
-                {g.info && Object.keys(g.info).length > 0 && (
-                  <div>
-                    <div className="kicker text-ink-muted">Info</div>
-                    <pre className="mt-1 text-[11px] text-ink-2 whitespace-pre-wrap font-mono bg-paper-2 p-3 rounded border border-rule">
-                      {JSON.stringify(g.info, null, 2)}
-                    </pre>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        ))}
+        {topLevel.map(g => renderRow(g, 0))}
       </div>
 
       {advisory && advisory.length > 0 && (
@@ -395,6 +437,43 @@ function TraceStateBadge({ state }) {
   );
 }
 
+// ---- Tier 1: live one-line narration ------------------------------------
+//
+// A single, always-visible, continuously-updating strip of plain-language
+// status lines ("Reading the dictionary file enrollment.csv", "Judge is
+// deciding how to handle every flagged column", ...), sourced from each
+// call's `status_text` field. Never gated behind a click, and never
+// cleared once the run finishes -- it becomes a readable scrollback of
+// what happened, distinct from the detailed (tier 2/3) trace below it.
+function LiveNarrationStrip({ trace }) {
+  const bottomRef = useRef(null);
+  const lines = (trace || [])
+    .filter(m => m.direction === 'in' && m.status_text)
+    .sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ block: 'end' });
+  }, [lines.length]);
+
+  if (lines.length === 0) return null;
+
+  return (
+    <div className="mt-6 border border-rule bg-paper-2/50 px-4 py-3" data-testid="live-narration-strip">
+      <div className="kicker mb-2">What's happening</div>
+      <div className="max-h-40 overflow-y-auto space-y-1 step-in" data-testid="live-narration-lines">
+        {lines.map((m, i) => (
+          <div key={m.id || i} className="text-[12px] text-ink-2 leading-5" data-testid={`narration-line-${i}`}>
+            <span className="font-mono text-oxblood">{m.agent}</span>
+            <span className="text-ink-muted mx-1.5">·</span>
+            {m.status_text}
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+    </div>
+  );
+}
+
 // ---- Phased progress bar ----------------------------------------------
 //
 // Sir Q "show the user a progress bar going through each phase and what
@@ -419,7 +498,7 @@ const _PHASES = [
 ];
 
 function _phaseIndexFromEvents(events, status) {
-  if (status === 'complete') return _PHASES.length - 1;
+  if (status === 'complete' || status === 'partially_complete') return _PHASES.length - 1;
   if (status === 'cancelled' || status === 'failed') return -1;
   // Walk events newest-first, match the phase prefix.
   for (let i = (events || []).length - 1; i >= 0; i--) {
@@ -551,6 +630,7 @@ export default function SessionDetail() {
   const [session, setSession] = useState(null);
   const [results, setResults] = useState(null);
   const [trace, setTrace] = useState([]);
+  // { [`${file_id}|${column}`]: { mode: 'approve'|'comment'|'defer', comment: string } }
   const [resolutions, setResolutions] = useState({});
   const [reviewer, setReviewer] = useState(() => {
     try { return window.localStorage.getItem('phi_reviewer_id') || ''; }
@@ -563,32 +643,45 @@ export default function SessionDetail() {
   });
   const [reviewComment, setReviewComment] = useState('');
   const [actualKnowledgeAck, setActualKnowledgeAck] = useState(false);
-  const [spotCheckAck, setSpotCheckAck] = useState(false);
-  const [preview, setPreview] = useState(null);
+  const [fileReviewAck, setFileReviewAck] = useState(false);
   const [corpusReport, setCorpusReport] = useState(null);
   const [benchmarkReport, setBenchmarkReport] = useState(null);
   const [devOpen, setDevOpen] = useState(false);
+  const [traceOpen, setTraceOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notFound, setNotFound] = useState(false);
   const esRef = useRef(null);
+  const traceCursorRef = useRef(null);
+
+  // Tier 3: cursor-paginated, appended incrementally rather than a full
+  // refetch on every SSE tick -- the trace now carries full, uncapped
+  // prompt/reply text, so a full-history refetch per message would grow
+  // unbounded over a long run.
+  const fetchTracePage = async () => {
+    const params = new URLSearchParams({ limit: '500' });
+    if (traceCursorRef.current) params.set('after', traceCursorRef.current);
+    try {
+      const { data } = await axios.get(`${API}/sessions/${sid}/agent-trace?${params.toString()}`);
+      const page = data.messages || [];
+      if (page.length > 0) {
+        traceCursorRef.current = data.next_cursor || traceCursorRef.current;
+        setTrace(prev => [...prev, ...page]);
+      }
+    } catch (err) {
+      console.warn('agent-trace fetch failed:', err);
+    }
+  };
 
   const refresh = async () => {
-    const [s, r, t] = await Promise.all([
+    const [s, r] = await Promise.all([
       getSession(sid).catch(() => null),
       axios.get(`${API}/sessions/${sid}/results`).then(r => r.data).catch(() => null),
-      axios.get(`${API}/sessions/${sid}/agent-trace?limit=500`).then(r => r.data.messages).catch(() => []),
     ]);
     if (!s) { setNotFound(true); return; }
     setNotFound(false);
     setSession(s);
     setResults(r);
-    setTrace(t || []);
-    // Fetch row-level preview only for awaiting_human_review sessions
-    if (s.status === 'awaiting_human_review') {
-      axios.get(`${API}/sessions/${sid}/preview?samples=5`)
-        .then(pr => setPreview(pr.data))
-        .catch(() => setPreview(null));
-    }
+    await fetchTracePage();
     // Corpus session: fetch the verifier report once the pipeline is done
     // so the IRB reviewer can see 0-PHI-leak / 100 %-accuracy inline.
     // `corpus_summary` is present on any corpus-mode session (ground truth
@@ -604,6 +697,8 @@ export default function SessionDetail() {
   };
 
   useEffect(() => {
+    traceCursorRef.current = null;
+    setTrace([]);
     refresh();
     const es = new EventSource(streamUrl(sid));
     es.onmessage = () => refresh();
@@ -617,15 +712,20 @@ export default function SessionDetail() {
 
   const status = session?.status;
   const isComplete = status === 'complete';
-  const isPending = !isComplete && !['awaiting_human_review', 'failed', 'cancelled', 'intake_failed'].includes(status);
-  const awaiting = status === 'awaiting_human_review';
+  const isPartiallyComplete = status === 'partially_complete';
+  const isPending = !isComplete && !isPartiallyComplete &&
+    !['awaiting_human_review', 'failed', 'cancelled', 'intake_failed'].includes(status);
+  // A reviewer may need to act whenever the session first pauses for review
+  // OR whenever a partial round leaves columns still pending.
+  const reviewNeeded = status === 'awaiting_human_review' || isPartiallyComplete;
   const guard = results?.guard || session?.guard_report;
   const decisions = results?.decisions || [];
   const humanRows = decisions.filter(d => d.action === 'human_review');
-  // Row-level preview is only required when there ARE dataset samples to spot-check.
-  const previewHasSamples = !!(preview && (preview.files || []).some(f => (f.samples || []).length > 0));
-  const spotCheckRequired = previewHasSamples;
-  const spotCheckSatisfied = !spotCheckRequired || spotCheckAck;
+  const datasetFiles = (session?.files || []).filter(f => f.kind === 'dataset');
+  // The reviewer must have opened at least one dataset file directly before
+  // submitting -- required only when there's a file to open at all.
+  const fileReviewRequired = datasetFiles.length > 0;
+  const fileReviewSatisfied = !fileReviewRequired || fileReviewAck;
 
   const downloadBundle = async () => {
     setBusy(true);
@@ -649,19 +749,31 @@ export default function SessionDetail() {
     } finally { setBusy(false); }
   };
 
+  const downloadDatasetFile = (fileId) => {
+    const url = `${API}/sessions/${sid}/dataset-file/${fileId}`;
+    const a = document.createElement('a');
+    a.href = url; a.target = '_blank'; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove();
+  };
+
   const submitReview = async () => {
     if (!reviewer.trim()) { toast.error('Reviewer id is required'); return; }
-    if (!spotCheckSatisfied) {
-      toast.error('You must review the row-level sample before submitting');
+    const unresolved = humanRows.filter(d => !resolutions[`${d.file_id}|${d.column}`]?.mode);
+    if (unresolved.length > 0) {
+      toast.error(`Choose approve, comment, or defer for every flagged column (${unresolved.length} left)`);
       return;
     }
-    if (!actualKnowledgeAck) {
+    const anyResolution = Object.values(resolutions).some(r => r.mode !== 'defer');
+    if (anyResolution && !fileReviewSatisfied) {
+      toast.error('You must download and review the original dataset file before submitting');
+      return;
+    }
+    if (anyResolution && !actualKnowledgeAck) {
       toast.error('You must acknowledge the actual-knowledge attestation (45 CFR 164.514(b)(2)(ii)) before submitting');
       return;
     }
-    const items = Object.entries(resolutions).map(([key, action]) => {
+    const items = Object.entries(resolutions).map(([key, r]) => {
       const [file_id, ...rest] = key.split('|');
-      return { file_id, column: rest.join('|'), action };
+      return { file_id, column: rest.join('|'), mode: r.mode, comment: r.comment || '' };
     });
     try { window.localStorage.setItem('phi_reviewer_id', reviewer.trim()); }
     catch (err) { console.warn('phi_reviewer_id write failed:', err); }
@@ -669,11 +781,11 @@ export default function SessionDetail() {
     try {
       const r = await axios.post(`${API}/sessions/${sid}/human-review`, {
         resolutions: items, reviewer: reviewer.trim(), comment: reviewComment,
-        actual_knowledge_ack: true,
+        actual_knowledge_ack: anyResolution,
       });
       toast.success(`Review submitted (${r.data.status})`);
       setResolutions({}); setReviewComment('');
-      setActualKnowledgeAck(false); setSpotCheckAck(false);
+      setActualKnowledgeAck(false); setFileReviewAck(false);
       await refresh();
     } catch (e) {
       toast.error(`review failed: ${e?.response?.data?.detail || e.message}`);
@@ -702,7 +814,8 @@ export default function SessionDetail() {
         <div className="mt-2 flex items-baseline gap-4 flex-wrap">
           <h1 className="font-display text-display-lg text-ink">
             {isComplete ? 'Handled.'
-              : awaiting ? 'Awaiting your review.'
+              : isPartiallyComplete ? 'Partially handled — some columns still pending.'
+              : reviewNeeded ? 'Awaiting your review.'
               : status === 'cancelled' ? 'Run cancelled.'
               : isPending ? 'Working on it.'
               : 'Something went wrong.'}
@@ -711,12 +824,14 @@ export default function SessionDetail() {
         </div>
         <div className="mt-3 text-[13px] text-ink-muted font-mono">session {sid}</div>
 
-        {isComplete && (
+        {(isComplete || isPartiallyComplete) && (
           <div className="mt-10 flex items-center gap-4">
             <Btn variant="primary" size="lg" onClick={downloadBundle} disabled={busy || guard?.status === 'blocked'} testId="btn-download-bundle">
-              {guard?.status === 'blocked' ? 'Bundle blocked' : `Download ${wantPub ? 'publication bundle' : 'safe-to-share bundle'} ↓`}
+              {guard?.status === 'blocked' ? 'Bundle blocked'
+                : isPartiallyComplete ? `Download partial bundle (${humanRows.length} column(s) withheld) ↓`
+                : `Download ${wantPub ? 'publication bundle' : 'safe-to-share bundle'} ↓`}
             </Btn>
-            <Btn variant="ghost" onClick={() => navigate('/')} testId="btn-new-run">Start another run</Btn>
+            {isComplete && <Btn variant="ghost" onClick={() => navigate('/')} testId="btn-new-run">Start another run</Btn>}
           </div>
         )}
         {isPending && (
@@ -752,14 +867,34 @@ export default function SessionDetail() {
         iterationCap={session?.iteration_cap}
       />
 
-      {/* Live agent trace — always shown so operators see the pipeline moving. */}
-      <AgentTracePanel
-        sid={sid}
-        trace={trace}
-        status={status}
-        cancelRequested={session?.cancel_requested}
-        advisory={session?.advisory_issues || []}
-      />
+      {/* Tier 1 — always-visible live narration, persists as history. */}
+      <LiveNarrationStrip trace={trace} />
+
+      {/* Tier 2 — full trace, collapsed by default; tier 3 (per-call detail,
+          uncapped text, parent/child tree) lives inside once expanded. */}
+      <div className="mt-6" data-testid="agent-trace-toggle-wrap">
+        <button
+          onClick={() => setTraceOpen(o => !o)}
+          className="kicker text-ink-2 hover:text-oxblood"
+          data-testid="btn-toggle-agent-trace"
+        >
+          {traceOpen ? '— hide full agent trace' : '+ show full agent trace'}
+        </button>
+        <div
+          className="grid transition-[grid-template-rows] duration-700 [transition-timing-function:cubic-bezier(0.2,0.7,0.2,1)]"
+          style={{ gridTemplateRows: traceOpen ? '1fr' : '0fr' }}
+        >
+          <div className="overflow-hidden">
+            <AgentTracePanel
+              sid={sid}
+              trace={trace}
+              status={status}
+              cancelRequested={session?.cancel_requested}
+              advisory={session?.advisory_issues || []}
+            />
+          </div>
+        </div>
+      </div>
 
       {/* Guard */}
       {guard && (
@@ -954,9 +1089,17 @@ export default function SessionDetail() {
           </div>
         </Panel>
       )}
-      {awaiting && (
+      {reviewNeeded && (
         <Panel title="Human review" cite="You are the reviewer of record; decisions carry your id + timestamp"
                testId="human-review-panel">
+          {isPartiallyComplete && (
+            <div className="mb-6 border-l-2 border-signal pl-4 py-2 bg-paper-2/50" data-testid="partially-complete-banner">
+              <div className="text-[12px] text-ink-2">
+                A partial bundle is ready above. <span className="font-mono">{humanRows.length}</span> column(s) below are
+                still withheld from every export pending your decision — never defaulted, never blanked.
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-6 mb-6">
             <div>
               <div className="kicker">Reviewer identity <span className="text-oxblood">(required)</span></div>
@@ -967,109 +1110,168 @@ export default function SessionDetail() {
             <div>
               <div className="kicker">Comment</div>
               <input data-testid="reviewer-comment" value={reviewComment} onChange={e => setReviewComment(e.target.value)}
-                     placeholder="acceptance rationale"
+                     placeholder="general note for this submission"
                      className="mt-2 w-full h-10 bg-transparent border-b border-ink text-ink focus:border-oxblood"/>
             </div>
           </div>
 
-          {/* Row-level spot-check strip (Phase D) */}
-          {preview && (preview.files || []).length > 0 && (
-            <div className="rule-top pt-5 mb-6" data-testid="spot-check-panel">
-              <div className="kicker mb-3">Row-level spot-check <span className="text-oxblood">(required)</span></div>
+          {/* Original file access: the system never opens or reads these on
+              the reviewer's behalf -- only column headers ever reach a model. */}
+          {datasetFiles.length > 0 && (
+            <div className="rule-top pt-5 mb-6" data-testid="dataset-file-review-panel">
+              <div className="kicker mb-3">Original dataset file(s) <span className="text-oxblood">(required)</span></div>
               <div className="text-[12px] text-ink-muted mb-3">
-                Sample cells from each dataset. Originals are partial-masked so this panel itself carries no PHI.
+                Download the original file(s) and open them in your own tool to judge the flagged columns below.
               </div>
-              <div className="space-y-4">
-                {preview.files.map((f, fi) => (
-                  <div key={f.file_id || fi} className="data-cell" data-testid={`spot-check-file-${fi}`}>
-                    <div className="font-mono text-[12px] text-ink-2 mb-2">{f.file_name}</div>
-                    <div className="grid grid-cols-3 gap-2 text-[11px] font-mono">
-                      <div className="text-ink-muted uppercase tracking-wider">column · action</div>
-                      <div className="text-ink-muted uppercase tracking-wider">original (masked)</div>
-                      <div className="text-ink-muted uppercase tracking-wider">redacted</div>
-                      {(f.samples || []).map((s, si) => (
-                        <React.Fragment key={si}>
-                          <div className="text-ink" data-testid={`spot-check-col-${fi}-${si}`}>
-                            {s.column} · <span className="text-oxblood">{s.action}</span>
-                          </div>
-                          <div className="phi-mask" data-testid={`spot-check-orig-${fi}-${si}`}>{s.original_masked}</div>
-                          <div className="text-ink" data-testid={`spot-check-red-${fi}-${si}`}>
-                            {s.redacted === '' ? <span className="text-ink-muted">(dropped)</span> : s.redacted}
-                          </div>
-                        </React.Fragment>
-                      ))}
-                    </div>
+              <div className="space-y-2">
+                {datasetFiles.map(f => (
+                  <div key={f.file_id} className="flex items-center justify-between gap-4 data-cell" data-testid={`dataset-file-row-${f.file_id}`}>
+                    <div className="font-mono text-[12px] text-ink">{f.original_name}</div>
+                    <Btn size="sm" variant="ghost" onClick={() => downloadDatasetFile(f.file_id)} testId={`btn-download-dataset-file-${f.file_id}`}>
+                      Download ↓
+                    </Btn>
                   </div>
                 ))}
               </div>
-              <label className="mt-4 flex items-start gap-3 cursor-pointer" data-testid="spot-check-ack-label">
-                <input type="checkbox" checked={spotCheckAck}
-                       onChange={e => setSpotCheckAck(e.target.checked)}
-                       data-testid="spot-check-ack"
+              <label className="mt-4 flex items-start gap-3 cursor-pointer" data-testid="file-review-ack-label">
+                <input type="checkbox" checked={fileReviewAck}
+                       onChange={e => setFileReviewAck(e.target.checked)}
+                       data-testid="file-review-ack"
                        className="mt-[3px] h-4 w-4 accent-oxblood"/>
                 <span className="text-[12px] text-ink-2 leading-5">
-                  I have reviewed the row-level sample above and confirm the per-column decisions are appropriate.
+                  I have downloaded and reviewed the original file(s) above in my own tool.
                 </span>
               </label>
             </div>
           )}
 
-          {humanRows.length > 0 ? (
-            <div className="space-y-4">
-              {humanRows.map(d => {
-                const key = `${d.file_id}|${d.column}`;
-                return (
-                  <div key={key} className="data-cell flex items-center gap-6" data-testid={`review-row-${d.column}`}>
-                    <div className="w-64 font-mono text-[13px] text-ink">{d.column}</div>
-                    <div className="text-[12px] text-ink-muted flex-1">{d.reason || 'no rationale'}</div>
-                    <select value={resolutions[key] || ''} onChange={e => setResolutions({ ...resolutions, [key]: e.target.value })}
-                            className="h-9 bg-transparent border border-rule text-ink px-2 text-[12px] font-mono focus:border-oxblood">
-                      <option value="">choose action…</option>
-                      {ACTION_OPTIONS.map(a => <option key={a} value={a}>{a}</option>)}
-                    </select>
+          {humanRows.length > 0 ? (() => {
+            const setRowMode = (key, mode) => setResolutions(prev => ({
+              ...prev, [key]: { ...(prev[key] || {}), mode, comment: mode === 'comment' ? (prev[key]?.comment || '') : '' },
+            }));
+            const setRowComment = (key, text) => setResolutions(prev => ({
+              ...prev, [key]: { ...(prev[key] || {}), mode: 'comment', comment: text },
+            }));
+            const clearRow = (key) => setResolutions(prev => {
+              const next = { ...prev }; delete next[key]; return next;
+            });
+            const activeRows = humanRows.filter(d => resolutions[`${d.file_id}|${d.column}`]?.mode !== 'defer');
+            const setAsideRows = humanRows.filter(d => resolutions[`${d.file_id}|${d.column}`]?.mode === 'defer');
+            const renderRow = (d) => {
+              const key = `${d.file_id}|${d.column}`;
+              const current = resolutions[key] || {};
+              const pending = d.pending_confirmation;
+              return (
+                <div key={key} className="data-cell space-y-3" data-testid={`review-row-${d.column}`}>
+                  <div>
+                    <div className="font-mono text-[13px] text-ink">{d.column}</div>
+                    <div className="text-[12px] text-ink-2 mt-1">{d.reviewer_prompt || d.reason || 'no rationale'}</div>
+                    {d.needs_file_glance && (
+                      <div className="text-[11px] text-oxblood mt-1">↑ open the original file above to judge this free-text column</div>
+                    )}
                   </div>
-                );
-              })}
-              <label className="mt-6 flex items-start gap-3 rule-top pt-4 cursor-pointer" data-testid="actual-knowledge-ack-label">
-                <input type="checkbox" checked={actualKnowledgeAck}
-                       onChange={e => setActualKnowledgeAck(e.target.checked)}
-                       data-testid="actual-knowledge-ack"
-                       className="mt-[3px] h-4 w-4 accent-oxblood"/>
-                <span className="text-[12px] text-ink-2 leading-5">
-                  <span className="font-mono text-oxblood">Required · 45 CFR 164.514(b)(2)(ii).</span>{' '}
-                  I have no actual knowledge that the remaining information alone or in combination
-                  with other reasonably available information could be used to identify an individual.
-                </span>
-              </label>
-              <div className="pt-4 flex justify-end">
-                <Btn variant="primary" onClick={submitReview}
-                     disabled={busy || Object.keys(resolutions).length === 0 || !reviewer.trim() || !actualKnowledgeAck || !spotCheckSatisfied}
-                     testId="btn-submit-human-review">
-                  Submit ({Object.keys(resolutions).length}/{humanRows.length}) →
-                </Btn>
+
+                  {pending ? (
+                    <div className="border-l-2 border-signal pl-3 py-2 bg-paper-2/50" data-testid={`review-row-confirm-${d.column}`}>
+                      <div className="text-[12px] text-ink-2">
+                        You said: <span className="italic">"{d.reviewer_comment}"</span> — I read that as:{' '}
+                        <span className="font-mono text-oxblood">{pending.action || '(no clear action)'}</span>.
+                        {pending.reason ? ` ${pending.reason}` : ''} Confirm?
+                      </div>
+                      <div className="mt-2 flex gap-2">
+                        <Btn size="sm" variant={current.mode === 'approve' ? 'primary' : 'ghost'}
+                             disabled={!pending.action}
+                             onClick={() => setRowMode(key, 'approve')} testId={`btn-confirm-${d.column}`}>
+                          Confirm
+                        </Btn>
+                        <Btn size="sm" variant={current.mode === 'comment' ? 'primary' : 'ghost'}
+                             onClick={() => setRowMode(key, 'comment')} testId={`btn-recomment-${d.column}`}>
+                          Re-comment
+                        </Btn>
+                        <Btn size="sm" variant="ghost" onClick={() => setRowMode(key, 'defer')} testId={`btn-defer-${d.column}`}>
+                          Defer
+                        </Btn>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2" data-testid={`review-row-buttons-${d.column}`}>
+                      <Btn size="sm" variant={current.mode === 'approve' ? 'primary' : 'ghost'}
+                           disabled={!d.suggested_action}
+                           onClick={() => setRowMode(key, 'approve')} testId={`btn-approve-${d.column}`}
+                           title={d.suggested_action ? `Apply: ${d.suggested_action}` : 'No suggested action available — use Comment'}>
+                        Approve{d.suggested_action ? ` (${d.suggested_action})` : ''}
+                      </Btn>
+                      <Btn size="sm" variant={current.mode === 'comment' ? 'primary' : 'ghost'}
+                           onClick={() => setRowMode(key, 'comment')} testId={`btn-comment-${d.column}`}>
+                        Comment
+                      </Btn>
+                      <Btn size="sm" variant="ghost" onClick={() => setRowMode(key, 'defer')} testId={`btn-defer-${d.column}`}>
+                        Defer
+                      </Btn>
+                    </div>
+                  )}
+
+                  {current.mode === 'comment' && (
+                    <textarea
+                      value={current.comment || ''}
+                      onChange={e => setRowComment(key, e.target.value)}
+                      placeholder="Tell the system what should happen to this column…"
+                      className="w-full h-16 bg-transparent border border-rule text-ink px-2 py-1.5 text-[12px] focus:border-oxblood"
+                      data-testid={`review-row-comment-${d.column}`}
+                    />
+                  )}
+                </div>
+              );
+            };
+            return (
+              <div className="space-y-4">
+                <div className="space-y-5">{activeRows.map(renderRow)}</div>
+                {setAsideRows.length > 0 && (
+                  <div className="rule-top pt-4" data-testid="set-aside-panel">
+                    <div className="kicker text-ink-muted mb-2">Set aside for later ({setAsideRows.length})</div>
+                    <div className="space-y-2">
+                      {setAsideRows.map(d => {
+                        const key = `${d.file_id}|${d.column}`;
+                        return (
+                          <div key={key} className="flex items-center justify-between gap-4 text-[12px] text-ink-muted" data-testid={`set-aside-row-${d.column}`}>
+                            <span className="font-mono">{d.column}</span>
+                            <button className="text-oxblood hover:underline" onClick={() => clearRow(key)} data-testid={`btn-unset-aside-${d.column}`}>
+                              bring back
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                <label className="mt-2 flex items-start gap-3 rule-top pt-4 cursor-pointer" data-testid="actual-knowledge-ack-label">
+                  <input type="checkbox" checked={actualKnowledgeAck}
+                         onChange={e => setActualKnowledgeAck(e.target.checked)}
+                         data-testid="actual-knowledge-ack"
+                         className="mt-[3px] h-4 w-4 accent-oxblood"/>
+                  <span className="text-[12px] text-ink-2 leading-5">
+                    <span className="font-mono text-oxblood">Required for approved/commented columns · 45 CFR 164.514(b)(2)(ii).</span>{' '}
+                    I have no actual knowledge that the information I am resolving this round, alone or in combination
+                    with other reasonably available information, could be used to identify an individual.
+                  </span>
+                </label>
+                <div className="pt-4 flex justify-end">
+                  <Btn variant="primary" onClick={submitReview}
+                       disabled={busy || humanRows.some(d => !resolutions[`${d.file_id}|${d.column}`]?.mode)}
+                       testId="btn-submit-human-review">
+                    Submit ({humanRows.filter(d => resolutions[`${d.file_id}|${d.column}`]?.mode).length}/{humanRows.length}) →
+                  </Btn>
+                </div>
               </div>
-            </div>
-          ) : (
+            );
+          })() : (
             <div className="space-y-4">
               <div className="text-[12px] text-ink-muted">
-                Sentinel flagged this session globally. No per-column overrides required.
+                Nothing is flagged for a specific column right now — resume the pipeline to continue.
               </div>
-              <label className="flex items-start gap-3 rule-top pt-4 cursor-pointer" data-testid="actual-knowledge-ack-label-global">
-                <input type="checkbox" checked={actualKnowledgeAck}
-                       onChange={e => setActualKnowledgeAck(e.target.checked)}
-                       data-testid="actual-knowledge-ack-global"
-                       className="mt-[3px] h-4 w-4 accent-oxblood"/>
-                <span className="text-[12px] text-ink-2 leading-5">
-                  <span className="font-mono text-oxblood">Required · 45 CFR 164.514(b)(2)(ii).</span>{' '}
-                  I have no actual knowledge that the remaining information alone or in combination
-                  with other reasonably available information could be used to identify an individual.
-                </span>
-              </label>
               <div className="flex justify-end">
-                <Btn variant="primary" onClick={submitReview}
-                     disabled={busy || !reviewer.trim() || !actualKnowledgeAck || !spotCheckSatisfied}
-                     testId="btn-accept-globally">
-                  Accept Judge decisions →
+                <Btn variant="primary" onClick={submitReview} disabled={busy || !reviewer.trim()} testId="btn-accept-globally">
+                  Resume →
                 </Btn>
               </div>
             </div>

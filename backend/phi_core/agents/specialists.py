@@ -50,6 +50,7 @@ class Lexicon(Agent):
                 "Respond with JSON only.",
                 phase=f"lexicon.read:{f['file_id']}",
                 default={"columns": [], "notes": ""},
+                status_text=f"Reading the dictionary file {f['original_name']}",
             )
             aggregated.extend(reply.get("columns", []))
         return {"columns": aggregated}
@@ -91,6 +92,7 @@ class Schema(Agent):
                 phase=f"schema.classify:{f['file_id']}",
                 default={"columns": []},
                 expect_key="columns", min_items=len(headers),
+                status_text=f"Classifying dataset headers in {f['original_name']}",
             )
             for c in reply.get("columns", []):
                 c["_file_id"] = f["file_id"]
@@ -129,6 +131,7 @@ class Instrument(Agent):
                 "Respond with JSON only.",
                 phase=f"instrument.read:{f['file_id']}",
                 default={"fields": []},
+                status_text=f"Reading the form {f['original_name']}",
             )
             aggregated.extend(reply.get("fields", []))
         return {"fields": aggregated}
