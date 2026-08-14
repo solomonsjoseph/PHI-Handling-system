@@ -165,6 +165,32 @@ full, untruncated text; the `[:400]` truncation in `agents/base.py` and the `aud
 gate on `prompt_full` are removed. This text is already scrubbed of cell values before the
 prompt is built (`scrub_for_prompt`), so persisting it in full introduces no new PHI exposure.
 
+## Motion and interaction craft
+
+Reviewed against the `high-end-visual-design` skill on Sir's request. Verdict: this product's
+existing identity (`tailwind.config.js`: `borderRadius: 0` globally, hairline `.rule-top`/
+`.rule-bottom` dividers, no shadows, no blur, no icon library, Fraunces/Inter/JetBrains Mono)
+is a deliberate clinical/editorial register that the skill's glass-and-bento agency aesthetic
+would actively work against for a compliance console read by IRB reviewers and auditors. None
+of the skill's vibe or layout archetypes (Ethereal Glass, Editorial Luxury, Soft Structuralism,
+Bento, Z-Axis Cascade) are adopted. Its motion-physics and performance discipline is, scoped to
+the new elements this design introduces:
+
+- Tier-2 collapse toggle: expand/collapse via the `grid-template-rows` `0fr` -> `1fr` technique
+  with `overflow-hidden`, not by animating `height` directly, on a custom cubic-bezier matching
+  the existing `step-in` curve (`cubic-bezier(0.2, 0.7, 0.2, 1)`) rather than default
+  `linear`/`ease-in-out`.
+- Tier-1 narration strip: each new line enters via `transform`/`opacity` only (a small fade with
+  slight upward translate), triggered by SSE message arrival, not scroll. `IntersectionObserver`
+  does not apply here since nothing is scroll-revealed on this page; it is reserved for the
+  general rule of never using a raw `scroll` listener, which this design does not need anywhere.
+- Deferred-row regrouping into the "Set aside" list, and the low-confidence confirmation prompt
+  swapping in for a comment row: `transform`/`opacity` only, same custom easing curve, restrained
+  amplitude. No spring/bounce/magnetic-hover choreography from Section 5B; that reads as
+  consumer-app playfulness inconsistent with this product's tone and is not adopted.
+- No new `backdrop-blur`, no new `z-[9999]`-style arbitrary stacking; this page has no fixed or
+  sticky chrome to justify blur, and none is introduced.
+
 ## Risk mitigations, summary
 
 | Risk | Mitigation |
