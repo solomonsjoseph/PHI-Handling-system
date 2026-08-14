@@ -407,8 +407,15 @@ class Judge(Agent):
                 f"{prior_feedback}\n"
             )
         prompt += "\nRespond with JSON only."
+        # One decision is ~9 fields of JSON; a fixed 2000-token default
+        # truncates (and so silently fails min_items validation) once a
+        # dataset crosses roughly a dozen columns. Scale with the column
+        # count instead of guessing a single global constant.
+        num_columns = len(schema.get("columns") or [])
+        judge_max_tokens = max(2000, 200 + 150 * num_columns)
         return await self.call_json(
             prompt, phase="judge.decide", default={"decisions": []},
+            max_tokens=judge_max_tokens,
             expect_key="decisions", min_items=len(schema.get("columns") or []),
             status_text="Deciding how to handle every flagged column")
 

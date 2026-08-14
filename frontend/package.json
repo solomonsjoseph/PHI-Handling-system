@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "packageManager": "npm@11.12.1",
+  "proxy": "http://localhost:8001",
   "dependencies": {
     "@phosphor-icons/react": "^2.1.7",
     "axios": "^1.7.9",

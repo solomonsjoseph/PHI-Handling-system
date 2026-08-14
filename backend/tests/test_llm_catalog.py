@@ -45,12 +45,12 @@ def test_default_model_for_each_ui_provider():
 
 
 @pytest.mark.parametrize("model_id,expected_family", [
-    ("claude-sonnet-4-5-20250929", "anthropic"),
-    ("claude-opus-4-20250929", "anthropic"),
-    ("gpt-5.2", "openai"),
-    ("gpt-5.4-mini", "openai"),
-    ("gemini-3-pro", "gemini"),
-    ("gemini-3-flash", "gemini"),
+    ("claude-sonnet-5", "anthropic"),
+    ("claude-opus-5", "anthropic"),
+    ("gpt-5.6-terra", "openai"),
+    ("gpt-5.6-luna", "openai"),
+    ("gemini-3.1-pro-preview", "gemini"),
+    ("gemini-3.7-flash", "gemini"),
 ])
 def test_family_resolution_from_model_id_via_emergent(model_id, expected_family):
     from phi_core.llm_catalog import resolve_family
@@ -66,10 +66,10 @@ def test_family_resolution_falls_back_to_anthropic_for_unknown_model():
 
 def test_family_resolution_byok_provider_maps_to_itself():
     from phi_core.llm_catalog import resolve_family
-    assert resolve_family("anthropic", "claude-opus-4-20250929") == "anthropic"
-    assert resolve_family("openai", "gpt-5.2") == "openai"
-    assert resolve_family("gemini", "gemini-3-pro") == "gemini"
-    assert resolve_family("openrouter", "openrouter/anthropic/claude-sonnet-4.5") == "openrouter"
+    assert resolve_family("anthropic", "claude-opus-5") == "anthropic"
+    assert resolve_family("openai", "gpt-5.6-terra") == "openai"
+    assert resolve_family("gemini", "gemini-3.1-pro-preview") == "gemini"
+    assert resolve_family("openrouter", "openrouter/anthropic/claude-sonnet-5") == "openrouter"
 
 
 def test_web_search_tool_selection_per_family():
@@ -118,5 +118,5 @@ def test_environment_key_selects_provider_without_selecting_model(
 def test_explicit_model_configuration_is_preserved():
     from phi_core.agents.llm import LlmConfig
 
-    cfg = LlmConfig.from_dict({"provider": "openai", "model": "gpt-5.2"})
-    assert (cfg.provider, cfg.model) == ("openai", "gpt-5.2")
+    cfg = LlmConfig.from_dict({"provider": "openai", "model": "gpt-5.6-terra"})
+    assert (cfg.provider, cfg.model) == ("openai", "gpt-5.6-terra")

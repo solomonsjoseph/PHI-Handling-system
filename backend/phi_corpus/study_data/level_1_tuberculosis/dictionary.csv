@@ -1,31 +1,31 @@
-column_name,description,type
-study_id,"Investigator-assigned study identifier for the TB cohort (format TB-YYYY-NNN). Not itself a direct identifier; keep.",string
-last_name,"Patient's legal last name (PHI cat A -- direct identifier, HIPAA Safe Harbor requires removal or pseudonymization).",string
-first_name,"Patient's legal first name (PHI cat A -- direct identifier, remove or pseudonymize).",string
-ssn,"Social Security number, held locally by the site for death-index and disease-registry linkage prior to de-identification (PHI cat H -- direct identifier, remove).",string
-date_of_birth,"Full date of birth (PHI cat C -- dates; Safe Harbor allows year only, month and day must be removed).",date
-street_address,"Residential street address (PHI cat B -- geographic subdivision smaller than state, remove).",string
-city,"Residential city (PHI cat B -- geographic subdivision smaller than state, remove).",string
-state,"Residential US state, two-letter postal abbreviation (Safe Harbor explicitly permits state-level geography; keep).",string
-zip_code,"Residential 5-digit ZIP code (PHI cat B -- Safe Harbor allows only the first 3 digits, and only for a ZIP3 area with population > 20,000; the 17 HIPAA-restricted ZIP3 prefixes must be dropped entirely).",string
-age_of_onset,"Age in years at TB disease onset, TB Portals' own field name (Safe Harbor allows ages under 90 as-is; ages 90 and over must be aggregated to '90+').",int
-sex_at_birth,"Sex recorded at birth -- 'Sex' in both RVCT and TB Portals (clinically needed demographic, not a Safe Harbor identifier; keep).",string
-race,"Race per OMB categories (clinically and epidemiologically needed; keep).",string
-ethnicity,"Hispanic or Latino ethnicity per OMB categories (clinically and epidemiologically needed; keep).",string
-country_of_birth,"Country of birth. Foreign-born status is the dominant US TB epidemiology risk factor per CDC NTSS surveillance (clinically needed; keep).",string
-years_in_us,"Years of US residence for foreign-born patients; 'N/A' for US-born patients (RVCT field, clinically needed TB risk factor; keep).",string
-registration_date,"Date the patient was registered into the TB program/surveillance system, ahead of confirmed diagnosis (PHI cat C -- dates; Safe Harbor allows year only). Modeled on TB Portals' 'Registration Date' field.",date
-diagnosis_date,"Date TB disease was confirmed, distinct from program registration and treatment start (PHI cat C -- dates; Safe Harbor allows year only).",date
-case_definition,"WHO/RVCT case-registration category: New, Relapse, Treatment after failure, Treatment after loss to follow-up, or Transferred in. Modeled on TB Portals' 'Case Definition' field (clinically needed; keep).",string
-diagnosis_code,"ICD-10-CM tuberculosis diagnosis code (A15-A19 range), e.g. A15.0 pulmonary TB, A18.2 tuberculous peripheral lymphadenopathy. Modeled on TB Portals' 'Diagnosis Code' field (clinically needed; keep).",string
-site_of_disease,"Anatomic site of TB disease: pulmonary, extrapulmonary (with site), or both. Equivalent to TB Portals' 'Localization' field (core clinical variable; keep).",string
-sputum_smear_result,"Acid-fast bacilli sputum smear microscopy result; 'N/A' when the site of disease is exclusively extrapulmonary (clinical lab result; keep).",string
-sputum_culture_result,"Mycobacterial culture result confirming M. tuberculosis (clinical lab result; keep).",string
-chest_xray_finding,"Chest radiograph finding, e.g. cavitary or non-cavitary infiltrate, pleural effusion, or normal (clinical imaging result; keep).",string
-drug_susceptibility_result,"Drug-susceptibility testing (DST) result summary, e.g. pan-susceptible, isoniazid-resistant, rifampin-resistant (RR-TB), or multidrug-resistant (MDR-TB). Equivalent to TB Portals' 'DST Profile' field (clinical lab result critical for treatment planning; keep).",string
-hiv_status,"HIV coinfection status, a standard RVCT/NTSS and TB Portals TB surveillance data element (clinical comorbidity; keep).",string
-comorbidity_other,"Non-HIV comorbidity most relevant to TB treatment and prognosis, e.g. diabetes mellitus, alcohol use disorder, chronic malnutrition, or none. Modeled on TB Portals' broader 'Comorbidity' field (clinically needed; keep).",string
-treatment_regimen,"Anti-TB drug regimen prescribed, e.g. first-line HRZE (isoniazid, rifampin, pyrazinamide, ethambutol) or a second-line MDR/RR-TB regimen. Modeled on TB Portals' 'Regimen Drugs' field (clinically needed; keep).",string
-treatment_start_date,"Date the anti-TB treatment regimen began (PHI cat C -- dates; Safe Harbor allows year only).",date
-treatment_end_date,"Date the treatment regimen ended (completion, death, or last contact before loss to follow-up); 'Ongoing' when the patient is still on treatment (PHI cat C -- dates; Safe Harbor allows year only).",date
-treatment_outcome,"Final treatment outcome: completed, died, lost to follow-up, or still on treatment. Equivalent to TB Portals' 'Outcome' field (core epidemiologic outcome variable; keep).",string
+column_name,description
+study_id,Investigator-assigned study identifier for the TB cohort (format TB-YYYY-NNN).
+last_name,Patient's legal last name.
+first_name,Patient's legal first name.
+ssn,Social Security number, held locally by the site for death-index and disease-registry linkage prior to de-identification.
+date_of_birth,Full date of birth.
+street_address,Residential street address.
+city,Residential city.
+state,Residential US state, two-letter postal abbreviation.
+zip_code,Residential 5-digit ZIP code.
+age_of_onset,Age in years at TB disease onset, TB Portals' own field name.
+sex_at_birth,Sex recorded at birth -- 'Sex' in both RVCT and TB Portals.
+race,Race per OMB categories.
+ethnicity,Hispanic or Latino ethnicity per OMB categories.
+country_of_birth,Country of birth. Foreign-born status is the dominant US TB epidemiology risk factor per CDC NTSS surveillance.
+years_in_us,Years of US residence for foreign-born patients; 'N/A' for US-born patients (RVCT field).
+registration_date,Date the patient was registered into the TB program/surveillance system, ahead of confirmed diagnosis. Modeled on TB Portals' 'Registration Date' field.
+diagnosis_date,Date TB disease was confirmed, distinct from program registration and treatment start.
+case_definition,"WHO/RVCT case-registration category: New, Relapse, Treatment after failure, Treatment after loss to follow-up, or Transferred in. Modeled on TB Portals' 'Case Definition' field."
+diagnosis_code,"ICD-10-CM tuberculosis diagnosis code (A15-A19 range), e.g. A15.0 pulmonary TB, A18.2 tuberculous peripheral lymphadenopathy. Modeled on TB Portals' 'Diagnosis Code' field."
+site_of_disease,"Anatomic site of TB disease: pulmonary, extrapulmonary (with site), or both. Equivalent to TB Portals' 'Localization' field."
+sputum_smear_result,Acid-fast bacilli sputum smear microscopy result; 'N/A' when the site of disease is exclusively extrapulmonary.
+sputum_culture_result,Mycobacterial culture result confirming M. tuberculosis.
+chest_xray_finding,"Chest radiograph finding, e.g. cavitary or non-cavitary infiltrate, pleural effusion, or normal."
+drug_susceptibility_result,"Drug-susceptibility testing (DST) result summary, e.g. pan-susceptible, isoniazid-resistant, rifampin-resistant (RR-TB), or multidrug-resistant (MDR-TB). Equivalent to TB Portals' 'DST Profile' field."
+hiv_status,"HIV coinfection status, a standard RVCT/NTSS and TB Portals TB surveillance data element."
+comorbidity_other,"Non-HIV comorbidity most relevant to TB treatment and prognosis, e.g. diabetes mellitus, alcohol use disorder, chronic malnutrition, or none. Modeled on TB Portals' broader 'Comorbidity' field."
+treatment_regimen,"Anti-TB drug regimen prescribed, e.g. first-line HRZE (isoniazid, rifampin, pyrazinamide, ethambutol) or a second-line MDR/RR-TB regimen. Modeled on TB Portals' 'Regimen Drugs' field."
+treatment_start_date,Date the anti-TB treatment regimen began.
+treatment_end_date,Date the treatment regimen ended (completion, death, or last contact before loss to follow-up); 'Ongoing' when the patient is still on treatment.
+treatment_outcome,"Final treatment outcome: completed, died, lost to follow-up, or still on treatment. Equivalent to TB Portals' 'Outcome' field."

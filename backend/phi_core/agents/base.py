@@ -6,6 +6,7 @@ Every call is timed, logged, and persisted to Mongo under `agent_log`.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
@@ -115,11 +116,18 @@ class Agent:
         web_search_max_uses: int = 3,
         parent_id: str | None = None,
         status_text: str = "",
+        max_tokens: int | None = None,
     ) -> str:
         """LLM call with logging, hard timeout, and -- when self.manager is set --
         Manager-supervised recovery on timeout / exception / empty / invalid /
-        off-task replies."""
+        off-task replies.
+
+        ``max_tokens``, when given, overrides ``self.llm.max_tokens`` for this
+        call only -- a large per-column reply (e.g. Judge deciding 50+
+        columns) otherwise truncates against the session's fixed default and
+        silently fails JSON validation."""
         base_timeout = PLAIN_TIMEOUT_S if timeout_s is None else timeout_s
+        call_cfg = self.llm if max_tokens is None else dataclasses.replace(self.llm, max_tokens=max_tokens)
         # Full untruncated text always persisted (tier-3 requirement); a
         # write-time scrub pass is defense-in-depth on top of the scrubbing
         # each call site already does to its own inputs before this point.
@@ -128,13 +136,13 @@ class Agent:
 
         async def attempt_plain(system_prompt: str, extended: bool) -> str:
             return await asyncio.wait_for(
-                asyncio.to_thread(call_llm, system_prompt, user_prompt, self.llm),
+                asyncio.to_thread(call_llm, system_prompt, user_prompt, call_cfg),
                 timeout=base_timeout + (PLAIN_EXTENDED_BUMP_S if extended else 0.0))
 
         async def attempt_web_search(system_prompt: str, extended: bool) -> str:
             reply, _cites = await asyncio.wait_for(
                 asyncio.to_thread(call_llm_with_web_search, system_prompt, user_prompt,
-                                  self.llm, web_search_max_uses),
+                                  call_cfg, web_search_max_uses),
                 timeout=WEB_SEARCH_TIMEOUT_S + (WEB_SEARCH_EXTENDED_BUMP_S if extended else 0.0))
             return reply
 
@@ -168,10 +176,12 @@ class Agent:
     async def call_json(self, user_prompt: str, phase: str, default: Any = None, *,
                         timeout_s: float | None = None,
                         expect_key: str | None = None, min_items: int = 0,
-                        parent_id: str | None = None, status_text: str = "") -> Any:
+                        parent_id: str | None = None, status_text: str = "",
+                        max_tokens: int | None = None) -> Any:
         reply = await self.call(user_prompt, phase, timeout_s=timeout_s,
                                 validate=_json_validator(expect_key, min_items),
-                                parent_id=parent_id, status_text=status_text)
+                                parent_id=parent_id, status_text=status_text,
+                                max_tokens=max_tokens)
         return parse_json(reply, default)
 
     async def call_with_web_search(

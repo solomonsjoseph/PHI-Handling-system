@@ -21,6 +21,12 @@ export default function Settings() {
   const [catalog, setCatalog] = useState({ providers: [], models: [], default_model_id: '' });
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [customModel, setCustomModel] = useState(false);
+  const [apiKey, setApiKey] = useState('');
+  const [apiKeySet, setApiKeySet] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [baseUrl, setBaseUrl] = useState('');
+  const CUSTOM_VALUE = '__custom__';
 
   const load = async () => {
     setLoadError('');
@@ -32,15 +38,21 @@ export default function Settings() {
       setCatalog(c.data);
       const nextProvider = r.data.provider || 'openai';
       const models = (c.data.models || []).filter(m => m.provider_family === nextProvider);
-      const nextModel = models.some(m => m.id === r.data.model)
+      const knownModel = models.some(m => m.id === r.data.model);
+      const nextModel = knownModel
         ? r.data.model
-        : (models[0]?.id || c.data.default_model_id || r.data.model || '');
+        : (r.data.model || models[0]?.id || c.data.default_model_id || '');
+      setCustomModel(!knownModel && !!r.data.model);
       setCfg({
         provider: nextProvider,
         model: nextModel,
         temperature: Number(r.data.temperature ?? 0.1),
         max_tokens: Number(r.data.max_tokens ?? 2000),
       });
+      setApiKeySet(!!r.data.api_key_set);
+      setApiKey('');
+      setShowApiKey(false);
+      setBaseUrl(r.data.base_url || '');
     } catch (e) {
       const detail = e?.response?.data?.detail || e.message;
       setLoadError(detail);
@@ -65,8 +77,8 @@ export default function Settings() {
         model: cfg.model,
         temperature: cfg.temperature,
         max_tokens: cfg.max_tokens,
-        api_key: '',
-        base_url: '',
+        api_key: apiKey,
+        base_url: baseUrl,
       });
       toast.success('LLM settings saved');
       await load();
@@ -101,6 +113,7 @@ export default function Settings() {
     const nextModel = models.some(m => m.id === cfg.model)
       ? cfg.model
       : (models[0]?.id || '');
+    setCustomModel(false);
     setCfg({ ...cfg, provider: nextProvider, model: nextModel });
   };
 
@@ -146,21 +159,52 @@ export default function Settings() {
 
           <Field
             label="Model"
-            hint={selectedModel?.notes || 'Pick a model served by the selected provider.'}
+            hint={customModel
+              ? 'Type the exact model ID accepted by this provider\'s API.'
+              : (selectedModel?.notes || 'Pick a model served by the selected provider.')}
           >
-            <select
-              value={cfg.model}
-              onChange={e => setCfg({ ...cfg, model: e.target.value })}
-              data-testid="settings-model"
-              className={input}
-              disabled={modelsForProvider.length === 0}
-            >
-              {modelsForProvider.map(m => (
-                <option key={m.id} value={m.id}>
-                  {m.label} — {m.tier}{m.supports_web_search ? ' · web-search' : ''}
-                </option>
-              ))}
-            </select>
+            {customModel ? (
+              <input
+                type="text"
+                value={cfg.model}
+                onChange={e => setCfg({ ...cfg, model: e.target.value })}
+                placeholder="e.g. gpt-5.6-sol"
+                data-testid="settings-model-custom"
+                className={input}
+              />
+            ) : (
+              <select
+                value={cfg.model}
+                onChange={e => {
+                  if (e.target.value === CUSTOM_VALUE) {
+                    setCustomModel(true);
+                    setCfg({ ...cfg, model: '' });
+                  } else {
+                    setCfg({ ...cfg, model: e.target.value });
+                  }
+                }}
+                data-testid="settings-model"
+                className={input}
+                disabled={modelsForProvider.length === 0}
+              >
+                {modelsForProvider.map(m => (
+                  <option key={m.id} value={m.id}>
+                    {m.label} — {m.tier}{m.supports_web_search ? ' · web-search' : ''}
+                  </option>
+                ))}
+                <option value={CUSTOM_VALUE}>Custom (type model ID)…</option>
+              </select>
+            )}
+            {customModel && (
+              <button
+                type="button"
+                onClick={() => { setCustomModel(false); onProviderChange(cfg.provider); }}
+                data-testid="settings-model-custom-cancel"
+                className="text-[12px] text-ink-muted mt-1.5 underline"
+              >
+                back to model list
+              </button>
+            )}
           </Field>
 
           <Field label="Temperature">
@@ -185,6 +229,44 @@ export default function Settings() {
               value={cfg.max_tokens}
               onChange={e => setCfg({ ...cfg, max_tokens: Number(e.target.value) })}
               data-testid="settings-max-tokens"
+              className={input}
+            />
+          </Field>
+
+          <Field
+            label="API key"
+            hint={apiKeySet
+              ? 'A key is already configured for this provider. Leave blank to keep it.'
+              : 'Optional. Falls back to the server environment key when left blank.'}
+          >
+            <div className="flex items-center gap-3">
+              <input
+                type={showApiKey ? 'text' : 'password'}
+                autoComplete="off"
+                value={apiKey}
+                onChange={e => setApiKey(e.target.value)}
+                placeholder={apiKeySet ? '••••••••••••••••' : 'sk-...'}
+                data-testid="settings-api-key"
+                className={input}
+              />
+              <button
+                type="button"
+                onClick={() => setShowApiKey(s => !s)}
+                data-testid="settings-api-key-toggle"
+                className="text-[12px] text-ink-muted underline shrink-0"
+              >
+                {showApiKey ? 'hide' : 'show'}
+              </button>
+            </div>
+          </Field>
+
+          <Field label="Base URL" hint="Optional. Only needed for a custom / self-hosted endpoint.">
+            <input
+              type="text"
+              value={baseUrl}
+              onChange={e => setBaseUrl(e.target.value)}
+              placeholder="https://api.example.com/v1"
+              data-testid="settings-base-url"
               className={input}
             />
           </Field>

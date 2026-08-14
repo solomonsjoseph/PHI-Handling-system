@@ -191,6 +191,11 @@ async def run_pipeline(
     praxis_methods: dict[str, Any] = {}
     for cat, res in zip(hipaa_cats, praxis_results):
         if isinstance(res, Exception):
+            # Judge falls back to its own reasoning for any category missing
+            # here; logging makes that fallback visible in the audit trail
+            # instead of a silently incomplete praxis_methods dict.
+            await praxis_agent._log("praxis.category_failed", "info",
+                                     {"category": cat, "error": f"{type(res).__name__}: {res}"})
             continue
         praxis_methods[cat] = res
 
@@ -377,11 +382,28 @@ async def run_pipeline(
     # Auditor). Ledger + Herald still need Auditor's metrics + Scout's
     # landscape so they wait on both.
     await on_phase("auditor_scout", {})
+    auditor_agent = Auditor(**common)
+    scout_agent = Scout(**common)
     audit, scout, benchmark = await asyncio.gather(
-        Auditor(**common).run(decisions=approved_decisions, exports=exec_out["exports"], files=files),
-        Scout(**common).run(),
+        auditor_agent.run(decisions=approved_decisions, exports=exec_out["exports"], files=files),
+        scout_agent.run(),
         _empty(None),   # placeholder for future synthetic benchmark run
+        return_exceptions=True,
     )
+    # Auditor/Scout are presentational (Publish Guard already gated the
+    # export above); an unhandled exception here must not crash a run that
+    # already succeeded. Log it and fall back to a report that visibly says
+    # "not verified" rather than claiming a clean audit it never performed.
+    if isinstance(audit, Exception):
+        await auditor_agent._log("auditor.crashed", "info",
+                                  {"error": f"{type(audit).__name__}: {audit}"})
+        audit = {"verdict": "issues", "issues": [{"file": "", "problem": "Auditor crashed; not verified"}],
+                 "metrics": {}, "summary": "Auditor raised an exception; audit not performed."}
+    if isinstance(scout, Exception):
+        await scout_agent._log("scout.crashed", "info", {"error": f"{type(scout).__name__}: {scout}"})
+        scout = {}
+    if isinstance(benchmark, Exception):
+        benchmark = None
 
     await _check_cancel(db, sid, on_phase)
 

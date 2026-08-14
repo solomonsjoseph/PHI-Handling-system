@@ -248,12 +248,13 @@ def _litellm_call_with_web_search(system: str, user: str, cfg: LlmConfig,
     }
     kwargs: dict[str, Any] = {
         "model": cfg.model,
-        "temperature": cfg.temperature,
         "max_tokens": cfg.max_tokens,
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
         "tools": [tool],
     }
+    if _model_supports_custom_temperature(cfg.model):
+        kwargs["temperature"] = cfg.temperature
     if cfg.api_key:
         kwargs["api_key"] = cfg.api_key
     resp = litellm.completion(**kwargs)
@@ -314,14 +315,26 @@ def call_llm_with_web_search(system: str, user: str,
     return _litellm_call(system, user, cfg), []
 
 
+def _model_supports_custom_temperature(model: str) -> bool:
+    """OpenAI reasoning-tier models (o1/o3/o4/gpt-5*) reject any
+    ``temperature`` other than the API default (1). litellm's
+    ``drop_params`` only strips params it already knows a model rejects,
+    which lags newly released reasoning models -- so we guard explicitly
+    rather than let the request 400 at the provider."""
+    bare = model.rsplit("/", 1)[-1].lower()
+    return not bare.startswith(("o1", "o3", "o4", "gpt-5"))
+
+
 def _litellm_call(system: str, user: str, cfg: LlmConfig) -> str:
     """Call via LiteLLM. Model naming follows LiteLLM conventions."""
     model = cfg.model
     if cfg.provider == "openrouter" and not model.startswith("openrouter/"):
         model = f"openrouter/{model}"
-    kwargs: dict[str, Any] = {"model": model, "temperature": cfg.temperature, "max_tokens": cfg.max_tokens,
+    kwargs: dict[str, Any] = {"model": model, "max_tokens": cfg.max_tokens,
                               "messages": [{"role": "system", "content": system},
                                            {"role": "user",   "content": user}]}
+    if _model_supports_custom_temperature(model):
+        kwargs["temperature"] = cfg.temperature
     if cfg.api_key:
         kwargs["api_key"] = cfg.api_key
     if cfg.base_url:

@@ -211,11 +211,25 @@ class Herald:
 
     async def run(self, ledger: dict[str, Any], audit: dict[str, Any],
                   target_venue: str = "JAMIA Open") -> dict[str, Any]:
+        abstract_agent = HeraldAbstract(**self._common)
+        sections_agent = HeraldSections(**self._common)
         abstract_out, sections_out = await asyncio.gather(
-            HeraldAbstract(**self._common).run(ledger, audit, target_venue),
-            HeraldSections(**self._common).run(ledger, audit, target_venue),
-            return_exceptions=False,
+            abstract_agent.run(ledger, audit, target_venue),
+            sections_agent.run(ledger, audit, target_venue),
+            return_exceptions=True,
         )
+        # LLM timeouts are already handled inside call_json (returns a
+        # default dict, never raises); an exception surviving to here is an
+        # unexpected bug in one subagent and must not blank out the whole
+        # manuscript draft when the other subagent succeeded.
+        if isinstance(abstract_out, Exception):
+            await abstract_agent._log("herald.abstract_crashed", "info",
+                                       {"error": f"{type(abstract_out).__name__}: {abstract_out}"})
+            abstract_out = {"title": "", "abstract": "", "methods": None, "references": []}
+        if isinstance(sections_out, Exception):
+            await sections_agent._log("herald.sections_crashed", "info",
+                                       {"error": f"{type(sections_out).__name__}: {sections_out}"})
+            sections_out = {"sections": [], "alt_venues": []}
 
         methods = abstract_out.get("methods") or {"heading": "Methods", "body": ""}
         sections = [methods] + (sections_out.get("sections") or [])
