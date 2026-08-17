@@ -212,30 +212,62 @@ _HARD_RULE_TABLE: list[tuple[str, list[str], str, str]] = [
     (r"^(notes|visit[_ ]?notes|clinician[_ ]?notes|provider[_ ]?notes|comments|remarks|observations|free[_ ]?text|note|comment)$",
      ["scrub_text", "drop"], "scrub_text", "164.514(b)(1) — free-text scrub"),
     # Explicit non-PHI keepers — clinical measurements and stratifiers
-    (r"^(hemoglobin|bmi|systolic[_ ]?bp|diastolic[_ ]?bp|heart[_ ]?rate|heart[_ ]?rate[_ ]?bpm|temperature|glucose|glucose[_ ]?mgdl|wbc[_ ]?count|hgb[_ ]?a1c|hba1c[_ ]?percent|ldl|hdl|creatinine|spo2|dose|dose[_ ]?mg|sex|gender|race|ethnicity|study[_ ]?arm|treatment[_ ]?group|arm[_ ]?code|visit[_ ]?number|state|country|barcode|specimen[_ ]?barcode|specimen[_ ]?id|cbcl[_ ]?total[_ ]?score)$",
+    (r"^(hemoglobin|bmi|systolic[_ ]?bp|diastolic[_ ]?bp|heart[_ ]?rate|heart[_ ]?rate[_ ]?bpm|temperature|glucose|glucose[_ ]?mgdl|wbc[_ ]?count|hgb[_ ]?a1c|hba1c[_ ]?percent|ldl|hdl|creatinine|spo2|dose|dose[_ ]?mg|sex|gender|race|ethnicity|study[_ ]?arm|treatment[_ ]?group|arm[_ ]?code|visit[_ ]?number|state|country|barcode|specimen[_ ]?barcode|specimen[_ ]?id|cbcl[_ ]?total[_ ]?score|diagnosis[_ ]?code|site[_ ]?of[_ ]?disease|chest[_ ]?xray[_ ]?finding|treatment[_ ]?regimen|drug[_ ]?susceptibility[_ ]?result|sputum[_ ]?smear[_ ]?result|sputum[_ ]?culture[_ ]?result|hiv[_ ]?status|comorbidity[_ ]?other|case[_ ]?definition|treatment[_ ]?outcome)$",
      ["keep"], "keep", "clinical / stratifier"),
 ]
+
+# NOTE: an earlier version of this fix skipped `verify_keep_decisions` row
+# scanning for columns already deemed safe by header name (state, country,
+# diagnosis_code, ...). That is a real security hole: `test_corpus_replay.py`
+# ::test_keeper_names_hijack_is_leak_clean_in_every_unmatched_mode plants
+# real names/addresses under exactly those keeper headers to prove the
+# deterministic row scan cannot be bypassed by column naming. The scan stays
+# on for every 'keep' decision, no column-name exemptions. The false
+# escalations this causes on e.g. a legitimate 'state' column are the
+# intended fail-closed behaviour, not a bug -- the fix that actually helps
+# is making the escalation cheap to resolve (suggested_action populated
+# below), not disabling the check.
+
+
+import re as _re_module
+
+_CATEGORY_LETTER_RE = _re_module.compile(r"\(([A-R])\)$")
+
+
+def _category_letter(citation: str) -> str | None:
+    """Extract the HIPAA Safe Harbor identifier letter from a hard-rule
+    citation like '164.514(b)(2)(i)(A)'. Returns None for citations with no
+    trailing subcategory letter (e.g. the free-text/clinical-keeper rows)."""
+    m = _CATEGORY_LETTER_RE.search(citation)
+    return m.group(1) if m else None
 
 
 def apply_sentinel_hard_rules(decisions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Force obvious direct-identifier columns off 'human_review' into a safe action.
 
     Returns (new_decisions, overrides) where overrides describes each change
-    applied. A decision is overridden ONLY when its column name matches a
-    hard-rule pattern AND its current action is either 'human_review' or not
-    in the rule's allow-list. Otherwise, Judge's choice is respected.
+    applied. A decision's action is overridden ONLY when its column name
+    matches a hard-rule pattern AND its current action is either
+    'human_review' or not in the rule's allow-list; otherwise Judge's action
+    choice is respected. Independently of the action, a matched column's
+    `phi_category` is always corrected to the rule's letter when the model
+    proposed a different or missing one -- Judge has been observed to pick
+    the right action with the wrong category label (e.g. 'ssn' -> action
+    drop, category A instead of G), which corrupts the Auditor's
+    per-category precision/recall.
     """
-    import re as _re_local
     out: list[dict[str, Any]] = []
     overrides: list[dict[str, Any]] = []
     for d in decisions:
         col = (d.get("column") or "").strip().lower()
-        norm = _re_local.sub(r"\s+", "_", col)
+        norm = _re_module.sub(r"\s+", "_", col)
         action = d.get("action", "human_review")
         matched = False
         for pattern, allow, default_action, citation in _HARD_RULE_TABLE:
-            if _re_local.match(pattern, norm):
+            if _re_module.match(pattern, norm):
                 matched = True
+                letter = _category_letter(citation)
+                category_wrong = letter is not None and d.get("phi_category") != letter
                 if action not in allow:
                     new_d = dict(d)
                     new_d["action"] = default_action
@@ -245,6 +277,8 @@ def apply_sentinel_hard_rules(decisions: list[dict[str, Any]]) -> tuple[list[dic
                     )
                     new_d["citation"] = f"45 CFR {citation}"
                     new_d["confidence"] = max(float(d.get("confidence") or 0), 0.95)
+                    if letter is not None:
+                        new_d["phi_category"] = letter
                     overrides.append({
                         "column": d.get("column"),
                         "file_id": d.get("file_id"),
@@ -253,10 +287,84 @@ def apply_sentinel_hard_rules(decisions: list[dict[str, Any]]) -> tuple[list[dic
                         "citation": citation,
                     })
                     out.append(new_d)
+                elif category_wrong:
+                    new_d = dict(d)
+                    new_d["phi_category"] = letter
+                    overrides.append({
+                        "column": d.get("column"),
+                        "file_id": d.get("file_id"),
+                        "from": action,
+                        "to": action,
+                        "citation": citation,
+                        "category_corrected": letter,
+                    })
+                    out.append(new_d)
                 else:
                     out.append(d)
                 break
         if not matched:
+            out.append(d)
+    return out, overrides
+
+
+# --- Cross-column deterministic rule: age present -> drop DOB -------------
+#
+# Sir's stated rule: "age present then drop DOB else keep DOB [transformed]".
+# Judge reasons about each column in isolation and has no way to see that a
+# separate age column already covers the research need, so a deterministic
+# post-Judge pass enforces this rather than relying on the LLM to infer a
+# cross-column relationship from headers alone.
+_AGE_COL_RE = _re_module.compile(
+    r"^(age|age[_ ]?years|age[_ ]?in[_ ]?years|age[_ ]?at[_ ]?enrolment|"
+    r"age[_ ]?at[_ ]?enrollment|age[_ ]?at[_ ]?screening|age[_ ]?of[_ ]?onset)$"
+)
+_DOB_COL_RE = _re_module.compile(
+    r"^(dob|date[_ ]?of[_ ]?birth|birth[_ ]?date|birthdate)$"
+)
+
+
+def apply_age_dob_rule(decisions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """If a separate age column is being retained, force any DOB column to
+    'drop' rather than a transform like year_only -- the age column already
+    covers the research need, and 164.514(b)(2)(i)(C) requires dropping the
+    identifier once it is not needed in identifiable or near-identifiable
+    form. Leaves DOB decisions untouched when no age column is present."""
+    has_age = any(
+        _AGE_COL_RE.match(_re_module.sub(r"\s+", "_", (d.get("column") or "").strip().lower()))
+        and d.get("action") not in ("drop", "human_review")
+        for d in decisions
+    )
+    if not has_age:
+        return decisions, []
+    out: list[dict[str, Any]] = []
+    overrides: list[dict[str, Any]] = []
+    for d in decisions:
+        col_norm = _re_module.sub(r"\s+", "_", (d.get("column") or "").strip().lower())
+        if _DOB_COL_RE.match(col_norm) and d.get("action") != "drop":
+            new_d = dict(d)
+            new_d.update(
+                action="drop",
+                phi_category="C",
+                reason=(
+                    "Cross-column rule: a separate age column is retained for research use, "
+                    "so date of birth must be dropped rather than transformed, per "
+                    "45 CFR 164.514(b)(2)(i)(C)."
+                ),
+                citation="45 CFR 164.514(b)(2)(i)(C)",
+                confidence=0.98,
+                suggested_action=None,
+                suggested_confidence=None,
+                suggested_reason=None,
+            )
+            overrides.append({
+                "file_id": d.get("file_id"),
+                "column": d.get("column"),
+                "from": d.get("action"),
+                "to": "drop",
+                "rule": "age_present_drop_dob",
+            })
+            out.append(new_d)
+        else:
             out.append(d)
     return out, overrides
 
@@ -285,6 +393,16 @@ def verify_keep_decisions(
                 "demoted pending human review."
             ),
             citation="45 CFR 164.514(b)(2)(i)",
+            # Carry the pre-demotion decision forward as the agent's own
+            # recommendation, so the reviewer sees what Judge proposed and
+            # why the deterministic scan didn't trust it, in one glance.
+            suggested_action="keep",
+            suggested_confidence=decision.get("confidence"),
+            suggested_reason=(
+                f"Judge originally proposed 'keep' ({decision.get('reason') or 'no reason given'}); "
+                f"a deterministic row-value scan matched detector '{detector_id}', which the "
+                "reviewer should confirm or override."
+            ),
         )
         return updated, {
             "file_id": decision.get("file_id"),

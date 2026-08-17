@@ -41,17 +41,27 @@ def test_age_forced_to_cap_age_90_only_if_human_review():
     # human_review -> cap_age_90
     out1, _ = apply_sentinel_hard_rules([_decide("age", "human_review")])
     assert out1[0]["action"] == "cap_age_90"
-    # keep is in allow-list; Judge's choice preserved
+    # keep is in allow-list; Judge's action choice preserved. phi_category is
+    # still corrected to the rule's letter (the test fixture omits it), so an
+    # override IS recorded, but it's a category-only correction, not an
+    # action change.
     out2, ov2 = apply_sentinel_hard_rules([_decide("age", "keep")])
     assert out2[0]["action"] == "keep"
-    assert ov2 == []
+    assert out2[0]["phi_category"] == "C"
+    assert len(ov2) == 1
+    assert ov2[0]["from"] == ov2[0]["to"] == "keep"
+    assert ov2[0]["category_corrected"] == "C"
 
 
 def test_dob_year_only_choice_respected():
-    # Judge already picked year_only which is in the allow-list -> no override
+    # Judge already picked year_only which is in the allow-list -> action
+    # unchanged, but phi_category is still corrected to 'C' since the test
+    # fixture omits it.
     out, ov = apply_sentinel_hard_rules([_decide("date_of_birth", "year_only")])
     assert out[0]["action"] == "year_only"
-    assert ov == []
+    assert out[0]["phi_category"] == "C"
+    assert len(ov) == 1
+    assert ov[0]["from"] == ov[0]["to"] == "year_only"
 
 
 def test_unknown_column_untouched():

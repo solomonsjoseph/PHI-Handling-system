@@ -131,7 +131,13 @@ class Agent:
         # Full untruncated text always persisted (tier-3 requirement); a
         # write-time scrub pass is defense-in-depth on top of the scrubbing
         # each call site already does to its own inputs before this point.
-        in_payload: dict[str, Any] = {"prompt_text": scrub_for_prompt(user_prompt)[0]}
+        # Rule-only detectors here (not presidio+rule): this layer sees every
+        # agent's full prompt/reply, most of which is ordinary reasoning
+        # prose, and presidio's NER false-positived heavily on it (flagged
+        # "Patient", "US", "years", ethnicity words, and ICD-10 codes as PHI
+        # on real corpus text with zero actual identifiers present). Rule
+        # regex still catches genuine SSN/phone/email/date-shaped leaks.
+        in_payload: dict[str, Any] = {"prompt_text": scrub_for_prompt(user_prompt, detectors=("rule",))[0]}
         await self._log(phase, "in", in_payload, parent_id=parent_id, status_text=status_text)
 
         async def attempt_plain(system_prompt: str, extended: bool) -> str:
@@ -156,7 +162,7 @@ class Agent:
                 await self._log(phase, "out", {"error": f"llm timeout after {base_timeout:.0f}s"}, dur, parent_id=parent_id)
                 return ""
             dur = (time.perf_counter() - t0) * 1000
-            await self._log(phase, "out", {"reply_text": scrub_for_prompt(reply)[0]}, dur, parent_id=parent_id)
+            await self._log(phase, "out", {"reply_text": scrub_for_prompt(reply, detectors=("rule",))[0]}, dur, parent_id=parent_id)
             return reply
 
         reply, ok, error_kind = await self.manager.run_supervised(
@@ -167,7 +173,7 @@ class Agent:
         )
         dur = (time.perf_counter() - t0) * 1000
         if ok:
-            await self._log(phase, "out", {"reply_text": scrub_for_prompt(reply)[0]}, dur, parent_id=parent_id)
+            await self._log(phase, "out", {"reply_text": scrub_for_prompt(reply, detectors=("rule",))[0]}, dur, parent_id=parent_id)
             return reply
         self.call_failures += 1
         await self._log(phase, "out", {"error": error_kind}, dur, parent_id=parent_id)
@@ -202,7 +208,7 @@ class Agent:
         Mongo persistence.
         """
         in_payload = {
-            "prompt_text": scrub_for_prompt(user_prompt)[0],
+            "prompt_text": scrub_for_prompt(user_prompt, detectors=("rule",))[0],
             "tool": "web_search_20250305",
             "max_uses": max_uses,
         }
@@ -235,7 +241,7 @@ class Agent:
         dur = (time.perf_counter() - t0) * 1000
         if ok:
             await self._log(phase, "out", {
-                "reply_text": scrub_for_prompt(reply)[0],
+                "reply_text": scrub_for_prompt(reply, detectors=("rule",))[0],
                 "citations_count": len(citations_box[0]),
                 "citations": citations_box[0][:20],
             }, dur, parent_id=parent_id)

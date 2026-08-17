@@ -194,16 +194,45 @@ _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 # with a path segment that looks personally targeted (u/, patient/, etc.).
 _URL_RE = re.compile(r"\bhttps?://[\w./\-?=&%+#:]{6,200}\b")
 
+# Statutory citations and fixed regulatory vocabulary are never PHI, but the
+# detectors above catch them as false positives: "164" in "45 CFR
+# §164.514(b)(2)(i)" reads like a phone/MRN digit run, and "Social Security
+# Number" / "Safe Harbor" / "Date of Birth" are two-Title-Case-word phrases
+# indistinguishable from the _NAME_RE heuristic. Protect both classes of text
+# before running the PHI detectors, then restore them verbatim -- this is the
+# only way to keep citations and rationale readable at the human-review
+# boundary without weakening real PHI detection.
+_CITATION_RE = re.compile(
+    r"\b\d{1,3}\s*C\.?\s*F\.?\s*R\.?\s*§?\s*\d+(?:\.\d+)*(?:\([a-zA-Z0-9]+\))*",
+    re.IGNORECASE,
+)
+_REGULATORY_TERMS_RE = re.compile(
+    r"\b(?:Social Security Number|Social Security|Safe Harbor|"
+    r"Protected Health Information|Medical Record Number|Date of Birth|"
+    r"Personally Identifiable Information|Privacy Rule|HIPAA)\b",
+    re.IGNORECASE,
+)
+
 
 def scrub_persisted_text(text: str) -> str:
     """Redact obvious PHI substrings from a stored string.
 
     Intentionally over-cautious: false-positive replacements only cost the
     reviewer some context, whereas false-negative leaks the raw identifier.
+    Statutory citations and known regulatory terms are protected first so
+    they survive the PHI detectors verbatim.
     """
     if not text:
         return text or ""
-    out = _EMAIL_RE.sub("[F]", text)
+    protected: list[str] = []
+
+    def _protect(m: re.Match) -> str:
+        protected.append(m.group(0))
+        return f"\x00{len(protected) - 1}\x00"
+
+    out = _CITATION_RE.sub(_protect, text)
+    out = _REGULATORY_TERMS_RE.sub(_protect, out)
+    out = _EMAIL_RE.sub("[F]", out)
     out = _PHONE_RE.sub("[D]", out)
     out = _SSN_RE.sub("[G]", out)
     # Order matters: strip MRN-shaped runs BEFORE the date/age regex so
@@ -216,6 +245,8 @@ def scrub_persisted_text(text: str) -> str:
     out = _DATE_RE.sub("[C]", out)
     out = _AGE_OVER_89_RE.sub("[C-age]", out)
     out = _NAME_RE.sub("[A]", out)
+    for i, original in enumerate(protected):
+        out = out.replace(f"\x00{i}\x00", original)
     return out
 
 

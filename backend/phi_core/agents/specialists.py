@@ -42,7 +42,15 @@ class Lexicon(Agent):
         self.scrub_count = 0
         for f in dict_files:
             text = _read_table_flat(Path(f["stored_path"]))
-            scrubbed, n_removed = scrub_for_prompt(text[:8000])
+            # Dictionary descriptions are short label-like phrases with little
+            # surrounding narrative context -- the same "Title-Case labels,
+            # no sentence context" case scrub_for_prompt's docstring already
+            # documents for form text. Presidio's NER false-positives heavily
+            # here (flagged "Patient", "US", "years", "sex_at_birth", and
+            # ethnicity words like "Hispanic"/"Latino" as PHI in the TB study
+            # dictionary, none of which are). Rule-based regex still catches
+            # any genuine identifier value typed into a description.
+            scrubbed, n_removed = scrub_for_prompt(text[:8000], detectors=("rule",))
             self.scrub_count += n_removed
             await self._log(f"lexicon.scrub:{f['file_id']}", "info", {"identifiers_removed": n_removed})
             reply = await self.call_json(

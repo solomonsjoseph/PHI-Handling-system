@@ -38,6 +38,7 @@ from .reasoning import (
     Judge,
     Sentinel,
     annotate_pending_review,
+    apply_age_dob_rule,
     apply_sentinel_hard_rules,
     validate_decisions,
     verify_keep_decisions,
@@ -209,6 +210,13 @@ async def run_pipeline(
     all_model_output_rejections: list[dict[str, Any]] = []
     decisions: list[dict[str, Any]] = []
     manager_early_escalation = False
+    # Anti-loop rule: (file_id, column) -> action that Sentinel rejected as
+    # blocking in a prior iteration. If Judge's revision proposes the exact
+    # same action again, it isn't a real revision -- escalate immediately
+    # instead of burning another iteration on a repeated proposal. Praxis
+    # multi-method scoring can later refine this to (action, method) so a
+    # differently-keyed hash doesn't get treated as a repeat.
+    prior_blocking_actions: dict[tuple[str, str], dict[str, Any]] = {}
     for iteration in range(1, iteration_cap + 1):
         await _check_cancel(db, sid, on_phase)
         await on_phase(f"judge_iter_{iteration}", {"iteration": iteration})
@@ -229,11 +237,61 @@ async def run_pipeline(
             all_sentinel_overrides.extend(overrides)
             await on_phase(f"sentinel_hard_rules_iter_{iteration}",
                            {"iteration": iteration, "overrides": overrides})
+        # Cross-column rule: a retained age column means DOB must be dropped,
+        # not transformed. Deterministic, so it runs before Sentinel rather
+        # than relying on the LLM to catch it and spend an iteration.
+        decisions, age_dob_overrides = apply_age_dob_rule(decisions)
+        if age_dob_overrides:
+            all_sentinel_overrides.extend(age_dob_overrides)
+            await on_phase(f"age_dob_rule_iter_{iteration}",
+                           {"iteration": iteration, "overrides": age_dob_overrides})
+        # Anti-loop: a decision repeating a previously-rejected action isn't
+        # a real revision. Force it straight to human review rather than
+        # resubmitting it to Sentinel for the same rejection.
+        anti_loop_forced: list[dict[str, Any]] = []
+        if prior_blocking_actions:
+            forced_decisions = []
+            for d in decisions:
+                key = (d.get("file_id"), d.get("column"))
+                prior = prior_blocking_actions.get(key)
+                if prior and d.get("action") == prior.get("action"):
+                    forced = dict(d)
+                    forced.update(
+                        action="human_review",
+                        suggested_action=prior.get("action"),
+                        suggested_confidence=d.get("confidence"),
+                        suggested_reason=(
+                            f"Judge repeated the previously-rejected action "
+                            f"{prior.get('action')!r} without change. Sentinel's objection: "
+                            f"{prior.get('issue_text') or 'see prior iteration issues'}"
+                        ),
+                    )
+                    anti_loop_forced.append({
+                        "file_id": d.get("file_id"), "column": d.get("column"),
+                        "repeated_action": d.get("action"),
+                    })
+                    forced_decisions.append(forced)
+                else:
+                    forced_decisions.append(d)
+            decisions = forced_decisions
+            if anti_loop_forced:
+                await on_phase(f"anti_loop_iter_{iteration}",
+                               {"iteration": iteration, "forced": anti_loop_forced})
         await _check_cancel(db, sid, on_phase)
         await on_phase(f"sentinel_iter_{iteration}", {"iteration": iteration, "decision_count": len(decisions)})
         s = await sentinel.run(decisions=decisions, statute=statute, instrument=instrument,
                                parent_id=judge.last_message_id)
         blocking = _blocking_issues(s)
+        # Record this iteration's blocking columns/actions so the next
+        # iteration's anti-loop check can compare against them.
+        blocking_by_column = {(b.get("file_id"), b.get("column")): b for b in blocking if b.get("column")}
+        for d in decisions:
+            key = (d.get("file_id"), d.get("column"))
+            if key in blocking_by_column and d.get("action") != "human_review":
+                prior_blocking_actions[key] = {
+                    "action": d.get("action"),
+                    "issue_text": blocking_by_column[key].get("problem") or "",
+                }
         # Every advisory issue stays in the audit trail even after early
         # approval (Sir Q1: 'nitpicks logged where required').
         advisory_issues.extend(
