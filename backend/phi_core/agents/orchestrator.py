@@ -39,6 +39,8 @@ from .reasoning import (
     Sentinel,
     annotate_pending_review,
     apply_age_dob_rule,
+    apply_confidence_floor,
+    apply_sentinel_escalations,
     apply_sentinel_hard_rules,
     validate_decisions,
     verify_keep_decisions,
@@ -65,6 +67,14 @@ def _blocking_issues(sentinel_out: dict[str, Any]) -> list[dict[str, Any]]:
     """
     return [i for i in (sentinel_out.get("issues") or [])
             if str(i.get("severity", "")).lower() == "blocking"]
+
+
+def _escalation_issues(sentinel_out: dict[str, Any]) -> list[dict[str, Any]]:
+    """Issues Sentinel marked 'escalate' -- genuine ambiguity it cannot
+    correct itself. Routes straight to human_review, skipping further Judge
+    iterations for that column (unlike 'blocking', which sends it back)."""
+    return [i for i in (sentinel_out.get("issues") or [])
+            if str(i.get("severity", "")).lower() == "escalate"]
 
 
 async def _check_cancel(db: AsyncIOMotorDatabase, sid: str, on_phase: PhaseCb) -> None:
@@ -277,10 +287,29 @@ async def run_pipeline(
             if anti_loop_forced:
                 await on_phase(f"anti_loop_iter_{iteration}",
                                {"iteration": iteration, "forced": anti_loop_forced})
+        # Confidence floor: below 0.80 always goes to human review, whether
+        # or not Sentinel would agree with it. Deterministic, so it runs
+        # before the LLM review rather than costing a review call on a
+        # decision that is going to human review regardless.
+        decisions, floor_overrides = apply_confidence_floor(decisions)
+        if floor_overrides:
+            all_sentinel_overrides.extend(floor_overrides)
+            await on_phase(f"confidence_floor_iter_{iteration}",
+                           {"iteration": iteration, "overrides": floor_overrides})
         await _check_cancel(db, sid, on_phase)
         await on_phase(f"sentinel_iter_{iteration}", {"iteration": iteration, "decision_count": len(decisions)})
         s = await sentinel.run(decisions=decisions, statute=statute, instrument=instrument,
                                parent_id=judge.last_message_id)
+        # Sentinel-originated escalation: genuine ambiguity Sentinel can't
+        # correct itself. Applied immediately -- these columns skip the
+        # remaining Judge iterations rather than looping.
+        escalations = _escalation_issues(s)
+        if escalations:
+            decisions, escalation_overrides = apply_sentinel_escalations(decisions, escalations)
+            if escalation_overrides:
+                all_sentinel_overrides.extend(escalation_overrides)
+                await on_phase(f"sentinel_escalation_iter_{iteration}",
+                               {"iteration": iteration, "overrides": escalation_overrides})
         blocking = _blocking_issues(s)
         # Record this iteration's blocking columns/actions so the next
         # iteration's anti-loop check can compare against them.

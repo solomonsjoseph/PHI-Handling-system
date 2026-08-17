@@ -54,6 +54,15 @@ def validate_decisions(
         d = dict(d)
         action = d.get("action")
         norm_action = str(action).strip().lower() if action is not None else ""
+        if norm_action == "human_review":
+            # 2026-08-17 Sentinel redesign: Judge always commits to its best
+            # action + confidence. It no longer owns the human_review call --
+            # only Sentinel (deterministic layer or LLM escalation) does. A
+            # Judge decision that still proposes human_review is invalid
+            # output, not a legitimate choice; route it through the same
+            # fail-closed rejection path as any other unusable action so it
+            # is visible in `rejections` (should be empty on Judge output).
+            norm_action = ""
         if norm_action not in ACTION_TYPES:
             rejections.append({"file_id": file_id, "column": column, "field": "action", "proposed": action})
             d["action"] = "human_review"
@@ -368,6 +377,93 @@ def apply_age_dob_rule(decisions: list[dict[str, Any]]) -> tuple[list[dict[str, 
             out.append(d)
     return out, overrides
 
+
+CONFIDENCE_FLOOR = 0.80
+
+
+def apply_confidence_floor(decisions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Any decision below CONFIDENCE_FLOOR always goes to human review,
+    independent of whether Sentinel agrees with it. Reducing human review is
+    not the same as denying it -- a deterministic gate, not an LLM judgment
+    call, and it runs before Sentinel's LLM review so a decision that is
+    going to human review regardless doesn't cost a review call. Fixed at
+    0.80 regardless of iteration_cap/rigor selector."""
+    out: list[dict[str, Any]] = []
+    overrides: list[dict[str, Any]] = []
+    for d in decisions:
+        confidence = d.get("confidence")
+        if (
+            d.get("action") != "human_review"
+            and isinstance(confidence, (int, float))
+            and confidence < CONFIDENCE_FLOOR
+        ):
+            new_d = dict(d)
+            new_d.update(
+                action="human_review",
+                reason=(
+                    f"Confidence floor: Judge's confidence ({confidence:.2f}) is below the "
+                    f"{CONFIDENCE_FLOOR:.2f} floor required to ship a decision unreviewed."
+                ),
+                suggested_action=d.get("action"),
+                suggested_confidence=confidence,
+                suggested_reason=(
+                    f"Judge proposed {d.get('action')!r} at confidence {confidence:.2f} "
+                    f"({d.get('reason') or 'no reason given'}); below the {CONFIDENCE_FLOOR:.2f} floor."
+                ),
+            )
+            overrides.append({
+                "file_id": d.get("file_id"), "column": d.get("column"),
+                "from": d.get("action"), "to": "human_review",
+                "rule": "confidence_floor", "confidence": confidence,
+            })
+            out.append(new_d)
+        else:
+            out.append(d)
+    return out, overrides
+
+
+def apply_sentinel_escalations(
+    decisions: list[dict[str, Any]],
+    escalations: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Convert the decisions Sentinel flagged 'escalate' to human_review,
+    carrying Judge's last committed action/confidence/reason into
+    suggested_*. Judge itself never proposes human_review (2026-08-17
+    redesign); this is the one place besides verify_keep_decisions/anti-loop
+    where a decision becomes human_review, and all three follow the same
+    contract: the reviewer sees what was proposed, not a bare rejection."""
+    by_key = {(e.get("file_id"), e.get("column")): e for e in escalations if e.get("column")}
+    if not by_key:
+        return decisions, []
+    out: list[dict[str, Any]] = []
+    overrides: list[dict[str, Any]] = []
+    for d in decisions:
+        key = (d.get("file_id"), d.get("column"))
+        issue = by_key.get(key)
+        if issue and d.get("action") != "human_review":
+            new_d = dict(d)
+            new_d.update(
+                action="human_review",
+                reason=f"Sentinel escalation: {issue.get('problem') or 'genuinely ambiguous under the applicable regulation'}",
+                suggested_action=d.get("action"),
+                suggested_confidence=d.get("confidence"),
+                suggested_reason=(
+                    f"Judge proposed {d.get('action')!r} ({d.get('reason') or 'no reason given'}); "
+                    f"Sentinel flagged this ambiguous rather than clearly wrong: "
+                    f"{issue.get('problem') or 'see Sentinel summary'}"
+                ),
+            )
+            overrides.append({
+                "file_id": d.get("file_id"), "column": d.get("column"),
+                "from": d.get("action"), "to": "human_review",
+                "rule": "sentinel_escalation",
+            })
+            out.append(new_d)
+        else:
+            out.append(d)
+    return out, overrides
+
+
 def verify_keep_decisions(
     decisions: list[dict[str, Any]],
     dataset_paths: dict[str, Path],
@@ -478,23 +574,21 @@ class Judge(Agent):
         "  hash           - deterministic sha256 token for linkage\n"
         "  pseudonymize   - stable replacement (SAME real value -> SAME pseudonym across the whole study)\n"
         "  scrub_text     - free-text column whose header is safe but rows may contain PHI; "
-        "the Executor will run Presidio + regex over each cell (LLM never reads the cells)\n"
-        "  human_review   - uncertain; route to a human\n\n"
+        "the Executor will run Presidio + regex over each cell (LLM never reads the cells)\n\n"
+        "You do not have a human_review option. ALWAYS commit to one of the actions above, even "
+        "when uncertain -- give your honest confidence (0..1) instead of deferring. A second "
+        "reviewer agent (Sentinel) checks your work against the regulations and methods, corrects "
+        "you when you're wrong, and is the only one that may route a column to a human. Low "
+        "confidence is information Sentinel uses to decide whether it needs a human, not a reason "
+        "for you to pick a placeholder.\n\n"
         "SUBJECT tag (choose exactly one): participant | staff | specimen | site | study\n\n"
         "Use scrub_text for columns like 'comments', 'notes', 'remarks', 'other_specify', "
-        "'reason', 'description' (any narrative free-text field on a study form).\n"
-        "Route to human_review whenever confidence < 0.60 or the column looks like a "
-        "true quasi-identifier requiring auditor judgement.\n\n"
+        "'reason', 'description' (any narrative free-text field on a study form).\n\n"
         "Return JSON: "
         '{"decisions": [{"file_id": str, "column": str, "phi_category": str|null, '
         '"subject": "participant|staff|specimen|site|study", '
-        '"action": "keep|drop|cap_age_90|year_only|zip3_truncate|hash|pseudonymize|scrub_text|human_review", '
-        '"reason": str, "confidence": 0..1, "citation": str, '
-        '"suggested_action": str|null, "suggested_confidence": 0..1|null, "suggested_reason": str|null}]}. '
-        "When action='human_review', also fill suggested_action/suggested_confidence/suggested_reason "
-        "with your best guess if you HAD to decide directly -- a human reviewer uses this as a "
-        "one-click starting point, never as the final decision. Leave all three null when action "
-        "is anything other than human_review.\n"
+        '"action": "keep|drop|cap_age_90|year_only|zip3_truncate|hash|pseudonymize|scrub_text", '
+        '"reason": str, "confidence": 0..1, "citation": str}]}. '
         "Preserve clinically-needed non-PHI (diagnoses, procedures, vitals, labs)."
     )
 
@@ -573,18 +667,26 @@ class Sentinel(Agent):
         "You are Sentinel. Review Judge's decisions with ONE goal: zero PHI leak, 100% accuracy. "
         "Cross-check every 'keep' against Statute rules and Instrument fields. Flag any column "
         "whose action is inconsistent with its PHI category or citation.\n\n"
-        "For every issue, set severity honestly:\n"
-        "  - 'blocking' ONLY when the current action would leak PHI or over-block clinical signal. "
-        "This is the bar for another iteration. Reserve for real leaks (e.g. keep on a phone column, "
-        "keep on a name column, drop on a study arm).\n"
+        "You are the only agent that may send a column to a human. Judge never does. For every "
+        "issue, set severity honestly:\n"
+        "  - 'blocking' when you know the correct action/category/method and Judge's decision is "
+        "wrong -- state the correct value in `suggested_action`. This sends the column back to "
+        "Judge for one more try, with your correction attached. Reserve for real leaks or clear "
+        "regulatory/method mismatches (e.g. keep on a phone column, keep on a name column, drop on "
+        "a study arm, hash used where Statute requires zip3_truncate).\n"
+        "  - 'escalate' when you disagree with Judge's decision but the correct answer is genuinely "
+        "ambiguous -- you cannot state a confident correction yourself. This routes the column "
+        "straight to a human, skipping further Judge iterations. Use this rarely: only for real "
+        "regulatory ambiguity, not merely low confidence on Judge's part.\n"
         "  - 'advisory' for style, retention-policy nits, or preference between two safe transforms "
         "(e.g. hash vs pseudonymize when both close the leak). Advisory issues NEVER trigger a "
-        "re-iteration; they are logged and included in the audit trail.\n\n"
+        "re-iteration or escalation; they are logged and included in the audit trail.\n\n"
         "Return JSON: "
         '{"verdict": "approved|revise", "issues": [{"file_id": str, "column": str, '
-        '"problem": str, "suggested_action": str, "severity": "blocking|advisory"}], "summary": str}. '
-        "Set verdict='approved' unless at least one blocking issue remains after your review. "
-        "Nitpick sparingly and only where it materially reduces PHI risk."
+        '"problem": str, "suggested_action": str, "severity": "blocking|advisory|escalate"}], '
+        '"summary": str}. '
+        "Set verdict='approved' unless at least one blocking or escalate issue remains after your "
+        "review. Nitpick sparingly and only where it materially reduces PHI risk."
     )
 
     async def run(self, decisions: list[dict[str, Any]], statute: dict, instrument: dict,
@@ -605,8 +707,8 @@ class Sentinel(Agent):
         # live sessions where the LLM emitted verdict='revise' with only
         # style-level objections.
         issues = out.get("issues") or []
-        blocking = [i for i in issues if str(i.get("severity", "")).lower() == "blocking"]
-        if not blocking:
+        actionable = [i for i in issues if str(i.get("severity", "")).lower() in ("blocking", "escalate")]
+        if not actionable:
             out["verdict"] = "approved"
         return out
 
