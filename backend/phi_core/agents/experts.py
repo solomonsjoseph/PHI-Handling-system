@@ -274,103 +274,174 @@ class Statute(Agent):
 
 
 class Praxis(Agent):
-    """PHI transformation methods expert. Fetches the current recommended
-    technique for a variable category with web citations."""
+    """PHI transformation methods expert. Reports candidate methods by category."""
 
     NAME = "Praxis"
     PROMPT = (
-        "You are Praxis, an expert in PHI transformation techniques. You "
-        "MUST search the web for the current best-practice method for the "
-        "requested category (date-jittering, k-anonymity generalisation, "
-        "cryptographic hashing, tokenisation, ZIP truncation, differential "
-        "privacy noise). Return JSON only with this schema: "
-        '{"category": str, "technique": str, "params": object, '
+        "You are Praxis, an expert in PHI transformation techniques. You MUST "
+        "search the web for current methods and return JSON only with this "
+        'schema: {"category": str, "methods": [{"name": str, '
+        '"how_to_apply": str, "why": str, "params": object, '
         '"utility_preserving": bool, "clinical_impact": str, '
-        '"reference_paper": str, "sources": [{"url": str, "title": str}]}. '
-        "Prefer techniques that preserve clinical utility (e.g., age -> '90+' "
-        "cap, date -> year only, ZIP -> first 3 digits with 17-code deny "
-        "list). If a web search returns no result, still fill the schema from "
-        "your training knowledge and mark ``sources`` empty."
+        '"reference_paper": str, "sources": [{"url": str, "title": str}]}], '
+        '"as_of": "YYYY-MM-DD"}. '
+        "Give every distinct current method that genuinely applies. "
+        "For methods requiring HIPAA Expert Determination rather than Safe "
+        "Harbor, say so in that method's why field."
     )
 
-    _DETERMINISTIC_METHODS: dict[str, dict[str, Any]] = {
-        # HIPAA-canonical, deterministic fallbacks. Only used when the LLM
-        # is unreachable OR the category is well-defined without needing
-        # a live web search (avoids paying for a search on trivia).
-        "A": {"category": "A", "technique": "drop", "params": {},
-              "utility_preserving": False, "clinical_impact": "none — names carry no clinical signal",
-              "reference_paper": "HIPAA §164.514(b)(2)(i)(A)", "sources": []},
-        "B": {"category": "B", "technique": "zip3_truncate", "params": {"length": 3, "restricted_prefixes_denylist": True},
-              "utility_preserving": True, "clinical_impact": "coarse geographic banding retained",
-              "reference_paper": "HIPAA §164.514(b)(2)(i)(B)", "sources": []},
-        "C": {"category": "C", "technique": "date_year_only + cap_age_90", "params": {"age_cap": 90},
-              "utility_preserving": True, "clinical_impact": "temporal signal preserved at year granularity",
-              "reference_paper": "HIPAA §164.514(b)(2)(i)(C)", "sources": []},
-        "D": {"category": "D", "technique": "drop", "params": {},
-              "utility_preserving": False, "clinical_impact": "none — phone carries no clinical signal",
-              "reference_paper": "HIPAA §164.514(b)(2)(i)(D)", "sources": []},
-        "F": {"category": "F", "technique": "drop", "params": {},
-              "utility_preserving": False, "clinical_impact": "none",
-              "reference_paper": "HIPAA §164.514(b)(2)(i)(F)", "sources": []},
-        "G": {"category": "G", "technique": "drop", "params": {},
-              "utility_preserving": False, "clinical_impact": "none — SSN carries no clinical signal",
-              "reference_paper": "HIPAA §164.514(b)(2)(i)(G)", "sources": []},
-        "H": {"category": "H", "technique": "pseudonymize", "params": {"salt_source": "session_id", "hash": "sha256", "output_len": 8},
-              "utility_preserving": True, "clinical_impact": "cross-file linkage preserved",
-              "reference_paper": "HIPAA §164.514(b)(2)(i)(H)", "sources": []},
+    _SAFE_HARBOR_SOURCE = {
+        "url": (
+            "https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/"
+            "part-164/subpart-E/section-164.514"
+        ),
+        "title": "45 CFR 164.514, Other requirements relating to uses and disclosures of protected health information",
     }
+    _DETERMINISTIC_METHODS: dict[str, dict[str, Any]] = {
+        "A": {
+            "name": "drop", "how_to_apply": "Remove the name column.",
+            "why": "Names carry no clinical signal and Safe Harbor removes them.",
+            "params": {}, "utility_preserving": False,
+            "clinical_impact": "No clinical signal retained.",
+            "reference_paper": "45 CFR 164.514(b)(2)(i)(A)",
+            "sources": [_SAFE_HARBOR_SOURCE],
+        },
+        "B": {
+            "name": "zip3_truncate",
+            "how_to_apply": "Keep the first three ZIP digits and apply the restricted-prefix deny list.",
+            "why": "Safe Harbor permits only the first three ZIP digits subject to its population rule.",
+            "params": {"length": 3, "restricted_prefixes_denylist": True},
+            "utility_preserving": True,
+            "clinical_impact": "Coarse geographic banding retained.",
+            "reference_paper": "45 CFR 164.514(b)(2)(i)(B)",
+            "sources": [_SAFE_HARBOR_SOURCE],
+        },
+        "C": {
+            "name": "date_year_only + cap_age_90",
+            "how_to_apply": "Replace date elements with the year and represent ages over 89 as 90+.",
+            "why": "Safe Harbor removes date elements other than the year and aggregates ages over 89.",
+            "params": {"age_cap": 90},
+            "utility_preserving": True,
+            "clinical_impact": "Annual temporal signal retained.",
+            "reference_paper": "45 CFR 164.514(b)(2)(i)(C)",
+            "sources": [_SAFE_HARBOR_SOURCE],
+        },
+        "D": {
+            "name": "drop", "how_to_apply": "Remove the telephone-number column.",
+            "why": "Telephone numbers carry no clinical signal and Safe Harbor removes them.",
+            "params": {}, "utility_preserving": False,
+            "clinical_impact": "No clinical signal retained.",
+            "reference_paper": "45 CFR 164.514(b)(2)(i)(D)",
+            "sources": [_SAFE_HARBOR_SOURCE],
+        },
+        "F": {
+            "name": "drop", "how_to_apply": "Remove the email-address column.",
+            "why": "Email addresses carry no clinical signal and Safe Harbor removes them.",
+            "params": {}, "utility_preserving": False,
+            "clinical_impact": "No clinical signal retained.",
+            "reference_paper": "45 CFR 164.514(b)(2)(i)(F)",
+            "sources": [_SAFE_HARBOR_SOURCE],
+        },
+        "G": {
+            "name": "drop", "how_to_apply": "Remove the Social Security number column.",
+            "why": "Social Security numbers carry no clinical signal and Safe Harbor removes them.",
+            "params": {}, "utility_preserving": False,
+            "clinical_impact": "No clinical signal retained.",
+            "reference_paper": "45 CFR 164.514(b)(2)(i)(G)",
+            "sources": [_SAFE_HARBOR_SOURCE],
+        },
+        "H": {
+            "name": "pseudonymize",
+            "how_to_apply": "Replace each value with a stable session-scoped pseudonym.",
+            "why": "Preserves cross-file linkage while removing the record number.",
+            "params": {"salt_source": "session_id", "hash": "sha256", "output_len": 8},
+            "utility_preserving": True,
+            "clinical_impact": "Cross-file linkage retained.",
+            "reference_paper": "45 CFR 164.514(b)(2)(i)(H)",
+            "sources": [_SAFE_HARBOR_SOURCE],
+        },
+    }
+    _DETERMINISTIC_CATEGORIES = {"A", "D", "F", "G"}
+
+    @classmethod
+    def _fallback(cls, category: str) -> dict[str, Any]:
+        method = cls._DETERMINISTIC_METHODS.get(category, {
+            "name": "remove",
+            "how_to_apply": "Remove the identifier column from the shared data.",
+            "why": "No researched method was available; remove the identifier pending review.",
+            "params": {},
+            "utility_preserving": False,
+            "clinical_impact": "Unknown.",
+            "reference_paper": "",
+            "sources": [],
+        })
+        return {
+            "category": category,
+            "methods": [method.copy()],
+            "as_of": "deterministic-fallback",
+        }
 
     async def method_for(self, category: str) -> dict[str, Any]:
-        cached = await cache_get(self.db, f"phi_method:{category}", "generic")
+        cache_topic = f"phi_method_v2:{category}"
+        cached = await cache_get(self.db, cache_topic, "generic")
         if cached:
-            # Log the cache hit so operators can see Praxis actually
-            # consulted in the live agent-trace panel (otherwise the row
-            # is missing on cached runs and it looks like Praxis was
-            # skipped -- Sir Q "user must feel movement").
             payload = _json.loads(cached["content"])
-            await self._log(f"praxis.cache_hit:{category}", "info",
-                            {"technique": payload.get("technique"),
-                             "source": cached.get("source", "cache")})
+            await self._log(
+                f"praxis.cache_hit:{category}", "info",
+                {"methods": len(payload.get("methods") or []),
+                 "source": cached.get("source", "cache")},
+            )
             return payload
 
-        # For well-defined HIPAA categories with canonical techniques, skip
-        # the web search (deterministic + free) and log the shortcut.
-        if category in self._DETERMINISTIC_METHODS:
-            reply = self._DETERMINISTIC_METHODS[category].copy()
-            await self._log(f"praxis.deterministic:{category}", "info",
-                            {"technique": reply["technique"]})
-            await cache_put(self.db, f"phi_method:{category}", "generic",
-                            _json.dumps(reply), source="deterministic")
+        if category in self._DETERMINISTIC_CATEGORIES:
+            reply = self._fallback(category)
+            await self._log(
+                f"praxis.deterministic:{category}", "info",
+                {"method": reply["methods"][0]["name"]},
+            )
+            await cache_put(self.db, cache_topic, "generic", _json.dumps(reply),
+                            source="deterministic")
             return reply
 
+        pack = get_pack("us")
+        description = pack.identifier_categories.get(category, category)
         prompt = (
-            f"Category: {category}. Web-search the current best-practice PHI "
-            "transformation for this category and return JSON per the schema. "
-            "Include citations for the method AND the paper that proposed it."
+            f"Category: {category} ({description}), under HIPAA Safe Harbor "
+            f"(45 CFR 164.514(b)(2)(i)). Web-search and list the current "
+            f"methods used to transform this category of PHI so the data "
+            f"stays usable for research (e.g. linkable, analyzable, "
+            f"comparable) without exposing the real value. For each method "
+            f"return how to apply it, why it preserves utility, and its "
+            f"params. Stay within Safe Harbor-compatible techniques unless "
+            f"a method requires Expert Determination -- if so, say so "
+            f"explicitly in that method's ``why`` field."
         )
+        fallback = self._fallback(category)
+        cache_source = "llm"
         try:
             reply, citations = await self.call_json_with_web_search(
-                prompt, phase=f"praxis.web_search:{category}",
-                default={
-                    "category": category, "technique": "remove",
-                    "params": {}, "utility_preserving": False,
-                    "clinical_impact": "unknown — search failed",
-                    "reference_paper": "", "sources": [],
-                },
-                max_uses=3,
-                status_text=f"Researching best-practice technique for {category} online",
+                prompt, phase=f"praxis.web_search:{category}", default=fallback,
+                max_uses=3, expect_key="methods", min_items=1,
+                status_text=f"Researching PHI transformation methods for {description} online",
             )
-            if not reply.get("sources") and citations:
-                reply["sources"] = citations
+            if not reply.get("methods"):
+                reply = fallback
+                cache_source = "deterministic"
+            elif citations:
+                for method in reply["methods"]:
+                    if not method.get("sources"):
+                        method["sources"] = citations
+            if any(method.get("sources") for method in reply["methods"]):
+                cache_source = "web_search"
         except Exception as e:  # pragma: no cover
             await self._log(f"praxis.error:{category}", "info", {"error": str(e)})
-            reply = {"category": category, "technique": "remove", "params": {},
-                     "utility_preserving": False, "clinical_impact": "unknown",
-                     "reference_paper": "", "sources": []}
+            reply = fallback
+            cache_source = "deterministic"
 
-        await cache_put(self.db, f"phi_method:{category}", "generic",
-                        _json.dumps(reply),
-                        source="web_search" if reply.get("sources") else "llm")
+        reply["category"] = category
+        reply.setdefault("as_of", "web-search")
+        await cache_put(self.db, cache_topic, "generic", _json.dumps(reply),
+                        source=cache_source)
         return reply
 
     async def run(self, categories: list[str]) -> dict[str, Any]:
