@@ -52,7 +52,7 @@ def test_confidence_floor_and_keep_verification_agree_on_human_review(tmp_path):
     assert "Keep verification" in verified[0]["reason"]
 
 
-def test_site_cardinality_and_blocking_floor_compose_idempotently():
+def test_site_cardinality_and_blocking_floor_compose_idempotently(tmp_path):
     """A low-cardinality facility column triggers the site-cardinality rule
     (keep -> drop) and, once Sentinel has raised BLOCKING_ISSUE_FLOOR
     blocking issues against that same forced 'drop', the blocking floor
@@ -60,7 +60,14 @@ def test_site_cardinality_and_blocking_floor_compose_idempotently():
     other's record: the blocking floor's suggested_action must reflect the
     cardinality rule's 'drop', not the stale original 'keep', and
     re-applying both passes to the already-settled decision must be a
-    true no-op."""
+    true no-op. Finally, verify_keep_decisions -- which orchestrator.py
+    also runs over the settled list, after this loop, on every run --
+    must leave a suggested_action=='drop' decision alone even when its
+    row value would match a detector, because its post-repair rescan
+    (Task 24 case 1) is scoped to decisions that began as 'keep', not
+    'drop'. Rescanning a forced drop would be wrong: 'drop' already
+    removes the value, so there is nothing for a human to confirm about
+    a row-level match."""
     stats = {("dataset.csv", "treatment_facility_name"): {"distinct": 4, "rows": 40}}
     decisions = [_decide(column="treatment_facility_name", confidence=0.95)]
 
@@ -88,3 +95,14 @@ def test_site_cardinality_and_blocking_floor_compose_idempotently():
     replayed_again, blocking_overrides_2 = apply_blocking_floor(replayed, attempts)
     assert replayed_again[0]["action"] == "human_review"
     assert blocking_overrides_2 == []
+
+    # verify_keep_decisions runs over this same settled list on every real
+    # pipeline run (orchestrator.py, post-loop). The dataset value below
+    # would match detector 'H' if scanned -- proving a missing demotion
+    # here is because suggested_action=='drop' is correctly excluded, not
+    # because the value happens not to match anything.
+    dataset = tmp_path / "dataset.csv"
+    dataset.write_text("treatment_facility_name\n" + "MRN-" + "1" * 8 + "\n", encoding="utf-8")
+    final, demotions = verify_keep_decisions(replayed_again, {"dataset.csv": dataset})
+    assert final == replayed_again
+    assert demotions == []
