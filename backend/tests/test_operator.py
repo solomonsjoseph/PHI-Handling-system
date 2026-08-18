@@ -1,17 +1,26 @@
-"""Tests for the shared bounded worker-pool batching helper (Task 26).
+"""Tests for the shared bounded worker-pool batching helper (Task 26) and
+for the Operator agent built on top of it (Task 27).
 
-Operator and Reviewer both build on `run_batched`; these tests cover the
-helper itself. The `Operator` agent is a later task and is not exercised
-here.
+Operator and Reviewer both build on `run_batched`; the tests through
+`test_on_batch_fires_while_a_later_batch_is_still_blocked` cover the
+helper itself. The Operator-specific tests follow.
 """
 from __future__ import annotations
 
 import asyncio
+import csv
 import threading
+from pathlib import Path
 
 import pytest
 
 from phi_core.agents.batching import run_batched
+from phi_core.agents.operator import Operator
+from phi_core.agents.reasoning import (
+    PseudonymRegistry,
+    _scrub_text_cell,
+    apply_column_actions_to_dataset,
+)
 
 
 def _fixed_check(batch: list[int]) -> list[dict]:
@@ -241,3 +250,244 @@ async def test_on_batch_fires_while_a_later_batch_is_still_blocked():
 
     assert fast_on_batch_seen.is_set()
     assert [r["value"] for r in result] == [0, 1]
+
+
+# ---- Operator agent (Task 27) ----------------------------------------------
+
+
+class FakeAgentLog:
+    def __init__(self):
+        self.inserted: list[dict] = []
+
+    async def insert_one(self, doc, *_args, **_kwargs):
+        self.inserted.append(doc)
+
+
+class FakeDb:
+    def __init__(self):
+        self.agent_log = FakeAgentLog()
+
+
+def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        for row in rows:
+            writer.writerow(row)
+
+
+def _dataset_file(file_id: str, stored_path: str | None = None) -> dict:
+    d = {"file_id": file_id, "kind": "dataset", "subtype": "csv"}
+    if stored_path is not None:
+        d["stored_path"] = stored_path
+    return d
+
+
+def test_all_action_types_pass_against_a_real_executor_export(tmp_path):
+    """One passing case per action type, checked against an export written
+    by the real Executor transform (not hand-built), so the shape checks
+    are proven against Executor's actual output encoding."""
+    header = ["id", "ssn", "age", "dob", "zip", "mrn", "name", "notes"]
+    rows = [
+        ["1", "123-45-6789", "45", "1980-05-01", "90210",
+         "abc123", "Jane Doe", "Contact patient at john.smith@example.com for follow up."],
+        ["2", "987-65-4321", "96", "1975-02-14", "10001-1234",
+         "def456", "Jane Doe", "Patient reports feeling better this week."],
+    ]
+    src = tmp_path / "dataset.csv"
+    _write_csv(src, header, rows)
+    dst = tmp_path / "dataset_out.csv"
+
+    decisions = [
+        {"file_id": "f1", "column": "id", "action": "keep", "phi_category": "NONE", "citation": ""},
+        {"file_id": "f1", "column": "ssn", "action": "drop", "phi_category": "G",
+         "citation": "45 CFR 164.514(b)(2)(i)(G)"},
+        {"file_id": "f1", "column": "age", "action": "cap_age_90", "phi_category": "C",
+         "citation": "45 CFR 164.514(b)(2)(i)(C)"},
+        {"file_id": "f1", "column": "dob", "action": "year_only", "phi_category": "C",
+         "citation": "45 CFR 164.514(b)(2)(i)(C)"},
+        {"file_id": "f1", "column": "zip", "action": "zip3_truncate", "phi_category": "B",
+         "citation": "45 CFR 164.514(b)(2)(i)(B)"},
+        {"file_id": "f1", "column": "mrn", "action": "hash", "phi_category": "H",
+         "citation": "45 CFR 164.514(b)(2)(i)(H)"},
+        {"file_id": "f1", "column": "name", "action": "pseudonymize", "phi_category": "A",
+         "citation": "45 CFR 164.514(b)(2)(i)(A)"},
+        {"file_id": "f1", "column": "notes", "action": "scrub_text", "phi_category": "A",
+         "citation": "45 CFR 164.514(b)(2)(i)(A)"},
+    ]
+    apply_column_actions_to_dataset(src, dst, "csv", decisions, PseudonymRegistry(salt="test-salt"))
+
+    files = [_dataset_file("f1", str(src))]
+    exports = {"f1": str(dst)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    assert result["failed_file_ids"] == []
+    by_col = {v["column"]: v for v in result["verdicts"]}
+    for col in header:
+        assert by_col[col]["verdict"] == "pass", (col, by_col[col])
+    assert result["status"] == "clean"
+
+
+def test_cap_age_90_shape_violation_is_caught(tmp_path):
+    """A corrupted export (age never capped) is caught, and the raw
+    offending value never appears in the reported problem text."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["age"], [["96"]])
+    files = [_dataset_file("f1")]
+    decisions = [{"file_id": "f1", "column": "age", "action": "cap_age_90",
+                  "phi_category": "C", "citation": "45 CFR 164.514(b)(2)(i)(C)"}]
+    exports = {"f1": str(src)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    v = result["verdicts"][0]
+    assert v["verdict"] == "fail"
+    assert "96" not in v["problem"]
+    assert result["status"] == "issues"
+
+
+def test_decision_for_nonexistent_column_is_flagged(tmp_path):
+    """Finding 12: a stale/misspelled column name from Judge/Sentinel is
+    surfaced rather than silently ignored."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id"], [["1"]])
+    files = [_dataset_file("f1")]
+    decisions = [{"file_id": "f1", "column": "ssn", "action": "drop",
+                  "phi_category": "G", "citation": "45 CFR 164.514(b)(2)(i)(G)"}]
+    exports = {"f1": str(src)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    v = result["verdicts"][0]
+    assert v["verdict"] == "fail"
+    assert "no corresponding column" in v["problem"]
+    assert result["status"] == "issues"
+
+
+def test_drop_column_left_populated_fails(tmp_path):
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["ssn"], [["123-45-6789"], [""]])
+    files = [_dataset_file("f1")]
+    decisions = [{"file_id": "f1", "column": "ssn", "action": "drop",
+                  "phi_category": "G", "citation": "45 CFR 164.514(b)(2)(i)(G)"}]
+    exports = {"f1": str(src)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    v = result["verdicts"][0]
+    assert v["verdict"] == "fail"
+    assert v["problem"] == "drop column left populated"
+
+
+def test_scrub_text_cell_preserves_adjacent_markup():
+    """Regression test for reasoning.py finding 4 (already fixed): a
+    detected PHI span must not eat into adjacent markup. This proves the
+    existing `_scrub_text_cell` behavior Operator relies on rather than
+    re-checking, not new Operator logic."""
+    text = "<b>John Smith</b> <a href='mailto:x@y.com'>"
+    out = _scrub_text_cell(text)
+    assert "</b>" in out
+    assert "John Smith" not in out
+
+
+def test_omit_by_file_column_expected_absent_passes(tmp_path):
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id"], [["1"]])  # 'notes' entirely absent, as omit_by_file specifies
+    files = [_dataset_file("f1")]
+    decisions = [
+        {"file_id": "f1", "column": "id", "action": "keep", "phi_category": "NONE", "citation": ""},
+        {"file_id": "f1", "column": "notes", "action": "scrub_text", "phi_category": "A",
+         "citation": "45 CFR 164.514(b)(2)(i)(A)"},
+    ]
+    exports = {"f1": str(src)}
+    omit_by_file = {"f1": {"notes"}}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports, omit_by_file))
+
+    by_col = {v["column"]: v for v in result["verdicts"]}
+    assert by_col["notes"]["verdict"] == "pass"
+    assert by_col["notes"]["performed"] == "column omitted as expected"
+    assert result["status"] == "clean"
+
+
+def test_omit_by_file_column_present_when_expected_absent_fails(tmp_path):
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id", "notes"], [["1", "leaked text"]])
+    files = [_dataset_file("f1")]
+    decisions = [{"file_id": "f1", "column": "notes", "action": "scrub_text",
+                  "phi_category": "A", "citation": "45 CFR 164.514(b)(2)(i)(A)"}]
+    exports = {"f1": str(src)}
+    omit_by_file = {"f1": {"notes"}}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports, omit_by_file))
+
+    v = result["verdicts"][0]
+    assert v["verdict"] == "fail"
+    assert v["problem"] == "column was supposed to be omitted but is present in output"
+
+
+def test_missing_export_file_fails_every_decision(tmp_path):
+    files = [_dataset_file("f1")]
+    decisions = [
+        {"file_id": "f1", "column": "id", "action": "keep", "phi_category": "NONE", "citation": ""},
+        {"file_id": "f1", "column": "ssn", "action": "drop", "phi_category": "G",
+         "citation": "45 CFR 164.514(b)(2)(i)(G)"},
+    ]
+    exports: dict[str, str] = {}  # Executor never wrote f1
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    assert result["failed_file_ids"] == ["f1"]
+    assert len(result["verdicts"]) == 2
+    assert all(v["verdict"] == "fail" for v in result["verdicts"])
+    assert all(v["checks"] == [] for v in result["verdicts"])
+    assert result["status"] == "issues"
+
+
+def test_non_dataset_file_decisions_are_out_of_scope(tmp_path):
+    """Metadata/narrative files never carry per-column decisions in this
+    pipeline; Operator must not invent a verdict for one."""
+    files = [{"file_id": "f1", "kind": "metadata", "subtype": "csv"}]
+    decisions = [{"file_id": "f1", "column": "code", "action": "keep",
+                  "phi_category": "NONE", "citation": ""}]
+    exports = {"f1": str(tmp_path / "does_not_matter.csv")}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    assert result["verdicts"] == []
+    assert result["failed_file_ids"] == []
+    assert result["status"] == "clean"
+
+
+def test_agent_log_row_emitted_per_batch(tmp_path):
+    """One agent_log row per batch, phase='operator.batch:<n>', carrying
+    accurate pass/fail/count verdict tallies."""
+    src = tmp_path / "out.csv"
+    header = [f"col{i}" for i in range(10)]
+    _write_csv(src, header, [["x"] * 10])
+    files = [_dataset_file("f1")]
+    decisions = [{"file_id": "f1", "column": c, "action": "keep",
+                  "phi_category": "NONE", "citation": ""} for c in header]
+    exports = {"f1": str(src)}
+    db = FakeDb()
+
+    op = Operator(session_id="s", llm=None, db=db)
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    batch_rows = [row for row in db.agent_log.inserted if row["phase"].startswith("operator.batch:")]
+    assert len(batch_rows) == 2  # 10 decisions at batch_size=8 -> batches of 8 and 2
+    by_phase = {row["phase"]: row["payload"] for row in batch_rows}
+    assert set(by_phase) == {"operator.batch:0", "operator.batch:1"}
+    assert by_phase["operator.batch:0"] == {"pass": 8, "fail": 0, "count": 8}
+    assert by_phase["operator.batch:1"] == {"pass": 2, "fail": 0, "count": 2}
+    assert len(result["verdicts"]) == 10
+    assert result["status"] == "clean"
