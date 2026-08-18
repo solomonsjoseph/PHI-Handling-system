@@ -39,9 +39,11 @@ from .reasoning import (
     Sentinel,
     annotate_pending_review,
     apply_age_dob_rule,
+    apply_blocking_floor,
     apply_confidence_floor,
     apply_sentinel_escalations,
     apply_sentinel_hard_rules,
+    BLOCKING_ISSUE_FLOOR,
     validate_decisions,
     verify_keep_decisions,
 )
@@ -233,7 +235,15 @@ async def run_pipeline(
     # multi-method scoring can later refine this to (action, method) so a
     # differently-keyed hash doesn't get treated as a repeat.
     prior_blocking_actions: dict[tuple[str, str], dict[str, Any]] = {}
-    for iteration in range(1, iteration_cap + 1):
+    # Blocking-issue floor (Task 19/20): a dedicated per-column counter,
+    # independent of iteration_cap, that forces human_review once Sentinel
+    # has raised 'blocking' on a column BLOCKING_ISSUE_FLOOR times. This
+    # keeps a low rigor setting from letting a genuinely contested column
+    # ship without review -- the loop runs up to max_iterations even when
+    # iteration_cap is lower, but never further than Thorough already did.
+    blocking_attempts: dict[tuple[str, str], int] = {}
+    max_iterations = max(iteration_cap, BLOCKING_ISSUE_FLOOR)
+    for iteration in range(1, max_iterations + 1):
         await _check_cancel(db, sid, on_phase)
         await on_phase(f"judge_iter_{iteration}", {"iteration": iteration})
         j = await judge.run(schema=schema, instrument=instrument, lexicon=lexicon,
@@ -320,6 +330,11 @@ async def run_pipeline(
         # Record this iteration's blocking columns/actions so the next
         # iteration's anti-loop check can compare against them.
         blocking_by_column = {(b.get("file_id"), b.get("column")): b for b in blocking if b.get("column")}
+        # Blocking-issue floor: increment the per-column counter for every
+        # column Sentinel raised 'blocking' on this iteration, independent
+        # of iteration_cap.
+        for key in blocking_by_column:
+            blocking_attempts[key] = blocking_attempts.get(key, 0) + 1
         for d in decisions:
             key = (d.get("file_id"), d.get("column"))
             if key in blocking_by_column and d.get("action") != "human_review":
@@ -333,6 +348,13 @@ async def run_pipeline(
             i for i in (s.get("issues") or [])
             if str(i.get("severity", "")).lower() == "advisory"
         )
+        # A column at the floor never gets a fourth Judge iteration: force
+        # it to human_review now, before the next iteration's Judge call.
+        decisions, blocking_floor_overrides = apply_blocking_floor(decisions, blocking_attempts)
+        if blocking_floor_overrides:
+            all_sentinel_overrides.extend(blocking_floor_overrides)
+            await on_phase(f"blocking_floor_iter_{iteration}",
+                           {"iteration": iteration, "overrides": blocking_floor_overrides})
         approved_decisions = decisions
         if not blocking:
             # Sir Q1: iterate only when required. No blocking issues means
@@ -343,8 +365,16 @@ async def run_pipeline(
                             "advisory_issues": len(advisory_issues)})
             s["verdict"] = "approved"
             break
+        if iteration >= iteration_cap and all(
+            blocking_attempts.get(key, 0) >= BLOCKING_ISSUE_FLOOR for key in blocking_by_column
+        ):
+            # Every still-blocking column has already been forced to
+            # human_review by apply_blocking_floor above -- the cap is
+            # passed and the floor is satisfied, so looping further would
+            # only re-litigate columns already settled.
+            break
         prior_feedback = _summarise_issues(blocking)
-        if iteration < iteration_cap:
+        if iteration < max_iterations:
             advice = await manager.consult(
                 agent_name="Judge", phase=f"judge_sentinel_iter_{iteration}",
                 signal={"iteration": iteration, "iteration_cap": iteration_cap,
