@@ -351,7 +351,9 @@ def test_cap_age_90_shape_violation_is_caught(tmp_path):
 
 def test_decision_for_nonexistent_column_is_flagged(tmp_path):
     """Finding 12: a stale/misspelled column name from Judge/Sentinel is
-    surfaced rather than silently ignored."""
+    surfaced rather than silently ignored. The written file's only real
+    column ('id') has no decision either, so reverse completeness also
+    flags it as undecided."""
     src = tmp_path / "out.csv"
     _write_csv(src, ["id"], [["1"]])
     files = [_dataset_file("f1")]
@@ -362,9 +364,11 @@ def test_decision_for_nonexistent_column_is_flagged(tmp_path):
     op = Operator(session_id="s", llm=None, db=FakeDb())
     result = asyncio.run(op.run(files, decisions, exports))
 
-    v = result["verdicts"][0]
-    assert v["verdict"] == "fail"
-    assert "no corresponding column" in v["problem"]
+    by_col = {v["column"]: v for v in result["verdicts"]}
+    assert by_col["ssn"]["verdict"] == "fail"
+    assert "no corresponding column" in by_col["ssn"]["problem"]
+    assert by_col["id"]["verdict"] == "fail"
+    assert by_col["id"]["method"] == "undecided"
     assert result["status"] == "issues"
 
 
@@ -428,9 +432,12 @@ def test_omit_by_file_column_present_when_expected_absent_fails(tmp_path):
     op = Operator(session_id="s", llm=None, db=FakeDb())
     result = asyncio.run(op.run(files, decisions, exports, omit_by_file))
 
-    v = result["verdicts"][0]
-    assert v["verdict"] == "fail"
-    assert v["problem"] == "column was supposed to be omitted but is present in output"
+    by_col = {v["column"]: v for v in result["verdicts"]}
+    assert by_col["notes"]["verdict"] == "fail"
+    assert by_col["notes"]["problem"] == "column was supposed to be omitted but is present in output"
+    # 'id' has no decision either and is not omitted -- reverse completeness.
+    assert by_col["id"]["verdict"] == "fail"
+    assert by_col["id"]["method"] == "undecided"
 
 
 def test_missing_export_file_fails_every_decision(tmp_path):
@@ -491,3 +498,158 @@ def test_agent_log_row_emitted_per_batch(tmp_path):
     assert by_phase["operator.batch:1"] == {"pass": 2, "fail": 0, "count": 2}
     assert len(result["verdicts"]) == 10
     assert result["status"] == "clean"
+
+
+def test_undecided_written_column_is_flagged(tmp_path):
+    """Reverse completeness: a column present in the written output with
+    no matching decision and no omit_by_file entry is invisible to
+    Judge/Sentinel and must be surfaced, not silently accepted."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id", "extra"], [["1", "leftover value"]])
+    files = [_dataset_file("f1")]
+    decisions = [{"file_id": "f1", "column": "id", "action": "keep",
+                  "phi_category": "NONE", "citation": ""}]
+    exports = {"f1": str(src)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    by_col = {v["column"]: v for v in result["verdicts"]}
+    assert by_col["id"]["verdict"] == "pass"
+    assert by_col["extra"]["verdict"] == "fail"
+    assert by_col["extra"]["method"] == "undecided"
+    assert by_col["extra"]["violation"] == {}
+    assert result["status"] == "issues"
+
+
+@pytest.mark.parametrize("action,bad_value", [
+    ("year_only", "198"),
+    ("zip3_truncate", "9021"),
+    ("hash", "not-a-hash"),
+    ("pseudonymize", "JaneDoe"),
+])
+def test_transform_shape_violations_are_caught(tmp_path, action, bad_value):
+    """A shape violation is caught for every transform action, not just
+    cap_age_90, and the raw offending value never leaks into the problem
+    text."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["col"], [[bad_value]])
+    files = [_dataset_file("f1")]
+    decisions = [{"file_id": "f1", "column": "col", "action": action,
+                  "phi_category": "C", "citation": "45 CFR 164.514(b)(2)(i)(C)"}]
+    exports = {"f1": str(src)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    v = result["verdicts"][0]
+    assert v["verdict"] == "fail"
+    assert bad_value not in v["problem"]
+    assert action in v["problem"]
+
+
+def test_scrub_text_no_change_from_source_fails(tmp_path):
+    """Operator itself catches a scrub_text column that never actually
+    changed, not merely `_scrub_text_cell` in isolation."""
+    src = tmp_path / "in.csv"
+    _write_csv(src, ["notes"], [["Patient contacted at john@example.com"]])
+    dst = tmp_path / "out.csv"
+    _write_csv(dst, ["notes"], [["Patient contacted at john@example.com"]])  # scrub never ran
+    files = [_dataset_file("f1", str(src))]
+    decisions = [{"file_id": "f1", "column": "notes", "action": "scrub_text",
+                  "phi_category": "A", "citation": "45 CFR 164.514(b)(2)(i)(A)"}]
+    exports = {"f1": str(dst)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    by_col = {v["column"]: v for v in result["verdicts"]}
+    assert by_col["notes"]["verdict"] == "fail"
+    assert by_col["notes"]["problem"] == "scrub_text produced no observable change"
+
+
+def test_scrub_text_missing_stored_path_fails_closed(tmp_path):
+    """No stored_path at all -- Operator cannot compare against a source
+    it was never given, so it fails closed rather than passing vacuously."""
+    dst = tmp_path / "out.csv"
+    _write_csv(dst, ["notes"], [["anything, doesn't matter"]])
+    files = [_dataset_file("f1")]  # no stored_path
+    decisions = [{"file_id": "f1", "column": "notes", "action": "scrub_text",
+                  "phi_category": "A", "citation": "45 CFR 164.514(b)(2)(i)(A)"}]
+    exports = {"f1": str(dst)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    v = result["verdicts"][0]
+    assert v["verdict"] == "fail"
+    assert v["problem"] == "cannot verify scrub_text ran"
+
+
+def test_scrub_text_unreadable_source_fails_closed(tmp_path):
+    """stored_path points at a file that cannot be read -- same fail-closed
+    outcome as a missing path, never a silent pass."""
+    dst = tmp_path / "out.csv"
+    _write_csv(dst, ["notes"], [["anything, doesn't matter"]])
+    files = [_dataset_file("f1", str(tmp_path / "does_not_exist.csv"))]
+    decisions = [{"file_id": "f1", "column": "notes", "action": "scrub_text",
+                  "phi_category": "A", "citation": "45 CFR 164.514(b)(2)(i)(A)"}]
+    exports = {"f1": str(dst)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    v = result["verdicts"][0]
+    assert v["verdict"] == "fail"
+    assert v["problem"] == "cannot verify scrub_text ran"
+
+
+def test_corrupt_written_file_isolated_from_sibling_files(tmp_path):
+    """A read failure on one file's written export (unsupported extension
+    here, deterministically triggers the read failure) is isolated to that
+    file_id -- it lands in failed_file_ids without crashing verification
+    of a sibling file that reads cleanly."""
+    good_src = tmp_path / "good.csv"
+    _write_csv(good_src, ["id"], [["1"]])
+    files = [
+        _dataset_file("f1"),
+        {"file_id": "f2", "kind": "dataset", "subtype": "weird"},
+    ]
+    decisions = [
+        {"file_id": "f1", "column": "id", "action": "keep", "phi_category": "NONE", "citation": ""},
+        {"file_id": "f2", "column": "id", "action": "keep", "phi_category": "NONE", "citation": ""},
+    ]
+    exports = {"f1": str(good_src), "f2": str(tmp_path / "bad.weird")}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    assert result["failed_file_ids"] == ["f2"]
+    by_file_col = {(v["file_id"], v["column"]): v for v in result["verdicts"]}
+    assert by_file_col[("f1", "id")]["verdict"] == "pass"
+    assert by_file_col[("f2", "id")]["verdict"] == "fail"
+    assert result["status"] == "issues"
+
+
+def test_unknown_file_id_decision_is_flagged(tmp_path):
+    """A decision naming a file_id Operator has never heard of (not in
+    `files` at all) is the file-level analog of finding 12 -- surfaced as
+    a failure rather than silently dropped."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id"], [["1"]])
+    files = [_dataset_file("f1")]  # only f1 known
+    decisions = [
+        {"file_id": "f1", "column": "id", "action": "keep", "phi_category": "NONE", "citation": ""},
+        {"file_id": "ghost", "column": "ssn", "action": "drop", "phi_category": "G",
+         "citation": "45 CFR 164.514(b)(2)(i)(G)"},
+    ]
+    exports = {"f1": str(src)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    assert "ghost" in result["failed_file_ids"]
+    by_file_col = {(v["file_id"], v["column"]): v for v in result["verdicts"]}
+    assert by_file_col[("ghost", "ssn")]["verdict"] == "fail"
+    assert by_file_col[("f1", "id")]["verdict"] == "pass"
+    assert result["status"] == "issues"

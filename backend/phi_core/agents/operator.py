@@ -54,7 +54,9 @@ _SHAPE_CHECKS = {
 def _read_columns(path: str, ext: str) -> tuple[list[str], dict[str, list[str]]]:
     """One ``iter_dataset_rows`` pass over a dataset file: header order plus,
     per column, every row's value in row order (empty cells included, so a
-    row-aligned source/written comparison stays possible)."""
+    row-aligned source/written comparison stays possible). Raises on a
+    corrupt or unsupported file -- callers isolate that per file_id rather
+    than letting it abort the whole run."""
     header: list[str] = []
     columns: dict[str, list[str]] = {}
     for _row_index, row in iter_dataset_rows(Path(path), ext):
@@ -76,9 +78,11 @@ def _verify_record(record: dict[str, Any], view: dict[str, Any] | None) -> dict[
     action = record["method"]
 
     if view is None:
-        # Executor never wrote this file at all (write failure, or every
-        # known column was deferred to omit_by_file) -- every decision for
-        # it is a hard failure, nothing to check against.
+        # Executor never wrote this file at all (write failure, every known
+        # column deferred to omit_by_file, a corrupt/unsupported written
+        # file, or a decision naming a file_id Operator has never heard
+        # of) -- every decision for it is a hard failure, nothing to check
+        # against.
         verdict.update(
             checks=[],
             verdict="fail",
@@ -89,6 +93,21 @@ def _verify_record(record: dict[str, Any], view: dict[str, Any] | None) -> dict[
 
     header = view["header"]
     written = view["written"]
+
+    if action == "undecided":
+        # Reverse completeness: this column exists in the written output
+        # but no decision names it and it isn't a deliberate omission
+        # either -- it is invisible to Judge/Sentinel entirely. By
+        # construction (see run()) this column is always present and never
+        # in omit, so no further lookup is needed.
+        verdict.update(
+            checks=[{"name": "has_decision", "pass": False}],
+            verdict="fail",
+            problem="written column has no Judge/Sentinel decision and is not marked omitted",
+            performed="column present in the written output with no matching decision",
+        )
+        return verdict
+
     present = column in header
 
     if column in view["omit"]:
@@ -153,6 +172,17 @@ def _verify_record(record: dict[str, Any], view: dict[str, Any] | None) -> dict[
         return verdict
 
     if action == "scrub_text":
+        if view.get("source_error"):
+            # The source Executor itself read (stored_path) is missing or
+            # unreadable -- change-detection is impossible, so this fails
+            # closed rather than vacuously passing for lack of evidence.
+            verdict.update(
+                checks=[{"name": "column_presence", "pass": True}, {"name": "scrub_ran", "pass": False}],
+                verdict="fail",
+                problem="cannot verify scrub_text ran",
+                performed="source could not be read; scrub_text cannot be verified",
+            )
+            return verdict
         source = view.get("source") or {}
         source_cells = source.get(column, [])
         # Row-aligned comparison against the original, only where the
@@ -192,7 +222,9 @@ class Operator(Agent):
         """Re-check every value Executor wrote against the decision Judge/
         Sentinel settled on. Only decisions whose file maps to a dataset
         file get a verdict: metadata/narrative files never carry per-column
-        decisions in this pipeline.
+        decisions in this pipeline. A decision naming a file_id Operator
+        has never heard of is still surfaced as a failure rather than
+        silently dropped.
 
         Returns ``{"verdicts": [...], "failed_file_ids": [...],
         "status": "clean" | "issues"}``.
@@ -204,11 +236,12 @@ class Operator(Agent):
         by_file: dict[str, list[dict[str, Any]]] = {}
         for d in decisions:
             fid = d.get("file_id", "")
-            if fid in dataset_ids:
+            if fid in dataset_ids or fid not in files_by_id:
                 by_file.setdefault(fid, []).append(d)
 
         views: dict[str, dict[str, Any] | None] = {}
         failed_file_ids: list[str] = []
+        extra_records: list[dict[str, Any]] = []
         for file_id, group in by_file.items():
             if file_id not in exports:
                 views[file_id] = None
@@ -216,18 +249,47 @@ class Operator(Agent):
                 continue
             f = files_by_id.get(file_id) or {}
             ext = f.get("subtype", "")
-            header, written = _read_columns(exports[file_id], ext)
+            try:
+                header, written = _read_columns(exports[file_id], ext)
+            except Exception:
+                # A corrupt or unsupported written file must not crash the
+                # whole run or silently pass -- isolate the failure to
+                # this file_id; every sibling file is still checked.
+                views[file_id] = None
+                failed_file_ids.append(file_id)
+                continue
+
             source: dict[str, list[str]] | None = None
+            source_error = False
             if any(d.get("action") == "scrub_text" for d in group):
                 src_path = f.get("stored_path")
-                if src_path:
-                    _src_header, source = _read_columns(src_path, ext)
+                if not src_path:
+                    source_error = True
+                else:
+                    try:
+                        _src_header, source = _read_columns(src_path, ext)
+                    except Exception:
+                        source = None
+                        source_error = True
+
+            omit_cols = set(omit_by_file.get(file_id, ()) or ())
             views[file_id] = {
                 "header": header,
                 "written": written,
                 "source": source,
-                "omit": set(omit_by_file.get(file_id, ()) or ()),
+                "source_error": source_error,
+                "omit": omit_cols,
             }
+
+            # Reverse completeness: every column in the written output
+            # must have a decision or be a deliberate omission. A column
+            # with neither is invisible to Judge/Sentinel entirely.
+            decided_columns = {d.get("column", "") for d in group}
+            for column in header:
+                if column not in decided_columns and column not in omit_cols:
+                    extra_records.append({
+                        "file_id": file_id, "column": column, "violation": {}, "method": "undecided",
+                    })
 
         records: list[dict[str, Any]] = [
             {
@@ -238,7 +300,7 @@ class Operator(Agent):
             }
             for file_id, group in by_file.items()
             for d in group
-        ]
+        ] + extra_records
 
         def _check_batch(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return [_verify_record(r, views.get(r["file_id"])) for r in batch]
@@ -249,11 +311,8 @@ class Operator(Agent):
             await self._log(f"operator.batch:{index}", "info",
                             {"pass": n_pass, "fail": n_fail, "count": len(results)})
 
-        self._check_batch = _check_batch
-        self._on_batch = _on_batch
-
-        verdicts = await run_batched(records, self._check_batch, batch_size=8, pool_size=6,
-                                     on_batch=self._on_batch)
+        verdicts = await run_batched(records, _check_batch, batch_size=8, pool_size=6,
+                                     on_batch=_on_batch)
 
         status = "issues" if failed_file_ids or any(v["verdict"] == "fail" for v in verdicts) else "clean"
         return {"verdicts": verdicts, "failed_file_ids": failed_file_ids, "status": status}
