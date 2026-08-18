@@ -422,6 +422,55 @@ def apply_confidence_floor(decisions: list[dict[str, Any]]) -> tuple[list[dict[s
     return out, overrides
 
 
+BLOCKING_ISSUE_FLOOR = 3
+
+
+def apply_blocking_floor(
+    decisions: list[dict[str, Any]],
+    blocking_attempts: dict[tuple[str, str], int],
+    floor: int = BLOCKING_ISSUE_FLOOR,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Force human_review once a (file_id, column) has drawn `floor`
+    Sentinel blocking rejections, independent of iteration_cap. A dedicated
+    per-column counter -- unlike the confidence floor above, this only
+    kicks in when Sentinel has actually raised 'blocking' on that column
+    repeatedly, so a low rigor setting can never let a genuinely contested
+    column ship without review. Deterministic, so it runs before Sentinel's
+    next LLM call rather than costing another review call on a column
+    that is going to human review regardless."""
+    out: list[dict[str, Any]] = []
+    overrides: list[dict[str, Any]] = []
+    for d in decisions:
+        key = (d.get("file_id"), d.get("column"))
+        attempts = blocking_attempts.get(key, 0)
+        if d.get("action") != "human_review" and attempts >= floor:
+            new_d = dict(d)
+            new_d.update(
+                action="human_review",
+                reason=(
+                    f"Blocking-issue floor: Sentinel has raised a blocking issue on this "
+                    f"column {attempts} times, at or above the {floor} floor required "
+                    f"before a decision ships unreviewed."
+                ),
+                suggested_action=d.get("action"),
+                suggested_confidence=d.get("confidence"),
+                suggested_reason=(
+                    f"Judge proposed {d.get('action')!r} ({d.get('reason') or 'no reason given'}); "
+                    f"Sentinel raised a blocking issue on this column {attempts} times, "
+                    f"at or above the {floor} floor."
+                ),
+            )
+            overrides.append({
+                "file_id": d.get("file_id"), "column": d.get("column"),
+                "from": d.get("action"), "to": "human_review",
+                "rule": "blocking_issue_floor", "attempts": attempts,
+            })
+            out.append(new_d)
+        else:
+            out.append(d)
+    return out, overrides
+
+
 def apply_sentinel_escalations(
     decisions: list[dict[str, Any]],
     escalations: list[dict[str, Any]],
