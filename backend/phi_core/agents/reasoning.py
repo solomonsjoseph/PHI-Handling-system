@@ -710,41 +710,72 @@ def verify_keep_decisions(
     dataset_paths: dict[str, Path],
     jurisdiction: str = "us",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Demote keeps whose dataset values match deterministic PHI detectors."""
+    """Demote keeps whose dataset values match deterministic PHI detectors.
+
+    Also re-scans decisions that are already human_review but whose
+    suggested_action is 'keep' -- meaning some other deterministic pass
+    (the confidence floor, the blocking floor, an anti-loop demotion...)
+    already forced human review on what started life as a keep. Those
+    still need the row-value scan: a generic floor reason gives a
+    reviewer no idea a detector actually matched. The action never
+    changes here (it's already human_review); only the explanation is
+    replaced with the detector-grounded keep-verification text so the
+    more specific evidence wins over the generic one. A human_review
+    decision whose suggested_action is anything else (e.g. a forced
+    'drop') never entered this function as a keep and is left alone.
+    """
     verified = list(decisions)
     demotions: list[dict[str, Any]] = []
     patterns = get_pack(jurisdiction).patterns
     keep_indices_by_file: dict[str, list[int]] = {}
     for index, decision in enumerate(decisions):
         file_id = decision.get("file_id")
-        if decision.get("action") == "keep" and file_id in dataset_paths:
+        if file_id not in dataset_paths:
+            continue
+        action = decision.get("action")
+        began_as_keep = action == "keep" or (
+            action == "human_review" and decision.get("suggested_action") == "keep"
+        )
+        if began_as_keep:
             keep_indices_by_file.setdefault(file_id, []).append(index)
 
     def demote(decision: dict[str, Any], detector_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         column = decision.get("column")
+        original_action = decision.get("action")
         updated = dict(decision)
-        updated.update(
-            action="human_review",
-            reason=(
-                f"Keep verification: column '{column}' matched {detector_id} in a row value; "
-                "demoted pending human review."
-            ),
-            citation="45 CFR 164.514(b)(2)(i)",
-            # Carry the pre-demotion decision forward as the agent's own
-            # recommendation, so the reviewer sees what Judge proposed and
-            # why the deterministic scan didn't trust it, in one glance.
-            suggested_action="keep",
-            suggested_confidence=decision.get("confidence"),
-            suggested_reason=(
-                f"Judge originally proposed 'keep' ({decision.get('reason') or 'no reason given'}); "
-                f"a deterministic row-value scan matched detector '{detector_id}', which the "
-                "reviewer should confirm or override."
-            ),
+        reason = (
+            f"Keep verification: column '{column}' matched {detector_id} in a row value; "
+            "demoted pending human review."
         )
+        # Carry the pre-demotion decision forward as the agent's own
+        # recommendation, so the reviewer sees what Judge proposed and
+        # why the deterministic scan didn't trust it, in one glance.
+        suggested_reason = (
+            f"Judge originally proposed 'keep' ({decision.get('reason') or 'no reason given'}); "
+            f"a deterministic row-value scan matched detector '{detector_id}', which the "
+            "reviewer should confirm or override."
+        )
+        if original_action == "keep":
+            updated.update(
+                action="human_review",
+                reason=reason,
+                citation="45 CFR 164.514(b)(2)(i)",
+                suggested_action="keep",
+                suggested_confidence=decision.get("confidence"),
+                suggested_reason=suggested_reason,
+            )
+        else:
+            # Already human_review via another mechanism, with
+            # suggested_action == "keep" recording that it began as a
+            # keep. Action stays human_review; only the reason and
+            # suggested_reason are overwritten so the specific,
+            # detector-grounded explanation wins over the generic one
+            # that put it here.
+            updated.update(reason=reason, suggested_reason=suggested_reason)
         return updated, {
             "file_id": decision.get("file_id"),
             "column": column,
-            "from": "keep",
+            "from": original_action,
             "to": "human_review",
             "detector": detector_id,
             "citation": "45 CFR 164.514(b)(2)(i)",
