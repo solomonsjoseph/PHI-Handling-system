@@ -318,3 +318,165 @@ def test_results_audit_ledger_herald_populated(api, session_id):
     assert herald.get("title"), f"herald missing title: {herald}"
     assert herald.get("abstract"), f"herald missing abstract: {herald}"
     assert isinstance(herald.get("sections"), list) and herald["sections"], f"herald sections empty: {herald}"
+
+
+# ------------------------- Anti-loop & Sentinel escalate (live) -----------
+#
+# Task 25: live evidence for two paths that never fired on either prior
+# live run (see docs/superpowers/specs/2026-08-17-judge-redesign-design.md
+# and 2026-08-17-sentinel-design.md). Both build their own small,
+# deliberately adversarial corpus rather than reusing the shared
+# `session_id` fixture's TB-shaped study1.zip, because the shared corpus's
+# `study_id` column is now caught by `_HARD_RULE_TABLE` before Judge or
+# Sentinel ever see it and can no longer reproduce the original
+# disagreement.
+
+_ANTI_LOOP_COLUMN = "enrollment_reference"
+_ESCALATE_COLUMN = "screening_result_code"
+
+
+@pytest.fixture(scope="module")
+def escalation_zip_bytes():
+    rows = [
+        ("James Smith", "03/15/1975", "ENR-000101", "SR-COMMON-A"),
+        ("Mary Johnson", "07/22/1982", "ENR-000102", "SR-COMMON-B"),
+        ("Robert Lee", "11/02/1969", "ENR-000103", "SR-COMMON-A"),
+        ("Linda Nguyen", "05/30/1990", "ENR-000104", "SR-COMMON-C"),
+        ("Carlos Diaz", "09/14/1988", "ENR-000105", "SR-RARE-001"),
+        ("Aisha Bello", "01/08/1977", "ENR-000106", "SR-COMMON-B"),
+        ("Wei Chen", "12/25/1993", "ENR-000107", "SR-COMMON-A"),
+        ("Fatima Khan", "04/19/1985", "ENR-000108", "SR-COMMON-C"),
+        ("Tom Walker", "08/11/1971", "ENR-000109", "SR-COMMON-B"),
+        ("Grace Kim", "02/27/1994", "ENR-000110", "SR-COMMON-A"),
+    ]
+    dataset_out = io.StringIO()
+    w = csv.writer(dataset_out)
+    w.writerow(["patient_name", "dob", _ANTI_LOOP_COLUMN, _ESCALATE_COLUMN])
+    w.writerows(rows)
+
+    dictionary_out = io.StringIO()
+    dw = csv.writer(dictionary_out)
+    dw.writerow(["column_name", "description", "phi_flag"])
+    dw.writerow(["patient_name", "Full name of the study participant.", "yes"])
+    dw.writerow(["dob", "Date of birth of the study participant.", "yes"])
+    dw.writerow([
+        _ANTI_LOOP_COLUMN,
+        "Internal linkage code assigned once per participant at enrollment; format ENR- "
+        "followed by a six-digit sequence. Used only to join this dataset with other files "
+        "inside the same study bundle. Not a name, date, or contact detail, but unique to one "
+        "participant across the entire submission, so retaining it as-is would let anyone who "
+        "obtains two files from this study re-associate a participant's records.",
+        "no",
+    ])
+    dw.writerow([
+        _ESCALATE_COLUMN,
+        "Coded outcome of the initial screening visit. SR-COMMON-A/B/C mark the three most "
+        "frequent outcomes, each shared by hundreds of participants across the parent cohort "
+        "with no linkage risk on its own. SR-RARE-001 marks an outcome documented in fewer "
+        "than five individuals in the entire national cohort; whether it appears in this "
+        "file's rows cannot be told from this dictionary entry, and if it does, that value "
+        "combined with the participant's approximate enrollment period could support "
+        "re-identification under 45 CFR 164.514(b)(2)(ii). Whether this column is a safe "
+        "coded clinical variable or a quasi-identifier turns on cell-level distribution this "
+        "dictionary cannot show.",
+        "unknown",
+    ])
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("datasets/screening.csv", dataset_out.getvalue())
+        z.writestr("data_dictionary/columns.csv", dictionary_out.getvalue())
+        z.writestr("forms/consent.pdf", b"%PDF-1.4\n%EOF\n")
+    return buf.getvalue()
+
+
+@pytest.fixture(scope="module")
+def escalation_session_id(api, escalation_zip_bytes):
+    r = api.post(f"{BASE_URL}/api/sessions", json={"jurisdiction": "us"}, timeout=TIMEOUT)
+    assert r.status_code == 200, r.text
+    sid = r.json()["id"]
+
+    files = {"file": ("screening.zip", escalation_zip_bytes, "application/zip")}
+    r2 = api.post(f"{BASE_URL}/api/sessions/{sid}/intake", files=files, timeout=60)
+    assert r2.status_code == 200, r2.text
+    d = r2.json()
+    assert d["status"] == "ready", f"intake status={d.get('status')} err={d.get('error')} missing={d.get('missing_components')}"
+    assert d["linked"] == 3, f"linked={d['linked']}"
+
+    r3 = api.post(f"{BASE_URL}/api/sessions/{sid}/handle", timeout=TIMEOUT)
+    assert r3.status_code == 200, r3.text
+    assert r3.json()["status"] == "started"
+
+    s = _poll_until(api, sid, {"complete", "awaiting_human_review", "partially_complete", "failed"})
+    assert s["status"] != "failed", f"pipeline failed: {s.get('error')}"
+    return sid
+
+
+def test_anti_loop_forces_human_review_on_repeated_rejection(api, escalation_session_id):
+    """Judge redesign plan item 1: replay of the run-1 `study_id`-shaped
+    hash-vs-Sentinel disagreement. `enrollment_reference` matches no
+    `_HARD_RULE_TABLE` pattern, so Judge and Sentinel settle its action
+    entirely from the dictionary text rather than a deterministic
+    override -- the same conditions that produced the original repeated-
+    action loop. Asserts the orchestrator's anti-loop rule
+    (`orchestrator.py`) forces `human_review` the moment a revision
+    repeats a previously-blocked action, with no further Judge<->Sentinel
+    round trip, and that `suggested_*` carries Judge's last committed
+    decision.
+    """
+    res = api.get(f"{BASE_URL}/api/sessions/{escalation_session_id}/results", timeout=TIMEOUT).json()
+    decisions = res.get("decisions") or []
+    by_col = {d["column"].lower(): d for d in decisions}
+    d = by_col.get(_ANTI_LOOP_COLUMN)
+    assert d is not None, f"{_ANTI_LOOP_COLUMN!r} missing from decisions: {sorted(by_col)}"
+
+    phase_timings = res.get("phase_timings") or {}
+    anti_loop_phases = sorted(k for k in phase_timings if k.startswith("anti_loop_iter_"))
+    assert anti_loop_phases, (
+        "orchestrator.py's anti-loop rule never fired on this live run "
+        f"(phases seen: {sorted(phase_timings)}); {_ANTI_LOOP_COLUMN} ended "
+        f"action={d.get('action')!r} reason={d.get('reason')!r} -- the model either agreed "
+        "with Sentinel outright, or corrected itself on revision instead of repeating the "
+        "rejected action."
+    )
+    assert d["action"] == "human_review", f"{_ANTI_LOOP_COLUMN} not forced to human_review: {d}"
+    assert d.get("suggested_action"), f"suggested_action not populated: {d}"
+    assert isinstance(d.get("suggested_confidence"), (int, float)), f"suggested_confidence not populated: {d}"
+    assert d.get("suggested_reason"), f"suggested_reason not populated: {d}"
+    assert "repeated" in d["suggested_reason"].lower(), (
+        f"suggested_reason doesn't read like the anti-loop text: {d['suggested_reason']!r}"
+    )
+
+
+def test_sentinel_escalates_ambiguous_coded_column(api, escalation_session_id):
+    """Sentinel plan item 3: a coded column that is plausibly either a
+    safe categorical variable or a quasi-identifier depending on which
+    rows carry the rare code, context Sentinel cannot see from headers
+    alone. Asserts Sentinel raises `severity='escalate'` rather than
+    silently agreeing or looping (`apply_sentinel_escalations`,
+    `reasoning.py`), routing straight to `human_review` with
+    `suggested_*` populated from Judge's last decision.
+    """
+    res = api.get(f"{BASE_URL}/api/sessions/{escalation_session_id}/results", timeout=TIMEOUT).json()
+    decisions = res.get("decisions") or []
+    by_col = {d["column"].lower(): d for d in decisions}
+    d = by_col.get(_ESCALATE_COLUMN)
+    assert d is not None, f"{_ESCALATE_COLUMN!r} missing from decisions: {sorted(by_col)}"
+
+    phase_timings = res.get("phase_timings") or {}
+    escalation_phases = sorted(k for k in phase_timings if k.startswith("sentinel_escalation_iter_"))
+    assert escalation_phases, (
+        "Sentinel never raised severity='escalate' on this live run "
+        f"(phases seen: {sorted(phase_timings)}); {_ESCALATE_COLUMN} ended "
+        f"action={d.get('action')!r} reason={d.get('reason')!r} -- Sentinel either agreed "
+        "with Judge outright or treated the ambiguity as resolvable (blocking, with a "
+        "confident correction) instead of recognizing genuine regulatory ambiguity."
+    )
+    assert d["action"] == "human_review", f"{_ESCALATE_COLUMN} not routed to human_review: {d}"
+    assert (d.get("reason") or "").startswith("Sentinel escalation:"), f"reason missing the escalation prefix: {d}"
+    assert d.get("suggested_action"), f"suggested_action not populated: {d}"
+    assert isinstance(d.get("suggested_confidence"), (int, float)), f"suggested_confidence not populated: {d}"
+    assert d.get("suggested_reason"), f"suggested_reason not populated: {d}"
+    assert "ambiguous" in d["suggested_reason"].lower(), (
+        f"suggested_reason doesn't read like the escalation text: {d['suggested_reason']!r}"
+    )
