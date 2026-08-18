@@ -18,6 +18,7 @@ consume them without additional parsing logic.
 """
 from __future__ import annotations
 
+import asyncio
 import json as _json
 from typing import Any
 
@@ -49,7 +50,89 @@ class Statute(Agent):
         "mark ``sources`` as an empty list."
     )
 
+    _ADJACENT_REGIMES_FALLBACK: list[dict[str, Any]] = [
+        {
+            "name": "45 CFR 46 (Common Rule)",
+            "citation": "45 CFR Part 46",
+            "applicability": (
+                "Governs human-subjects research conduct, including IRB review "
+                "and informed consent. It applies to the study process, not the "
+                "de-identification transformation itself."
+            ),
+            "advisory": (
+                "This system does not perform consent or IRB-review compliance "
+                "checks. The study team remains responsible for Common Rule "
+                "compliance outside this tool."
+            ),
+            "sources": [],
+        },
+        {
+            "name": "42 CFR Part 2",
+            "citation": "42 CFR Part 2",
+            "applicability": (
+                "Applies to substance-use-disorder treatment records held by "
+                "federally assisted programs that provide diagnosis, treatment, "
+                "or referral for treatment."
+            ),
+            "advisory": (
+                "Part 2 remains distinct and can be stricter than HIPAA where it "
+                "applies, including after the 2024 final rule partially aligned "
+                "its requirements with HIPAA. The study team must determine "
+                "whether Part 2 applies."
+            ),
+            "sources": [],
+        },
+        {
+            "name": "FERPA",
+            "citation": "20 U.S.C. § 1232g; 34 CFR Part 99",
+            "applicability": (
+                "Governs student education records. FERPA-protected records are "
+                "generally excluded from the HIPAA Privacy Rule."
+            ),
+            "advisory": (
+                "For a school-based health study, the study team must determine "
+                "which law applies based on who maintains the record."
+            ),
+            "sources": [],
+        },
+        {
+            "name": "Privacy Act of 1974",
+            "citation": "5 U.S.C. § 552a",
+            "applicability": (
+                "Applies to records containing PII maintained in a system of "
+                "records by a federal agency, including research conducted by or "
+                "on behalf of that agency."
+            ),
+            "advisory": (
+                "This system does not determine whether a federal system of "
+                "records or a Privacy Act disclosure condition applies."
+            ),
+            "sources": [],
+        },
+        {
+            "name": "State law (non-exhaustive)",
+            "citation": "",
+            "applicability": (
+                "State law can impose requirements stricter than the federal "
+                "floor. California CMIA and CCPA are examples only."
+            ),
+            "advisory": (
+                "This is a non-exhaustive advisory note. Per-state research is "
+                "not performed because session.jurisdiction is country-level."
+            ),
+            "sources": [],
+        },
+    ]
+
     async def rules_for(self, jurisdiction: str) -> dict[str, Any]:
+        hipaa, adjacent = await asyncio.gather(
+            self._hipaa_rules_for(jurisdiction),
+            self._adjacent_regimes_for(jurisdiction),
+        )
+        hipaa["adjacent_regimes"] = adjacent["adjacent_regimes"]
+        return hipaa
+
+    async def _hipaa_rules_for(self, jurisdiction: str) -> dict[str, Any]:
         cached = await cache_get(self.db, "regulation_rules", jurisdiction)
         if cached:
             await self._log(f"statute.cache_hit:{jurisdiction}", "info",
@@ -98,6 +181,75 @@ class Statute(Agent):
         await cache_put(self.db, "regulation_rules", jurisdiction,
                         _json.dumps(reply),
                         source="web_search" if reply.get("sources") else "llm")
+        return reply
+
+    async def _adjacent_regimes_for(self, jurisdiction: str) -> dict[str, Any]:
+        if jurisdiction != "us":
+            return {"adjacent_regimes": []}
+
+        cached = await cache_get(self.db, "adjacent_regulations", jurisdiction)
+        if cached:
+            await self._log(f"statute.cache_hit:{jurisdiction}", "info",
+                            {"topic": "adjacent_regulations"})
+            return _json.loads(cached["content"])
+
+        prompt = (
+            "Jurisdiction: us.\n"
+            "Research these adjacent US PHI/PII regimes using primary sources "
+            "only. Return JSON only with "
+            '{"adjacent_regimes": [{"name": str, "citation": str, '
+            '"applicability": str, "advisory": str, '
+            '"sources": [{"url": str, "title": str}]}]}.\n'
+            "Return exactly five entries: (1) 45 CFR 46 (Common Rule), covering "
+            "IRB review and informed consent for the study process, not the "
+            "de-identification transformation; its advisory must say this "
+            "system performs no consent or IRB-review check. (2) 42 CFR Part 2, "
+            "for substance-use-disorder treatment records from federally "
+            "assisted programs, which remains stricter than HIPAA where it "
+            "applies after the 2024 final rule's partial alignment. (3) FERPA, "
+            "citation '20 U.S.C. § 1232g; 34 CFR Part 99', for student "
+            "education records; FERPA-protected records are generally excluded "
+            "from the HIPAA Privacy Rule, so school-based studies must determine "
+            "which law applies from who maintains the record. (4) Privacy Act of "
+            "1974, citation '5 U.S.C. § 552a', when research is conducted by or "
+            "on behalf of a federal agency. (5) State law (non-exhaustive), with "
+            "an empty citation and an advisory that per-state research is not "
+            "performed because jurisdiction is country-level; California CMIA and "
+            "CCPA may be examples only. These entries are advisory only."
+        )
+        try:
+            reply, citations = await self.call_json_with_web_search(
+                prompt,
+                phase=f"statute.adjacent_web_search:{jurisdiction}",
+                default={"adjacent_regimes": self._ADJACENT_REGIMES_FALLBACK},
+                max_uses=3,
+                expect_key="adjacent_regimes",
+                min_items=5,
+                status_text="Researching adjacent US data-protection regimes online",
+            )
+            regimes = reply.get("adjacent_regimes") if isinstance(reply, dict) else None
+            if not isinstance(regimes, list) or len(regimes) < 5:
+                reply = {"adjacent_regimes": self._ADJACENT_REGIMES_FALLBACK}
+            elif citations:
+                for regime in regimes:
+                    if isinstance(regime, dict) and not regime.get("sources"):
+                        regime["sources"] = citations
+        except Exception as e:  # pragma: no cover — defensive fallback
+            await self._log(f"statute.adjacent_error:{jurisdiction}", "info",
+                            {"error": str(e)})
+            reply = {"adjacent_regimes": self._ADJACENT_REGIMES_FALLBACK}
+
+        await cache_put(
+            self.db,
+            "adjacent_regulations",
+            jurisdiction,
+            _json.dumps(reply),
+            source=(
+                "web_search"
+                if any(regime.get("sources") for regime in reply["adjacent_regimes"])
+                else "llm"
+            ),
+        )
         return reply
 
     @staticmethod
