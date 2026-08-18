@@ -206,8 +206,10 @@ def _verify_record(record: dict[str, Any], view: dict[str, Any] | None) -> dict[
         # leak, as long as none of the written cells still contain
         # anything _scrub_text_cell would redact -- i.e. the written
         # output is already a fixed point of the same scrub function.
-        stable = all(_scrub_text_cell(v) == v for v in non_empty)
-        ok = changed or stable
+        # Lazy: only probe the fixed point when no cell actually changed --
+        # the common case (real PHI present, scrub ran) already has
+        # changed == True and must not pay a second full Presidio pass.
+        ok = changed or all(_scrub_text_cell(v) == v for v in non_empty)
         verdict.update(
             checks=[{"name": "column_presence", "pass": True}, {"name": "scrub_ran", "pass": ok}],
             verdict="pass" if ok else "fail",
