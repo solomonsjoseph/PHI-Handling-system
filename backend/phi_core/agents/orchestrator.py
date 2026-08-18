@@ -365,13 +365,19 @@ async def run_pipeline(
                             "advisory_issues": len(advisory_issues)})
             s["verdict"] = "approved"
             break
-        if iteration >= iteration_cap and all(
+        if blocking_by_column and iteration >= iteration_cap and all(
             blocking_attempts.get(key, 0) >= BLOCKING_ISSUE_FLOOR for key in blocking_by_column
         ):
             # Every still-blocking column has already been forced to
             # human_review by apply_blocking_floor above -- the cap is
             # passed and the floor is satisfied, so looping further would
-            # only re-litigate columns already settled.
+            # only re-litigate columns already settled. `blocking_by_column`
+            # must be non-empty here: `all()` over an empty generator is
+            # vacuously True, which would let a malformed Sentinel reply
+            # (blocking issues with no `column` key, so nothing was ever
+            # tracked toward the floor) short-circuit the loop after a
+            # single iteration under a low iteration_cap, well before any
+            # column actually earned three tries.
             break
         prior_feedback = _summarise_issues(blocking)
         if iteration < max_iterations:
