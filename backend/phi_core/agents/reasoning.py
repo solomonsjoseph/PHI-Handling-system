@@ -116,20 +116,96 @@ def _needs_file_glance(column: str, suggested_action: str | None) -> bool:
     return any(pat in norm for pat in _FREE_TEXT_COLUMN_PATTERNS)
 
 
+_ACTION_PLAIN: dict[str, str] = {
+    "keep": "leave this column exactly as it is",
+    "drop": "remove this column from the shared data",
+    "cap_age_90": "replace ages over 89 with '90+'",
+    "year_only": "keep only the year, not the full date",
+    "zip3_truncate": "keep only the first three digits of the ZIP code",
+    "hash": "replace each value with a one-way code",
+    "pseudonymize": "replace each value with a stable made-up code",
+    "scrub_text": "blank out anything identifying inside the free text",
+}
+
+
+_CATEGORY_PLAIN: dict[str, str] = {
+    "A": "a person's name",
+    "B": "part of an address smaller than a state, such as a ZIP code",
+    "C": "a date tied to the person, such as a birth date, or an age over 89",
+    "D": "a telephone number",
+    "E": "a fax number",
+    "F": "an email address",
+    "G": "a Social Security number",
+    "H": "a medical record number",
+    "I": "a health plan membership number",
+    "J": "an account number",
+    "K": "a license or certificate number",
+    "L": "a vehicle identifier, such as a license plate number",
+    "M": "a device identifier or serial number",
+    "N": "a web address",
+    "O": "an internet (IP) address",
+    "P": "a biometric identifier, such as a fingerprint or voice print",
+    "Q": "a full-face photograph or a similar image",
+    "R": "some other detail that could single someone out",
+    "NONE": "not something that identifies a person on its own",
+    "QUASI": "a detail that could help identify someone only when combined with other details",
+}
+
+
+def _confidence_band(confidence: Any) -> str | None:
+    """Plain-English certainty band for a 0..1 confidence score. Never
+    surfaces the raw number in reviewer-facing text, only how sure it
+    makes the automated guess sound."""
+    if not isinstance(confidence, (int, float)):
+        return None
+    value = max(0.0, min(1.0, float(confidence)))
+    if value >= 0.9:
+        return "very confident"
+    if value >= 0.7:
+        return "fairly confident"
+    if value >= 0.5:
+        return "only somewhat confident"
+    if value >= 0.3:
+        return "not very confident"
+    return "not confident at all"
+
+
 def _reviewer_prompt_for(d: dict[str, Any], dictionary_by_column: dict[str, str] | None = None) -> str:
     """Plain-language sentence built in Python from column name, dictionary
-    description, and Judge's suggestion -- no LLM call."""
+    description, and the proposed action's plain-English gloss -- no LLM
+    call, and no agent-internal vocabulary (action ids, HIPAA letters,
+    confidence numbers, agent names) ever surfaces raw: only its plain
+    phrase from `_ACTION_PLAIN` / `_CATEGORY_PLAIN` / `_confidence_band`
+    does. Every one of the five deterministic paths that can route a
+    decision to human_review -- invalid model output in `validate_decisions`,
+    `apply_confidence_floor`, `apply_blocking_floor`,
+    `apply_sentinel_escalations`, and `verify_keep_decisions` -- funnels
+    through this one template via `annotate_pending_review`, so a fix here
+    covers every escalation path and the Task 33 second review that reuses
+    it."""
     col = d.get("column") or "this column"
     desc = (dictionary_by_column or {}).get(col, "")
-    desc_clause = f' ("{desc}")' if desc else ""
-    suggested = d.get("suggested_action")
-    reason = d.get("suggested_reason") or d.get("reason") or \
-        "the automated classifiers were not confident enough to decide on their own"
-    if suggested:
-        return (f"I'm not confident enough to decide '{col}'{desc_clause} on my own. "
-                f"My best guess is {suggested}: {reason} Does that look right?")
-    return (f"I'm not confident enough to decide '{col}'{desc_clause} on my own: {reason} "
-            "What should happen to this column?")
+    desc_clause = f' (the data dictionary describes it as "{desc}")' if desc else ""
+
+    action_plain = _ACTION_PLAIN.get(d.get("suggested_action"))
+    category_plain = _CATEGORY_PLAIN.get(d.get("phi_category"))
+    band = _confidence_band(d.get("suggested_confidence"))
+
+    what = f"My best guess is to {action_plain}" if action_plain \
+        else "I could not settle on one clear best guess for what to do with it"
+
+    why_bits = []
+    category = d.get("phi_category")
+    if category_plain and category not in (None, "", "NONE"):
+        why_bits.append(f"it looks like it may hold {category_plain}")
+    if band:
+        why_bits.append(f"I am {band} about that guess")
+    why = "; ".join(why_bits) if why_bits \
+        else "the automated review could not finish deciding on its own"
+
+    return (f"I'm not confident enough to decide what should happen to the column "
+            f"'{col}'{desc_clause} on my own. {what}, because {why}. "
+            "Please confirm this is right, or tell me what should happen instead.")
 
 
 def annotate_pending_review(decisions: list[dict[str, Any]],
