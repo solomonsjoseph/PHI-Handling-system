@@ -378,6 +378,82 @@ def apply_age_dob_rule(decisions: list[dict[str, Any]]) -> tuple[list[dict[str, 
     return out, overrides
 
 
+# --- Deterministic rule: low-cardinality site/facility columns ------------
+#
+# Sentinel plan item 4. A confidently wrong 'keep' on a site- or
+# sub-geography-shaped column passes both the confidence floor and
+# Sentinel's LLM judgment, because the risk isn't in the confidence score,
+# it's in the column's shape: a handful of distinct facility names spread
+# across many rows is exactly the quasi-identifier pattern
+# 164.514(b)(2)(i)(R) covers. Fires only for columns the hard-rule table
+# doesn't already own (so a clinical keeper like 'site_of_disease' is never
+# touched) and only when Schema's deterministic cardinality stats are
+# actually known for that column.
+_SITE_COL_RE = _re_module.compile(
+    r"(facility|site|clinic|hospital|centre|center|ward|catchment"
+    r"|district|village|township|sub_?district|taluk|tehsil|mandal)",
+    _re_module.I,
+)
+
+
+def apply_site_cardinality_rule(
+    decisions: list[dict[str, Any]],
+    stats: dict[tuple[str, str], dict[str, int]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Force 'keep' to 'drop'/category R on a low-cardinality site or
+    facility column. Fires only when all four hold: the column name
+    matches `_SITE_COL_RE` as a substring, the current action is 'keep',
+    the column matches no `_HARD_RULE_TABLE` pattern (so an owned clinical
+    keeper such as 'site_of_disease' is left alone), and Schema's known
+    distinct-value count satisfies `2 <= distinct <= max(20, 0.05 * rows)`.
+    A column with unknown stats is left alone -- there is nothing to force
+    a decision from. Runs deterministically before Sentinel, so a column
+    it recognises never costs a review call."""
+    out: list[dict[str, Any]] = []
+    overrides: list[dict[str, Any]] = []
+    for d in decisions:
+        col = (d.get("column") or "").strip().lower()
+        norm = _re_module.sub(r"\s+", "_", col)
+        eligible = (
+            d.get("action") == "keep"
+            and bool(_SITE_COL_RE.search(norm))
+            and not any(_re_module.match(pattern, norm) for pattern, *_ in _HARD_RULE_TABLE)
+        )
+        s = stats.get((d.get("file_id"), col)) if eligible else None
+        distinct = s.get("distinct") if s else None
+        rows = s.get("rows") if s else None
+        if (
+            eligible
+            and isinstance(distinct, int)
+            and isinstance(rows, int)
+            and rows > 0
+            and 2 <= distinct <= max(20, 0.05 * rows)
+        ):
+            new_d = dict(d)
+            new_d.update(
+                action="drop",
+                phi_category="R",
+                citation="45 CFR 164.514(b)(2)(i)(R)",
+                confidence=0.95,
+                reason=(
+                    f"Site-cardinality rule: column '{d.get('column')}' names a facility or "
+                    f"catchment-shaped field with only {distinct} distinct values across "
+                    f"{rows} rows, a quasi-identifying pattern under 45 CFR "
+                    "164.514(b)(2)(i)(R). Forced from 'keep' to 'drop'."
+                ),
+                suggested_action=d.get("action"),
+            )
+            overrides.append({
+                "file_id": d.get("file_id"), "column": d.get("column"),
+                "from": d.get("action"), "to": "drop",
+                "rule": "site_cardinality", "distinct": distinct, "rows": rows,
+            })
+            out.append(new_d)
+        else:
+            out.append(d)
+    return out, overrides
+
+
 CONFIDENCE_FLOOR = 0.80
 
 

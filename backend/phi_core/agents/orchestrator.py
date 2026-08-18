@@ -43,6 +43,7 @@ from .reasoning import (
     apply_confidence_floor,
     apply_sentinel_escalations,
     apply_sentinel_hard_rules,
+    apply_site_cardinality_rule,
     BLOCKING_ISSUE_FLOOR,
     validate_decisions,
     verify_keep_decisions,
@@ -198,7 +199,7 @@ async def run_pipeline(
     # Carried forward for the site/facility cardinality rule. Fakes/mocks
     # in tests never set `_stats`, so default to empty rather than assume
     # a real Schema instance ran.
-    schema_stats = getattr(schema_agent, "_stats", {}) if schema_agent else {}  # noqa: F841
+    schema_stats = getattr(schema_agent, "_stats", {}) if schema_agent else {}
     prompt_scrub_counts = {
         "lexicon": lexicon_agent.scrub_count if lexicon_agent else 0,
         "instrument": instrument_agent.scrub_count if instrument_agent else 0,
@@ -271,6 +272,18 @@ async def run_pipeline(
             all_sentinel_overrides.extend(age_dob_overrides)
             await on_phase(f"age_dob_rule_iter_{iteration}",
                            {"iteration": iteration, "overrides": age_dob_overrides})
+        # Site/facility cardinality rule (Task 22, Sentinel plan item 4): a
+        # confidently wrong 'keep' on a low-cardinality site or facility
+        # column passes both the confidence floor and Sentinel's LLM
+        # judgment, because the risk is knowable from the column's shape,
+        # not from Judge's confidence score. Schema-driven and
+        # deterministic, so it runs before the anti-loop check and before
+        # Sentinel ever sees the column.
+        decisions, cardinality_overrides = apply_site_cardinality_rule(decisions, schema_stats)
+        if cardinality_overrides:
+            all_sentinel_overrides.extend(cardinality_overrides)
+            await on_phase(f"site_cardinality_iter_{iteration}",
+                           {"iteration": iteration, "overrides": cardinality_overrides})
         # Anti-loop: a decision repeating a previously-rejected action isn't
         # a real revision. Force it straight to human review rather than
         # resubmitting it to Sentinel for the same rejection.
