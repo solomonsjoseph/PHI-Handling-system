@@ -90,6 +90,9 @@ class Reviewer(Agent):
             # already flagged it); a _read_columns failure here must not
             # raise out of Reviewer, only skip these two checks.
             if file_id not in failed_file_ids and file_id in exports:
+                # Reviewer has no `files` list to cross-check a registered
+                # subtype against (unlike Operator) -- the export path's
+                # own suffix is the only signal available for its ext.
                 ext = Path(exports[file_id]).suffix.lstrip(".").lower()
                 try:
                     header, _written = _read_columns(exports[file_id], ext)
@@ -123,7 +126,7 @@ class Reviewer(Agent):
                 "operator_verdicts_found": operator_verdicts_found,
                 "missing": missing,
                 "findings": findings,
-                "verdict": "clean" if not findings else "issues",
+                "verdict": "issues" if (findings or file_id in failed_file_ids) else "clean",
             }
 
         def _check_batch(batch: list[str]) -> list[dict[str, Any]]:
@@ -140,6 +143,9 @@ class Reviewer(Agent):
                 if r["verdict"] == "clean":
                     status_text = (f"file {r['file_id']}: all {r['decisions_checked']} "
                                     "decision(s) have a matching Operator verdict")
+                elif r["file_id"] in failed_file_ids:
+                    status_text = (f"file {r['file_id']}: already flagged as unreadable "
+                                    "or missing by Operator")
                 else:
                     status_text = (f"file {r['file_id']}: {r['missing']} of "
                                     f"{r['decisions_checked']} decision(s) missing an "

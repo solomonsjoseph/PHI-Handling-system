@@ -245,3 +245,58 @@ def test_agent_log_row_emitted_per_file_with_coverage_check_phase(tmp_path):
     assert payload["verdict"] == "clean"
     assert rows[0]["agent"] == "Reviewer"
     assert rows[0]["status_text"]
+
+
+def test_corrupt_export_for_a_non_failed_file_does_not_raise_and_skips_header_checks(tmp_path):
+    """Reviewer must never crash on an export it cannot read when Operator
+    did not already flag the file as failed -- it degrades gracefully,
+    skipping the omit-leak and coverage_mismatch checks (both need a real
+    header) while still catching whatever missing_operator_verdict
+    findings the file's decisions warrant."""
+    bad = tmp_path / "bad.weird"
+    bad.write_text("garbage")
+    exports = {"f1": str(bad)}
+    decisions = [_decision("f1", "id"), _decision("f1", "name")]
+    operator_result = {
+        "verdicts": [_verdict("f1", "id")],  # "name" missing -> still caught
+        "failed_file_ids": [],  # NOT flagged failed by Operator
+        "status": "clean",
+    }
+    omit_by_file = {"f1": {"ssn"}}  # would trigger omit-leak if the header were readable
+
+    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(reviewer.run(decisions, operator_result, exports, omit_by_file))
+
+    kinds = {f["kind"] for f in result["findings"]}
+    assert kinds == {"missing_operator_verdict"}
+    assert result["status"] == "issues"
+    assert "f1" not in result["exports"]
+
+
+def test_zero_decision_file_with_real_export_is_coverage_mismatch_unless_already_failed(tmp_path):
+    """A file with zero decisions at all but a real multi-column export is
+    a coverage_mismatch when Operator did not already flag it failed.
+    An already-failed file skips the header-dependent check entirely
+    (Operator already excluded it; no readable header is assumed), but
+    stays excluded from the returned exports and the run stays "issues"
+    either way."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id", "name"], [["1", "Jane"]])
+    exports = {"f1": str(src)}
+    decisions: list[dict] = []  # zero decisions for f1
+
+    operator_result_not_failed = {"verdicts": [], "failed_file_ids": [], "status": "clean"}
+    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(reviewer.run(decisions, operator_result_not_failed, exports))
+    findings = [f for f in result["findings"] if f["kind"] == "coverage_mismatch"]
+    assert len(findings) == 1
+    assert findings[0]["file_id"] == "f1"
+    assert result["status"] == "issues"
+    assert "f1" not in result["exports"]
+
+    operator_result_failed = {"verdicts": [], "failed_file_ids": ["f1"], "status": "issues"}
+    reviewer2 = Reviewer(session_id="s", llm=None, db=FakeDb())
+    result2 = asyncio.run(reviewer2.run(decisions, operator_result_failed, exports))
+    assert not any(f["kind"] == "coverage_mismatch" for f in result2["findings"])
+    assert result2["status"] == "issues"
+    assert "f1" not in result2["exports"]
