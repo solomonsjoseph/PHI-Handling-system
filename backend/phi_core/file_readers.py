@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import email
 import hashlib
+from itertools import islice
 from pathlib import Path
 from typing import Iterator
 
@@ -97,6 +98,82 @@ def read_xlsx_columns(path: Path) -> tuple[list[str], int]:
     row_count = max(0, (ws.max_row or 0) - 1)
     wb.close()
     return columns, row_count
+
+def _iter_table_rows(path: Path, ext: str) -> Iterator[list[str]]:
+    if ext in ("csv", "tsv"):
+        delimiter = "\t" if ext == "tsv" else ","
+        with path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+            for row in csv.reader(f, delimiter=delimiter):
+                yield [str(cell) for cell in row]
+        return
+    if ext in ("xlsx", "xls"):
+        workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            worksheet = workbook[workbook.sheetnames[0]]
+            for row in worksheet.iter_rows(values_only=True):
+                yield [str(cell) if cell is not None else "" for cell in row]
+        finally:
+            workbook.close()
+        return
+    raise ValueError(f"unsupported table ext {ext!r}")
+
+
+def _read_table_rows(
+    path: Path, ext: str, max_rows: int
+) -> tuple[list[str], list[list[str]]]:
+    if max_rows < 0:
+        raise ValueError("max_rows must be non-negative")
+    rows = _iter_table_rows(path, ext)
+    try:
+        try:
+            headers = next(rows)
+        except StopIteration:
+            return [], []
+        if ext in ("csv", "tsv"):
+            headers = [cell.strip() for cell in headers]
+        return headers, list(islice(rows, max_rows))
+    finally:
+        rows.close()
+
+def read_table_rows(path: Path, max_rows: int = 5000) -> tuple[list[str], list[list[str]]]:
+    """Return a CSV, TSV, or workbook header and up to ``max_rows`` string rows."""
+    return _read_table_rows(path, path.suffix.lstrip(".").lower(), max_rows)
+
+
+def column_value_stats(
+    path: Path,
+    ext: str,
+    columns: list[str],
+    max_rows: int = 50_000,
+) -> dict[str, dict[str, int]]:
+    """Return bounded per-column distinct-value and row counts without retaining values."""
+    if max_rows < 0:
+        raise ValueError("max_rows must be non-negative")
+    normalized_ext = ext.lower().lstrip(".")
+    table_rows = _iter_table_rows(path, normalized_ext)
+    try:
+        try:
+            headers = next(table_rows)
+        except StopIteration:
+            return {column: {"distinct": 0, "rows": 0} for column in columns}
+        if normalized_ext in ("csv", "tsv"):
+            headers = [cell.strip() for cell in headers]
+        positions = {header: index for index, header in enumerate(headers)}
+        distinct_values = {column: set() for column in columns}
+        row_counts = {column: 0 for column in columns}
+        for row in islice(table_rows, max_rows):
+            for column, values in distinct_values.items():
+                index = positions.get(column)
+                if index is None:
+                    continue
+                row_counts[column] += 1
+                values.add(row[index] if index < len(row) else "")
+        return {
+            column: {"distinct": len(distinct_values[column]), "rows": row_counts[column]}
+            for column in columns
+        }
+    finally:
+        table_rows.close()
 
 
 def read_parquet_columns(path: Path) -> tuple[list[str], int]:
