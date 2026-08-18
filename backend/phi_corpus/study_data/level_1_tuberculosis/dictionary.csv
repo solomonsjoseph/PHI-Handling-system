@@ -29,3 +29,4 @@ treatment_regimen,"Anti-TB drug regimen prescribed, e.g. first-line HRZE (isonia
 treatment_start_date,Date the anti-TB treatment regimen began.
 treatment_end_date,Date the treatment regimen ended (completion, death, or last contact before loss to follow-up); 'Ongoing' when the patient is still on treatment.
 treatment_outcome,"Final treatment outcome: completed, died, lost to follow-up, or still on treatment. Equivalent to TB Portals' 'Outcome' field."
+treatment_facility_name,Name of the clinic or health department facility where the patient received TB treatment.
