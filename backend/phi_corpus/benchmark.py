@@ -155,6 +155,35 @@ def _context_hygiene(
     }
 
 
+def _reviewer_coverage(agent_log: list[dict[str, Any]]) -> dict[str, Any]:
+    files_checked = 0
+    files_with_findings = 0
+    total_missing = 0
+    total_decisions_checked = 0
+    total_operator_verdicts_found = 0
+    all_clean = True
+    for msg in agent_log or []:
+        if msg.get("agent") != "Reviewer":
+            continue
+        payload = msg.get("payload") or {}
+        files_checked += 1
+        total_missing += payload.get("missing", 0)
+        total_decisions_checked += payload.get("decisions_checked", 0)
+        total_operator_verdicts_found += payload.get("operator_verdicts_found", 0)
+        if payload.get("verdict") != "clean":
+            files_with_findings += 1
+            all_clean = False
+
+    return {
+        "files_checked": files_checked,
+        "files_with_findings": files_with_findings,
+        "decisions_checked": total_decisions_checked,
+        "operator_verdicts_found": total_operator_verdicts_found,
+        "missing": total_missing,
+        "clean": all_clean,
+    }
+
+
 def _differentiation() -> dict[str, Any]:
     return {
         "tools": TOOLS,
@@ -223,6 +252,7 @@ def build_report(
         ("guard_report", guard_report),
         ("prompt_scrub_counts", prompt_scrub_counts),
         ("context_hygiene", agent_log),
+        ("reviewer_coverage", agent_log),
         ("phase_timings", phase_timings),
         ("run_elapsed_s", run_elapsed_s),
         ("model_output_rejections", model_output_rejections),
@@ -403,6 +433,7 @@ def build_report(
         bucket["accuracy"] = round(bucket["correct"] / bucket["count"], 4) if bucket["count"] else 1.0
 
     context_hygiene = _context_hygiene(agent_log_list, ground_truth, prompt_scrub_counts) if agent_log is not None else None
+    reviewer_coverage = _reviewer_coverage(agent_log_list) if agent_log is not None else None
 
     meta = {
         "scenario_id": ground_truth.get("scenario_id"),
@@ -425,6 +456,7 @@ def build_report(
         "regulation": verify_report.get("regulation", {}),
         "calibration": calibration,
         "context_hygiene": context_hygiene,
+        "reviewer_coverage": reviewer_coverage,
         "differentiation": _differentiation(),
         "unavailable": unavailable,
     }

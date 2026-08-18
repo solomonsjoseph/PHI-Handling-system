@@ -9,6 +9,8 @@ import csv
 from pathlib import Path
 
 from phi_core.agents.reviewer import Reviewer
+from phi_corpus.benchmark import _reviewer_coverage, build_report
+from phi_corpus.planters import plant
 
 
 class FakeAgentLog:
@@ -300,3 +302,63 @@ def test_zero_decision_file_with_real_export_is_coverage_mismatch_unless_already
     assert not any(f["kind"] == "coverage_mismatch" for f in result2["findings"])
     assert result2["status"] == "issues"
     assert "f1" not in result2["exports"]
+
+
+def test_reviewer_coverage_rolls_up_reviewer_agent_log_rows():
+    """A synthetic agent_log with a mix of clean and issues verdicts and
+    varying missing counts must roll up into exact summed totals, and
+    'clean' must go false the moment any single row has findings."""
+    agent_log = [
+        {"agent": "Reviewer", "phase": "review.coverage_check",
+         "payload": {"file_id": "f1", "columns": 3, "decisions_checked": 3,
+                     "operator_verdicts_found": 3, "missing": 0, "verdict": "clean"}},
+        {"agent": "Reviewer", "phase": "review.coverage_check",
+         "payload": {"file_id": "f2", "columns": 4, "decisions_checked": 4,
+                     "operator_verdicts_found": 2, "missing": 2, "verdict": "issues"}},
+        {"agent": "Reviewer", "phase": "review.coverage_check",
+         "payload": {"file_id": "f3", "columns": 2, "decisions_checked": 2,
+                     "operator_verdicts_found": 1, "missing": 1, "verdict": "issues"}},
+        # a row from another agent must never be counted
+        {"agent": "Judge", "phase": "judge.decide",
+         "payload": {"prompt_text": "irrelevant"}},
+    ]
+    coverage = _reviewer_coverage(agent_log)
+    assert coverage["files_checked"] == 3
+    assert coverage["files_with_findings"] == 2
+    assert coverage["decisions_checked"] == 9
+    assert coverage["operator_verdicts_found"] == 6
+    assert coverage["missing"] == 3
+    assert coverage["clean"] is False
+
+
+def test_reviewer_coverage_clean_when_every_row_is_clean():
+    agent_log = [
+        {"agent": "Reviewer", "phase": "review.coverage_check",
+         "payload": {"file_id": "f1", "columns": 3, "decisions_checked": 3,
+                     "operator_verdicts_found": 3, "missing": 0, "verdict": "clean"}},
+        {"agent": "Reviewer", "phase": "review.coverage_check",
+         "payload": {"file_id": "f2", "columns": 1, "decisions_checked": 1,
+                     "operator_verdicts_found": 1, "missing": 0, "verdict": "clean"}},
+    ]
+    coverage = _reviewer_coverage(agent_log)
+    assert coverage["files_checked"] == 2
+    assert coverage["files_with_findings"] == 0
+    assert coverage["missing"] == 0
+    assert coverage["clean"] is True
+
+
+def test_build_report_reviewer_coverage_absent_when_no_agent_log():
+    """When agent_log is not supplied, build_report must leave
+    reviewer_coverage at None and list it in 'unavailable', exactly as it
+    already does for context_hygiene."""
+    art = plant(scenario_id="oncology_v1", row_count=12, seed=7)
+    gt = art.ground_truth
+
+    report = build_report(
+        ground_truth=gt, decisions=[], verify_report={}, mode="agentic",
+    )
+
+    assert report["reviewer_coverage"] is None
+    unavailable_sections = {u["section"] for u in report["unavailable"]}
+    assert "reviewer_coverage" in unavailable_sections
+    assert "context_hygiene" in unavailable_sections
