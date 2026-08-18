@@ -104,18 +104,26 @@ def _iter_table_rows(path: Path, ext: str) -> Iterator[list[str]]:
         delimiter = "\t" if ext == "tsv" else ","
         with path.open("r", encoding="utf-8", errors="replace", newline="") as f:
             for row in csv.reader(f, delimiter=delimiter):
-                yield [str(cell) for cell in row]
+                values = [str(cell) for cell in row]
+                if any(cell.strip() for cell in values):
+                    yield values
         return
     if ext in ("xlsx", "xls"):
         workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
         try:
             worksheet = workbook[workbook.sheetnames[0]]
             for row in worksheet.iter_rows(values_only=True):
-                yield [str(cell) if cell is not None else "" for cell in row]
+                values = [str(cell) if cell is not None else "" for cell in row]
+                if any(cell.strip() for cell in values):
+                    yield values
         finally:
             workbook.close()
         return
     raise ValueError(f"unsupported table ext {ext!r}")
+
+
+def _table_column_key(column: str) -> str:
+    return column.strip().casefold()
 
 
 def _read_table_rows(
@@ -158,12 +166,12 @@ def column_value_stats(
             return {column: {"distinct": 0, "rows": 0} for column in columns}
         if normalized_ext in ("csv", "tsv"):
             headers = [cell.strip() for cell in headers]
-        positions = {header: index for index, header in enumerate(headers)}
+        positions = {_table_column_key(header): index for index, header in enumerate(headers)}
         distinct_values = {column: set() for column in columns}
         row_counts = {column: 0 for column in columns}
         for row in islice(table_rows, max_rows):
             for column, values in distinct_values.items():
-                index = positions.get(column)
+                index = positions.get(_table_column_key(column))
                 if index is None:
                     continue
                 row_counts[column] += 1
