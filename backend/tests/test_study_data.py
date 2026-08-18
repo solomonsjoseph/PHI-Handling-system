@@ -15,6 +15,7 @@ def test_list_packages_includes_tuberculosis_level_1():
 
 def test_tuberculosis_package_has_31_columns_with_low_cardinality_facility():
     import csv
+
     from phi_corpus.study_data import package_dir
     root = package_dir("level_1_tuberculosis")
     with (root / "dataset.csv").open(newline="") as f:

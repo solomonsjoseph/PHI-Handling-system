@@ -506,7 +506,7 @@ def apply_age_dob_rule(decisions: list[dict[str, Any]]) -> tuple[list[dict[str, 
 _SITE_COL_RE = _re_module.compile(
     r"(?:^|_)(facility|site|clinic|hospital|centre|center|ward|catchment"
     r"|district|village|township|sub_?district|taluk|tehsil|mandal)(?:_|$)",
-    _re_module.I,
+    _re_module.IGNORECASE,
 )
 
 

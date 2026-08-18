@@ -4,7 +4,6 @@ inspection (Sentinel plan item 5): applying a second mechanism to a decision
 a first mechanism already settled must never corrupt the record, never
 re-fire on a decision it no longer applies to, and must carry forward the
 most specific explanation available rather than a stale one."""
-import asyncio
 
 from phi_core.agents.reasoning import (
     BLOCKING_ISSUE_FLOOR,

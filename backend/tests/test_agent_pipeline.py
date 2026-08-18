@@ -361,24 +361,28 @@ def escalation_zip_bytes():
     dw.writerow(["dob", "Date of birth of the study participant.", "yes"])
     dw.writerow([
         _ANTI_LOOP_COLUMN,
-        "Internal linkage code assigned once per participant at enrollment; format ENR- "
-        "followed by a six-digit sequence. Used only to join this dataset with other files "
-        "inside the same study bundle. Not a name, date, or contact detail, but unique to one "
-        "participant across the entire submission, so retaining it as-is would let anyone who "
-        "obtains two files from this study re-associate a participant's records.",
+        (
+            "Internal linkage code assigned once per participant at enrollment; format ENR- "
+            "followed by a six-digit sequence. Used only to join this dataset with other files "
+            "inside the same study bundle. Not a name, date, or contact detail, but unique to one "
+            "participant across the entire submission, so retaining it as-is would let anyone who "
+            "obtains two files from this study re-associate a participant's records."
+        ),
         "no",
     ])
     dw.writerow([
         _ESCALATE_COLUMN,
-        "Coded outcome of the initial screening visit. SR-COMMON-A/B/C mark the three most "
-        "frequent outcomes, each shared by hundreds of participants across the parent cohort "
-        "with no linkage risk on its own. SR-RARE-001 marks an outcome documented in fewer "
-        "than five individuals in the entire national cohort; whether it appears in this "
-        "file's rows cannot be told from this dictionary entry, and if it does, that value "
-        "combined with the participant's approximate enrollment period could support "
-        "re-identification under 45 CFR 164.514(b)(2)(ii). Whether this column is a safe "
-        "coded clinical variable or a quasi-identifier turns on cell-level distribution this "
-        "dictionary cannot show.",
+        (
+            "Coded outcome of the initial screening visit. SR-COMMON-A/B/C mark the three most "
+            "frequent outcomes, each shared by hundreds of participants across the parent cohort "
+            "with no linkage risk on its own. SR-RARE-001 marks an outcome documented in fewer "
+            "than five individuals in the entire national cohort; whether it appears in this "
+            "file's rows cannot be told from this dictionary entry, and if it does, that value "
+            "combined with the participant's approximate enrollment period could support "
+            "re-identification under 45 CFR 164.514(b)(2)(ii). Whether this column is a safe "
+            "coded clinical variable or a quasi-identifier turns on cell-level distribution this "
+            "dictionary cannot show."
+        ),
         "unknown",
     ])
 

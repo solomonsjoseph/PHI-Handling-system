@@ -12,9 +12,9 @@ import pytest
 import requests
 
 from phi_core.agents.reasoning import (
-    ACTION_TYPES,
     _ACTION_PLAIN,
     _CATEGORY_PLAIN,
+    ACTION_TYPES,
     _escalation_reason_phrase,
     annotate_pending_review,
     apply_blocking_floor,
@@ -23,7 +23,6 @@ from phi_core.agents.reasoning import (
     validate_decisions,
     verify_keep_decisions,
 )
-
 
 BASE_URL = os.environ.get("PHI_TEST_BASE_URL", "http://localhost:8001")
 
