@@ -15,6 +15,7 @@ from phi_core.agents.reasoning import (
     ACTION_TYPES,
     _ACTION_PLAIN,
     _CATEGORY_PLAIN,
+    _escalation_reason_phrase,
     annotate_pending_review,
     apply_blocking_floor,
     apply_confidence_floor,
@@ -137,12 +138,16 @@ def test_human_review_captures_session_review_when_provided():
 _BARE_ACTION_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(a) for a in _ACTION_PLAIN) + r")\b"
 )
-# Standalone uppercase HIPAA category letter. Deliberately excludes 'I':
-# the implementation never emits a bare category letter at all (see
-# `_reviewer_prompt_for`), and 'I' collides with the English first-person
-# pronoun the prompts legitimately use ("I'm not confident..."). The
-# other sixteen Safe Harbor letters still guard against a regression.
-_BARE_CATEGORY_RE = re.compile(r"(?<![A-Za-z0-9'])[A-HJ-R](?![A-Za-z0-9'])")
+# Standalone uppercase HIPAA category letter, including a quoted one
+# ('R', "R", (R)). The only exemption is 'I' immediately followed by an
+# apostrophe -- an English contraction ("I'm", "I've", "I'll", "I'd"),
+# which the prompts legitimately use for the first-person pronoun and
+# which the implementation is written to always use (never a bare "I ").
+# A quoted or otherwise bare 'I' (not part of a contraction) still
+# matches, same as every other Safe Harbor letter.
+_BARE_CATEGORY_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-HJ-R](?![A-Za-z0-9])|I(?!['A-Za-z0-9]))"
+)
 _BARE_CONFIDENCE_RE = re.compile(r"\d*\.\d+")
 _AGENT_NAMES = ("Judge", "Sentinel", "Executor", "Auditor", "Reviewer", "Operator")
 
@@ -163,6 +168,21 @@ def test_category_plain_covers_every_hipaa_letter_and_none_and_quasi():
     letters = {chr(c) for c in range(ord("A"), ord("R") + 1)}
     assert letters <= set(_CATEGORY_PLAIN)
     assert {"NONE", "QUASI"} <= set(_CATEGORY_PLAIN)
+
+
+def test_bare_category_regex_catches_quoted_letter_but_not_i_contraction():
+    """Direct regression for the quoted-category gap: a single-quoted
+    (or otherwise bare) HIPAA letter like 'R' must be caught, while the
+    'I' contractions the prompts actually use must not false-positive."""
+    assert _BARE_CATEGORY_RE.search("category 'R' was assigned")
+    assert _BARE_CATEGORY_RE.search('category "G" was assigned')
+    assert _BARE_CATEGORY_RE.search("flagged as category R here")
+    assert not _BARE_CATEGORY_RE.search("I'm not confident enough")
+    assert not _BARE_CATEGORY_RE.search("I've seen this before")
+    assert not _BARE_CATEGORY_RE.search("I'll leave it as is")
+    assert not _BARE_CATEGORY_RE.search("I'd say this is fine")
+    # A bare, non-contraction 'I' still counts as a leak.
+    assert _BARE_CATEGORY_RE.search("this is category I territory")
 
 
 def _path1_invalid_action_decision() -> dict:
@@ -232,6 +252,7 @@ def test_reviewer_prompt_plain_english_path1_invalid_model_action():
     prompt = annotate_pending_review([decision])[0]["reviewer_prompt"]
     _assert_plain_english(prompt)
     assert _ACTION_PLAIN["drop"] in prompt
+    assert _escalation_reason_phrase(decision) in prompt
 
 
 def test_reviewer_prompt_plain_english_path2_confidence_floor():
@@ -241,6 +262,7 @@ def test_reviewer_prompt_plain_english_path2_confidence_floor():
     _assert_plain_english(prompt)
     assert _ACTION_PLAIN["keep"] in prompt
     assert _CATEGORY_PLAIN["B"] in prompt
+    assert _escalation_reason_phrase(decision) in prompt
 
 
 def test_reviewer_prompt_plain_english_path3_blocking_floor():
@@ -249,6 +271,7 @@ def test_reviewer_prompt_plain_english_path3_blocking_floor():
     prompt = annotate_pending_review([decision])[0]["reviewer_prompt"]
     _assert_plain_english(prompt)
     assert _ACTION_PLAIN["keep"] in prompt
+    assert _escalation_reason_phrase(decision) in prompt
 
 
 def test_reviewer_prompt_plain_english_path4_sentinel_escalation():
@@ -257,6 +280,7 @@ def test_reviewer_prompt_plain_english_path4_sentinel_escalation():
     prompt = annotate_pending_review([decision])[0]["reviewer_prompt"]
     _assert_plain_english(prompt)
     assert _CATEGORY_PLAIN["R"] in prompt
+    assert _escalation_reason_phrase(decision) in prompt
 
 
 def test_reviewer_prompt_plain_english_path5_keep_verification(tmp_path, monkeypatch):
@@ -265,6 +289,28 @@ def test_reviewer_prompt_plain_english_path5_keep_verification(tmp_path, monkeyp
     prompt = annotate_pending_review([decision])[0]["reviewer_prompt"]
     _assert_plain_english(prompt)
     assert _CATEGORY_PLAIN["G"] in prompt
+    assert _escalation_reason_phrase(decision) in prompt
+
+
+def test_escalation_reason_phrases_distinguish_all_five_routes(tmp_path, monkeypatch):
+    """The five escalation paths must not collapse into one indistinguishable
+    'not confident enough' sentence: each gets its own safe, plain-English
+    why-phrase, built only from the trusted, code-controlled reason-prefix
+    each path writes (never from suggested_reason, an agent name, a raw
+    identifier, a confidence float, or dataset PHI)."""
+    decisions = [
+        _path1_invalid_action_decision(),
+        _path2_confidence_floor_decision(),
+        _path3_blocking_floor_decision(),
+        _path4_sentinel_escalation_decision(),
+        _path5_keep_verification_decision(tmp_path, monkeypatch),
+    ]
+    phrases = [_escalation_reason_phrase(d) for d in decisions]
+    assert len(set(phrases)) == 5, f"escalation routes are not distinguishable: {phrases}"
+    for decision, phrase in zip(decisions, phrases):
+        prompt = annotate_pending_review([decision])[0]["reviewer_prompt"]
+        _assert_plain_english(prompt)
+        assert phrase in prompt
 
 
 def test_reviewer_prompt_with_dictionary_description_stays_plain_english():

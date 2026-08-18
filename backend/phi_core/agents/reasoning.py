@@ -170,12 +170,40 @@ def _confidence_band(confidence: Any) -> str | None:
     return "not confident at all"
 
 
+def _escalation_reason_phrase(d: dict[str, Any]) -> str:
+    """Classify which deterministic path routed this decision to human
+    review, from the literal reason-prefix each path writes -- never from
+    `suggested_reason`, an agent name, or any interpolated/free-text
+    content. Every prefix matched below is a compile-time string
+    constant written by this module's own code (`validate_decisions`,
+    `apply_confidence_floor`, `apply_blocking_floor`,
+    `apply_sentinel_escalations`, `verify_keep_decisions`), never data
+    from a model, a reviewer, or a dataset row, so matching on it cannot
+    leak PHI, a raw identifier, a confidence number, or an agent name --
+    only the fixed prefix is inspected; whatever free text a path
+    appended after it is never read here."""
+    reason = d.get("reason")
+    reason = reason if isinstance(reason, str) else ""
+    if reason.startswith("model proposed unknown action"):
+        return "the answer the automated review proposed was not usable"
+    if reason.startswith("Confidence floor:"):
+        return "the automated review was not certain enough to act on its own"
+    if reason.startswith("Blocking-issue floor:"):
+        return "this column has repeatedly raised the same safety concern"
+    if reason.startswith("Sentinel escalation:"):
+        return "a safety check flagged this column as ambiguous rather than clearly wrong"
+    if reason.startswith("Keep verification:"):
+        return "a check of the actual values in this column found something that looked identifying"
+    return "the automated review could not finish deciding on its own"
+
+
 def _reviewer_prompt_for(d: dict[str, Any], dictionary_by_column: dict[str, str] | None = None) -> str:
     """Plain-language sentence built in Python from column name, dictionary
-    description, and the proposed action's plain-English gloss -- no LLM
-    call, and no agent-internal vocabulary (action ids, HIPAA letters,
-    confidence numbers, agent names) ever surfaces raw: only its plain
-    phrase from `_ACTION_PLAIN` / `_CATEGORY_PLAIN` / `_confidence_band`
+    description, the proposed action's plain-English gloss, and which
+    deterministic path escalated it -- no LLM call, and no agent-internal
+    vocabulary (action ids, HIPAA letters, confidence numbers, agent
+    names) ever surfaces raw: only its plain phrase from `_ACTION_PLAIN`
+    / `_CATEGORY_PLAIN` / `_confidence_band` / `_escalation_reason_phrase`
     does. Every one of the five deterministic paths that can route a
     decision to human_review -- invalid model output in `validate_decisions`,
     `apply_confidence_floor`, `apply_blocking_floor`,
@@ -188,20 +216,19 @@ def _reviewer_prompt_for(d: dict[str, Any], dictionary_by_column: dict[str, str]
     desc_clause = f' (the data dictionary describes it as "{desc}")' if desc else ""
 
     action_plain = _ACTION_PLAIN.get(d.get("suggested_action"))
-    category_plain = _CATEGORY_PLAIN.get(d.get("phi_category"))
+    category = d.get("phi_category")
+    category_plain = _CATEGORY_PLAIN.get(category)
     band = _confidence_band(d.get("suggested_confidence"))
 
     what = f"My best guess is to {action_plain}" if action_plain \
-        else "I could not settle on one clear best guess for what to do with it"
+        else "I'm not able to settle on one clear best guess for what to do with it"
 
-    why_bits = []
-    category = d.get("phi_category")
+    why_bits = [_escalation_reason_phrase(d)]
     if category_plain and category not in (None, "", "NONE"):
         why_bits.append(f"it looks like it may hold {category_plain}")
     if band:
-        why_bits.append(f"I am {band} about that guess")
-    why = "; ".join(why_bits) if why_bits \
-        else "the automated review could not finish deciding on its own"
+        why_bits.append(f"I'm {band} about that guess")
+    why = "; ".join(why_bits)
 
     return (f"I'm not confident enough to decide what should happen to the column "
             f"'{col}'{desc_clause} on my own. {what}, because {why}. "
