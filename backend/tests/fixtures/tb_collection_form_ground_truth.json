@@ -1,0 +1,76 @@
+{
+  "form": "tb_collection_form.pdf",
+  "acroform": "tb_collection_form_acroform.pdf",
+  "scanned": "tb_collection_form_scanned.pdf",
+  "fields": [
+    {
+      "label": "Study ID",
+      "collected_variable": "study_id"
+    },
+    {
+      "label": "Patient Last Name",
+      "collected_variable": null
+    },
+    {
+      "label": "Patient First Name",
+      "collected_variable": null
+    },
+    {
+      "label": "Medical Record Number",
+      "collected_variable": "mrn"
+    },
+    {
+      "label": "Date of Birth",
+      "collected_variable": "date_of_birth"
+    },
+    {
+      "label": "Phone Number",
+      "collected_variable": null
+    },
+    {
+      "label": "Street Address",
+      "collected_variable": null
+    },
+    {
+      "label": "City",
+      "collected_variable": null
+    },
+    {
+      "label": "State",
+      "collected_variable": null
+    },
+    {
+      "label": "ZIP Code",
+      "collected_variable": "zip_code"
+    },
+    {
+      "label": "Sex at Birth",
+      "collected_variable": "sex_at_birth"
+    },
+    {
+      "label": "Race",
+      "collected_variable": null
+    },
+    {
+      "label": "Country of Birth",
+      "collected_variable": "country_of_birth"
+    },
+    {
+      "label": "Diagnosis Code (ICD-10)",
+      "collected_variable": "diagnosis_code"
+    },
+    {
+      "label": "Site of Disease",
+      "collected_variable": null
+    },
+    {
+      "label": "HIV Status",
+      "collected_variable": null
+    },
+    {
+      "label": "Treatment Start Date",
+      "collected_variable": "treatment_start_date"
+    }
+  ],
+  "notes": "Ground truth for the Task 14 Instrument evaluation. The flat and AcroForm fixtures share this field list; the scanned fixture is a smaller, deliberately minimal image-only form used only to prove the OCR fallback fires -- it is not graded against this full field list."
+}
