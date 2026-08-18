@@ -724,3 +724,185 @@ def test_header_only_export_does_not_block_decisions(tmp_path):
     assert by_col["id"]["verdict"] == "pass"
     assert by_col["ssn"]["verdict"] == "pass"
     assert result["status"] == "clean"
+
+
+# ---- Task 28: Operator wired between Executor and Publish Guard -----------
+
+
+def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_path, monkeypatch):
+    """Full-pipeline-shaped proof, run directly against
+    `orchestrator.run_pipeline` with the same fake-agent-double pattern
+    `test_keep_verification_pipeline.py` uses against this same function:
+    every agent except the real Operator is faked, Executor is faked to
+    hand back one hand-corrupted export (finding 9's `cap_age_90`
+    violation) alongside one clean export, and the assertions prove
+    Operator's filtering and status change land end to end.
+
+    A corrupted export must: (1) be excluded from the final `exports`
+    dict used everywhere downstream (Publish Guard, Auditor, the
+    completion `$set`), (2) be named in `operator_failures`, and (3)
+    leave the run `partially_complete`, not `complete`.
+    """
+    from phi_core.agents import orchestrator
+
+    bad_export = tmp_path / "f1_export.csv"
+    _write_csv(bad_export, ["age"], [["96"]])  # cap_age_90 shape violation
+    good_export = tmp_path / "f2_export.csv"
+    _write_csv(good_export, ["age"], [["45"]])  # valid cap_age_90 output
+
+    class FakeSessions:
+        def __init__(self):
+            self.updates = []
+
+        async def find_one(self, *_args, **_kwargs):
+            return None
+
+        async def update_one(self, *_args, **_kwargs):
+            self.updates.append(_args[1])
+
+    class FakeAgentLog:
+        async def insert_one(self, *_args, **_kwargs):
+            return None
+
+    class FakeDb:
+        def __init__(self):
+            self.sessions = FakeSessions()
+            self.agent_log = FakeAgentLog()
+
+    class FakeStatute:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {}
+
+    class FakePraxis:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def method_for(self, _category):
+            return {}
+
+    class FakeLexicon:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {"columns": []}
+
+    class FakeInstrument(FakeLexicon):
+        async def run(self, **_kwargs):
+            return {"fields": []}
+
+    class FakeSchema(FakeLexicon):
+        pass
+
+    class FakeJudge:
+        def __init__(self, **_kwargs):
+            self.call_failures = 0
+            self.last_message_id = None
+
+        async def run(self, **_kwargs):
+            return {"decisions": [
+                {"file_id": "f1", "column": "age", "action": "cap_age_90",
+                 "phi_category": "C", "citation": "45 CFR 164.514(b)(2)(i)(C)",
+                 "confidence": 0.95, "reason": "Judge decision"},
+                {"file_id": "f2", "column": "age", "action": "cap_age_90",
+                 "phi_category": "C", "citation": "45 CFR 164.514(b)(2)(i)(C)",
+                 "confidence": 0.95, "reason": "Judge decision"},
+            ]}
+
+    class FakeSentinel:
+        def __init__(self, **_kwargs):
+            self.call_failures = 0
+
+        async def run(self, **_kwargs):
+            return {"issues": []}
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {"exports": {"f1": str(bad_export), "f2": str(good_export)}}
+
+    class FakeAuditor:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def _log(self, *_args, **_kwargs):
+            return None
+
+        async def run(self, **_kwargs):
+            return {"verdict": "clean", "issues": [], "metrics": {}, "summary": "ok"}
+
+    class FakeScout:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {}
+
+    class FakeLedger:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {}
+
+    class FakeHerald:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {}
+
+    monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
+    monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
+    monkeypatch.setattr(orchestrator, "Lexicon", FakeLexicon)
+    monkeypatch.setattr(orchestrator, "Instrument", FakeInstrument)
+    monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
+    monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
+    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
+    monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
+    monkeypatch.setattr(orchestrator, "Scout", FakeScout)
+    monkeypatch.setattr(orchestrator, "Ledger", FakeLedger)
+    monkeypatch.setattr(orchestrator, "Herald", FakeHerald)
+
+    phase_events = []
+
+    async def emit(_message):
+        return None
+
+    async def on_phase(phase, payload):
+        phase_events.append((phase, payload))
+
+    db = FakeDb()
+    result = asyncio.run(orchestrator.run_pipeline(
+        {
+            "id": "session",
+            "files": [
+                {"kind": "dataset", "file_id": "f1", "subtype": "csv", "stored_path": str(bad_export)},
+                {"kind": "dataset", "file_id": "f2", "subtype": "csv", "stored_path": str(good_export)},
+            ],
+        },
+        db,
+        object(),
+        emit,
+        on_phase,
+    ))
+
+    assert "f1" not in result["exports"]
+    assert result["exports"] == {"f2": str(good_export)}
+    assert result["operator_failures"] == ["f1"]
+    assert result["status"] == "partially_complete"
+
+    operator_events = [e for e in phase_events if e[0] == "operator"]
+    assert len(operator_events) == 1
+    assert operator_events[0][1]["decision_count"] == 2
+
+    completion_update = db.sessions.updates[-1]["$set"]
+    assert completion_update["status"] == "partially_complete"
+    assert completion_update["operator_failures"] == ["f1"]
+    assert completion_update["export_paths"] == {"f2": str(good_export)}

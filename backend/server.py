@@ -1935,6 +1935,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         apply_sentinel_hard_rules, validate_decisions, verify_keep_decisions,
     )
     from phi_core.agents.outward import Scout, Ledger, Herald
+    from phi_core.agents.operator import Operator
     from phi_core.paths import cleanup_session_unpacked
     from phi_core.security import scrub_persisted_text
 
@@ -2233,12 +2234,32 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             await timed_on_phase("executor", {"decision_count": len(scrubbed_decisions)})
 
             exec_out = await Executor(**common).run(files=files, decisions=scrubbed_decisions, omit_by_file=omit_by_file)
+
+            await timed_on_phase("operator", {"decision_count": len(scrubbed_decisions)})
+            op_out = await Operator(**common).run(files=files, decisions=scrubbed_decisions,
+                                                  exports=exec_out["exports"], omit_by_file=omit_by_file)
+            # Operator's own `failed_file_ids` only covers a file it could
+            # not read or that never made it into `exports` at all. A
+            # shape-check or reverse-completeness failure surfaces as a
+            # per-column 'fail' verdict on an otherwise-readable file, and
+            # must block that file from `exports` exactly the same way.
+            op_failed_ids = sorted(set(op_out["failed_file_ids"]) |
+                                   {v["file_id"] for v in op_out["verdicts"] if v.get("verdict") == "fail"})
+            exports = {fid: p for fid, p in exec_out["exports"].items()
+                      if fid not in op_failed_ids}
+
             from phi_core.publish_guard import scan_all_exports as _scan_all_exports
             if exec_out["exports"]:
-                guard_report = _scan_all_exports(exec_out["exports"], decisions=scrubbed_decisions,
+                # `exports` (operator-filtered) is what actually gets scanned.
+                # If Operator's checks wiped every file out of a non-empty
+                # Executor output, scan_all_exports naturally reports
+                # `blocked` on the resulting empty dict (scanned == 0) --
+                # exactly the existing "can't certify clean" behavior, no
+                # special-casing needed here.
+                guard_report = _scan_all_exports(exports, decisions=scrubbed_decisions,
                                                  jurisdiction=session.get("jurisdiction", "us")).to_dict()
             else:
-                # Nothing resolved into an exportable file yet this round
+                # Executor itself produced nothing exportable this round
                 # (e.g. every column of the only dataset is still deferred).
                 # This is a legitimate empty-so-far state, not a leak --
                 # Publish Guard's own "no exports to scan" reading would
@@ -2256,11 +2277,12 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                 await db.sessions.update_one(run_filter, {"$set": {
                     "status": "blocked",
                     "guard_report": guard_report,
-                    "export_paths": exec_out["exports"],
+                    "export_paths": exports,
                     "agent_decisions": decisions,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "phase_timings": phase_timings,
                     "run_elapsed_s": round(time.perf_counter() - run_started, 3),
+                    "operator_failures": op_failed_ids,
 
                 }})
                 cleanup_session_unpacked(sid)
@@ -2268,7 +2290,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                 return
             await timed_on_phase("auditor_scout", {})
 
-            audit = await Auditor(**common).run(decisions=scrubbed_decisions, exports=exec_out["exports"], files=files)
+            audit = await Auditor(**common).run(decisions=scrubbed_decisions, exports=exports, files=files)
             scout = await Scout(**common).run()
             await timed_on_phase("ledger", {})
 
@@ -2280,7 +2302,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             await close_last_phase()
             run_elapsed_s = round(time.perf_counter() - run_started, 3)
 
-            final_status = "partially_complete" if pending_review else "complete"
+            final_status = "partially_complete" if (pending_review or op_failed_ids) else "complete"
             completion_update = {
                 "$set": {
                     "agent_audit": audit,
@@ -2290,11 +2312,12 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                     "guard_report": guard_report,
                     "session_review": session_review_history,
                     "pending_review": pending_review,
-                    "export_paths": exec_out["exports"],
+                    "export_paths": exports,
                     "status": final_status,
                     "human_review_required": bool(pending_review),
                     "phase_timings": phase_timings,
                     "run_elapsed_s": run_elapsed_s,
+                    "operator_failures": op_failed_ids,
 
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },

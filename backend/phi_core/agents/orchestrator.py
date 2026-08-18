@@ -31,6 +31,7 @@ from .base import AgentMessage, ITERATION_CAP
 from .experts import Praxis, Statute
 from .llm import LlmConfig
 from .manager import Manager
+from .operator import Operator
 from .outward import Herald, Ledger, Scout
 from .reasoning import (
     Auditor,
@@ -500,11 +501,30 @@ async def run_pipeline(
     await on_phase("executor", {"decision_count": len(approved_decisions)})
     exec_out = await Executor(**common).run(files=files, decisions=approved_decisions)
 
+    # 5a. Operator: deterministic self-verification of what Executor wrote,
+    # one stage before Publish Guard, mirroring the Judge/Sentinel split one
+    # stage later. exec_out["exports"] stays Executor's own factual record
+    # of what it wrote and is never mutated here; `exports` is the
+    # operator-filtered view every later step in this function uses.
+    await on_phase("operator", {"decision_count": len(approved_decisions)})
+    op_out = await Operator(**common).run(files=files, decisions=approved_decisions,
+                                          exports=exec_out["exports"])
+    # Operator's own `failed_file_ids` only covers a file it could not read
+    # or that never made it into `exports` at all (see operator.py). A
+    # shape-check or reverse-completeness failure surfaces as a per-column
+    # 'fail' verdict on an otherwise-readable file, and must block that
+    # file from `exports` exactly the same way -- fold both into one set.
+    op_failed_ids = sorted(set(op_out["failed_file_ids"]) |
+                           {v["file_id"] for v in op_out["verdicts"] if v.get("verdict") == "fail"})
+    exports = {fid: p for fid, p in exec_out["exports"].items()
+              if fid not in op_failed_ids}
+    final_status = "partially_complete" if op_failed_ids else "complete"
+
     # 5b. Publish Guard: deterministic last-mile PHI scan on emitted exports.
     # GOAL invariant: exports are only 'ready to share publicly' after this
     # boundary check clears. Runs synchronously; downloads are 403 until clean.
     from ..publish_guard import scan_all_exports as _scan_all_exports
-    guard_report = _scan_all_exports(exec_out["exports"], decisions=approved_decisions, jurisdiction=session.get("jurisdiction", "us")).to_dict()
+    guard_report = _scan_all_exports(exports, decisions=approved_decisions, jurisdiction=session.get("jurisdiction", "us")).to_dict()
     await on_phase("publish_guard", {"status": guard_report["status"],
                                      "scanned": guard_report["scanned"],
                                      "blocked": guard_report["blocked"]})
@@ -517,12 +537,13 @@ async def run_pipeline(
             {"$set": {
                 "status": "blocked",
                 "guard_report": guard_report,
-                "export_paths": exec_out["exports"],
+                "export_paths": exports,
                 "agent_decisions": approved_decisions,
                 "phase_timings": _phase_timings,
                 "run_elapsed_s": round(time.perf_counter() - _run_started, 3),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "manager_report": manager_report,
+                "operator_failures": op_failed_ids,
             }},
         )
         cleanup_session_unpacked(sid)
@@ -538,7 +559,7 @@ async def run_pipeline(
     auditor_agent = Auditor(**common)
     scout_agent = Scout(**common)
     audit, scout, benchmark = await asyncio.gather(
-        auditor_agent.run(decisions=approved_decisions, exports=exec_out["exports"], files=files),
+        auditor_agent.run(decisions=approved_decisions, exports=exports, files=files),
         scout_agent.run(),
         _empty(None),   # placeholder for future synthetic benchmark run
         return_exceptions=True,
@@ -574,21 +595,22 @@ async def run_pipeline(
                                         target_venue=session.get("target_venue") or "JAMIA Open")
 
     await close_last_phase()
-    manager_report = await manager.close_run("complete")
+    manager_report = await manager.close_run(final_status)
     result = {
-        "status": "complete",
+        "status": final_status,
         "decisions": approved_decisions,
         "audit": audit,
         "scout": scout,
         "ledger": ledger,
         "herald": herald,
-        "exports": exec_out["exports"],
+        "exports": exports,
         "guard": guard_report,
         "advisory_issues": advisory_issues,
         "phase_timings": _phase_timings,
         "run_elapsed_s": round(time.perf_counter() - _run_started, 3),
         "iteration_cap": iteration_cap,
         "manager_report": manager_report,
+        "operator_failures": op_failed_ids,
     }
     completion_update = {
         "$set": {
@@ -598,17 +620,19 @@ async def run_pipeline(
             "agent_scout": scout,
             "advisory_issues": advisory_issues,
             "guard_report": guard_report,
-            "export_paths": exec_out["exports"],
-            "status": "complete",
+            "export_paths": exports,
+            "status": final_status,
             "phase_timings": _phase_timings,
             "run_elapsed_s": result["run_elapsed_s"],
             "iteration_cap": iteration_cap,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "manager_report": manager_report,
+            "operator_failures": op_failed_ids,
         },
     }
     await db.sessions.update_one(session_filter, completion_update)
-    cleanup_session_unpacked(sid)
+    if final_status == "complete":
+        cleanup_session_unpacked(sid)
     return result
 
 
