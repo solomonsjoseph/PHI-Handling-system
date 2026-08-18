@@ -22,7 +22,7 @@ def _now() -> str:
 
 SessionStatus = Literal[
     "created", "intake", "reading", "classifying", "anonymizing",
-    "awaiting_human_review", "complete", "cancelled", "failed",
+    "awaiting_human_review", "partially_complete", "complete", "cancelled", "failed",
     "blocked", "corpus_ready", "intake_failed",
 ]
 

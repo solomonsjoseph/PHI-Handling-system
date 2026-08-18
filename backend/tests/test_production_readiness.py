@@ -183,6 +183,76 @@ async def test_session_delete_removes_document_files_and_agent_log(tmp_path, mon
 
 
 @pytest.mark.asyncio
+async def test_retention_purge_removes_expired_partially_complete_session(tmp_path, monkeypatch):
+    """Expired partial reviews lose their PHI files on the normal retention window."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    import server as srv
+
+    upload_dir = tmp_path / "uploads"
+    session_dir = upload_dir / "sess-expired-partial"
+    session_dir.mkdir(parents=True)
+    (session_dir / "source.csv").write_text("raw PHI", encoding="utf-8")
+    export = tmp_path / "exports" / "handled.csv"
+    export.parent.mkdir()
+    export.write_text("handled data", encoding="utf-8")
+    expired_session = {
+        "id": "sess-expired-partial",
+        "status": "partially_complete",
+        "updated_at": (datetime.now(timezone.utc) - timedelta(days=srv.RETENTION_DAYS + 1)).isoformat(),
+        "export_paths": {"dataset": str(export)},
+    }
+
+    class _Sessions:
+        def __init__(self):
+            self.deleted = []
+
+        def find(self, query, *_a, **_kw):
+            status_filter = query["status"]["$in"]
+            cutoff = query["updated_at"]["$lt"]
+
+            async def matching_sessions():
+                if (
+                    expired_session["status"] in status_filter
+                    and expired_session["updated_at"] < cutoff
+                ):
+                    yield expired_session
+
+            return matching_sessions()
+
+        async def delete_one(self, query):
+            self.deleted.append(query)
+
+    class _AgentLog:
+        def __init__(self):
+            self.deleted = []
+
+        async def delete_many(self, query):
+            self.deleted.append(query)
+
+    class _StubDB:
+        def __init__(self):
+            self.sessions = _Sessions()
+            self.agent_log = _AgentLog()
+
+    async def stop_after_one_pass(_seconds):
+        raise asyncio.CancelledError
+
+    db = _StubDB()
+    monkeypatch.setattr(srv, "UPLOAD_DIR", upload_dir)
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+    monkeypatch.setattr(srv.asyncio, "sleep", stop_after_one_pass)
+
+    with pytest.raises(asyncio.CancelledError):
+        await srv._purge_settled_sessions_loop()
+
+    assert not session_dir.exists()
+    assert not export.exists()
+    assert db.agent_log.deleted == [{"session_id": "sess-expired-partial"}]
+    assert db.sessions.deleted == [{"id": "sess-expired-partial"}]
+
+@pytest.mark.asyncio
 async def test_health_reports_mongo_down_as_503(monkeypatch):
     import server as srv
 

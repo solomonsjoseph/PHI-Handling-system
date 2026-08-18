@@ -1635,15 +1635,9 @@ async def _purge_settled_sessions_loop():
     agent_log rows. Runs forever; a single bad iteration backs off and
     retries rather than killing the loop.
 
-    ``partially_complete`` is deliberately excluded from this set. A
-    partially-complete session still has pending_review columns a reviewer
-    may resolve on a later round, and the resume path (session_human_review)
-    depends on both the session document and the unpacked originals under
-    UPLOAD_DIR/<sid> surviving until that happens -- deleting either one
-    silently destroys the only path back to a resolvable session, along
-    with its session_review audit history and attestations. It only leaves
-    this purge loop through an explicit terminal status (complete, failed,
-    cancelled, blocked, intake_failed).
+    ``partially_complete`` sessions remain resumable until RETENTION_DAYS
+    after their last update. Once that window expires, they are purged with
+    their uploaded PHI like any other settled session.
     """
     import shutil
     while True:
@@ -1651,7 +1645,8 @@ async def _purge_settled_sessions_loop():
             db = get_db()
             cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
             cursor = db.sessions.find(
-                {"status": {"$in": ["complete", "failed", "cancelled", "blocked", "intake_failed"]},
+                {"status": {"$in": ["complete", "failed", "cancelled", "blocked", "intake_failed",
+                                    "partially_complete"]},
                  "updated_at": {"$lt": cutoff}},
                 {"_id": 0, "id": 1, "export_paths": 1},
             )
