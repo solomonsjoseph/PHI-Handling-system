@@ -37,10 +37,13 @@ async def run_batched(
     checked exactly once.
 
     If ``check`` or ``on_batch`` raises for any batch, every sibling batch
-    that has not yet started is cancelled, every sibling is awaited to
-    completion so nothing keeps running (and no further ``on_batch`` call
-    can happen) once this function has returned control to the caller, and
-    the original exception is re-raised.
+    that has not yet started is cancelled outright. A sibling already
+    mid-flight inside ``asyncio.to_thread`` cannot be interrupted: its
+    worker thread runs ``check`` to completion, but its coroutine task is
+    cancelled at the ``await`` point, so that batch's result is discarded
+    and its ``on_batch`` never fires. Every sibling task, cancelled or
+    finished, is awaited before this function returns control to the
+    caller, and the original exception is re-raised.
 
     Raises ``ValueError`` if ``batch_size`` or ``pool_size`` is less than 1.
     """
@@ -73,10 +76,13 @@ async def run_batched(
     try:
         await asyncio.gather(*tasks)
     except BaseException:
-        # asyncio.gather does not cancel siblings on the first failure: a
-        # batch that hasn't started is cancelled outright, and every batch
-        # (cancelled or already mid-flight) is awaited to completion before
-        # we propagate, so nothing survives this call as a background task.
+        # asyncio.gather does not cancel siblings on the first failure: an
+        # unstarted batch is cancelled outright; a batch already inside
+        # asyncio.to_thread has its worker thread run to completion (its
+        # result is discarded) while its task is cancelled at the await
+        # point. Every task, cancelled or finished, is awaited before we
+        # propagate, so no coroutine task and no further on_batch call
+        # survives this function returning.
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
