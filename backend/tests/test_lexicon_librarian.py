@@ -151,6 +151,39 @@ def test_missing_headers_logged_and_skipped(tmp_path):
     assert lex.call_count == 0  # never asked the LLM about zero rows
 
 
+def test_blank_name_row_is_logged_not_silently_dropped(tmp_path):
+    """A dictionary row with a blank/absent name cell is skipped, but the
+    skip is audited rather than silent: it must show up as a
+    lexicon.blank_name log entry, and lexicon.parsed's raw-vs-indexed
+    counts must account for the gap."""
+    path = tmp_path / "dictionary.csv"
+    path.write_text(
+        "column_name,description\n"
+        "study_id,Study identifier.\n"
+        ",Orphaned description with no column name.\n"
+        "last_name,Patient's legal last name.\n",
+        encoding="utf-8",
+    )
+    db = FakeDb()
+    lex = _DropCountStubLexicon(session_id="s", llm=None, db=db)
+    dict_files = [{"file_id": "f1", "original_name": "dictionary.csv",
+                  "stored_path": str(path)}]
+
+    result = asyncio.run(lex.run(dict_files=dict_files))
+
+    assert {c["name"] for c in result["columns"]} == {"study_id", "last_name"}
+    assert len(lex._notes) == 2
+
+    blank_logs = [d for d in db.agent_log.inserted if d["phase"] == "lexicon.blank_name"]
+    assert len(blank_logs) == 1
+    assert blank_logs[0]["payload"] == {"file_id": "f1", "row_index": 1, "reason": "blank_name"}
+
+    parsed_logs = [d for d in db.agent_log.inserted if d["phase"] == "lexicon.parsed:f1"]
+    assert len(parsed_logs) == 1
+    assert parsed_logs[0]["payload"]["raw_row_count"] == 3
+    assert parsed_logs[0]["payload"]["indexed_row_count"] == 2
+
+
 # ---- Task 10: answer() ------------------------------------------------------
 
 

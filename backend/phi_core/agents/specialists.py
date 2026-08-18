@@ -71,12 +71,13 @@ class Lexicon(Agent):
                 continue
             name_idx = _name_column_index(header)
             file_entries: list[dict[str, Any]] = []
-            for row in rows:
-                if name_idx >= len(row):
+            for row_index, row in enumerate(rows):
+                if name_idx >= len(row) or not (row[name_idx] or "").strip():
+                    await self._log("lexicon.blank_name", "info",
+                                    {"file_id": f["file_id"], "row_index": row_index,
+                                     "reason": "blank_name"})
                     continue
-                name = (row[name_idx] or "").strip()
-                if not name:
-                    continue
+                name = row[name_idx].strip()
                 raw_row = ", ".join(
                     f"{h.strip()}: {v}" for h, v in zip(header, row) if (h or "").strip()
                 )
@@ -99,8 +100,12 @@ class Lexicon(Agent):
                 }
                 file_entries.append(entry)
                 self._notes[name.lower()] = entry
+            # Auditable raw-vs-indexed count: any gap between the two is
+            # accounted for entirely by the lexicon.blank_name rows logged
+            # above, never a silent drop.
             await self._log(f"lexicon.parsed:{f['file_id']}", "info",
-                            {"file": f.get("original_name"), "row_count": len(file_entries)})
+                            {"file": f.get("original_name"), "raw_row_count": len(rows),
+                             "indexed_row_count": len(file_entries)})
             per_file.append((f, file_entries))
 
         # Pass 2: fill in a gist per row, chunked, now that every row is
