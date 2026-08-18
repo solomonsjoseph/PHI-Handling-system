@@ -22,6 +22,7 @@ from typing import Any
 
 from .base import Agent
 from .batching import run_batched
+from .reasoning import _read_dataset_headers, _scrub_text_cell
 from ..file_readers import iter_dataset_rows
 
 
@@ -66,6 +67,14 @@ def _read_columns(path: str, ext: str) -> tuple[list[str], dict[str, list[str]]]
                 columns[name] = []
         for name in header:
             columns[name].append(row.get(name, ""))
+    if not header:
+        # Zero data rows is a valid, empty dataset -- iter_dataset_rows has
+        # nothing to yield a header from, so fall back to the real on-disk
+        # header rather than reporting every column missing. Never raises
+        # (returns an empty set on a genuinely unreadable file), so a real
+        # read failure still surfaces through the loop above, not here.
+        header = sorted(_read_dataset_headers(Path(path), ext))
+        columns = {name: [] for name in header}
     return header, columns
 
 
@@ -79,15 +88,17 @@ def _verify_record(record: dict[str, Any], view: dict[str, Any] | None) -> dict[
 
     if view is None:
         # Executor never wrote this file at all (write failure, every known
-        # column deferred to omit_by_file, a corrupt/unsupported written
-        # file, or a decision naming a file_id Operator has never heard
-        # of) -- every decision for it is a hard failure, nothing to check
-        # against.
+        # column deferred to omit_by_file, a decision naming a file_id
+        # Operator has never heard of), OR the written file exists but
+        # could not be read (corrupt/unsupported export) -- either way
+        # nothing in it is verifiable, so every decision for it is a hard
+        # failure. Worded to cover both causes rather than implying the
+        # file was never written when it may simply be unreadable.
         verdict.update(
             checks=[],
             verdict="fail",
-            problem=f"file {record['file_id']!r} is missing from exports",
-            performed="nothing written: the file never reached exports",
+            problem=f"file {record['file_id']!r} is missing from exports or could not be read",
+            performed="nothing verifiable: the file never reached exports or could not be read",
         )
         return verdict
 
@@ -189,13 +200,21 @@ def _verify_record(record: dict[str, Any], view: dict[str, Any] | None) -> dict[
         # source cell actually had something to scrub. Change-detection
         # only: no value from either side is ever placed in the verdict.
         relevant = [(s, w) for s, w in zip(source_cells, cells) if s != ""]
-        ok = (not relevant) or any(s != w for s, w in relevant)
+        changed = any(s != w for s, w in relevant)
+        # A column can legitimately have nothing to scrub: every relevant
+        # cell coming through unchanged from source is correct, not a
+        # leak, as long as none of the written cells still contain
+        # anything _scrub_text_cell would redact -- i.e. the written
+        # output is already a fixed point of the same scrub function.
+        stable = all(_scrub_text_cell(v) == v for v in non_empty)
+        ok = changed or stable
         verdict.update(
             checks=[{"name": "column_presence", "pass": True}, {"name": "scrub_ran", "pass": ok}],
             verdict="pass" if ok else "fail",
             problem="" if ok else "scrub_text produced no observable change",
-            performed="scrub_text ran, at least one cell changed" if ok
-            else "scrub_text produced no observable change from source",
+            performed="scrub_text ran, at least one cell changed" if changed
+            else ("scrub_text ran, output already clean" if ok
+                  else "scrub_text produced no observable change from source"),
         )
         return verdict
 
@@ -238,6 +257,13 @@ class Operator(Agent):
             fid = d.get("file_id", "")
             if fid in dataset_ids or fid not in files_by_id:
                 by_file.setdefault(fid, []).append(d)
+        # A dataset file Executor wrote with zero decisions at all (every
+        # column fell through Executor's fail-closed default) must still
+        # go through reverse completeness below -- seed it with an empty
+        # group rather than skipping it because no decision named it.
+        for fid in dataset_ids:
+            if fid in exports:
+                by_file.setdefault(fid, [])
 
         views: dict[str, dict[str, Any] | None] = {}
         failed_file_ids: list[str] = []

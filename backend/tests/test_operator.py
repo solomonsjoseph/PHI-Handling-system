@@ -456,6 +456,7 @@ def test_missing_export_file_fails_every_decision(tmp_path):
     assert len(result["verdicts"]) == 2
     assert all(v["verdict"] == "fail" for v in result["verdicts"])
     assert all(v["checks"] == [] for v in result["verdicts"])
+    assert all("missing from exports or could not be read" in v["problem"] for v in result["verdicts"])
     assert result["status"] == "issues"
 
 
@@ -628,6 +629,7 @@ def test_corrupt_written_file_isolated_from_sibling_files(tmp_path):
     by_file_col = {(v["file_id"], v["column"]): v for v in result["verdicts"]}
     assert by_file_col[("f1", "id")]["verdict"] == "pass"
     assert by_file_col[("f2", "id")]["verdict"] == "fail"
+    assert "missing from exports or could not be read" in by_file_col[("f2", "id")]["problem"]
     assert result["status"] == "issues"
 
 
@@ -653,3 +655,72 @@ def test_unknown_file_id_decision_is_flagged(tmp_path):
     assert by_file_col[("ghost", "ssn")]["verdict"] == "fail"
     assert by_file_col[("f1", "id")]["verdict"] == "pass"
     assert result["status"] == "issues"
+
+
+def test_scrub_text_column_with_nothing_to_scrub_passes(tmp_path):
+    """A scrub_text column whose source never contained anything
+    detectable is correctly unchanged from source -- must not be reported
+    as a failure just because nothing differs (the false-positive the
+    naive changed-from-source check produced)."""
+    rows = [["The subject continues routine treatment as scheduled."],
+            ["Nothing sensitive is mentioned in this note."]]
+    src = tmp_path / "in.csv"
+    _write_csv(src, ["notes"], rows)
+    dst = tmp_path / "out.csv"
+    _write_csv(dst, ["notes"], rows)  # identical: correct, since there was nothing to scrub
+    files = [_dataset_file("f1", str(src))]
+    decisions = [{"file_id": "f1", "column": "notes", "action": "scrub_text",
+                  "phi_category": "A", "citation": "45 CFR 164.514(b)(2)(i)(A)"}]
+    exports = {"f1": str(dst)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    by_col = {v["column"]: v for v in result["verdicts"]}
+    assert by_col["notes"]["verdict"] == "pass"
+    assert result["status"] == "clean"
+
+
+def test_dataset_file_with_zero_decisions_still_gets_reverse_completeness(tmp_path):
+    """A dataset file Executor wrote with zero decisions at all (every
+    column fell through Executor's SEC-004 fail-closed default) must still
+    run the undecided-column pass rather than being skipped entirely for
+    lack of any decision to key off of."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id", "ssn"], [["1", ""]])
+    files = [_dataset_file("f1")]
+    decisions: list[dict] = []  # Judge/Sentinel produced nothing for this file
+    exports = {"f1": str(src)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    by_col = {v["column"]: v for v in result["verdicts"]}
+    assert by_col["id"]["method"] == "undecided"
+    assert by_col["id"]["verdict"] == "fail"
+    assert by_col["ssn"]["method"] == "undecided"
+    assert by_col["ssn"]["verdict"] == "fail"
+    assert result["status"] == "issues"
+
+
+def test_header_only_export_does_not_block_decisions(tmp_path):
+    """Zero data rows is a valid, empty dataset -- iter_dataset_rows yields
+    nothing to build a header from, so the real on-disk header must still
+    be used rather than treating every column as missing."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id", "ssn"], [])  # header only, zero data rows
+    files = [_dataset_file("f1")]
+    decisions = [
+        {"file_id": "f1", "column": "id", "action": "keep", "phi_category": "NONE", "citation": ""},
+        {"file_id": "f1", "column": "ssn", "action": "drop", "phi_category": "G",
+         "citation": "45 CFR 164.514(b)(2)(i)(G)"},
+    ]
+    exports = {"f1": str(src)}
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    by_col = {v["column"]: v for v in result["verdicts"]}
+    assert by_col["id"]["verdict"] == "pass"
+    assert by_col["ssn"]["verdict"] == "pass"
+    assert result["status"] == "clean"
