@@ -1,6 +1,7 @@
 """Regression coverage for Statute's advisory US adjacent-regime research."""
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -54,6 +55,70 @@ async def test_adjacent_regimes_fall_back_without_blocking_when_search_fails():
     cache_put.assert_awaited_once()
     assert cache_put.await_args.args[1:3] == ("adjacent_regulations", "us")
     assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
+
+
+@pytest.mark.asyncio
+async def test_adjacent_regimes_reject_scalar_entries_from_web_reply():
+    from phi_core.agents.experts import Statute
+
+    agent = _agent()
+    agent.call_json_with_web_search = AsyncMock(return_value=(
+        {"adjacent_regimes": ["not a regime"] * 5},
+        [],
+    ))  # type: ignore[method-assign]
+
+    with patch("phi_core.agents.experts.cache_get", new=AsyncMock(return_value=None)), \
+         patch("phi_core.agents.experts.cache_put", new=AsyncMock()):
+        result = await agent._adjacent_regimes_for("us")
+
+    assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
+
+
+
+
+@pytest.mark.asyncio
+async def test_adjacent_regimes_reject_untrusted_cached_entries():
+    from phi_core.agents.experts import Statute
+
+    agent = _agent()
+    agent._log = AsyncMock()  # type: ignore[method-assign]
+    agent.call_json_with_web_search = AsyncMock()  # type: ignore[method-assign]
+    cached = {"content": json.dumps({"adjacent_regimes": ["not a regime"] * 5})}
+
+    with patch("phi_core.agents.experts.cache_get", new=AsyncMock(return_value=cached)), \
+         patch("phi_core.agents.experts.cache_put", new=AsyncMock()) as cache_put:
+        result = await agent._adjacent_regimes_for("us")
+
+    assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
+    agent.call_json_with_web_search.assert_not_awaited()
+    cache_put.assert_not_awaited()
+@pytest.mark.asyncio
+async def test_adjacent_regimes_reject_incomplete_or_noncanonical_dict_entries():
+    from phi_core.agents.experts import Statute
+
+    incomplete = {
+        "adjacent_regimes": [
+            {"name": regime["name"]}
+            for regime in Statute._ADJACENT_REGIMES_FALLBACK
+        ],
+    }
+    noncanonical = {
+        "adjacent_regimes": [
+            regime.copy()
+            for regime in Statute._ADJACENT_REGIMES_FALLBACK
+        ],
+    }
+    noncanonical["adjacent_regimes"][0]["citation"] = "incorrect citation"
+
+    for payload in (incomplete, noncanonical):
+        agent = _agent()
+        agent.call_json_with_web_search = AsyncMock(return_value=(payload, []))  # type: ignore[method-assign]
+
+        with patch("phi_core.agents.experts.cache_get", new=AsyncMock(return_value=None)), \
+             patch("phi_core.agents.experts.cache_put", new=AsyncMock()):
+            result = await agent._adjacent_regimes_for("us")
+
+        assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
 
 
 @pytest.mark.asyncio

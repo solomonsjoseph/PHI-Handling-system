@@ -124,6 +124,42 @@ class Statute(Agent):
         },
     ]
 
+    @classmethod
+    def _valid_adjacent_regimes(cls, reply: Any) -> bool:
+        """Accept only the five advisory rows Statute is allowed to report."""
+        if not isinstance(reply, dict):
+            return False
+        regimes = reply.get("adjacent_regimes")
+        if not isinstance(regimes, list) or len(regimes) != len(cls._ADJACENT_REGIMES_FALLBACK):
+            return False
+
+        canonical_citations = {
+            regime["name"]: regime["citation"]
+            for regime in cls._ADJACENT_REGIMES_FALLBACK
+        }
+        if {regime.get("name") for regime in regimes if isinstance(regime, dict)} != set(canonical_citations):
+            return False
+
+        for regime in regimes:
+            if not isinstance(regime, dict):
+                return False
+            if (
+                not isinstance(regime.get("name"), str)
+                or regime.get("citation") != canonical_citations[regime["name"]]
+                or not isinstance(regime.get("applicability"), str)
+                or not isinstance(regime.get("advisory"), str)
+                or not isinstance(regime.get("sources"), list)
+            ):
+                return False
+            if any(
+                not isinstance(source, dict)
+                or not isinstance(source.get("url"), str)
+                or not isinstance(source.get("title"), str)
+                for source in regime["sources"]
+            ):
+                return False
+        return True
+
     async def rules_for(self, jurisdiction: str) -> dict[str, Any]:
         hipaa, adjacent = await asyncio.gather(
             self._hipaa_rules_for(jurisdiction),
@@ -188,10 +224,17 @@ class Statute(Agent):
             return {"adjacent_regimes": []}
 
         cached = await cache_get(self.db, "adjacent_regulations", jurisdiction)
+
         if cached:
             await self._log(f"statute.cache_hit:{jurisdiction}", "info",
                             {"topic": "adjacent_regulations"})
-            return _json.loads(cached["content"])
+            try:
+                reply = _json.loads(cached["content"])
+            except (TypeError, ValueError):
+                reply = None
+            if self._valid_adjacent_regimes(reply):
+                return reply
+            return {"adjacent_regimes": self._ADJACENT_REGIMES_FALLBACK}
 
         prompt = (
             "Jurisdiction: us.\n"
@@ -221,18 +264,17 @@ class Statute(Agent):
             reply, citations = await self.call_json_with_web_search(
                 prompt,
                 phase=f"statute.adjacent_web_search:{jurisdiction}",
-                default={"adjacent_regimes": self._ADJACENT_REGIMES_FALLBACK},
+                default={},
                 max_uses=3,
                 expect_key="adjacent_regimes",
                 min_items=5,
                 status_text="Researching adjacent US data-protection regimes online",
             )
-            regimes = reply.get("adjacent_regimes") if isinstance(reply, dict) else None
-            if not isinstance(regimes, list) or len(regimes) < 5:
+            if not self._valid_adjacent_regimes(reply):
                 reply = {"adjacent_regimes": self._ADJACENT_REGIMES_FALLBACK}
             elif citations:
-                for regime in regimes:
-                    if isinstance(regime, dict) and not regime.get("sources"):
+                for regime in reply["adjacent_regimes"]:
+                    if not regime["sources"]:
                         regime["sources"] = citations
         except Exception as e:  # pragma: no cover — defensive fallback
             await self._log(f"statute.adjacent_error:{jurisdiction}", "info",
