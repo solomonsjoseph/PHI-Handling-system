@@ -75,6 +75,64 @@ def test_non_matching_column_name_left_alone():
     assert overrides == []
 
 
+@pytest.mark.parametrize("column", ["award_id", "composite_score", "subclinical_flag"])
+def test_in_token_substrings_never_treated_as_site_terms(column):
+    # 'award_id' contains 'ward', 'composite_score' contains 'site', and
+    # 'subclinical_flag' contains 'clinic' as raw substrings, but none of
+    # them is a separator-delimited site/facility token. Unbounded
+    # substring matching would silently drop these columns; that is the
+    # destructive false positive this test guards against.
+    stats = {("dataset.csv", column): {"distinct": 4, "rows": 40}}
+    out, overrides = apply_site_cardinality_rule([_decide(column=column)], stats)
+    assert out[0]["action"] == "keep"
+    assert overrides == []
+
+
+def test_distinct_one_below_floor_left_alone():
+    # distinct must be >= 2; a constant-valued column carries no
+    # cardinality signal at all and is left to Judge/Sentinel.
+    stats = {("dataset.csv", "treatment_facility_name"): {"distinct": 1, "rows": 40}}
+    out, overrides = apply_site_cardinality_rule([_decide()], stats)
+    assert out[0]["action"] == "keep"
+    assert overrides == []
+
+
+def test_distinct_equals_20_ceiling_fires():
+    # rows=300 -> 0.05*rows=15, so the flat floor of 20 governs the
+    # ceiling. distinct == 20 is the inclusive upper boundary and must fire.
+    stats = {("dataset.csv", "treatment_facility_name"): {"distinct": 20, "rows": 300}}
+    out, overrides = apply_site_cardinality_rule([_decide()], stats)
+    assert out[0]["action"] == "drop"
+    assert overrides[0]["distinct"] == 20
+    assert overrides[0]["rows"] == 300
+
+
+def test_distinct_21_fails_at_rows_400():
+    # rows=400 -> 0.05*rows=20, so the ceiling is still exactly 20 (the
+    # flat floor and the percentage coincide here). distinct == 21 is one
+    # past the inclusive boundary and must be left alone.
+    stats = {("dataset.csv", "treatment_facility_name"): {"distinct": 21, "rows": 400}}
+    out, overrides = apply_site_cardinality_rule([_decide()], stats)
+    assert out[0]["action"] == "keep"
+    assert overrides == []
+
+
+def test_percentage_branch_above_rows_400():
+    # rows=1000 -> 0.05*rows=50, so the percentage now governs the
+    # ceiling rather than the flat floor of 20. distinct == 50 fires;
+    # distinct == 51 is one past the boundary and is left alone.
+    fires_stats = {("dataset.csv", "treatment_facility_name"): {"distinct": 50, "rows": 1000}}
+    out, overrides = apply_site_cardinality_rule([_decide()], fires_stats)
+    assert out[0]["action"] == "drop"
+    assert overrides[0]["distinct"] == 50
+    assert overrides[0]["rows"] == 1000
+
+    fails_stats = {("dataset.csv", "treatment_facility_name"): {"distinct": 51, "rows": 1000}}
+    out2, overrides2 = apply_site_cardinality_rule([_decide()], fails_stats)
+    assert out2[0]["action"] == "keep"
+    assert overrides2 == []
+
+
 def _run_cardinality_pipeline(tmp_path, monkeypatch):
     """Drive orchestrator.run_pipeline with a Judge that proposes 'keep' on
     a low-cardinality facility column and a Schema stub carrying the

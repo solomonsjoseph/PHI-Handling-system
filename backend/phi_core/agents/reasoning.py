@@ -389,9 +389,20 @@ def apply_age_dob_rule(decisions: list[dict[str, Any]]) -> tuple[list[dict[str, 
 # doesn't already own (so a clinical keeper like 'site_of_disease' is never
 # touched) and only when Schema's deterministic cardinality stats are
 # actually known for that column.
+#
+# The site term must land on a separator-delimited token, not merely
+# appear somewhere inside one: unanchored substring matching would treat
+# 'award_id' (contains 'ward'), 'composite_score' (contains 'site') and
+# 'subclinical_flag' (contains 'clinic') as site columns, which is a real
+# destructive false positive -- those columns would be silently dropped.
+# `(?:^|_)...(?:_|$)` requires an underscore or string boundary on both
+# sides, so the term matches a whole token (or a run of tokens for the
+# `sub_?district` compound) while still finding it anywhere in the column
+# name, exactly as the plan's "as a substring, not anchored" describes for
+# `treatment_facility_name`.
 _SITE_COL_RE = _re_module.compile(
-    r"(facility|site|clinic|hospital|centre|center|ward|catchment"
-    r"|district|village|township|sub_?district|taluk|tehsil|mandal)",
+    r"(?:^|_)(facility|site|clinic|hospital|centre|center|ward|catchment"
+    r"|district|village|township|sub_?district|taluk|tehsil|mandal)(?:_|$)",
     _re_module.I,
 )
 
@@ -402,8 +413,10 @@ def apply_site_cardinality_rule(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Force 'keep' to 'drop'/category R on a low-cardinality site or
     facility column. Fires only when all four hold: the column name
-    matches `_SITE_COL_RE` as a substring, the current action is 'keep',
-    the column matches no `_HARD_RULE_TABLE` pattern (so an owned clinical
+    contains a `_SITE_COL_RE` token (a site/facility/geography word
+    delimited by underscores or the string boundary, not merely a
+    substring of an unrelated word), the current action is 'keep', the
+    column matches no `_HARD_RULE_TABLE` pattern (so an owned clinical
     keeper such as 'site_of_disease' is left alone), and Schema's known
     distinct-value count satisfies `2 <= distinct <= max(20, 0.05 * rows)`.
     A column with unknown stats is left alone -- there is nothing to force
