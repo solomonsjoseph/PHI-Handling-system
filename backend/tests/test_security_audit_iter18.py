@@ -69,7 +69,7 @@ def test_scrub_persisted_text_redacts_urls_and_ips():
 def test_release_stream_drops_queue_when_last_subscriber_leaves():
     import server as srv
     # simulate: one subscriber joins, then leaves
-    srv._progress_queues["s1"] = srv.asyncio.Queue()
+    srv._progress_queues["s1"] = object()
     srv._progress_subscribers["s1"] = 1
     srv._release_stream("s1")
     assert "s1" not in srv._progress_queues, "queue leaked after last subscriber"
@@ -78,7 +78,7 @@ def test_release_stream_drops_queue_when_last_subscriber_leaves():
 
 def test_release_stream_keeps_queue_when_other_subscribers_remain():
     import server as srv
-    srv._progress_queues["s2"] = srv.asyncio.Queue()
+    srv._progress_queues["s2"] = object()
     srv._progress_subscribers["s2"] = 2
     srv._release_stream("s2")
     assert "s2" in srv._progress_queues, "queue prematurely freed"
