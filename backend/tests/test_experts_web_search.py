@@ -40,14 +40,14 @@ def test_praxis_deterministic_hipaa_category_a_dropped():
     Praxis must NOT waste a web search for it."""
     from phi_core.agents.experts import Praxis
     method = Praxis._DETERMINISTIC_METHODS["A"]
-    assert method["technique"] == "drop"
-    assert method["reference_paper"] == "HIPAA §164.514(b)(2)(i)(A)"
+    assert method["name"] == "drop"
+    assert method["reference_paper"] == "45 CFR 164.514(b)(2)(i)(A)"
 
 
 def test_praxis_deterministic_hipaa_category_c_dates_year_only():
     from phi_core.agents.experts import Praxis
     method = Praxis._DETERMINISTIC_METHODS["C"]
-    assert "date_year_only" in method["technique"]
+    assert "date_year_only" in method["name"]
     assert method["params"]["age_cap"] == 90
 
 
