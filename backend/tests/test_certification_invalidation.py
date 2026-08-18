@@ -434,6 +434,111 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
 
 
 @pytest.mark.asyncio
+async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatch):
+    """A resumed tail emits phase events and exposes its measured timings."""
+    import phi_core.agents.outward as outward
+    import phi_core.agents.reasoning as reasoning
+    import phi_core.paths as paths
+    import server as srv
+
+    db = _ConditionalStubDB({
+        "id": "sid",
+        "owner": "reviewer",
+        "intake_status": "ready",
+        "status": "awaiting_human_review",
+        "files": [],
+        "agent_decisions": [{
+            "file_id": "dataset",
+            "column": "subject_id",
+            "action": "human_review",
+            "suggested_action": "drop",
+            "suggested_reason": "direct identifier",
+        }],
+    })
+    emitted = []
+    scheduled = []
+    original_create_task = asyncio.create_task
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {"exports": {}}
+
+    class FakeAuditor:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {"metrics": {}}
+
+    class FakeScout:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {}
+
+    class FakeLedger:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {}
+
+    class FakeHerald:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {}
+
+    async def fake_cfg():
+        return SimpleNamespace(provider="test", model="test")
+
+    async def fake_emit(_sid, event, **_kwargs):
+        emitted.append(event)
+
+    def schedule(coro):
+        task = original_create_task(coro)
+        scheduled.append(task)
+        return task
+
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+    monkeypatch.setattr(srv, "_current_llm_cfg", fake_cfg)
+    monkeypatch.setattr(srv, "_emit", fake_emit)
+    monkeypatch.setattr(srv.asyncio, "create_task", schedule)
+    monkeypatch.setattr(reasoning, "Executor", FakeExecutor)
+    monkeypatch.setattr(reasoning, "Auditor", FakeAuditor)
+    monkeypatch.setattr(outward, "Scout", FakeScout)
+    monkeypatch.setattr(outward, "Ledger", FakeLedger)
+    monkeypatch.setattr(outward, "Herald", FakeHerald)
+    monkeypatch.setattr(paths, "cleanup_session_unpacked", lambda _sid: None)
+
+    assert (await srv.session_human_review(
+        "sid",
+        srv.HumanReviewSubmit(
+            reviewer="reviewer",
+            actual_knowledge_ack=True,
+            resolutions=[{
+                "file_id": "dataset",
+                "column": "subject_id",
+                "mode": "approve",
+            }],
+        ),
+        principal="reviewer",
+    )) == {"status": "resuming"}
+    await scheduled[0]
+
+    results = await srv.session_results("sid", principal="reviewer")
+
+    assert results["phase_timings"]
+    assert results["run_elapsed_s"] >= 0
+    assert "executor" in results["phase_timings"]
+    assert any(event.phase == "agent_phase:executor" for event in emitted)
+
+@pytest.mark.asyncio
 async def test_stale_unresolved_human_review_cannot_overwrite_claimed_tail(monkeypatch):
     """An unresolved stale review cannot overwrite a newer tail's decisions."""
     from fastapi import HTTPException

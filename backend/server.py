@@ -2188,14 +2188,50 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         )
         await _emit(sid, ev, run_id=resume_run_id)
 
+    async def on_phase(phase: str, payload: dict):
+        await _emit(sid, ProgressEvent(phase=f"agent_phase:{phase}", message=phase, payload=payload), run_id=resume_run_id)
+
+
+
     async def worker():
         async def _run_tail():
+            phase_timings: dict[str, dict[str, float]] = {}
+            last_phase: dict[str, str | float | None] = {"key": None, "t0": 0.0}
+            run_started = time.perf_counter()
+
+            async def timed_on_phase(phase: str, payload: dict) -> None:
+                now = time.perf_counter()
+                previous = last_phase["key"]
+                if previous and previous != phase:
+                    timing = phase_timings.setdefault(
+                        str(previous), {"start_s": float(last_phase["t0"]) - run_started},
+                    )
+                    timing["end_s"] = now - run_started
+                    timing["duration_ms"] = (now - float(last_phase["t0"])) * 1000
+                phase_timings.setdefault(phase, {"start_s": now - run_started})
+                last_phase["key"] = phase
+                last_phase["t0"] = now
+                await on_phase(phase, payload)
+
+            async def close_last_phase() -> None:
+                previous = last_phase["key"]
+                if not previous:
+                    return
+                now = time.perf_counter()
+                timing = phase_timings.setdefault(
+                    str(previous), {"start_s": float(last_phase["t0"]) - run_started},
+                )
+                timing.setdefault("end_s", now - run_started)
+                timing.setdefault("duration_ms", (now - float(last_phase["t0"])) * 1000)
+
             common = dict(session_id=sid, llm=cfg, db=db, emit=emit_msg)
             resolved_decisions = [d for d in decisions if d.get("action") != "human_review"]
             scrubbed_decisions = [scrub_decision(d) for d in resolved_decisions]
             omit_by_file: dict[str, set[str]] = {}
             for entry in pending_review:
                 omit_by_file.setdefault(entry["file_id"], set()).add(entry["column"])
+            await timed_on_phase("executor", {"decision_count": len(scrubbed_decisions)})
+
             exec_out = await Executor(**common).run(files=files, decisions=scrubbed_decisions, omit_by_file=omit_by_file)
             from phi_core.publish_guard import scan_all_exports as _scan_all_exports
             if exec_out["exports"]:
@@ -2208,22 +2244,42 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                 # Publish Guard's own "no exports to scan" reading would
                 # otherwise report `blocked`, which is wrong here.
                 guard_report = {"status": "clean", "results": [], "scanned": 0, "blocked": 0}
+            await timed_on_phase("publish_guard", {
+                "status": guard_report["status"],
+                "scanned": guard_report["scanned"],
+                "blocked": guard_report["blocked"],
+            })
+
             if guard_report["status"] != "clean":
+                await close_last_phase()
+
                 await db.sessions.update_one(run_filter, {"$set": {
                     "status": "blocked",
                     "guard_report": guard_report,
                     "export_paths": exec_out["exports"],
                     "agent_decisions": decisions,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "phase_timings": phase_timings,
+                    "run_elapsed_s": round(time.perf_counter() - run_started, 3),
+
                 }})
                 cleanup_session_unpacked(sid)
                 await _emit(sid, ProgressEvent(phase="blocked", message="publish guard blocked this run", percent=100.0), run_id=resume_run_id)
                 return
+            await timed_on_phase("auditor_scout", {})
+
             audit = await Auditor(**common).run(decisions=scrubbed_decisions, exports=exec_out["exports"], files=files)
             scout = await Scout(**common).run()
+            await timed_on_phase("ledger", {})
+
             ledger = await Ledger(**common).run(decisions=scrubbed_decisions, audit=audit, scout=scout, benchmark_result=None)
+            await timed_on_phase("herald", {})
+
             herald = await Herald(**common).run(ledger=ledger, audit=audit,
                                                 target_venue=session.get("target_venue") or "JAMIA Open")
+            await close_last_phase()
+            run_elapsed_s = round(time.perf_counter() - run_started, 3)
+
             final_status = "partially_complete" if pending_review else "complete"
             completion_update = {
                 "$set": {
@@ -2237,6 +2293,9 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                     "export_paths": exec_out["exports"],
                     "status": final_status,
                     "human_review_required": bool(pending_review),
+                    "phase_timings": phase_timings,
+                    "run_elapsed_s": run_elapsed_s,
+
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
             }
@@ -2368,6 +2427,8 @@ async def session_results(sid: str, principal: str = Depends(resolve_principal))
         "session_review": scrubbed.get("session_review"),
         "pending_review": scrubbed.get("pending_review", []),
         "human_review_required": scrubbed.get("human_review_required", False),
+        "phase_timings": scrubbed.get("phase_timings", {}),
+        "run_elapsed_s": scrubbed.get("run_elapsed_s"),
     }
 
 
