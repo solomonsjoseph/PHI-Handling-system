@@ -126,13 +126,17 @@ def test_human_review_captures_session_review_when_provided():
 # --- Task 23: reviewer prompts speak plain English on every escalation
 # path -----------------------------------------------------------------
 #
-# Pure Python, no live backend: these exercise the five deterministic
+# Pure Python, no live backend: these exercise the six deterministic
 # routes that can set `action == "human_review"` --
 # `validate_decisions` (invalid model output), `apply_confidence_floor`,
-# `apply_blocking_floor`, `apply_sentinel_escalations`, and
-# `verify_keep_decisions` -- and check the `reviewer_prompt`
-# `annotate_pending_review` attaches to each never leaks a bare
-# HIPAA letter, action identifier, confidence number, or agent name.
+# `apply_blocking_floor`, `apply_sentinel_escalations`,
+# `verify_keep_decisions`, and orchestrator.py's anti-loop forcing
+# block -- and check the `reviewer_prompt` `annotate_pending_review`
+# attaches to each never leaks a bare HIPAA letter, action identifier,
+# confidence number, or agent name. A seventh case below covers
+# `verify_keep_decisions`' unreadable-file fallback specifically, since
+# it shares "Keep verification" wording with path 5 but must read as a
+# distinct, accurate explanation rather than a false detector match.
 
 _BARE_ACTION_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(a) for a in _ACTION_PLAIN) + r")\b"
@@ -245,6 +249,44 @@ def _path5_keep_verification_decision(tmp_path, monkeypatch) -> dict:
     return out[0]
 
 
+def _path6_anti_loop_decision() -> dict:
+    """Path 6: orchestrator.py's anti-loop forcing block converts a
+    revision that repeats a previously-rejected action straight to
+    human_review, without resubmitting it to Sentinel. That block lives
+    in orchestrator.py (it needs the running iteration's
+    `prior_blocking_actions` state), not reasoning.py, so this builds
+    the decision with the exact `Anti-loop:` reason prefix the block
+    writes, to exercise the shared classifier and reviewer-prompt
+    template it feeds into the same way the other five paths do."""
+    forced = {"file_id": "f1", "column": "study_id", "action": "human_review",
+              "confidence": 0.7, "phi_category": "H",
+              "reason": (
+                  "Anti-loop: Judge repeated the previously-rejected action 'keep' "
+                  "without a substantive revision; forced to human review rather "
+                  "than resubmitting to Sentinel for the same rejection."
+              ),
+              "suggested_action": "keep", "suggested_confidence": 0.7,
+              "suggested_reason": (
+                  "Judge repeated the previously-rejected action 'keep' without "
+                  "change. Sentinel's objection: may be a hashed direct identifier"
+              )}
+    return forced
+
+
+def _path7_keep_verification_unreadable_decision(tmp_path) -> dict:
+    """Path 7: `verify_keep_decisions`' fail-closed fallback when the
+    dataset file itself can't be read (missing, corrupt, unsupported).
+    Still demotes to human_review, but no detector ever ran, so the
+    reason must say verification could not run rather than implying a
+    match was found -- distinct wording from path 5's real match."""
+    missing = tmp_path / "does-not-exist.csv"
+    raw = {"file_id": "dataset.csv", "column": "study_id", "action": "keep",
+           "confidence": 0.9, "reason": "looked fine on the header",
+           "phi_category": "H"}
+    out, _ = verify_keep_decisions([raw], {"dataset.csv": missing})
+    return out[0]
+
+
 def test_reviewer_prompt_plain_english_path1_invalid_model_action():
     decision = _path1_invalid_action_decision()
     assert decision["action"] == "human_review"
@@ -291,8 +333,45 @@ def test_reviewer_prompt_plain_english_path5_keep_verification(tmp_path, monkeyp
     assert _escalation_reason_phrase(decision) in prompt
 
 
-def test_escalation_reason_phrases_distinguish_all_five_routes(tmp_path, monkeypatch):
-    """The five escalation paths must not collapse into one indistinguishable
+def test_reviewer_prompt_plain_english_path6_anti_loop():
+    decision = _path6_anti_loop_decision()
+    assert decision["action"] == "human_review"
+    prompt = annotate_pending_review([decision])[0]["reviewer_prompt"]
+    _assert_plain_english(prompt)
+    assert _ACTION_PLAIN["keep"] in prompt
+    assert _escalation_reason_phrase(decision) in prompt
+
+
+def test_reviewer_prompt_plain_english_path7_keep_verification_unreadable(tmp_path):
+    decision = _path7_keep_verification_unreadable_decision(tmp_path)
+    assert decision["action"] == "human_review"
+    prompt = annotate_pending_review([decision])[0]["reviewer_prompt"]
+    _assert_plain_english(prompt)
+    assert _escalation_reason_phrase(decision) in prompt
+
+
+def test_unreadable_keep_verification_reason_is_accurate_and_distinct(tmp_path, monkeypatch):
+    """Direct regression: the unreadable-file fallback must never claim a
+    detector matched a row value -- nothing was ever read -- and must
+    stay distinguishable from path 5's genuine detector-match wording."""
+    unreadable = _path7_keep_verification_unreadable_decision(tmp_path)
+    assert unreadable["reason"].startswith("Keep verification (unreadable):")
+    assert "could not be read" in unreadable["reason"]
+    assert "matched" not in unreadable["reason"]
+
+    matched = _path5_keep_verification_decision(tmp_path, monkeypatch)
+    assert matched["reason"].startswith("Keep verification:")
+    assert not matched["reason"].startswith("Keep verification (unreadable):")
+
+    unreadable_phrase = _escalation_reason_phrase(unreadable)
+    matched_phrase = _escalation_reason_phrase(matched)
+    assert unreadable_phrase != matched_phrase
+    assert "read" in unreadable_phrase
+    assert "found something" not in unreadable_phrase
+
+
+def test_escalation_reason_phrases_distinguish_all_six_routes(tmp_path, monkeypatch):
+    """The six escalation paths must not collapse into one indistinguishable
     'not confident enough' sentence: each gets its own safe, plain-English
     why-phrase, built only from the trusted, code-controlled reason-prefix
     each path writes (never from suggested_reason, an agent name, a raw
@@ -303,9 +382,10 @@ def test_escalation_reason_phrases_distinguish_all_five_routes(tmp_path, monkeyp
         _path3_blocking_floor_decision(),
         _path4_sentinel_escalation_decision(),
         _path5_keep_verification_decision(tmp_path, monkeypatch),
+        _path6_anti_loop_decision(),
     ]
     phrases = [_escalation_reason_phrase(d) for d in decisions]
-    assert len(set(phrases)) == 5, f"escalation routes are not distinguishable: {phrases}"
+    assert len(set(phrases)) == 6, f"escalation routes are not distinguishable: {phrases}"
     for decision, phrase in zip(decisions, phrases):
         prompt = annotate_pending_review([decision])[0]["reviewer_prompt"]
         _assert_plain_english(prompt)

@@ -177,9 +177,10 @@ def _escalation_reason_phrase(d: dict[str, Any]) -> str:
     content. Every prefix matched below is a compile-time string
     constant written by this module's own code (`validate_decisions`,
     `apply_confidence_floor`, `apply_blocking_floor`,
-    `apply_sentinel_escalations`, `verify_keep_decisions`), never data
-    from a model, a reviewer, or a dataset row, so matching on it cannot
-    leak PHI, a raw identifier, a confidence number, or an agent name --
+    `apply_sentinel_escalations`, `verify_keep_decisions`) or by
+    `orchestrator.py`'s anti-loop forcing block, never data from a
+    model, a reviewer, or a dataset row, so matching on it cannot leak
+    PHI, a raw identifier, a confidence number, or an agent name --
     only the fixed prefix is inspected; whatever free text a path
     appended after it is never read here."""
     reason = d.get("reason")
@@ -190,8 +191,12 @@ def _escalation_reason_phrase(d: dict[str, Any]) -> str:
         return "the automated review was not certain enough to act on its own"
     if reason.startswith("Blocking-issue floor:"):
         return "this column has repeatedly raised the same safety concern"
+    if reason.startswith("Anti-loop:"):
+        return "the automated review kept repeating the same rejected answer instead of revising it"
     if reason.startswith("Sentinel escalation:"):
         return "a safety check flagged this column as ambiguous rather than clearly wrong"
+    if reason.startswith("Keep verification (unreadable):"):
+        return "the underlying data could not be read to check this column, so it needs a human look"
     if reason.startswith("Keep verification:"):
         return "a check of the actual values in this column found something that looked identifying"
     return "the automated review could not finish deciding on its own"
@@ -204,12 +209,13 @@ def _reviewer_prompt_for(d: dict[str, Any], dictionary_by_column: dict[str, str]
     vocabulary (action ids, HIPAA letters, confidence numbers, agent
     names) ever surfaces raw: only its plain phrase from `_ACTION_PLAIN`
     / `_CATEGORY_PLAIN` / `_confidence_band` / `_escalation_reason_phrase`
-    does. Every one of the five deterministic paths that can route a
+    does. Every one of the six deterministic paths that can route a
     decision to human_review -- invalid model output in `validate_decisions`,
     `apply_confidence_floor`, `apply_blocking_floor`,
-    `apply_sentinel_escalations`, and `verify_keep_decisions` -- funnels
-    through this one template via `annotate_pending_review`, so a fix here
-    covers every escalation path and the Task 33 second review that reuses
+    `apply_sentinel_escalations`, `verify_keep_decisions`, and
+    `orchestrator.py`'s anti-loop forcing block -- funnels through this
+    one template via `annotate_pending_review`, so a fix here covers
+    every escalation path and the Task 33 second review that reuses
     it."""
     col = d.get("column") or "this column"
     desc = (dictionary_by_column or {}).get(col, "")
@@ -743,18 +749,35 @@ def verify_keep_decisions(
         column = decision.get("column")
         original_action = decision.get("action")
         updated = dict(decision)
-        reason = (
-            f"Keep verification: column '{column}' matched {detector_id} in a row value; "
-            "demoted pending human review."
-        )
-        # Carry the pre-demotion decision forward as the agent's own
-        # recommendation, so the reviewer sees what Judge proposed and
-        # why the deterministic scan didn't trust it, in one glance.
-        suggested_reason = (
-            f"Judge originally proposed 'keep' ({decision.get('reason') or 'no reason given'}); "
-            f"a deterministic row-value scan matched detector '{detector_id}', which the "
-            "reviewer should confirm or override."
-        )
+        if detector_id == "unreadable":
+            # The dataset file itself couldn't be read (missing, corrupt,
+            # unsupported), so no detector ever ran against these row
+            # values -- fail closed the same way a real match would, but
+            # say plainly that verification could not run rather than
+            # implying something was found.
+            reason = (
+                f"Keep verification (unreadable): row values for column '{column}' "
+                "could not be read, so the keep could not be verified; demoted pending "
+                "human review as a precaution."
+            )
+            suggested_reason = (
+                f"Judge originally proposed 'keep' ({decision.get('reason') or 'no reason given'}); "
+                "the deterministic row-value scan could not run because the underlying file "
+                "could not be read, so the reviewer should confirm or override."
+            )
+        else:
+            reason = (
+                f"Keep verification: column '{column}' matched {detector_id} in a row value; "
+                "demoted pending human review."
+            )
+            # Carry the pre-demotion decision forward as the agent's own
+            # recommendation, so the reviewer sees what Judge proposed and
+            # why the deterministic scan didn't trust it, in one glance.
+            suggested_reason = (
+                f"Judge originally proposed 'keep' ({decision.get('reason') or 'no reason given'}); "
+                f"a deterministic row-value scan matched detector '{detector_id}', which the "
+                "reviewer should confirm or override."
+            )
         if original_action == "keep":
             updated.update(
                 action="human_review",

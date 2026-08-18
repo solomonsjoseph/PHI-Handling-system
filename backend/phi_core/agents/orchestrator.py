@@ -297,6 +297,17 @@ async def run_pipeline(
                     forced = dict(d)
                     forced.update(
                         action="human_review",
+                        # Fixed, compile-time prefix `_escalation_reason_phrase`
+                        # (reasoning.py) matches on to classify this as an
+                        # anti-loop escalation in the plain-English reviewer
+                        # prompt. The free text after the colon is never read
+                        # by that classifier and never surfaces to a reviewer.
+                        reason=(
+                            f"Anti-loop: Judge repeated the previously-rejected "
+                            f"action {prior.get('action')!r} without a substantive "
+                            "revision; forced to human review rather than "
+                            "resubmitting to Sentinel for the same rejection."
+                        ),
                         suggested_action=prior.get("action"),
                         suggested_confidence=d.get("confidence"),
                         suggested_reason=(
