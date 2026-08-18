@@ -1,0 +1,247 @@
+"""Tests for the Reviewer agent (Task 29): confirms Operator's coverage of
+every decision Judge/Sentinel produced, not Operator's per-cell
+correctness (that is Operator's own job, covered by test_operator.py).
+"""
+from __future__ import annotations
+
+import asyncio
+import csv
+from pathlib import Path
+
+from phi_core.agents.reviewer import Reviewer
+
+
+class FakeAgentLog:
+    def __init__(self):
+        self.inserted: list[dict] = []
+
+    async def insert_one(self, doc, *_args, **_kwargs):
+        self.inserted.append(doc)
+
+
+class FakeDb:
+    def __init__(self):
+        self.agent_log = FakeAgentLog()
+
+
+def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        for row in rows:
+            writer.writerow(row)
+
+
+def _decision(file_id: str, column: str, action: str = "keep") -> dict:
+    return {
+        "file_id": file_id, "column": column, "action": action,
+        "phi_category": "NONE", "citation": "",
+    }
+
+
+def _verdict(file_id: str, column: str, method: str = "keep", verdict: str = "pass") -> dict:
+    return {
+        "file_id": file_id, "column": column,
+        "violation": {"phi_category": "NONE", "citation": ""},
+        "method": method, "checks": [], "verdict": verdict, "problem": "", "performed": "",
+    }
+
+
+def test_missing_operator_verdict_is_a_finding_and_blocks_the_file(tmp_path):
+    """A decision Judge/Sentinel produced has no corresponding Operator
+    verdict at all -- Reviewer must catch this coverage gap even though
+    Operator itself reported nothing wrong for the file."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id", "name"], [["1", "Jane"], ["2", "John"]])
+    exports = {"f1": str(src)}
+    decisions = [_decision("f1", "id"), _decision("f1", "name")]
+    operator_result = {
+        "verdicts": [_verdict("f1", "id")],  # the "name" verdict silently missing
+        "failed_file_ids": [],
+        "status": "clean",
+    }
+
+    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(reviewer.run(decisions, operator_result, exports))
+
+    findings = [f for f in result["findings"] if f["kind"] == "missing_operator_verdict"]
+    assert len(findings) == 1
+    assert findings[0]["file_id"] == "f1"
+    assert findings[0]["column"] == "name"
+    assert result["status"] == "issues"
+    assert "f1" not in result["exports"]
+    assert result["coverage"]["missing"] == 1
+    assert result["coverage"]["decisions"] == 2
+    assert result["coverage"]["verdicts"] == 1
+
+
+def test_omit_by_file_column_still_present_is_a_finding(tmp_path):
+    """A column marked for omission in the human-review deferral tail must
+    genuinely be absent from the written file. Reviewer opens the real
+    export and checks itself, independent of what Operator or Executor
+    claims happened."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id", "ssn"], [["1", "123-45-6789"]])
+    exports = {"f1": str(src)}
+    decisions = [_decision("f1", "id")]
+    operator_result = {
+        "verdicts": [_verdict("f1", "id")],
+        "failed_file_ids": [],
+        "status": "clean",
+    }
+    omit_by_file = {"f1": {"ssn"}}
+
+    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(reviewer.run(decisions, operator_result, exports, omit_by_file))
+
+    findings = [f for f in result["findings"] if f["kind"] == "omit_column_leaked"]
+    assert len(findings) == 1
+    assert findings[0]["file_id"] == "f1"
+    assert findings[0]["column"] == "ssn"
+    assert result["status"] == "issues"
+    assert "f1" not in result["exports"]
+
+
+def test_coverage_mismatch_when_zero_fail_verdicts_but_column_count_differs(tmp_path):
+    """Operator reported zero failures for this file, but the recounted
+    decision count doesn't match the real written column count. Reviewer
+    turns that diagnostic into a blocking finding rather than trusting
+    Operator's clean read of its own work."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id", "name", "extra"], [["1", "Jane", "x"]])
+    exports = {"f1": str(src)}
+    # Only two decisions were made, but the written file has three columns.
+    decisions = [_decision("f1", "id"), _decision("f1", "name")]
+    operator_result = {
+        "verdicts": [_verdict("f1", "id"), _verdict("f1", "name")],
+        "failed_file_ids": [],
+        "status": "clean",
+    }
+
+    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(reviewer.run(decisions, operator_result, exports))
+
+    findings = [f for f in result["findings"] if f["kind"] == "coverage_mismatch"]
+    assert len(findings) == 1
+    assert findings[0]["file_id"] == "f1"
+    assert "column" not in findings[0]
+    assert result["status"] == "issues"
+    assert "f1" not in result["exports"]
+
+
+def test_coverage_mismatch_not_raised_when_operator_already_has_a_fail(tmp_path):
+    """A file with a genuine Operator fail verdict is Operator's own
+    problem to report; Reviewer's coverage_mismatch check only fires when
+    Operator's own verdicts show zero failures for the file."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id", "name", "extra"], [["1", "Jane", "x"]])
+    exports = {"f1": str(src)}
+    decisions = [_decision("f1", "id"), _decision("f1", "name")]
+    operator_result = {
+        "verdicts": [_verdict("f1", "id", verdict="fail"), _verdict("f1", "name")],
+        "failed_file_ids": [],
+        "status": "issues",
+    }
+
+    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(reviewer.run(decisions, operator_result, exports))
+
+    assert not any(f["kind"] == "coverage_mismatch" for f in result["findings"])
+
+
+def test_full_coverage_clean_run(tmp_path):
+    """Every decision has a matching Operator verdict, no omitted column
+    leaks into the output, and the decision count matches the written
+    columns. Reviewer reports clean and returns exports unchanged."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id", "name"], [["1", "Jane"], ["2", "John"]])
+    exports = {"f1": str(src)}
+    decisions = [_decision("f1", "id"), _decision("f1", "name")]
+    operator_result = {
+        "verdicts": [_verdict("f1", "id"), _verdict("f1", "name")],
+        "failed_file_ids": [],
+        "status": "clean",
+    }
+
+    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(reviewer.run(decisions, operator_result, exports))
+
+    assert result["findings"] == []
+    assert result["status"] == "clean"
+    assert result["exports"] == exports
+    assert result["exports"] is not exports
+    assert result["coverage"]["decisions"] == result["coverage"]["verdicts"]
+    assert result["coverage"]["missing"] == 0
+
+
+def test_input_exports_dict_is_never_mutated(tmp_path):
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id", "name"], [["1", "Jane"]])
+    src2 = tmp_path / "out2.csv"
+    _write_csv(src2, ["id"], [["1"]])
+    exports = {"f1": str(src), "f2": str(src2)}
+    original = dict(exports)
+    decisions = [_decision("f1", "id"), _decision("f1", "name"), _decision("f2", "id")]
+    operator_result = {
+        # f2's decision has no verdict at all -- should be dropped from the
+        # returned exports, but the original dict must be untouched.
+        "verdicts": [_verdict("f1", "id"), _verdict("f1", "name")],
+        "failed_file_ids": [],
+        "status": "clean",
+    }
+
+    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(reviewer.run(decisions, operator_result, exports))
+
+    assert exports == original
+    assert "f2" not in result["exports"]
+    assert "f1" in result["exports"]
+
+
+def test_file_already_in_failed_file_ids_stays_excluded_and_is_issues(tmp_path):
+    """A file Operator already flagged as failed (never reached a
+    readable export) needs no further per-column comparison from
+    Reviewer, and never lands back in the returned exports."""
+    decisions = [_decision("f1", "id")]
+    operator_result = {
+        "verdicts": [_verdict("f1", "id", verdict="fail")],
+        "failed_file_ids": ["f1"],
+        "status": "issues",
+    }
+    exports: dict[str, str] = {}
+
+    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(reviewer.run(decisions, operator_result, exports))
+
+    assert result["status"] == "issues"
+    assert "f1" not in result["exports"]
+
+
+def test_agent_log_row_emitted_per_file_with_coverage_check_phase(tmp_path):
+    """Task 29's logging contract: one row per file, not one aggregate row
+    per batch, with the exact phase and payload shape."""
+    src = tmp_path / "out.csv"
+    _write_csv(src, ["id"], [["1"]])
+    exports = {"f1": str(src)}
+    decisions = [_decision("f1", "id")]
+    operator_result = {
+        "verdicts": [_verdict("f1", "id")],
+        "failed_file_ids": [],
+        "status": "clean",
+    }
+
+    db = FakeDb()
+    reviewer = Reviewer(session_id="s", llm=None, db=db)
+    asyncio.run(reviewer.run(decisions, operator_result, exports))
+
+    rows = [d for d in db.agent_log.inserted if d["phase"] == "review.coverage_check"]
+    assert len(rows) == 1
+    payload = rows[0]["payload"]
+    assert payload["file_id"] == "f1"
+    assert payload["columns"] == ["id"]
+    assert payload["decisions_checked"] == 1
+    assert payload["operator_verdicts_found"] == 1
+    assert payload["missing"] == 0
+    assert payload["verdict"] == "clean"
+    assert rows[0]["agent"] == "Reviewer"
+    assert rows[0]["status_text"]
