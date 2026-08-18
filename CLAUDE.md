@@ -13,9 +13,13 @@ The zero-row-read invariant is the whole product: the LLM sees dataset
 **headers** only. Row values are read exclusively by the deterministic Executor
 and the deterministic Publish Guard.
 
-Jurisdiction scope is **US-HIPAA only** until end-to-end runs are consistently
-green. EU / UK / IN / CA / BR stubs live in `phi_core/jurisdictions.py` and stay
-disabled at the wizard level until Sir clears expansion.
+Jurisdiction scope is **US-only** until end-to-end runs are consistently
+green. Within `us`, Statute researches HIPAA Safe Harbor (45 CFR 164.514) plus
+adjacent PHI/PII regimes: the Common Rule (45 CFR 46), 42 CFR Part 2 (SUD
+records), FERPA, and the federal Privacy Act (5 U.S.C. § 552a), with a
+non-exhaustive state-law advisory note. EU / UK / IN / CA / BR stubs live in
+`phi_core/jurisdictions.py` and stay disabled at the wizard level until Sir
+clears expansion.
 
 See `/app/memory/VISION.md` for the north-star, `/app/memory/GOAL.md` for the
 operational spec, `/app/memory/PRD.md` for the delivery log.
