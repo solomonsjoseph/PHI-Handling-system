@@ -92,6 +92,26 @@ async def test_adjacent_regimes_reject_untrusted_cached_entries():
     assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
     agent.call_json_with_web_search.assert_not_awaited()
     cache_put.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_adjacent_regimes_reject_cached_non_string_name():
+    from phi_core.agents.experts import Statute
+
+    agent = _agent()
+    agent._log = AsyncMock()  # type: ignore[method-assign]
+    agent.call_json_with_web_search = AsyncMock()  # type: ignore[method-assign]
+    regimes = [regime.copy() for regime in Statute._ADJACENT_REGIMES_FALLBACK]
+    regimes[0]["name"] = ["not", "a", "string"]
+    cached = {"content": json.dumps({"adjacent_regimes": regimes})}
+
+    with patch("phi_core.agents.experts.cache_get", new=AsyncMock(return_value=cached)), \
+         patch("phi_core.agents.experts.cache_put", new=AsyncMock()) as cache_put:
+        result = await agent._adjacent_regimes_for("us")
+
+    assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
+    agent.call_json_with_web_search.assert_not_awaited()
+    cache_put.assert_not_awaited()
 @pytest.mark.asyncio
 async def test_adjacent_regimes_reject_incomplete_or_noncanonical_dict_entries():
     from phi_core.agents.experts import Statute

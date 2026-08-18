@@ -137,15 +137,17 @@ class Statute(Agent):
             regime["name"]: regime["citation"]
             for regime in cls._ADJACENT_REGIMES_FALLBACK
         }
-        if {regime.get("name") for regime in regimes if isinstance(regime, dict)} != set(canonical_citations):
+        if any(
+            not isinstance(regime, dict) or not isinstance(regime.get("name"), str)
+            for regime in regimes
+        ):
+            return False
+        if {regime["name"] for regime in regimes} != set(canonical_citations):
             return False
 
         for regime in regimes:
-            if not isinstance(regime, dict):
-                return False
             if (
-                not isinstance(regime.get("name"), str)
-                or regime.get("citation") != canonical_citations[regime["name"]]
+                regime.get("citation") != canonical_citations[regime["name"]]
                 or not isinstance(regime.get("applicability"), str)
                 or not isinstance(regime.get("advisory"), str)
                 or not isinstance(regime.get("sources"), list)
