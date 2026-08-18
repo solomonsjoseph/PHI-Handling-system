@@ -21,6 +21,8 @@ def test_tuberculosis_package_has_31_columns_with_low_cardinality_facility():
         rows = list(csv.reader(f))
     header, data_rows = rows[0], rows[1:]
     assert len(header) == 31
+    assert len(data_rows) == 10
+    assert all(len(row) == len(header) for row in data_rows), "every row must match header width"
     facility_idx = header.index("treatment_facility_name")
     facility_values = {row[facility_idx] for row in data_rows}
     assert len(facility_values) == 4
