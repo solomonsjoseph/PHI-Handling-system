@@ -161,8 +161,7 @@ async def test_server_benchmark_route_remaps_pipeline_file_id(monkeypatch):
         for c in columns
     ]
     schema_columns = [
-        {"_file_id": pipeline_file_id, "name": c["column"], "confidence": 0.7,
-         "candidate_phi_category": c["hipaa_category"]}
+        {"_file_id": pipeline_file_id, "name": c["column"]}
         for c in columns
     ]
 
@@ -179,9 +178,10 @@ async def test_server_benchmark_route_remaps_pipeline_file_id(monkeypatch):
     report = srv._build_corpus_benchmark_report(doc, [])
 
     assert report["totals"]["columns_total"] == len(columns)
+    unavailable_sections = {u["section"] for u in report["unavailable"]}
+    assert "schema_columns" not in unavailable_sections
     for c in report["columns"]:
         assert c["decided_by"] != "unmapped_default", c
-        assert c["schema_category"] is not None
 
 
 def test_context_hygiene_reads_renamed_prompt_text_field():

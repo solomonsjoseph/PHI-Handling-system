@@ -9,104 +9,332 @@ per-column knowledge record consumed by Judge.
 """
 from __future__ import annotations
 
+import csv
+import json
+import re
 from pathlib import Path
 from typing import Any
 
 import openpyxl
 
-try:
-    from pypdf import PdfReader
-except Exception:  # pragma: no cover
-    PdfReader = None
-
 from .base import Agent
 from ..anonymizer import scrub_for_prompt
-from ..file_readers import read_pdf_form_fields
+from ..file_readers import (
+    column_value_stats,
+    read_csv_columns,
+    read_docx,
+    read_parquet_columns,
+    read_pdf,
+    read_pdf_form_fields,
+    read_table_rows,
+    read_xlsx_columns,
+)
 
 
 class Lexicon(Agent):
     NAME = "Lexicon"
+    # Lexicon never sees a whole dictionary in one call. Row extraction is
+    # fully deterministic (see ``_dict_rows`` below) and happens for every
+    # file before any LLM call is made; the LLM is only ever handed an
+    # already-indexed batch of rows and asked to summarise them, or a single
+    # already-indexed row and asked a grounded question about it. An LLM
+    # outage or a short reply can leave a row's gist blank -- it can never
+    # drop the row itself.
     PROMPT = (
         "You are Lexicon, a specialist in data dictionaries and code maps for clinical study "
-        "datasets. Given the full text of a dictionary or mapping table, produce a JSON object: "
-        '{"columns": [{"name": str, "description": str, "phi_flag_hint": bool|null, '
-        '"clinical_utility": "low|medium|high", "notes": str}], "notes": str}. '
-        "Identifiers arrive pre-redacted as [REDACTED:<category>:<entity>] tokens; treat such a "
-        "token as evidence the column carries PHI, never as a literal column value. "
-        "phi_flag_hint reflects only what the dictionary itself indicates, not your own judgement. "
-        "Never invent columns. Cite 45 CFR 164.514 in notes when applicable."
+        "datasets. You are handed already-extracted, already-scrubbed dictionary rows -- one "
+        "row per documented column -- and asked either to summarise a batch of rows or to "
+        "answer a grounded question about one specific row. Identifiers arrive pre-redacted "
+        "as [REDACTED:<category>:<entity>] tokens; treat such a token as evidence the row "
+        "documents an identifier, never as a literal value. Always follow the JSON schema "
+        "given in the prompt exactly, and answer only from the row(s) you are given: you "
+        "report what the dictionary says, you never decide whether a column is PHI. Never "
+        "invent a row you were not given."
     )
 
+    _GIST_CHUNK_SIZE = 20
+
     async def run(self, dict_files: list[dict[str, Any]]) -> dict[str, Any]:
-        aggregated: list[dict[str, Any]] = []
+        self._notes: dict[str, dict[str, Any]] = {}
         self.scrub_count = 0
+        # Pass 1: parse and index every row of every file. No LLM call
+        # happens until this pass is complete for the whole batch, so an
+        # LLM can never silently drop a documented column.
+        per_file: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
         for f in dict_files:
-            text = _read_table_flat(Path(f["stored_path"]))
-            # Dictionary descriptions are short label-like phrases with little
-            # surrounding narrative context -- the same "Title-Case labels,
-            # no sentence context" case scrub_for_prompt's docstring already
-            # documents for form text. Presidio's NER false-positives heavily
-            # here (flagged "Patient", "US", "years", "sex_at_birth", and
-            # ethnicity words like "Hispanic"/"Latino" as PHI in the TB study
-            # dictionary, none of which are). Rule-based regex still catches
-            # any genuine identifier value typed into a description.
-            scrubbed, n_removed = scrub_for_prompt(text[:8000], detectors=("rule",))
-            self.scrub_count += n_removed
-            await self._log(f"lexicon.scrub:{f['file_id']}", "info", {"identifiers_removed": n_removed})
+            path = Path(f["stored_path"])
+            header, rows = _dict_rows(path)
+            if not header:
+                await self._log(f"lexicon.empty:{f['file_id']}", "info",
+                                {"file": f.get("original_name")})
+                per_file.append((f, []))
+                continue
+            name_idx = _name_column_index(header)
+            file_entries: list[dict[str, Any]] = []
+            blank_row_indices: list[int] = []
+            for row_index, row in enumerate(rows):
+                if name_idx >= len(row) or not (row[name_idx] or "").strip():
+                    blank_row_indices.append(row_index)
+                    continue
+                name = row[name_idx].strip()
+                raw_row = ", ".join(
+                    f"{h.strip()}: {v}" for h, v in zip(header, row) if (h or "").strip()
+                )
+                # Dictionary rows are short label-like phrases with little
+                # surrounding narrative context -- the same case
+                # scrub_for_prompt's docstring documents for form text.
+                # Presidio's NER false-positives heavily here (flagged
+                # "Patient", "US", "years", "sex_at_birth", "Hispanic"/
+                # "Latino" as PHI in the TB study dictionary, none of which
+                # are); rule-based regex still catches any genuine
+                # identifier value typed into a description.
+                scrubbed_row, n_removed = scrub_for_prompt(raw_row, detectors=("rule",))
+                self.scrub_count += n_removed
+                entry = {
+                    "name": name,
+                    "raw_row": scrubbed_row,
+                    "gist": "",
+                    "phi_flag_hint": None,
+                    "clinical_utility": "low",
+                }
+                file_entries.append(entry)
+                self._notes[name.lower()] = entry
+            if blank_row_indices:
+                # One aggregate event per file, not one per row (a
+                # dictionary can carry up to Task 5's 5000-row cap) --
+                # still names every skipped row, just in one document.
+                await self._log("lexicon.blank_name", "info",
+                                {"file_id": f["file_id"], "reason": "blank_name",
+                                 "count": len(blank_row_indices),
+                                 "row_indices": blank_row_indices})
+            # Auditable raw-vs-indexed count: any gap between the two is
+            # accounted for entirely by the lexicon.blank_name event
+            # above, never a silent drop.
+            await self._log(f"lexicon.parsed:{f['file_id']}", "info",
+                            {"file": f.get("original_name"), "raw_row_count": len(rows),
+                             "indexed_row_count": len(file_entries)})
+            per_file.append((f, file_entries))
+
+        # Pass 2: fill in a gist per row, chunked, now that every row is
+        # already indexed in self._notes.
+        entries: list[dict[str, Any]] = []
+        for f, file_entries in per_file:
+            if file_entries:
+                await self._fill_gists(file_entries, f)
+            entries.extend(file_entries)
+
+        columns = [
+            {
+                "name": e["name"],
+                "description": e["gist"],
+                "phi_flag_hint": e["phi_flag_hint"],
+                "clinical_utility": e["clinical_utility"],
+                "notes": "",
+            }
+            for e in entries
+        ]
+        return {"columns": columns, "notes": ""}
+
+    async def _fill_gists(self, entries: list[dict[str, Any]], f: dict[str, Any]) -> None:
+        """One call_json per chunk of already-indexed rows. A short or
+        empty reply can only leave a chunk's gists blank."""
+        for start in range(0, len(entries), self._GIST_CHUNK_SIZE):
+            chunk = entries[start:start + self._GIST_CHUNK_SIZE]
+            batch = [{"name": e["name"], "row": e["raw_row"]} for e in chunk]
             reply = await self.call_json(
-                f"Filename: {f['original_name']}\nComponent: {f.get('component')}\n"
-                f"Full content (rows are metadata about a schema):\n{scrubbed}\n"
-                "Respond with JSON only.",
-                phase=f"lexicon.read:{f['file_id']}",
-                default={"columns": [], "notes": ""},
+                f"Filename: {f['original_name']}\n"
+                f"Dictionary rows in this batch:\n{batch}\n"
+                'Respond with JSON only: {"gists": [{"name": str, "gist": str, '
+                '"phi_flag_hint": bool|null, "clinical_utility": "low|medium|high"}]}, one '
+                "entry per row above, using the same name given for that row.",
+                phase=f"lexicon.gist:{f['file_id']}:{start}",
+                default={"gists": []},
+                expect_key="gists", min_items=len(chunk),
                 status_text=f"Reading the dictionary file {f['original_name']}",
             )
-            aggregated.extend(reply.get("columns", []))
-        return {"columns": aggregated}
+            by_name = {
+                str(g["name"]).strip().lower(): g
+                for g in reply.get("gists", [])
+                if isinstance(g, dict) and g.get("name")
+            }
+            for e in chunk:
+                g = by_name.get(e["name"].lower())
+                if g is None:
+                    await self._log("lexicon.gist_missing", "info", {"column": e["name"]})
+                    continue
+                e["gist"] = g.get("gist") or ""
+                e["phi_flag_hint"] = g.get("phi_flag_hint")
+                cu = g.get("clinical_utility")
+                if cu in ("low", "medium", "high"):
+                    e["clinical_utility"] = cu
+
+    async def answer(self, column: str, assumption: str, reasoning: str) -> dict[str, Any]:
+        """Grounded per-column question, answered only from that column's
+        already-scrubbed dictionary row -- never by reopening the file,
+        never by looking at another column's row."""
+        note = self._notes.get((column or "").strip().lower())
+        if note is None:
+            return {
+                "verdict": "not_in_dictionary",
+                "explanation": (
+                    f"'{column}' is not present in the dictionary -- this index is the "
+                    "final list, nothing else exists"
+                ),
+                "citation": "",
+            }
+        reply = await self.call_json(
+            f"Column: {note['name']}\n"
+            f"Dictionary row (scrubbed): {note['raw_row']}\n"
+            f"Caller's assumption about this column: {assumption}\n"
+            f"Caller's reasoning: {reasoning}\n"
+            'Respond with JSON only: {"verdict": "confirmed"|"corrected", "explanation": str, '
+            '"citation": str}. Ground your answer only in the dictionary row above.',
+            phase=f"lexicon.answer:{note['name']}",
+            default={"verdict": "corrected", "explanation": "", "citation": ""},
+            status_text=f"Checking the assumption about {note['name']} against the dictionary",
+        )
+        verdict = reply.get("verdict")
+        return {
+            "verdict": verdict if verdict in ("confirmed", "corrected") else "corrected",
+            "explanation": reply.get("explanation", ""),
+            "citation": reply.get("citation", ""),
+        }
+
+
+_DICT_COLUMN_NAME_RE = re.compile(
+    r"^(variable|variable_name|column|column_name|field|field_name|name)$", re.I)
+
+
+def _name_column_index(header: list[str]) -> int:
+    """Locate the column-name cell in a dictionary header row; falls back
+    to the first column when no header cell matches a recognised heading."""
+    for i, cell in enumerate(header):
+        if _DICT_COLUMN_NAME_RE.match((cell or "").strip()):
+            return i
+    return 0
+
+
+def _docx_dictionary_rows(path: Path) -> tuple[list[str], list[list[str]]]:
+    """(header, rows) for a .docx dictionary, parsed from the first table
+    ``_read_docx_tables`` extracts. Reuses that helper's CSV-shaped text
+    rather than re-walking the XML, so a .docx dictionary is indexed the
+    same row-first way as a .csv/.xlsx one."""
+    text = _read_docx_tables(path)
+    if not text:
+        return [], []
+    table_lines: list[str] = []
+    in_first_table = False
+    for line in text.splitlines():
+        if line.startswith("# table "):
+            if in_first_table:
+                break  # only the first table documents columns
+            in_first_table = True
+            continue
+        if line.startswith("#"):
+            if in_first_table:
+                break
+            continue
+        if in_first_table:
+            table_lines.append(line)
+    if not table_lines:
+        return [], []
+    parsed = [row for row in csv.reader(table_lines) if any(cell.strip() for cell in row)]
+    if not parsed:
+        return [], []
+    return parsed[0], parsed[1:]
+
+
+def _dict_rows(path: Path) -> tuple[list[str], list[list[str]]]:
+    """Deterministic (header, rows) for one dictionary file: csv/tsv/xlsx
+    via Task 5's ``read_table_rows``, .docx via the CSV-shaped text
+    ``_read_docx_tables`` already produces. Every row this returns becomes
+    a Lexicon index entry before any LLM call happens -- an LLM can no
+    longer drop a documented column, only fail to describe one."""
+    ext = path.suffix.lower()
+    if ext in {".csv", ".tsv", ".xlsx"}:
+        return read_table_rows(path)
+    if ext == ".docx":
+        return _docx_dictionary_rows(path)
+    return [], []
 
 
 class Schema(Agent):
     NAME = "Schema"
-    PROMPT = (
-        "You are Schema, a specialist in reading DATASET COLUMN HEADERS ONLY. You must NEVER "
-        "receive or infer row values. Given a list of column headers and optional dictionary "
-        "context, produce JSON: "
-        '{"columns": [{"name": str, "inferred_meaning": str, "candidate_phi_category": '
-        '"A|B|C|D|E|F|G|H|I|J|K|L|M|N|O|P|Q|R|QUASI|NONE", "confidence": 0..1}]}. '
-        "Use HIPAA Safe Harbor 45 CFR 164.514(b)(2)(i) categories A-R."
-    )
+    PROMPT = ""  # deterministic; Schema never calls an LLM
 
-    async def run(self, dataset_files: list[dict[str, Any]], lexicon_columns: list[dict[str, Any]]) -> dict[str, Any]:
+    async def run(self, dataset_files: list[dict[str, Any]]) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
-        lex_map = {c.get("name", "").lower(): c for c in lexicon_columns}
+        self._headers: dict[str, list[str]] = {}
+        self._stats: dict[tuple[str, str], dict[str, int]] = {}
         for f in dataset_files:
-            headers = f.get("columns", [])
+            file_id = f["file_id"]
+            headers = f.get("columns") or self._read_headers(f)
             if not headers:
                 # Fail loud instead of hallucinating - orchestrator must have populated columns before us.
-                await self._log(f"schema.error:{f['file_id']}", "info",
+                await self._log(f"schema.error:{file_id}", "info",
                                 {"error": "no headers provided", "file": f.get("original_name")})
                 continue
-            # Enrich each header with any dictionary hint (no row values ever sent)
-            enrichment = []
+            self._headers[file_id] = [h.lower() for h in headers]
+            await self._log(f"schema.headers:{file_id}", "info", {"header_count": len(headers)})
+            stats = self._column_stats(f, headers)
+            for name, s in stats.items():
+                self._stats[(file_id, name.lower())] = s
+            await self._log(f"schema.cardinality:{file_id}", "info", {"columns": len(stats)})
             for h in headers:
-                lex = lex_map.get(h.lower())
-                if lex:
-                    enrichment.append({"name": h, "dict_hint": lex.get("description", ""), "phi_flag_hint": lex.get("phi_flag_hint")})
-                else:
-                    enrichment.append({"name": h})
-            reply = await self.call_json(
-                f"Dataset: {f['original_name']} (rows are withheld; you only see headers).\n"
-                f"Enriched headers: {enrichment}\n"
-                "Respond with JSON only.",
-                phase=f"schema.classify:{f['file_id']}",
-                default={"columns": []},
-                expect_key="columns", min_items=len(headers),
-                status_text=f"Classifying dataset headers in {f['original_name']}",
-            )
-            for c in reply.get("columns", []):
-                c["_file_id"] = f["file_id"]
-            results.extend(reply.get("columns", []))
+                results.append({"name": h, "_file_id": file_id})
         return {"columns": results}
+
+    @staticmethod
+    def _dataset_ext(f: dict[str, Any]) -> str:
+        path = Path(f["stored_path"])
+        return (f.get("subtype") or path.suffix.lstrip(".")).lower()
+
+    @classmethod
+    def _read_headers(cls, f: dict[str, Any]) -> list[str]:
+        """Fallback header read when intake left `columns` unpopulated."""
+        path = Path(f["stored_path"])
+        ext = cls._dataset_ext(f)
+        try:
+            if ext in ("csv", "tsv"):
+                cols, _rows = read_csv_columns(path)
+            elif ext in ("xlsx", "xls"):
+                cols, _rows = read_xlsx_columns(path)
+            elif ext == "parquet":
+                cols, _rows = read_parquet_columns(path)
+            else:
+                cols = []
+        except Exception:
+            cols = []
+        return cols
+
+    @classmethod
+    def _column_stats(cls, f: dict[str, Any], headers: list[str]) -> dict[str, dict[str, int]]:
+        try:
+            return column_value_stats(Path(f["stored_path"]), cls._dataset_ext(f), headers)
+        except Exception:
+            return {}
+
+    def verify(self, column: str, file_id: str | None = None) -> dict[str, Any]:
+        """No LLM call: a column is present iff it is literally in the
+        dataset headers this run parsed, nothing inferred."""
+        key = column.lower()
+        candidates = [file_id] if file_id else list(self._headers)
+        for fid in candidates:
+            if key in self._headers.get(fid, []):
+                return {"present": True, "file_id": fid}
+        return {
+            "present": False,
+            "explanation": "not present in the dataset headers -- this is the final list, nothing else exists",
+        }
+
+    def cardinality(self, column: str, file_id: str | None = None) -> dict[str, Any]:
+        key = column.lower()
+        if file_id is not None:
+            return self._stats.get((file_id, key), {})
+        for (fid, name), stats in self._stats.items():
+            if name == key:
+                return stats
+        return {}
 
 
 class Instrument(Agent):
@@ -126,8 +354,12 @@ class Instrument(Agent):
     async def run(self, form_files: list[dict[str, Any]]) -> dict[str, Any]:
         aggregated: list[dict[str, Any]] = []
         self.scrub_count = 0
+        self._fields: dict[str, list[dict[str, Any]]] = {}
+        self._source_names: dict[str, str] = {}
         for f in form_files:
+            file_id = f["file_id"]
             path = Path(f["stored_path"])
+            self._source_names[file_id] = f.get("original_name", path.name)
 
             # Tier 1: true fillable (AcroForm) PDF -- real field names read
             # straight off the PDF, zero LLM call, zero fabrication risk.
@@ -139,33 +371,95 @@ class Instrument(Agent):
                     acroform_fields = None
             if acroform_fields:
                 await self._log(
-                    f"instrument.acroform:{f['file_id']}", "info",
+                    f"instrument.acroform:{file_id}", "info",
                     {"fields_found": len(acroform_fields)},
                 )
+                self._fields[file_id] = acroform_fields
                 aggregated.extend(acroform_fields)
                 continue
 
-            # Tier 2: flat/scanned form -- extraction-only LLM call on the
-            # (OCR-fallback-capable) extracted text.
-            text = ""
-            if PdfReader is not None and path.suffix.lower() == ".pdf":
-                try:
-                    reader = PdfReader(str(path))
-                    text = "\n\n".join((p.extract_text() or "") for p in reader.pages)
-                except Exception:
-                    text = ""
+            # Tier 2: flat/scanned PDF or .docx -- extraction-only LLM call
+            # on text read through the shared readers, never parsed inline
+            # here. `read_pdf` inherits the OCR fallback for scanned forms
+            # (nothing form-specific is reimplemented); `.docx` forms
+            # combine the structured table view with the full narrative
+            # paragraph text.
+            text = _read_form_text(path)
             scrubbed, n_removed = scrub_for_prompt(text[:6000], detectors=("rule",))
             self.scrub_count += n_removed
-            await self._log(f"instrument.scrub:{f['file_id']}", "info", {"identifiers_removed": n_removed})
+            await self._log(f"instrument.scrub:{file_id}", "info", {"identifiers_removed": n_removed})
             reply = await self.call_json(
                 f"Form: {f['original_name']}\nExtracted text:\n{scrubbed}\n"
                 "Respond with JSON only.",
-                phase=f"instrument.read:{f['file_id']}",
+                phase=f"instrument.read:{file_id}",
                 default={"fields": []},
                 status_text=f"Reading the form {f['original_name']}",
             )
-            aggregated.extend(reply.get("fields", []))
+            fields = reply.get("fields", [])
+            self._fields[file_id] = fields
+            aggregated.extend(fields)
+        await self._write_reports()
         return {"fields": aggregated}
+
+    def verify(self, field_or_variable: str, file_id: str | None = None) -> dict[str, Any]:
+        """No LLM call: a field is present iff this run's index literally
+        has it, matched case-insensitively on either the printed label or
+        the collected_variable name."""
+        needle = field_or_variable.strip().casefold()
+        candidates = [file_id] if file_id else list(self._fields)
+        for fid in candidates:
+            for field in self._fields.get(fid, []):
+                label = (field.get("label") or "").strip().casefold()
+                variable = (field.get("collected_variable") or "").strip().casefold()
+                if needle == label or (variable and needle == variable):
+                    return {"present": True, "file_id": fid, "field": field}
+        return {
+            "present": False,
+            "explanation": "not present in any extracted form field",
+        }
+
+    async def _write_reports(self) -> list[str]:
+        """Write one per-form field report into UPLOAD_DIR/<sid>/, built
+        from the in-memory ``self._fields`` index only -- never
+        reconstructed from `agent_log`, whose write-time scrub can mangle
+        a label the way it did for the Tier-2 LLM's free-text replies."""
+        from ..paths import UPLOAD_DIR, safe_join
+        from ..security import scrub_persisted_text
+
+        session_dir = UPLOAD_DIR / self.session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        written: list[str] = []
+        for file_id, fields in self._fields.items():
+            payload = {
+                "file_id": file_id,
+                "source_filename": self._source_names.get(file_id, ""),
+                "fields": fields,
+            }
+            text = scrub_persisted_text(json.dumps(payload, indent=2))
+            report_path = safe_join(session_dir, f"instrument_report_{file_id}.json")
+            report_path.write_text(text, encoding="utf-8")
+            written.append(str(report_path))
+        return written
+
+
+def _read_form_text(path: Path) -> str:
+    """Deterministic text extraction for a Tier-2 form, dispatched by
+    extension onto the shared, OCR-capable readers -- no inline parsing
+    lives in the agent body."""
+    ext = path.suffix.lower()
+    if ext == ".pdf":
+        try:
+            return read_pdf(path)
+        except Exception:
+            return ""
+    if ext == ".docx":
+        table_text = _read_docx_tables(path)
+        try:
+            prose_text = read_docx(path)
+        except Exception:
+            prose_text = ""
+        return "\n\n".join(t for t in (table_text, prose_text) if t)
+    return ""
 
 
 # --- deterministic helpers ------------------------------------------------

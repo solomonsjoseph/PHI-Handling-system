@@ -95,7 +95,7 @@ _CALIBRATION_BUCKETS: list[tuple[str, float, float, bool]] = [
 _COLUMN_FIELDS = [
     "file", "column", "gold_category", "gold_expected_action",
     "predicted_category", "action", "action_label", "transform", "authority",
-    "reason", "citation", "confidence", "schema_confidence", "schema_category",
+    "reason", "citation", "confidence",
     "praxis_technique", "praxis_utility_preserving", "decided_by",
     "verdict", "method_exact", "cells_total", "cells_changed", "leak_hits",
     "expectation_kind",
@@ -230,7 +230,6 @@ def build_report(
         _absent(name, value)
 
     praxis_methods = praxis_methods or {}
-    schema_columns = schema_columns or []
     sentinel_overrides = sentinel_overrides or []
     keep_demotions = keep_demotions or []
     prompt_scrub_counts = prompt_scrub_counts or {}
@@ -241,10 +240,6 @@ def build_report(
     decision_index: dict[tuple[str, str], dict[str, Any]] = {}
     for d in decisions:
         decision_index[(d.get("file_id", ""), d.get("column", ""))] = d
-
-    schema_index: dict[tuple[str, str], dict[str, Any]] = {}
-    for c in schema_columns:
-        schema_index[(c.get("_file_id", ""), c.get("name", ""))] = c
 
     keep_demote_keys = {(d.get("file_id", ""), d.get("column", "")) for d in keep_demotions}
     sentinel_override_keys = {(o.get("file_id", ""), o.get("column", "")) for o in sentinel_overrides}
@@ -297,7 +292,6 @@ def build_report(
                 verdict = "correct"
 
         praxis_entry = praxis_methods.get(gold_category) if gold_category else None
-        schema_entry = schema_index.get(key)
 
         cells = planted_by_col.get(key, [])
         cells_total = len(cells)
@@ -326,8 +320,6 @@ def build_report(
             "reason": (dec.get("reason") if dec else "") or "",
             "citation": (dec.get("citation") if dec else "") or "",
             "confidence": dec.get("confidence") if dec else None,
-            "schema_confidence": schema_entry.get("confidence") if schema_entry else None,
-            "schema_category": schema_entry.get("candidate_phi_category") if schema_entry else None,
             "praxis_technique": (praxis_entry or {}).get("technique") if praxis_entry else None,
             "praxis_utility_preserving": (praxis_entry or {}).get("utility_preserving") if praxis_entry else None,
             "decided_by": decided_by,

@@ -218,22 +218,26 @@ def test_judge_min_items_zero_on_empty_study():
 
 
 def test_schema_declares_deliverable_contract():
+    """Schema is deterministic (Task 6): it never calls call_json, and its
+    deliverable is exactly the dataset headers it parsed, one entry per
+    header, tagged with the file that produced them."""
     import phi_core.agents.specialists as specialists
 
-    captured: dict = {}
+    called = {"call_json": False}
 
     class StubSchema(specialists.Schema):
         async def call_json(self, *a, **kw):
-            captured.update(kw)
+            called["call_json"] = True
             return {"columns": []}
 
     s = StubSchema(session_id="s", llm=None, db=FakeDb())
     dataset_files = [{"file_id": "f1", "original_name": "d.csv",
                       "columns": ["a", "b", "c"]}]
-    asyncio.run(s.run(dataset_files=dataset_files, lexicon_columns=[]))
+    result = asyncio.run(s.run(dataset_files=dataset_files))
 
-    assert captured["expect_key"] == "columns"
-    assert captured["min_items"] == 3
+    assert called["call_json"] is False
+    assert [c["name"] for c in result["columns"]] == ["a", "b", "c"]
+    assert all(c["_file_id"] == "f1" for c in result["columns"])
 
 
 # ---- lateness ------------------------------------------------------------

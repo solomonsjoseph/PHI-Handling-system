@@ -86,6 +86,49 @@ def test_default_bundle_contains_safe_to_share_only(tmp_path):
     assert not any(n.startswith("publication/") for n in names)
 
 
+def test_bundle_picks_up_the_instrument_field_report_into_forms(tmp_path, monkeypatch):
+    """Task 13: the per-form field report Instrument writes to
+    UPLOAD_DIR/<sid>/instrument_report_<file_id>.json rides into
+    safe_to_share/forms/ alongside the exported form, unconditionally
+    (no Publish Guard gating -- it is already-scrubbed structural
+    extraction, not row content)."""
+    from phi_core import paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "UPLOAD_DIR", tmp_path / "uploads")
+    sid = "sess_form_report_test"
+    session_dir = tmp_path / "uploads" / sid
+    session_dir.mkdir(parents=True)
+    report_path = session_dir / "instrument_report_fid.json"
+    report_payload = {
+        "file_id": "fid",
+        "source_filename": "consent_form.pdf",
+        "fields": [{"label": "Study ID", "collected_variable": "study_id"}],
+    }
+    report_path.write_text(json.dumps(report_payload), encoding="utf-8")
+
+    exports_dir = tmp_path / "exports"
+    exports_dir.mkdir()
+    form_export = exports_dir / "consent_form.pdf.txt"
+    form_export.write_text("redacted form text", encoding="utf-8")
+
+    sess = {
+        "id": sid,
+        "jurisdiction": "us",
+        "files": [{"file_id": "fid", "kind": "narrative", "original_name": "consent_form.pdf"}],
+        "export_paths": {"fid": str(form_export)},
+        "guard_report": {
+            "status": "clean", "scanned": 1, "blocked": 0,
+            "results": [{"file_id": "fid", "status": "clean"}],
+        },
+    }
+    data, _ = build_bundle(sess, BundleOptions())
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = zf.namelist()
+        assert "safe_to_share/forms/instrument_report_fid.json" in names
+        written = json.loads(zf.read("safe_to_share/forms/instrument_report_fid.json"))
+    assert written["fields"][0]["collected_variable"] == "study_id"
+
+
 def test_publication_bundle_adds_paper_folder(tmp_path):
     sess = _fake_session(tmp_path)
     data, _ = build_bundle(sess, BundleOptions(include_publication=True))
