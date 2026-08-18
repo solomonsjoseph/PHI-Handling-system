@@ -144,3 +144,100 @@ async def test_no_shared_mutable_state_leaks_between_batches():
 
 def test_run_batched_is_a_plain_coroutine_function():
     assert asyncio.iscoroutinefunction(run_batched)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs", [
+    {"batch_size": 0},
+    {"batch_size": -1},
+    {"pool_size": 0},
+    {"pool_size": -3},
+])
+async def test_invalid_batch_or_pool_size_raises_before_any_work(kwargs):
+    """A bad `batch_size`/`pool_size` is rejected up front, even against
+    an empty item list, rather than producing an empty range or a
+    semaphore that can never be acquired."""
+    calls = []
+
+    def check(batch: list[int]) -> list[dict]:
+        calls.append(batch)
+        return [{"value": v} for v in batch]
+
+    with pytest.raises(ValueError):
+        await run_batched([1, 2, 3], check, **kwargs)
+    with pytest.raises(ValueError):
+        await run_batched([], check, **kwargs)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_check_returning_wrong_result_count_raises_clear_error():
+    """check() must return exactly one result per item; a silent
+    truncation or duplication is a programming error, not data to smuggle
+    through as misaligned output."""
+    def check(batch: list[int]) -> list[dict]:
+        return [{"value": batch[0]}]  # always one result, regardless of batch size
+
+    with pytest.raises(ValueError, match="exactly one result per item"):
+        await run_batched([1, 2, 3, 4], check, batch_size=2, pool_size=2)
+
+
+@pytest.mark.asyncio
+async def test_a_failing_check_cancels_unstarted_siblings_and_stops_cleanly():
+    """A serial pool (pool_size=1) makes batch order deterministic: 0 and
+    1 complete and are delivered before 2 fails; 3 and 4 are still parked
+    on the pool and are cancelled without ever running `check`. Nothing
+    keeps executing in the background after `run_batched` has raised."""
+    items = [0, 1, 2, 3, 4]
+    checked: list[int] = []
+    batches_seen: list[int] = []
+
+    def check(batch: list[int]) -> list[dict]:
+        v = batch[0]
+        checked.append(v)
+        if v == 2:
+            raise RuntimeError("boom")
+        return [{"value": v}]
+
+    async def on_batch(index: int, results: list[dict]) -> None:
+        batches_seen.append(index)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await run_batched(items, check, batch_size=1, pool_size=1, on_batch=on_batch)
+
+    assert checked == [0, 1, 2]
+    assert batches_seen == [0, 1]
+
+    await asyncio.sleep(0.05)
+    assert checked == [0, 1, 2], "a cancelled sibling ran check() after run_batched raised"
+
+
+@pytest.mark.asyncio
+async def test_on_batch_fires_while_a_later_batch_is_still_blocked():
+    """True incremental delivery, proven causally rather than by timing:
+    batch 1's check cannot return until on_batch(0, ...) unblocks it, so
+    if on_batch(0, ...) has run, batch 1 is provably still mid-check."""
+    items = [0, 1]
+    slow_started = threading.Event()
+    allow_slow_finish = threading.Event()
+    fast_on_batch_seen = threading.Event()
+
+    def check(batch: list[int]) -> list[dict]:
+        v = batch[0]
+        if v == 1:
+            slow_started.set()
+            assert allow_slow_finish.wait(timeout=5), \
+                "fast batch's on_batch never unblocked the slow batch"
+        return [{"value": v}]
+
+    async def on_batch(index: int, results: list[dict]) -> None:
+        if index == 0:
+            assert slow_started.wait(timeout=2), "sibling batch never started concurrently"
+            allow_slow_finish.set()
+            fast_on_batch_seen.set()
+
+    result = await run_batched(items, check, batch_size=1, pool_size=2, on_batch=on_batch)
+
+    assert fast_on_batch_seen.is_set()
+    assert [r["value"] for r in result] == [0, 1]
