@@ -151,17 +151,20 @@ def test_missing_headers_logged_and_skipped(tmp_path):
     assert lex.call_count == 0  # never asked the LLM about zero rows
 
 
-def test_blank_name_row_is_logged_not_silently_dropped(tmp_path):
-    """A dictionary row with a blank/absent name cell is skipped, but the
-    skip is audited rather than silent: it must show up as a
-    lexicon.blank_name log entry, and lexicon.parsed's raw-vs-indexed
-    counts must account for the gap."""
+def test_blank_name_rows_are_logged_as_one_aggregate_event(tmp_path):
+    """Rows with a blank/absent name cell are skipped, but never silently:
+    every one of them is named in a single aggregate lexicon.blank_name
+    event per file (not one event per row -- a dictionary can carry up to
+    Task 5's 5000-row cap), and lexicon.parsed's raw-vs-indexed counts
+    account for the gap."""
     path = tmp_path / "dictionary.csv"
     path.write_text(
         "column_name,description\n"
         "study_id,Study identifier.\n"
         ",Orphaned description with no column name.\n"
-        "last_name,Patient's legal last name.\n",
+        "last_name,Patient's legal last name.\n"
+        ",Another orphaned row.\n"
+        "first_name,Patient's legal first name.\n",
         encoding="utf-8",
     )
     db = FakeDb()
@@ -171,17 +174,35 @@ def test_blank_name_row_is_logged_not_silently_dropped(tmp_path):
 
     result = asyncio.run(lex.run(dict_files=dict_files))
 
-    assert {c["name"] for c in result["columns"]} == {"study_id", "last_name"}
-    assert len(lex._notes) == 2
+    assert {c["name"] for c in result["columns"]} == {"study_id", "last_name", "first_name"}
+    assert len(lex._notes) == 3
 
     blank_logs = [d for d in db.agent_log.inserted if d["phase"] == "lexicon.blank_name"]
-    assert len(blank_logs) == 1
-    assert blank_logs[0]["payload"] == {"file_id": "f1", "row_index": 1, "reason": "blank_name"}
+    assert len(blank_logs) == 1  # one aggregate event, not one per blank row
+    assert blank_logs[0]["payload"] == {
+        "file_id": "f1", "reason": "blank_name", "count": 2, "row_indices": [1, 3],
+    }
 
     parsed_logs = [d for d in db.agent_log.inserted if d["phase"] == "lexicon.parsed:f1"]
     assert len(parsed_logs) == 1
-    assert parsed_logs[0]["payload"]["raw_row_count"] == 3
-    assert parsed_logs[0]["payload"]["indexed_row_count"] == 2
+    assert parsed_logs[0]["payload"]["raw_row_count"] == 5
+    assert parsed_logs[0]["payload"]["indexed_row_count"] == 3
+
+
+def test_no_blank_name_event_when_every_row_is_named(tmp_path):
+    """A dictionary with no blank-name rows emits zero lexicon.blank_name
+    events -- the aggregate event only fires when there is something to
+    report."""
+    path = _write_csv_dictionary(tmp_path, 3)
+    db = FakeDb()
+    lex = _DropCountStubLexicon(session_id="s", llm=None, db=db)
+    dict_files = [{"file_id": "f1", "original_name": "dictionary.csv",
+                  "stored_path": str(path)}]
+
+    asyncio.run(lex.run(dict_files=dict_files))
+
+    blank_logs = [d for d in db.agent_log.inserted if d["phase"] == "lexicon.blank_name"]
+    assert blank_logs == []
 
 
 # ---- Task 10: answer() ------------------------------------------------------

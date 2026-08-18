@@ -71,11 +71,10 @@ class Lexicon(Agent):
                 continue
             name_idx = _name_column_index(header)
             file_entries: list[dict[str, Any]] = []
+            blank_row_indices: list[int] = []
             for row_index, row in enumerate(rows):
                 if name_idx >= len(row) or not (row[name_idx] or "").strip():
-                    await self._log("lexicon.blank_name", "info",
-                                    {"file_id": f["file_id"], "row_index": row_index,
-                                     "reason": "blank_name"})
+                    blank_row_indices.append(row_index)
                     continue
                 name = row[name_idx].strip()
                 raw_row = ", ".join(
@@ -100,8 +99,16 @@ class Lexicon(Agent):
                 }
                 file_entries.append(entry)
                 self._notes[name.lower()] = entry
+            if blank_row_indices:
+                # One aggregate event per file, not one per row (a
+                # dictionary can carry up to Task 5's 5000-row cap) --
+                # still names every skipped row, just in one document.
+                await self._log("lexicon.blank_name", "info",
+                                {"file_id": f["file_id"], "reason": "blank_name",
+                                 "count": len(blank_row_indices),
+                                 "row_indices": blank_row_indices})
             # Auditable raw-vs-indexed count: any gap between the two is
-            # accounted for entirely by the lexicon.blank_name rows logged
+            # accounted for entirely by the lexicon.blank_name event
             # above, never a silent drop.
             await self._log(f"lexicon.parsed:{f['file_id']}", "info",
                             {"file": f.get("original_name"), "raw_row_count": len(rows),
