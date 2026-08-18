@@ -800,8 +800,18 @@ class Executor(Agent):
                     await self._log("executor.dataset_fully_deferred", "info",
                                     {"file_id": f["file_id"], "column_count": len(known_cols)})
                     continue
-                apply_column_actions_to_dataset(src, dst, f["subtype"], by_file.get(f["file_id"], []),
-                                                registry, omit_columns=omit_cols)
+                try:
+                    apply_column_actions_to_dataset(src, dst, f["subtype"], by_file.get(f["file_id"], []),
+                                                    registry, omit_columns=omit_cols)
+                except Exception as e:
+                    # Mirrors the narrative branch below: a write failure must
+                    # not crash the whole run or leave a partial file counted
+                    # as exported. apply_column_actions_to_dataset already
+                    # guarantees no partial file survives at `dst`; this just
+                    # keeps that file_id out of `exports` instead of raising.
+                    await self._log("executor.dataset_write_failed", "info",
+                                    {"file_id": f["file_id"], "error": type(e).__name__})
+                    continue
             else:
                 dst = EXPORT_DIR / f"{f['file_id']}__{Path(f['original_name']).stem}.redacted.txt"
                 try:
@@ -929,7 +939,15 @@ def _scrub_text_cell(value: str) -> str:
     out = value
     for s in spans_sorted:
         cat = s.hipaa_category or "X"
-        out = out[: s.start] + f"[{cat}]" + out[s.end :]
+        end = s.end
+        # A detector span can overrun into adjacent markup (e.g. eating
+        # part of a closing HTML tag after a name). PHI values don't
+        # contain a raw '<', so clip the span at the first one found
+        # inside it rather than let the substitution corrupt structure.
+        lt = out.find("<", s.start, end)
+        if lt != -1:
+            end = lt
+        out = out[: s.start] + f"[{cat}]" + out[end:]
     return out
 
 
@@ -945,7 +963,10 @@ def _apply_action(value: str, action: str, column: str, registry: "PseudonymRegi
             n = int(_re.sub(r"[^0-9-]", "", value))
             return "90+" if n > 89 else str(n)
         except Exception:
-            return value
+            # Fail closed like year_only's malformed-input branch: a
+            # non-numeric age (free text, "N/A", transcription artifact)
+            # must not ship the original value verbatim.
+            return ""
     if action == "year_only":
         m = _re.search(r"(\d{4})", value)
         return m.group(1) if m else ""
@@ -1000,7 +1021,18 @@ def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: l
     """
     import os as _os
     omit_columns = set(omit_columns or ())
-    action_by_col: dict[str, dict[str, Any]] = {d.get("column", ""): d for d in decisions}
+    action_by_col: dict[str, dict[str, Any]] = {}
+    _dupes: list[str] = []
+    for d in decisions:
+        col = d.get("column", "")
+        if col in action_by_col:
+            _dupes.append(f"{col!r} ({action_by_col[col].get('action')!r} vs {d.get('action')!r})")
+        action_by_col[col] = d
+    if _dupes:
+        # A duplicate decision for one column is a Judge/Sentinel/human-review
+        # merge bug upstream. Silently picking whichever sorted last risked
+        # shipping the looser of two conflicting actions -- fail loud instead.
+        raise ValueError(f"duplicate decisions for column(s): {'; '.join(_dupes)}")
     _default_action = _os.environ.get("PHI_UNMAPPED_COLUMN_ACTION", "drop").strip() or "drop"
     if _default_action not in {"drop", "scrub_text"}:
         _default_action = "drop"
@@ -1011,53 +1043,63 @@ def apply_column_actions_to_dataset(src: Path, dst: Path, ext: str, decisions: l
             return d
         return {"action": _default_action, "column": col, "reason": "SEC-004 fail-closed default"}
 
-    if ext in ("csv", "tsv"):
-        delim = "\t" if ext == "tsv" else ","
-        with src.open("r", encoding="utf-8", errors="replace", newline="") as fin, \
-             dst.open("w", encoding="utf-8", newline="") as fout:
-            reader = _csv.DictReader(fin, delimiter=delim)
-            fieldnames = reader.fieldnames or []
-            surviving = [c for c in fieldnames if c not in omit_columns]
-            writer = _csv.DictWriter(fout, fieldnames=surviving, delimiter=delim)
-            writer.writeheader()
-            for row in reader:
-                out_row: dict[str, str] = {}
-                for col in surviving:
+    # Write to a temp path in the same directory and rename into place only
+    # on clean completion, so a mid-write exception (detector error, corrupt
+    # xlsx) never leaves a partially-transformed file at the real export
+    # path -- the caller sees the exception and the tmp file is removed.
+    tmp = dst.with_name(dst.name + ".tmp")
+    try:
+        if ext in ("csv", "tsv"):
+            delim = "\t" if ext == "tsv" else ","
+            with src.open("r", encoding="utf-8", errors="replace", newline="") as fin, \
+                 tmp.open("w", encoding="utf-8", newline="") as fout:
+                reader = _csv.DictReader(fin, delimiter=delim)
+                fieldnames = reader.fieldnames or []
+                surviving = [c for c in fieldnames if c not in omit_columns]
+                writer = _csv.DictWriter(fout, fieldnames=surviving, delimiter=delim)
+                writer.writeheader()
+                for row in reader:
+                    out_row: dict[str, str] = {}
+                    for col in surviving:
+                        d = _decision_for(col)
+                        transformed = _apply_action(row.get(col) or "", d.get("action", "drop"), col, registry)
+                        out_row[col] = _neutralise_formula(transformed)
+                    writer.writerow(out_row)
+        elif ext in ("xlsx", "xls"):
+            wb = _openpyxl.load_workbook(src)
+            ws = wb[wb.sheetnames[0]]
+            headers: list[str] = []
+            for r in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+                headers = [str(c) if c is not None else "" for c in r]
+                break
+            if omit_columns:
+                omit_positions = sorted(
+                    (j for j, col in enumerate(headers, start=1) if col in omit_columns),
+                    reverse=True,
+                )
+                for pos in omit_positions:
+                    ws.delete_cols(pos, 1)
+                headers = [c for c in headers if c not in omit_columns]
+            for i in range(2, (ws.max_row or 1) + 1):
+                for j, col in enumerate(headers, start=1):
                     d = _decision_for(col)
-                    transformed = _apply_action(row.get(col) or "", d.get("action", "drop"), col, registry)
-                    out_row[col] = _neutralise_formula(transformed)
-                writer.writerow(out_row)
-    elif ext in ("xlsx", "xls"):
-        wb = _openpyxl.load_workbook(src)
-        ws = wb[wb.sheetnames[0]]
-        headers: list[str] = []
-        for r in ws.iter_rows(min_row=1, max_row=1, values_only=True):
-            headers = [str(c) if c is not None else "" for c in r]
-            break
-        if omit_columns:
-            omit_positions = sorted(
-                (j for j, col in enumerate(headers, start=1) if col in omit_columns),
-                reverse=True,
+                    cell = ws.cell(row=i, column=j)
+                    transformed = _apply_action(str(cell.value) if cell.value is not None else "",
+                                               d.get("action", "drop"), col, registry)
+                    cell.value = _neutralise_formula(transformed)
+            wb.save(tmp)
+        else:
+            # Unknown extension - SEC-004 fail closed: refuse to emit verbatim.
+            # Write a single-line marker file so the operator sees the block.
+            tmp.write_text(
+                f"[REDACTED] source extension {ext!r} not supported by executor; "
+                f"content withheld to prevent PHI leak.\n",
+                encoding="utf-8",
             )
-            for pos in omit_positions:
-                ws.delete_cols(pos, 1)
-            headers = [c for c in headers if c not in omit_columns]
-        for i in range(2, (ws.max_row or 1) + 1):
-            for j, col in enumerate(headers, start=1):
-                d = _decision_for(col)
-                cell = ws.cell(row=i, column=j)
-                transformed = _apply_action(str(cell.value) if cell.value is not None else "",
-                                           d.get("action", "drop"), col, registry)
-                cell.value = _neutralise_formula(transformed)
-        wb.save(dst)
-    else:
-        # Unknown extension - SEC-004 fail closed: refuse to emit verbatim.
-        # Write a single-line marker file so the operator sees the block.
-        dst.write_text(
-            f"[REDACTED] source extension {ext!r} not supported by executor; "
-            f"content withheld to prevent PHI leak.\n",
-            encoding="utf-8",
-        )
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    _os.replace(tmp, dst)
 
 
 # --- SEC-004: deterministic metadata (dictionary) redaction ---------------
