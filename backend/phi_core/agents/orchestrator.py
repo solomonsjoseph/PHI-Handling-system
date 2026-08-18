@@ -182,15 +182,21 @@ async def run_pipeline(
         return_exceptions=True,
     )
 
-    # Specialists: Lexicon must finish before Schema (Schema enriches its
-    # prompt with the dictionary columns). Instrument is independent.
+    # Specialists: independent of each other now that Schema no longer
+    # enriches its prompt from Lexicon's dictionary columns (Task 6 made
+    # Schema deterministic) -- Lexicon, Schema and Instrument all launch
+    # under one gather instead of Schema waiting on Lexicon.
     lexicon_agent = Lexicon(**common) if dict_files else None
+    schema_agent = Schema(**common) if dataset_files else None
     instrument_agent = Instrument(**common) if form_files else None
     lex_task = lexicon_agent.run(dict_files=dict_files) if lexicon_agent else _empty({"columns": []})
+    schema_task = schema_agent.run(dataset_files=dataset_files) if schema_agent else _empty({"columns": []})
     inst_task = instrument_agent.run(form_files=form_files) if instrument_agent else _empty({"fields": []})
-    lexicon = await lex_task
-    schema_task = Schema(**common).run(dataset_files=dataset_files, lexicon_columns=lexicon.get("columns", [])) if dataset_files else _empty({"columns": []})
-    schema, instrument = await asyncio.gather(schema_task, inst_task)
+    lexicon, schema, instrument = await asyncio.gather(lex_task, schema_task, inst_task)
+    # Carried forward for the site/facility cardinality rule. Fakes/mocks
+    # in tests never set `_stats`, so default to empty rather than assume
+    # a real Schema instance ran.
+    schema_stats = getattr(schema_agent, "_stats", {}) if schema_agent else {}
     prompt_scrub_counts = {
         "lexicon": lexicon_agent.scrub_count if lexicon_agent else 0,
         "instrument": instrument_agent.scrub_count if instrument_agent else 0,
