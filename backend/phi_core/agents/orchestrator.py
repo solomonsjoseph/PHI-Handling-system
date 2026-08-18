@@ -512,7 +512,8 @@ async def run_pipeline(
     # one stage before Publish Guard, mirroring the Judge/Sentinel split one
     # stage later. exec_out["exports"] stays Executor's own factual record
     # of what it wrote and is never mutated here; `exports` is the
-    # operator-filtered view every later step in this function uses.
+    # Operator-then-Reviewer-filtered view every later step in this
+    # function uses.
     await on_phase("operator", {"decision_count": len(approved_decisions)})
     op_out = await Operator(**common).run(files=files, decisions=approved_decisions,
                                           exports=exec_out["exports"])
@@ -569,11 +570,16 @@ async def run_pipeline(
                 "operator_failures": op_failed_ids,
             }},
         )
+        scout_task.cancel()
         cleanup_session_unpacked(sid)
         return {"status": "blocked", "guard": guard_report,
                 "decisions": approved_decisions, "phase_timings": _phase_timings}
 
-    await _check_cancel(db, sid, on_phase)
+    try:
+        await _check_cancel(db, sid, on_phase)
+    except PipelineCancelled:
+        scout_task.cancel()
+        raise
 
     # 6+7. Auditor (Scout already started earlier, in parallel with
     # Operator/Reviewer/Publish Guard). Ledger + Herald still need

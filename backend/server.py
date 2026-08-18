@@ -2273,7 +2273,8 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
 
             from phi_core.publish_guard import scan_all_exports as _scan_all_exports
             if exec_out["exports"]:
-                # `exports` (operator-filtered) is what actually gets scanned.
+                # `exports` (Operator-then-Reviewer-filtered) is what
+                # actually gets scanned.
                 # If Operator's checks wiped every file out of a non-empty
                 # Executor output, scan_all_exports naturally reports
                 # `blocked` on the resulting empty dict (scanned == 0) --
@@ -2309,6 +2310,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                     "reviewer_findings": rv_out["findings"],
 
                 }})
+                scout_task.cancel()
                 cleanup_session_unpacked(sid)
                 await _emit(sid, ProgressEvent(phase="blocked", message="publish guard blocked this run", percent=100.0), run_id=resume_run_id)
                 return
