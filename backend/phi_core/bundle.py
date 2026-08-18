@@ -581,6 +581,25 @@ def build_bundle(session: dict[str, Any], opts: BundleOptions,
             zf.writestr(arcname, data)
             file_hashes[arcname] = _sha256_of_bytes(data)
 
+        # Instrument's per-form field reports: structured extraction the
+        # agent produced, not row/cell content. Already scrubbed at write
+        # time (Instrument._write_reports), so this rides in unconditionally
+        # for every narrative file the session actually has, the way the
+        # rest of this loop assembles session artifacts -- no Publish Guard
+        # gating here, unlike the raw exported form text above.
+        from .paths import UPLOAD_DIR
+        sid_dir = UPLOAD_DIR / sid
+        for file_id, meta in files_meta.items():
+            if meta.get("kind") != "narrative":
+                continue
+            report_path = sid_dir / f"instrument_report_{file_id}.json"
+            if not report_path.exists():
+                continue
+            data = report_path.read_bytes()
+            arcname = f"safe_to_share/forms/instrument_report_{file_id}.json"
+            zf.writestr(arcname, data)
+            file_hashes[arcname] = _sha256_of_bytes(data)
+
         from .crypto import sign_bytes, signing_public_key_pem
         att = _attestation_payload(session, file_hashes)
         pubkey_pem = signing_public_key_pem()
