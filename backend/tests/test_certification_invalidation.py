@@ -436,9 +436,8 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
 @pytest.mark.asyncio
 async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatch):
     """A resumed tail emits phase events and exposes its measured timings."""
-    import phi_core.agents.outward as outward
-    import phi_core.agents.reasoning as reasoning
-    import phi_core.paths as paths
+    from phi_core.agents import outward, reasoning
+    from phi_core import paths
     import server as srv
 
     db = _ConditionalStubDB({
