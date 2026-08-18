@@ -196,7 +196,7 @@ async def run_pipeline(
     # Carried forward for the site/facility cardinality rule. Fakes/mocks
     # in tests never set `_stats`, so default to empty rather than assume
     # a real Schema instance ran.
-    schema_stats = getattr(schema_agent, "_stats", {}) if schema_agent else {}
+    schema_stats = getattr(schema_agent, "_stats", {}) if schema_agent else {}  # noqa: F841
     prompt_scrub_counts = {
         "lexicon": lexicon_agent.scrub_count if lexicon_agent else 0,
         "instrument": instrument_agent.scrub_count if instrument_agent else 0,
