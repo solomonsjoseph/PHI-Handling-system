@@ -20,10 +20,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..file_readers import iter_dataset_rows
 from .base import Agent
 from .batching import run_batched
 from .reasoning import _read_dataset_headers, _scrub_text_cell
-from ..file_readers import iter_dataset_rows
 
 
 def _cap_age_90_ok(value: str) -> bool:

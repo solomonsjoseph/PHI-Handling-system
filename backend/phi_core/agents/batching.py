@@ -7,7 +7,8 @@ of 5-10, so wallclock scales with ``total_checks / (pool_size * batch_size)``.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 
 async def run_batched(
@@ -16,7 +17,7 @@ async def run_batched(
     *,
     batch_size: int = 8,
     pool_size: int = 6,
-    on_batch: Optional[Callable[[int, list[dict]], Awaitable[None]]] = None,
+    on_batch: Callable[[int, list[dict]], Awaitable[None]] | None = None,
 ) -> list[dict]:
     """Check every item in ``items``, ``batch_size`` at a time, across a
     pool of at most ``pool_size`` concurrently running batches.
@@ -57,7 +58,7 @@ async def run_batched(
 
     batches = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
     semaphore = asyncio.Semaphore(pool_size)
-    slots: list[Optional[list[dict]]] = [None] * len(batches)
+    slots: list[list[dict] | None] = [None] * len(batches)
 
     async def run_one(index: int, batch: list[Any]) -> None:
         expected_count = len(batch)
