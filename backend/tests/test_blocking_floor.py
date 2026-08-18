@@ -1,3 +1,7 @@
+import asyncio
+
+import pytest
+
 from phi_core.agents.reasoning import BLOCKING_ISSUE_FLOOR, apply_blocking_floor
 
 
@@ -44,11 +48,6 @@ def test_missing_key_defaults_to_zero_attempts():
     out, overrides = apply_blocking_floor([_decide()], {})
     assert out[0]["action"] == "keep"
     assert overrides == []
-
-
-import asyncio
-
-import pytest
 
 
 def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_issue_column="col"):
