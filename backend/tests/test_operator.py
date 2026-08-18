@@ -726,6 +726,23 @@ def test_header_only_export_does_not_block_decisions(tmp_path):
     assert result["status"] == "clean"
 
 
+def test_zero_decision_file_missing_from_exports_is_not_silently_invisible(tmp_path):
+    """A dataset file with zero decisions at all (e.g. Schema couldn't read
+    its headers) that ALSO failed to write (Executor's write raised, so it
+    never reached exports) must not vanish with no verdict and no audit
+    trail -- it has to land in failed_file_ids so the session status
+    reflects the loss rather than reporting a false 'complete'."""
+    files = [_dataset_file("f1")]
+    decisions: list[dict] = []  # no decision ever named this file
+    exports: dict[str, str] = {}  # and Executor never wrote it either
+
+    op = Operator(session_id="s", llm=None, db=FakeDb())
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    assert result["failed_file_ids"] == ["f1"]
+    assert result["status"] == "issues"
+
+
 # ---- Task 28: Operator wired between Executor and Publish Guard -----------
 
 

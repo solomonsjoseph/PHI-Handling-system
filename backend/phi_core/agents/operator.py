@@ -259,13 +259,15 @@ class Operator(Agent):
             fid = d.get("file_id", "")
             if fid in dataset_ids or fid not in files_by_id:
                 by_file.setdefault(fid, []).append(d)
-        # A dataset file Executor wrote with zero decisions at all (every
-        # column fell through Executor's fail-closed default) must still
-        # go through reverse completeness below -- seed it with an empty
-        # group rather than skipping it because no decision named it.
+        # A dataset file with zero decisions at all (Schema couldn't read
+        # its headers, or Executor never got a decision for it) must
+        # still be surfaced -- seeded unconditionally, not only when it
+        # made it into exports, so a file that ALSO failed to write (a
+        # write exception, never reaching exports) still lands in
+        # failed_file_ids below instead of vanishing with no verdict and
+        # no audit trail.
         for fid in dataset_ids:
-            if fid in exports:
-                by_file.setdefault(fid, [])
+            by_file.setdefault(fid, [])
 
         views: dict[str, dict[str, Any] | None] = {}
         failed_file_ids: list[str] = []
