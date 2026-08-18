@@ -601,14 +601,22 @@ class Judge(Agent):
             f"Lexicon columns (dictionary): {lexicon}\n"
         )
         if praxis:
-            # Praxis-recommended technique per HIPAA identifier category,
-            # web-sourced where possible. Judge uses these to pick the
-            # correct `action` value below rather than reasoning from
-            # scratch.
-            praxis_summary = {c: {"technique": m.get("technique"),
-                                  "utility_preserving": m.get("utility_preserving")}
-                              for c, m in praxis.items() if m}
-            prompt += (f"\nPraxis methods (current best-practice technique per HIPAA "
+            # Praxis reports candidates. Judge still chooses an action, but
+            # sees every candidate name and whether any preserves utility.
+            praxis_summary = {
+                category: {
+                    "methods": [
+                        method.get("name") for method in result.get("methods", [])
+                        if method.get("name")
+                    ],
+                    "utility_preserving": any(
+                        method.get("utility_preserving", False)
+                        for method in result.get("methods", [])
+                    ),
+                }
+                for category, result in praxis.items() if result
+            }
+            prompt += (f"\nPraxis methods (current candidate methods per HIPAA "
                        f"identifier category): {praxis_summary}\n")
         if prior_feedback:
             prompt += (

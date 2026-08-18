@@ -298,6 +298,8 @@ def build_report(
 
         praxis_entry = praxis_methods.get(gold_category) if gold_category else None
         schema_entry = schema_index.get(key)
+        first_praxis_method = ((praxis_entry or {}).get("methods") or [{}])[0]
+
 
         cells = planted_by_col.get(key, [])
         cells_total = len(cells)
@@ -328,8 +330,8 @@ def build_report(
             "confidence": dec.get("confidence") if dec else None,
             "schema_confidence": schema_entry.get("confidence") if schema_entry else None,
             "schema_category": schema_entry.get("candidate_phi_category") if schema_entry else None,
-            "praxis_technique": (praxis_entry or {}).get("technique") if praxis_entry else None,
-            "praxis_utility_preserving": (praxis_entry or {}).get("utility_preserving") if praxis_entry else None,
+            "praxis_technique": first_praxis_method.get("name"),
+            "praxis_utility_preserving": first_praxis_method.get("utility_preserving"),
             "decided_by": decided_by,
             "verdict": verdict,
             "method_exact": action == gold_expected_action,
