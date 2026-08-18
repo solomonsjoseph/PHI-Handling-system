@@ -1910,7 +1910,8 @@ class HumanReviewSubmit(BaseModel):
 @app.post("/api/sessions/{sid}/human-review")
 async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str = Depends(resolve_principal)):
     """Operator resolves human_review decisions conversationally and resumes
-    the pipeline tail (Executor -> Auditor -> Scout -> Ledger -> Herald).
+    the pipeline tail (Executor -> Operator -> Reviewer -> Publish Guard ->
+    Auditor/Scout -> Ledger -> Herald).
 
     Three resolution modes per column:
       - approve: apply the server's own suggested_action (Judge's original
@@ -1936,6 +1937,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     )
     from phi_core.agents.outward import Scout, Ledger, Herald
     from phi_core.agents.operator import Operator
+    from phi_core.agents.reviewer import Reviewer
     from phi_core.paths import cleanup_session_unpacked
     from phi_core.security import scrub_persisted_text
 
@@ -2235,6 +2237,12 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
 
             exec_out = await Executor(**common).run(files=files, decisions=scrubbed_decisions, omit_by_file=omit_by_file)
 
+            # Scout has no dependency on Operator, Reviewer, Publish Guard,
+            # or Auditor, so it starts here and runs in the background
+            # across all of them; only Ledger needs its result.
+            scout_agent = Scout(**common)
+            scout_task = asyncio.create_task(scout_agent.run())
+
             await timed_on_phase("operator", {"decision_count": len(scrubbed_decisions)})
             op_out = await Operator(**common).run(files=files, decisions=scrubbed_decisions,
                                                   exports=exec_out["exports"], omit_by_file=omit_by_file)
@@ -2247,6 +2255,21 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                                    {v["file_id"] for v in op_out["verdicts"] if v.get("verdict") == "fail"})
             exports = {fid: p for fid, p in exec_out["exports"].items()
                       if fid not in op_failed_ids}
+
+            # Reviewer: confirms Operator's coverage of every decision
+            # against the real written export, catching gaps Operator's
+            # own pass cannot see. Its own filtered exports become
+            # canonical for every remaining step below, starting with
+            # Publish Guard.
+            await timed_on_phase("reviewer", {"decision_count": len(scrubbed_decisions)})
+            rv_out = await Reviewer(**common).run(
+                decisions=scrubbed_decisions,
+                operator_result={"failed_file_ids": op_failed_ids, "verdicts": op_out["verdicts"]},
+                exports=exports,
+                omit_by_file=omit_by_file,
+            )
+            reviewer_blocked_ids = sorted(set(exports) - set(rv_out["exports"]))
+            exports = rv_out["exports"]
 
             from phi_core.publish_guard import scan_all_exports as _scan_all_exports
             if exec_out["exports"]:
@@ -2283,15 +2306,32 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                     "phase_timings": phase_timings,
                     "run_elapsed_s": round(time.perf_counter() - run_started, 3),
                     "operator_failures": op_failed_ids,
+                    "reviewer_findings": rv_out["findings"],
 
                 }})
                 cleanup_session_unpacked(sid)
                 await _emit(sid, ProgressEvent(phase="blocked", message="publish guard blocked this run", percent=100.0), run_id=resume_run_id)
                 return
             await timed_on_phase("auditor_scout", {})
-
-            audit = await Auditor(**common).run(decisions=scrubbed_decisions, exports=exports, files=files)
-            scout = await Scout(**common).run()
+            auditor_agent = Auditor(**common)
+            audit, scout = await asyncio.gather(
+                auditor_agent.run(decisions=scrubbed_decisions, exports=exports, files=files),
+                scout_task,
+                return_exceptions=True,
+            )
+            # Auditor/Scout are presentational (Publish Guard already gated
+            # the export above); an unhandled exception here must not crash
+            # a run that already succeeded. Log it and fall back to a
+            # report that visibly says "not verified" rather than claiming
+            # a clean audit it never performed.
+            if isinstance(audit, Exception):
+                await auditor_agent._log("auditor.crashed", "info",
+                                          {"error": f"{type(audit).__name__}: {audit}"})
+                audit = {"verdict": "issues", "issues": [{"file": "", "problem": "Auditor crashed; not verified"}],
+                         "metrics": {}, "summary": "Auditor raised an exception; audit not performed."}
+            if isinstance(scout, Exception):
+                await scout_agent._log("scout.crashed", "info", {"error": f"{type(scout).__name__}: {scout}"})
+                scout = {}
             await timed_on_phase("ledger", {})
 
             ledger = await Ledger(**common).run(decisions=scrubbed_decisions, audit=audit, scout=scout, benchmark_result=None)
@@ -2302,7 +2342,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             await close_last_phase()
             run_elapsed_s = round(time.perf_counter() - run_started, 3)
 
-            final_status = "partially_complete" if (pending_review or op_failed_ids) else "complete"
+            final_status = "partially_complete" if (pending_review or op_failed_ids or reviewer_blocked_ids) else "complete"
             completion_update = {
                 "$set": {
                     "agent_audit": audit,
@@ -2318,6 +2358,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                     "phase_timings": phase_timings,
                     "run_elapsed_s": run_elapsed_s,
                     "operator_failures": op_failed_ids,
+                    "reviewer_findings": rv_out["findings"],
 
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 },

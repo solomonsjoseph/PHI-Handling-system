@@ -923,3 +923,198 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
     assert completion_update["status"] == "partially_complete"
     assert completion_update["operator_failures"] == ["f1"]
     assert completion_update["export_paths"] == {"f2": str(good_export)}
+
+
+# ---- Task 30: Reviewer wired between Operator and Publish Guard -----------
+
+
+def test_run_pipeline_reviewer_only_finding_excludes_file_and_ends_partially_complete(tmp_path, monkeypatch):
+    """Full-pipeline-shaped proof that Reviewer's own coverage check, not
+    Operator's, is what excludes a file from the final export.
+
+    f1 gets two Judge decisions naming the same column ('field', both
+    'drop') -- Operator processes decisions one-for-one and verifies each
+    independently, so a duplicate decision on an already-empty column
+    still verifies clean and Operator reports zero failures for f1. Only
+    Reviewer's independent recount (2 decisions vs. 1 real written
+    column) catches the coverage_mismatch. f2 has one matching decision
+    and is unaffected.
+
+    The real Operator and real Reviewer both run; every other agent is a
+    fake double, mirroring the Task 28 proof test above.
+    """
+    from phi_core.agents import orchestrator
+
+    f1_export = tmp_path / "f1_export.csv"
+    _write_csv(f1_export, ["field"], [[""]])  # dropped column: empty cell
+    f2_export = tmp_path / "f2_export.csv"
+    _write_csv(f2_export, ["field"], [[""]])  # dropped column: empty cell
+
+    class FakeSessions:
+        def __init__(self):
+            self.updates = []
+
+        async def find_one(self, *_args, **_kwargs):
+            return None
+
+        async def update_one(self, *_args, **_kwargs):
+            self.updates.append(_args[1])
+
+    class FakeAgentLog:
+        async def insert_one(self, *_args, **_kwargs):
+            return None
+
+    class FakeDb:
+        def __init__(self):
+            self.sessions = FakeSessions()
+            self.agent_log = FakeAgentLog()
+
+    class FakeStatute:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {}
+
+    class FakePraxis:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def method_for(self, _category):
+            return {}
+
+    class FakeLexicon:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {"columns": []}
+
+    class FakeInstrument(FakeLexicon):
+        async def run(self, **_kwargs):
+            return {"fields": []}
+
+    class FakeSchema(FakeLexicon):
+        pass
+
+    class FakeJudge:
+        def __init__(self, **_kwargs):
+            self.call_failures = 0
+            self.last_message_id = None
+
+        async def run(self, **_kwargs):
+            return {"decisions": [
+                {"file_id": "f1", "column": "field", "action": "drop",
+                 "phi_category": "G", "citation": "45 CFR 164.514(b)(2)(i)(G)",
+                 "confidence": 0.95, "reason": "Judge decision"},
+                {"file_id": "f1", "column": "field", "action": "drop",
+                 "phi_category": "G", "citation": "45 CFR 164.514(b)(2)(i)(G)",
+                 "confidence": 0.95, "reason": "Judge decision (duplicate)"},
+                {"file_id": "f2", "column": "field", "action": "drop",
+                 "phi_category": "G", "citation": "45 CFR 164.514(b)(2)(i)(G)",
+                 "confidence": 0.95, "reason": "Judge decision"},
+            ]}
+
+    class FakeSentinel:
+        def __init__(self, **_kwargs):
+            self.call_failures = 0
+
+        async def run(self, **_kwargs):
+            return {"issues": []}
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {"exports": {"f1": str(f1_export), "f2": str(f2_export)}}
+
+    class FakeAuditor:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def _log(self, *_args, **_kwargs):
+            return None
+
+        async def run(self, **_kwargs):
+            return {"verdict": "clean", "issues": [], "metrics": {}, "summary": "ok"}
+
+    class FakeScout:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {}
+
+    class FakeLedger:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {}
+
+    class FakeHerald:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {}
+
+    monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
+    monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
+    monkeypatch.setattr(orchestrator, "Lexicon", FakeLexicon)
+    monkeypatch.setattr(orchestrator, "Instrument", FakeInstrument)
+    monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
+    monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
+    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
+    monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
+    monkeypatch.setattr(orchestrator, "Scout", FakeScout)
+    monkeypatch.setattr(orchestrator, "Ledger", FakeLedger)
+    monkeypatch.setattr(orchestrator, "Herald", FakeHerald)
+
+    phase_events = []
+
+    async def emit(_message):
+        return None
+
+    async def on_phase(phase, payload):
+        phase_events.append((phase, payload))
+
+    db = FakeDb()
+    result = asyncio.run(orchestrator.run_pipeline(
+        {
+            "id": "session",
+            "files": [
+                {"kind": "dataset", "file_id": "f1", "subtype": "csv", "stored_path": str(f1_export)},
+                {"kind": "dataset", "file_id": "f2", "subtype": "csv", "stored_path": str(f2_export)},
+            ],
+        },
+        db,
+        object(),
+        emit,
+        on_phase,
+    ))
+
+    # Operator itself reported this file clean: no fail verdict, not in
+    # failed_file_ids -- the exclusion is Reviewer's finding alone.
+    assert result["operator_failures"] == []
+
+    assert "f1" not in result["exports"]
+    assert result["exports"] == {"f2": str(f2_export)}
+
+    reviewer_findings = result["reviewer_findings"]
+    assert any(f["kind"] == "coverage_mismatch" and f["file_id"] == "f1"
+               for f in reviewer_findings)
+    assert not any(f["file_id"] == "f2" for f in reviewer_findings)
+
+    assert result["status"] == "partially_complete"
+
+    reviewer_events = [e for e in phase_events if e[0] == "reviewer"]
+    assert len(reviewer_events) == 1
+
+    completion_update = db.sessions.updates[-1]["$set"]
+    assert completion_update["status"] == "partially_complete"
+    assert completion_update["export_paths"] == {"f2": str(f2_export)}
+    assert any(f["kind"] == "coverage_mismatch" and f["file_id"] == "f1"
+               for f in completion_update["reviewer_findings"])

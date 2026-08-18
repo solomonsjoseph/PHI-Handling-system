@@ -32,6 +32,7 @@ from .experts import Praxis, Statute
 from .llm import LlmConfig
 from .manager import Manager
 from .operator import Operator
+from .reviewer import Reviewer
 from .outward import Herald, Ledger, Scout
 from .reasoning import (
     Auditor,
@@ -501,6 +502,12 @@ async def run_pipeline(
     await on_phase("executor", {"decision_count": len(approved_decisions)})
     exec_out = await Executor(**common).run(files=files, decisions=approved_decisions)
 
+    # Scout has no dependency on Operator, Reviewer, Publish Guard, or
+    # Auditor, so it starts here and runs in the background across all of
+    # them; only Ledger/Herald actually need its result.
+    scout_agent = Scout(**common)
+    scout_task = asyncio.create_task(scout_agent.run())
+
     # 5a. Operator: deterministic self-verification of what Executor wrote,
     # one stage before Publish Guard, mirroring the Judge/Sentinel split one
     # stage later. exec_out["exports"] stays Executor's own factual record
@@ -518,9 +525,24 @@ async def run_pipeline(
                            {v["file_id"] for v in op_out["verdicts"] if v.get("verdict") == "fail"})
     exports = {fid: p for fid, p in exec_out["exports"].items()
               if fid not in op_failed_ids}
-    final_status = "partially_complete" if op_failed_ids else "complete"
 
-    # 5b. Publish Guard: deterministic last-mile PHI scan on emitted exports.
+    # 5b. Reviewer: confirms Operator's coverage of every decision against
+    # the real written export, catching gaps Operator's own pass cannot see
+    # (e.g. an omit_by_file column that leaked into the header). Its own
+    # filtered exports become canonical for every remaining step below,
+    # starting with Publish Guard.
+    await on_phase("reviewer", {"decision_count": len(approved_decisions)})
+    rv_out = await Reviewer(**common).run(
+        decisions=approved_decisions,
+        operator_result={"failed_file_ids": op_failed_ids, "verdicts": op_out["verdicts"]},
+        exports=exports,
+        omit_by_file=None,
+    )
+    reviewer_blocked_ids = sorted(set(exports) - set(rv_out["exports"]))
+    exports = rv_out["exports"]
+    final_status = "partially_complete" if (op_failed_ids or reviewer_blocked_ids) else "complete"
+
+    # 5c. Publish Guard: deterministic last-mile PHI scan on emitted exports.
     # GOAL invariant: exports are only 'ready to share publicly' after this
     # boundary check clears. Runs synchronously; downloads are 403 until clean.
     from ..publish_guard import scan_all_exports as _scan_all_exports
@@ -543,6 +565,7 @@ async def run_pipeline(
                 "run_elapsed_s": round(time.perf_counter() - _run_started, 3),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "manager_report": manager_report,
+                "reviewer_findings": rv_out["findings"],
                 "operator_failures": op_failed_ids,
             }},
         )
@@ -552,15 +575,14 @@ async def run_pipeline(
 
     await _check_cancel(db, sid, on_phase)
 
-    # 6+7. Auditor and Scout in parallel (Scout has no dependency on
-    # Auditor). Ledger + Herald still need Auditor's metrics + Scout's
-    # landscape so they wait on both.
+    # 6+7. Auditor (Scout already started earlier, in parallel with
+    # Operator/Reviewer/Publish Guard). Ledger + Herald still need
+    # Auditor's metrics + Scout's landscape so they wait on both here.
     await on_phase("auditor_scout", {})
     auditor_agent = Auditor(**common)
-    scout_agent = Scout(**common)
     audit, scout, benchmark = await asyncio.gather(
         auditor_agent.run(decisions=approved_decisions, exports=exports, files=files),
-        scout_agent.run(),
+        scout_task,
         _empty(None),   # placeholder for future synthetic benchmark run
         return_exceptions=True,
     )
@@ -611,6 +633,7 @@ async def run_pipeline(
         "iteration_cap": iteration_cap,
         "manager_report": manager_report,
         "operator_failures": op_failed_ids,
+        "reviewer_findings": rv_out["findings"],
     }
     completion_update = {
         "$set": {
@@ -628,6 +651,7 @@ async def run_pipeline(
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "manager_report": manager_report,
             "operator_failures": op_failed_ids,
+            "reviewer_findings": rv_out["findings"],
         },
     }
     await db.sessions.update_one(session_filter, completion_update)
