@@ -169,9 +169,12 @@ def column_value_stats(
         positions = {_table_column_key(header): index for index, header in enumerate(headers)}
         distinct_values = {column: set() for column in columns}
         row_counts = {column: 0 for column in columns}
+        tracked_columns = [
+            (column, positions.get(_table_column_key(column)), distinct_values[column])
+            for column in distinct_values
+        ]
         for row in islice(table_rows, max_rows):
-            for column, values in distinct_values.items():
-                index = positions.get(_table_column_key(column))
+            for column, index, values in tracked_columns:
                 if index is None:
                     continue
                 row_counts[column] += 1
