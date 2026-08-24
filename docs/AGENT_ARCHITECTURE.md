@@ -11,7 +11,7 @@ The browser clients create and upload sessions through FastAPI. `Wizard.jsx` sta
 ```mermaid
 flowchart LR
     Wizard["Wizard.jsx"] -->|"POST /api/sessions: session configuration; POST intake: ZIP bytes"| Server["FastAPI server.py"]
-    Wizard -->|"POST /api/sessions/{sid}/handle?iteration_cap=1..3: launch control"| Server
+    Wizard -->|"POST /api/sessions/{sid}/handle?iteration_cap=1..3"| Server
     Detail["SessionDetail.jsx"] -->|"GET session, results, trace: refetched JSON"| Server
     Detail -->|"GET /api/sessions/{sid}/stream, 15 s heartbeat, closes on __end__"| Server
     Server -->|"SSE progress event; client discards payload and refetches"| Detail
@@ -24,7 +24,7 @@ flowchart LR
     subgraph Boundary["Untrusted boundary"]
         Providers["LLM providers"]
     end
-    Pool -->|"provider HTTPS: agent-specific prompts, including column headers + scrubbed dictionary text only"| Providers
+    Pool -->|"column headers + scrubbed dictionary text only"| Providers
     Providers -->|"provider HTTPS: text or JSON replies and web citations"| Pool
     Pipeline -->|"in-process writes: transformed dataset, redacted metadata, narrative output"| Exports["export directory"]
     Detail -->|"GET export or bundle: authenticated request"| Server
@@ -32,6 +32,8 @@ flowchart LR
     Server -->|"assemble bundle: export paths, reports, requested publication options"| Bundle["bundle"]
     Exports -->|"export files selected by pipeline"| Bundle
 ```
+
+The handle request launches the pipeline with a valid `iteration_cap` from 1 through 3. Provider prompts vary by agent: the displayed projection is the Lexicon and Instrument data-bearing prompt boundary; Statute, Praxis, Scout, Ledger, Herald, and Manager use their narrower work inputs.
 
 The SSE stream is a change notification, not a state transport. `SessionDetail.jsx` registers `onmessage = () => refresh()`, so the displayed session, results, and trace are fetched through HTTP after a message. `server.py` emits a comment heartbeat after 15 seconds without a queued event and ends the stream when the phase is `"__end__"`. Sources: Code anchors "SSE route" and "Session-detail SSE client".
 
@@ -80,13 +82,15 @@ flowchart TB
         Sentinel["Sentinel"]
         Escalate["apply Sentinel escalations and count blocking issues"]
         BlockingFloor["apply_blocking_floor; summarise feedback"]
+        Reiteration{"iteration < max_iterations?"}
         Consult["Manager consult"]
         Judge --> Validate --> HardRules --> Sentinel --> Escalate --> BlockingFloor
-        BlockingFloor -->|"blocking issues remain and iteration < max(iteration_cap, 3)"| Judge
         BlockingFloor -->|"no blocking issues, break at orchestrator.py:405"| PostLoop
         BlockingFloor -->|"iteration >= iteration_cap and every blocking column hit the floor, :406-419"| PostLoop
-        BlockingFloor --> Consult
-        Consult -->|"continue with feedback and iteration < max_iterations"| Judge
+        BlockingFloor -->|"blocking issues remain"| Reiteration
+        Reiteration -->|"iteration >= max_iterations, post-loop exit"| PostLoop
+        Reiteration -->|"iteration < max_iterations"| Consult
+        Consult -->|"continue; blocking issues remain and iteration < max(iteration_cap, 3)"| Judge
     end
     Attach --> Judge
     PraxisFailures --> Judge
@@ -97,13 +101,14 @@ flowchart TB
     Pause -->|"tail only, Executor onward, new _pipeline_run_id"| Executor
     HumanGate -->|"no human-review predicate"| Executor["Executor; persist reversal_key_blob separately"]
     Executor --> Scout["start Scout background task"]
+    Executor --> Operator
 
     subgraph Verification["Execution and verification"]
         Operator["Operator"]
         OperatorDrop["file dropped from exports, final_status = partially_complete"]
         Reviewer["Reviewer replaces exports with filtered view"]
         ReviewerConsult["advisory Manager consult for Reviewer"]
-        Scout --> Operator --> OperatorDrop --> Reviewer --> ReviewerConsult
+        Operator --> OperatorDrop --> Reviewer --> ReviewerConsult
     end
     ReviewerConsult -->|"coverage advisory escalation"| Pause
 
@@ -120,7 +125,9 @@ flowchart TB
         Ledger["Ledger"]
         Herald["Herald"]
         Complete["close_run; persist completion; cleanup only when complete"]
-        Guard -->|"clean"| AuditScout --> AuditAdvice
+        Guard -->|"clean"| AuditScout
+        Scout --> AuditScout
+        AuditScout --> AuditAdvice
         AuditAdvice -->|"human review required"| Pause
         AuditAdvice -->|"no escalation"| Ledger --> Herald --> Complete
     end
@@ -130,34 +137,37 @@ The loop performs the listed deterministic transformations before Sentinel sees 
 
 ## Inside one agent (Level 2) and the per-agent contract
 
-This level describes LLM-backed calls made through the base class. Schema, Executor, Operator, and Reviewer do not take this call path because their `PROMPT` is empty and their work is deterministic.
+This level shows the `call_json` path used by LLM-backed agents. Schema, Executor, Operator, and Reviewer do not take this path because their `PROMPT` is empty and their work is deterministic.
 
 ```mermaid
 flowchart TB
     Projection["Scoped projection prepared by caller"] --> Scrub["Call-site scrub where implemented"]
-    Scrub --> Call["Agent.call"]
+    Scrub --> JsonCall["call_json with declared default"]
+    JsonCall --> Call["Agent.call"]
+    JsonCall -. "passes _json_validator when requested" .-> Validator["_json_validator: invalid_output or off_task counts"]
     Call --> Managed{"Manager attached?"}
     Managed -->|"yes"| Supervised["run_supervised attempt: retry, timeout extension, web-search grant, or escalate"]
     Managed -->|"no"| Single["one plain provider attempt"]
-    Supervised --> Raw["raw reply or empty string on terminal failure"]
-    Single --> Raw
-    Raw --> Parse["parse_json in call_json"]
-    Call -. "validator passed to supervised attempt" .-> Validator["_json_validator: invalid_output or off_task counts"]
     Validator -. "accept or failure kind" .-> Supervised
+    Supervised -->|"reply or terminal empty string"| JsonResult["call_json receives reply or empty string"]
+    Single -->|"provider reply"| JsonResult
+    Single -->|"timeout increments call_failures and returns empty string"| JsonResult
+    Single -->|"provider exception"| Propagate["exception propagates to caller"]
+    JsonResult --> Parse["parse_json"]
     Parse --> Output["parsed output"]
-    Parse -->|"parse failure or empty reply"| Default["agent-declared default"]
+    Parse -->|"parse failure or empty string"| Default["declared default"]
 ```
 
-`Agent.call` logs scrubbed prompt and reply text to `agent_log`, but it passes its original `user_prompt` to the provider. The effective outbound control is therefore any caller-specific scrub, such as Lexicon's dictionary-row scrub and Instrument's tier-2 form-text scrub. A supervised failure returns an empty string after Manager exhaustion, then `call_json` parses that result to its caller-declared default. Sources: Code anchors "Base agent", "Prompt scrubbing call sites", and "Manager".
+`Agent.call` logs scrubbed prompt and reply text to `agent_log`, but it passes its original `user_prompt` to the provider. The effective outbound control is therefore any caller-specific scrub, such as Lexicon's dictionary-row scrub and Instrument's tier-2 form-text scrub. Only `call_json` applies `parse_json` and its declared default after a reply or an empty string. An unmanaged `Agent.call` timeout returns `""`; an unmanaged provider exception propagates. A supervised terminal failure returns `""` after Manager exhaustion. Sources: Code anchors "Base agent", "Prompt scrubbing call sites", and "Manager".
 
 ### Per-agent contracts
 
 #### Lexicon
 
-- Indexes every dictionary row, asks for gists in batches, and returns `{"columns": [...], "notes": ""}`.
+- Indexes every documented dictionary row with a nonblank name, asks for gists in batches, and returns `{"columns": [...], "notes": ""}`.
 - Reads dictionary files, then sends only one or more already-scrubbed dictionary rows to an LLM. A guardian query reads only that indexed column row.
 - Returns column entries with `name`, `description`, `phi_flag_hint`, `clinical_utility`, and `notes`; guardian answers have `verdict`, `explanation`, and `citation`.
-- Leaves a row gist blank after a missing or short gist reply. A guardian query for an absent column returns `not_in_dictionary`; an invalid reply becomes `corrected` with empty explanation and citation.
+- Logs a `lexicon.blank_name` skip for blank-name rows. A missing or short gist reply leaves a nonblank row's gist blank; an absent guardian query returns `not_in_dictionary`, and an invalid reply becomes `corrected` with empty explanation and citation.
 
 Source: Code anchors "Lexicon".
 
@@ -229,7 +239,7 @@ Source: Code anchors "Executor".
 - Independently re-derives expected actions and reports final audit findings and metrics.
 - Uses per-column names, categories, actions, per-file counts, regulation text, Praxis methods, file metadata, and export IDs. It explicitly excludes row values.
 - Returns `verdict`, `issues`, `metrics`, `confidence`, and `summary`.
-- Defaults to `{"verdict": "issues", "issues": [], "metrics": {}, "confidence": 0.0, "summary": ...}`. An exception gathered by the pipeline becomes an `issues` verdict, empty metrics, and confidence `0.0`.
+- Defaults to `{"verdict": "issues", "issues": [], "metrics": {}, "confidence": 0.0, "summary": "Auditor call failed; treated as below the confidence floor."}`. An exception gathered by the pipeline becomes an `issues` verdict, empty metrics, and confidence `0.0`.
 
 Source: Code anchors "Auditor" and "Pipeline sequence".
 
@@ -264,8 +274,8 @@ Source: Code anchors "Herald and subagents".
 
 - Opens a charter, supervises LLM attempts, records consult advice, brokers guardian queries, escalates to human review, and closes a run report.
 - Uses fixed roles plus counts, enums, timings, and owed/delivered integers for supervision. Guardian broker calls receive a column or field name only to forward it to Schema, Instrument, or Lexicon.
-- Returns charter keys `opened_at`, `max_attempts`, `phase_plan`, and `assignments`; supervision returns a reply, success flag, and error kind; closeout reports outcome, phase and intervention counts, bounded histories, reused coaching, and escalation.
-- Collapses invalid, failed, or illegal `_decide` responses to the caller's default action. `consult` defaults to `continue`; a third failed supervised attempt returns no reply with `attempts_exhausted`.
+- Returns charter keys `opened_at`, `max_attempts`, `phase_plan`, and `assignments`; supervision returns a reply, success flag, and the original `error_kind`; closeout reports outcome, phase and intervention counts, bounded histories, reused coaching, and escalation.
+- Logs `action: "escalate"` and `reason: "attempts_exhausted"` on a third failed supervised attempt, while returning its original error kind with no reply. `_decide` failures or illegal actions use the caller's default; `consult` defaults to `continue`.
 
 Source: Code anchors "Manager" and "Base agent".
 
