@@ -12,6 +12,7 @@ from phi_core.agents.reasoning import (
     AUDITOR_CONFIDENCE_FLOOR,
     PseudonymRegistry,
     auditor_escalation_reason,
+    materialize_auditor_disagreements,
     plain_human_review_reasons,
 )
 from phi_core.crypto import decrypt_reversal_map, encrypt_reversal_map
@@ -182,3 +183,70 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
     assert "executor_crashed" in completion_update["human_review_reasons"]
     # The plain-English rendering must never leak the raw internal code.
     assert "executor_crashed" not in " ".join(completion_update["human_review_reasons_plain"])
+
+
+# ---- Auditor disagreements become resolvable decisions, not a dead end ---
+
+
+def test_materialize_auditor_disagreements_makes_a_resolvable_decision():
+    decisions = [
+        {"file_id": "f1", "column": "dob", "action": "drop", "phi_category": "C"},
+        {"file_id": "f1", "column": "age", "action": "cap_age_90", "phi_category": "C"},
+    ]
+    audit = {"confidence": 0.5, "issues": [
+        {"file": "f1.csv", "column": "dob", "problem": "should be year_only, not drop"},
+    ]}
+    out = materialize_auditor_disagreements(decisions, audit, {"dob": "date of birth"})
+
+    flagged = next(d for d in out if d["column"] == "dob")
+    untouched = next(d for d in out if d["column"] == "age")
+
+    assert flagged["action"] == "human_review"
+    assert flagged["stage"] == "auditor_final"
+    assert flagged["auditor_original_action"] == "drop"
+    assert flagged["suggested_action"] == "drop"  # approve = reaffirm, comment = override
+    assert flagged["reviewer_prompt"]  # populated via the standard plain-English builder
+    assert "0.5" not in flagged["reviewer_prompt"]  # no raw confidence number
+    assert untouched["action"] == "cap_age_90"  # only the flagged column changes
+
+
+def test_materialize_auditor_disagreements_is_a_noop_with_no_column_issues():
+    decisions = [{"file_id": "f1", "column": "dob", "action": "drop"}]
+    audit = {"confidence": 0.5, "issues": []}
+    out = materialize_auditor_disagreements(decisions, audit)
+    assert out == decisions
+
+
+# ---- verify_keep_decisions: an explicit human approval must stick -------
+
+
+def test_explicit_human_approval_of_keep_is_not_re_demoted(tmp_path):
+    """A hard-rule-forced 'keep' whose real values also match a detector
+    would loop forever without this exemption: every approval silently
+    reverted by the very next call. Reproduced live against the
+    level_1_tuberculosis corpus on 2026-08-24 before this fix landed."""
+    from phi_core.agents.reasoning import verify_keep_decisions
+
+    csv_path = tmp_path / "dataset.csv"
+    csv_path.write_text("state\nCalifornia\n", encoding="utf-8")
+
+    approved = [{"file_id": "f1", "column": "state", "action": "keep",
+                "provenance": "human_explicit_action", "confidence": 0.99}]
+    verified, demotions = verify_keep_decisions(approved, {"f1": csv_path}, jurisdiction="us")
+    assert verified[0]["action"] == "keep"
+    assert not demotions
+
+
+def test_model_comment_inferred_keep_is_still_scanned():
+    """The exemption is narrow: a model's guess at interpreting a comment
+    is not a person's direct confirmation, so it gets no special pass."""
+    from phi_core.agents.reasoning import verify_keep_decisions
+    import io
+
+    unscanned = [{"file_id": "f1", "column": "state", "action": "keep",
+                 "provenance": "human_comment_inferred", "confidence": 0.6}]
+    # Any nonexistent path triggers the "unreadable" demotion path, proving
+    # this decision was NOT skipped the way the exemption test's was.
+    verified, demotions = verify_keep_decisions(unscanned, {"f1": __import__("pathlib").Path("/no/such/file.csv")})
+    assert verified[0]["action"] == "human_review"
+    assert demotions

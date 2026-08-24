@@ -48,6 +48,7 @@ from .reasoning import (
     apply_sentinel_hard_rules,
     apply_site_cardinality_rule,
     BLOCKING_ISSUE_FLOOR,
+    materialize_auditor_disagreements,
     plain_human_review_reasons,
     validate_decisions,
     verify_keep_decisions,
@@ -681,10 +682,15 @@ async def run_pipeline(
     if audit_advice.action == "escalate_human_review" or auditor_reason:
         reasons = [r for r in ("manager_advisory_audit_escalation" if audit_advice.action == "escalate_human_review" else None,
                                auditor_reason) if r]
+        # Turn any per-column Auditor disagreement into a resolvable
+        # human_review decision, so this second review has an actual
+        # lever for the reviewer to pull rather than only a status flag
+        # that can be blindly resubmitted against a non-deterministic model.
+        approved_decisions = materialize_auditor_disagreements(approved_decisions, audit, dictionary_by_column)
         await db.sessions.update_one(session_filter, {"$set": {
             "guard_report": guard_report, "export_paths": exports,
             "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids,
-            "audit": audit,
+            "audit": audit, "agent_decisions": approved_decisions,
         }})
         return await manager.escalate_to_human_review(
             session_filter=session_filter, reasons=reasons,

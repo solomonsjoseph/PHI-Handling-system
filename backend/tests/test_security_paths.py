@@ -79,14 +79,42 @@ def session_id() -> str:
     return r.json()["id"]
 
 
+def _zip_with_evil_entry(evil_name: str) -> bytes:
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(evil_name, "hostile bytes")
+    return buf.getvalue()
+
+
 @pytest.mark.parametrize("evil", [
     "../../../.env",
     "/etc/passwd",
     "..\\..\\..\\backend\\.env",
-    "..",
-    "sub/dir.txt",
+    "../datasets/escaped.csv",
 ])
-def test_upload_rejects_evil_filename(session_id, evil):
-    files = {"file": (evil, io.BytesIO(b"hostile bytes"), "application/octet-stream")}
-    r = requests.post(f"{BASE_URL}/api/sessions/{session_id}/upload", files=files, timeout=10)
-    assert r.status_code == 400, r.text
+def test_intake_rejects_zip_with_evil_entry_path(session_id, evil):
+    """SEC-001, current endpoint: intake requires a .zip, so the attack
+    surface a stale filename check on a nonexistent /upload endpoint used
+    to cover has moved to the ZIP's *internal* entry paths (zip-slip).
+    `phi_core.intake.unpack_zip` rejects absolute paths and any ".."
+    component before a single byte is written to disk (see
+    `intake.py`, "unsafe path in zip"); this exercises that live, through
+    the real endpoint, rather than only the unit-level `sanitise_filename`
+    coverage above.
+
+    Replaces the old `test_upload_rejects_evil_filename`, which posted to
+    `/api/sessions/{sid}/upload` -- a route that no longer exists (intake
+    is `/api/sessions/{sid}/intake`, .zip-only, and never uses the
+    uploaded file's own name to build a path at all: the ZIP is always
+    stored server-side as a fixed "intake.zip"). That test could only ever
+    404, never actually exercising anything; the previously-\"passing\"
+    parametrized cases were a false sense of security about live coverage
+    of this attack class.
+    """
+    files = {"file": ("intake.zip", io.BytesIO(_zip_with_evil_entry(evil)), "application/zip")}
+    r = requests.post(f"{BASE_URL}/api/sessions/{session_id}/intake", files=files, timeout=10)
+    assert r.status_code == 200, r.text  # intake always 200s; failure is in the manifest body
+    body = r.json()
+    assert body["status"] == "failed", body
+    assert body["exit_code"] == 2, body

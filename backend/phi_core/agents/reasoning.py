@@ -16,6 +16,7 @@ from ..file_readers import iter_dataset_rows, read_narrative
 from ..jurisdictions import get_pack
 from ..paths import EXPORT_DIR
 from ..publish_guard import should_fire
+from ..security import scrub_persisted_text
 from .base import Agent
 
 
@@ -199,6 +200,8 @@ def _escalation_reason_phrase(d: dict[str, Any]) -> str:
         return "the underlying data could not be read to check this column, so it needs a human look"
     if reason.startswith("Keep verification:"):
         return "a check of the actual values in this column found something that looked identifying"
+    if reason.startswith("Auditor disagreement:"):
+        return "the final independent check thinks a different action is required by the rule for this column"
     return "the automated review could not finish deciding on its own"
 
 
@@ -729,6 +732,19 @@ def verify_keep_decisions(
     more specific evidence wins over the generic one. A human_review
     decision whose suggested_action is anything else (e.g. a forced
     'drop') never entered this function as a keep and is left alone.
+
+    Exemption: a decision whose `provenance` is exactly
+    `"human_explicit_action"` -- a person, under the actual-knowledge
+    attestation required by 45 CFR 164.514(b)(2)(ii), explicitly approved
+    this exact 'keep' -- is scanned once (to catch the case where they were
+    simply wrong) but not scanned again after they have already been asked
+    and confirmed. Without this, a hard-rule-forced 'keep' (e.g. a
+    clinical/stratifier column such as 'state' or 'diagnosis_code') that
+    also matches a row-value detector can never leave human_review: every
+    approval is silently re-demoted by the very next call, forever. This
+    exemption never applies to `"human_comment_inferred"` (a model's guess
+    at interpreting free text, not a person's direct confirmation) or to
+    a decision no person has looked at yet.
     """
     verified = list(decisions)
     demotions: list[dict[str, Any]] = []
@@ -737,6 +753,8 @@ def verify_keep_decisions(
     for index, decision in enumerate(decisions):
         file_id = decision.get("file_id")
         if file_id not in dataset_paths:
+            continue
+        if decision.get("provenance") == "human_explicit_action" and decision.get("action") == "keep":
             continue
         action = decision.get("action")
         began_as_keep = action == "keep" or (
@@ -1198,6 +1216,44 @@ def auditor_escalation_reason(audit: dict[str, Any]) -> str | None:
     return None
 
 
+def materialize_auditor_disagreements(decisions: list[dict[str, Any]], audit: dict[str, Any],
+                                      dictionary_by_column: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """Turn Auditor's per-column disagreement findings into resolvable
+    human_review decisions, distinct from Sentinel's pre-execution round.
+
+    Without this, a session can reach 'awaiting_human_review' on Auditor's
+    say-so with no per-column entry for a reviewer to act on -- resolving
+    nothing changes anything, and resubmitting only re-asks the same
+    question of a non-deterministic model. This routes the disagreement
+    through the same annotate_pending_review/_reviewer_prompt_for path
+    every other escalation uses, so the reviewer sees one more plain-
+    English question, not a dead end.
+
+    Matches by column name only (Auditor's findings carry a file name, not
+    a file_id) -- a real limitation in a multi-file study with a repeated
+    column name across files; both would be flagged. Acceptable for a
+    first pass; tracked as a follow-up, not silently ignored.
+    """
+    issues_by_column = {i["column"]: i for i in (audit.get("issues") or []) if i.get("column")}
+    if not issues_by_column:
+        return decisions
+    out = []
+    for d in decisions:
+        col = d.get("column")
+        issue = issues_by_column.get(col)
+        if issue and d.get("action") != "human_review":
+            d = dict(d)
+            d["suggested_action"] = d.get("action")
+            d["suggested_reason"] = d.get("reason") or ""
+            d["auditor_original_action"] = d.get("action")
+            d["action"] = "human_review"
+            d["stage"] = "auditor_final"
+            problem = scrub_persisted_text(str(issue.get("problem") or "")).strip()
+            d["reason"] = f"Auditor disagreement: {problem}" if problem else "Auditor disagreement:"
+        out.append(d)
+    return annotate_pending_review(out, dictionary_by_column)
+
+
 class Auditor(Agent):
     NAME = "Auditor"
     PROMPT = (
@@ -1236,7 +1292,7 @@ class Auditor(Agent):
             else:
                 b["transform"] += 1
             per_column.append({"file_id": fid, "column": d.get("column", ""),
-                               "hipaa_category": d.get("hipaa_category") or d.get("category"),
+                               "hipaa_category": d.get("phi_category") or d.get("hipaa_category") or d.get("category"),
                                "action_taken": a})
 
         file_meta = [{"file_id": f["file_id"], "name": f["original_name"], "component": f.get("component")} for f in files]

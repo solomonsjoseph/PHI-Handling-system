@@ -41,18 +41,42 @@ needs_backend = pytest.mark.skipif(not _backend_up(), reason="backend not reacha
 
 
 @needs_backend
-def test_human_review_requires_reviewer():
-    """Endpoint rejects when reviewer identity missing (GOAL invariant)."""
-    # Use a non-existent session id — the reviewer check runs before the
-    # session lookup, so we still see the 400 we want.
+def test_human_review_ignores_client_supplied_reviewer_field():
+    """GOAL invariant, current shape: every human decision carries a
+    reviewer identity, but that identity is the *authenticated principal*
+    from `resolve_principal`, never the client-supplied `reviewer` field
+    on the request body -- `HumanReviewSubmit.reviewer` is documented in
+    server.py as "unused; identity is the authenticated principal", a
+    deliberate hardening so a caller cannot spoof someone else's name as
+    the reviewer of record.
+
+    Replaces `test_human_review_requires_reviewer`, which expected a 400
+    when `body.reviewer` was empty. That expectation is stale: no code
+    path in `server.py` has validated `body.reviewer` since identity moved
+    to the authenticated principal, so it could never actually 400 for
+    that reason (the previous version of this test only ever exercised the
+    *session-not-found* 404 path and happened to also match its `assert
+    "reviewer" in r.text.lower()` check by coincidence against unrelated
+    404 text, masking that the reviewer-emptiness check itself was dead
+    code). This test instead proves an empty/garbage `body.reviewer` has
+    no effect on request handling: the request fails for the SAME reason
+    (session not found) as it would with any other value, since the field
+    is never inspected before that lookup runs.
+    """
     fake_sid = uuid.uuid4().hex
-    r = requests.post(
+    r_empty = requests.post(
         f"{BASE_URL}/api/sessions/{fake_sid}/human-review",
         json={"resolutions": [], "reviewer": "", "comment": "no reviewer"},
         timeout=10,
     )
-    assert r.status_code == 400, r.text
-    assert "reviewer" in r.text.lower()
+    r_spoofed = requests.post(
+        f"{BASE_URL}/api/sessions/{fake_sid}/human-review",
+        json={"resolutions": [], "reviewer": "someone.else@lab.edu", "comment": "no reviewer"},
+        timeout=10,
+    )
+    # Both fail identically (session not found) -- the reviewer field value
+    # never changes the outcome, proving it is genuinely inert.
+    assert r_empty.status_code == r_spoofed.status_code == 404, (r_empty.text, r_spoofed.text)
 
 
 @needs_backend

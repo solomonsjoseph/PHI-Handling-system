@@ -1935,6 +1935,17 @@ class HumanReviewSubmit(BaseModel):
     resolutions: list[dict]
     reviewer: str = ""        # unused; identity is the authenticated principal
     comment: str = ""         # optional submission-level note for the audit trail
+    # Auditor's confidence-floor gate (design doc "second human review") can
+    # fire with zero actionable per-column issues -- just a bare self-
+    # reported number below the floor. There is no per-column decision to
+    # resolve in that case, so approve/comment/defer cannot clear it. This
+    # is the explicit lever: a reviewer who has read Auditor's full summary
+    # and metrics (surfaced in plain English) and decides to proceed anyway
+    # sets this, under the same accountability gate as any other
+    # human decision here (actual_knowledge_ack required). It has no effect
+    # when Auditor has real per-column issues -- those still require
+    # resolving through `resolutions` like any other human_review decision.
+    confirm_auditor_confidence: bool = False
     # HHS §164.514(b)(2)(ii) "actual knowledge" attestation. IRB-required
     # procedural step separate from the technical Safe Harbor method.
     # Required only when this submission resolves (approves/comments) at
@@ -1969,7 +1980,8 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     """
     from phi_core.agents.reasoning import (
         ACTION_TYPES, Auditor, auditor_escalation_reason, Executor, Judge, annotate_pending_review,
-        apply_sentinel_hard_rules, plain_human_review_reasons, validate_decisions, verify_keep_decisions,
+        apply_sentinel_hard_rules, materialize_auditor_disagreements, plain_human_review_reasons,
+        validate_decisions, verify_keep_decisions,
     )
     from phi_core.agents.outward import Scout, Ledger, Herald
     from phi_core.agents.operator import Operator
@@ -2387,12 +2399,41 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             # as the first-pass pipeline -- distinct from Sentinel's
             # pre-execution round, and fires regardless of entry path.
             auditor_reason = auditor_escalation_reason(audit)
+            # The confidence-only override: a bare low self-reported number
+            # with zero actionable per-column issues has no decision for
+            # `resolutions` to act on. A reviewer who explicitly confirms
+            # (having been shown Auditor's full summary/metrics) after
+            # actually attesting actual knowledge is trusted once, logged,
+            # never silently -- this is NOT honored when Auditor has real
+            # per-column issues, which must still be resolved normally.
+            confidence_override_applies = (
+                bool(auditor_reason) and not (audit.get("issues") or [])
+                and body.confirm_auditor_confidence and body.actual_knowledge_ack
+            )
+            if confidence_override_applies:
+                await db.sessions.update_one(run_filter, {"$push": {
+                    "auditor_confidence_overrides": {
+                        "reviewer": reviewer, "reviewed_at": ts,
+                        "confidence": audit.get("confidence"),
+                        "summary": audit.get("summary", ""),
+                    }
+                }})
+                auditor_reason = None
             if auditor_reason:
                 await close_last_phase()
+                # Same materialization as the first-pass pipeline: give the
+                # reviewer an actual per-column question to answer instead
+                # of a bare status flag that can only be blindly resubmitted.
+                # NOTE: assigned to a new name, not `decisions` -- `decisions`
+                # is a name from the enclosing function that this nested
+                # `_run_tail` closure only reads; assigning to it here would
+                # make Python treat it as local for the WHOLE function body,
+                # breaking every earlier read of it (UnboundLocalError).
+                materialized_decisions = materialize_auditor_disagreements(decisions, audit, dictionary_by_column)
                 await db.sessions.update_one(run_filter, {"$set": {
                     "status": "awaiting_human_review",
                     "guard_report": guard_report, "export_paths": exports,
-                    "agent_decisions": decisions, "agent_audit": audit,
+                    "agent_decisions": materialized_decisions, "agent_audit": audit,
                     "operator_failures": op_failed_ids, "reviewer_findings": rv_out["findings"],
                     "human_review_reasons": [auditor_reason],
                     "human_review_reasons_plain": plain_human_review_reasons([auditor_reason]),
