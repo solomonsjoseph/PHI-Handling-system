@@ -851,7 +851,7 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
             return None
 
         async def run(self, **_kwargs):
-            return {"verdict": "clean", "issues": [], "metrics": {}, "summary": "ok"}
+            return {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
 
     class FakeScout:
         def __init__(self, **_kwargs):
@@ -1037,7 +1037,7 @@ def test_run_pipeline_reviewer_only_finding_excludes_file_and_ends_partially_com
             return None
 
         async def run(self, **_kwargs):
-            return {"verdict": "clean", "issues": [], "metrics": {}, "summary": "ok"}
+            return {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
 
     class FakeScout:
         def __init__(self, **_kwargs):

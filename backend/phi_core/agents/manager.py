@@ -55,6 +55,8 @@ class Manager(Agent):
         "Judge": "returns exactly one handling decision per dataset column",
         "Sentinel": "reviews Judge's decisions for zero leak; returns issues",
         "Executor": "deterministic; applies approved decisions, makes no LLM call",
+        "Operator": "deterministic; self-verifies what Executor wrote against decisions",
+        "Reviewer": "deterministic; confirms Operator covered every decision",
         "Auditor": "verifies executor output against decisions; returns metrics",
         "Scout": "returns the competitive landscape",
         "Ledger.Compare": "returns per-competitor delta notes",
@@ -306,8 +308,16 @@ class Manager(Agent):
         close_last_phase: Callable[[], Awaitable[None]],
         phase_timings: dict[str, Any], run_elapsed_s: float,
         approved_decisions: list[dict[str, Any]], sentinel_report: dict[str, Any],
+        reasons_plain: list[str] | None = None,
     ) -> dict[str, Any]:
-        """The single path by which a run becomes 'awaiting_human_review'."""
+        """The single path by which a run becomes 'awaiting_human_review'.
+
+        ``reasons_plain`` is an optional plain-English rendering of
+        ``reasons`` (see ``reasoning.plain_human_review_reasons``) --
+        Manager stays domain-agnostic and just stores whatever the caller
+        hands it, so this list is what a reviewer should actually be shown,
+        never the raw internal reason codes.
+        """
         self._escalation = {"reasons": reasons}
         await self._log("manager.escalate", "info", {"reasons": reasons})
         await close_last_phase()
@@ -318,6 +328,7 @@ class Manager(Agent):
             "phase_timings": phase_timings,
             "run_elapsed_s": round(run_elapsed_s, 3),
             "human_review_reasons": reasons,
+            "human_review_reasons_plain": reasons_plain or reasons,
             "manager_report": report,
         }})
         return {"status": "awaiting_human_review", "decisions": approved_decisions,

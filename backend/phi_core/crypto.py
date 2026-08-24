@@ -89,6 +89,35 @@ def decrypt_api_key(stored: str) -> str:
         raise KeyRotated("stored value cannot be decrypted under the current key")
 
 
+def encrypt_reversal_map(payload: dict) -> str:
+    """Encrypt the study's reversal key (pseudonym map + salt) at rest.
+
+    Same Fernet primitive as :func:`encrypt_api_key`. There is no per-study
+    BYO encryption key today -- only a BYO *LLM provider* key exists in this
+    codebase -- so this is server-key encryption, same trust boundary as
+    every other Fernet-wrapped secret here. Kept separate from the
+    shareable export at all times; never written into ``exports`` or the
+    publication bundle.
+    """
+    import json
+    token = _cipher().encrypt(json.dumps(payload).encode()).decode()
+    return _ENC_PREFIX + token
+
+
+def decrypt_reversal_map(stored: str) -> dict:
+    """Reverse :func:`encrypt_reversal_map`. Raises :class:`KeyRotated` on a
+    stored value that cannot be decrypted under the current key."""
+    import json
+    if not stored:
+        return {}
+    if not stored.startswith(_ENC_PREFIX):
+        raise KeyRotated("stored value is not a recognised ciphertext")
+    try:
+        return json.loads(_cipher().decrypt(stored[len(_ENC_PREFIX):].encode()).decode())
+    except InvalidToken:
+        raise KeyRotated("stored value cannot be decrypted under the current key")
+
+
 def pseudonym_salt(session_id: str) -> str:
     """HMAC-SHA256 of the session id under the server-held key. Never leaves
     the process, so a bundle recipient cannot reproduce the digest."""

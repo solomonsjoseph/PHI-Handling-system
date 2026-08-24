@@ -1142,23 +1142,87 @@ class Executor(Agent):
             await self._log("executor.wrote", "info", {"file_id": f["file_id"], "path": str(dst)})
         # Persist the pseudonym map size so the auditor can report on linkage coverage.
         await self._log("executor.pseudonym_registry", "info", {"unique_values_pseudonymized": len(registry._map)})
-        return {"exports": exports, "pseudonym_count": len(registry._map)}
+        # `reversal_key_blob` is the mandatory reversal-key deliverable: an
+        # encrypted, opaque blob distinct from `exports`. Only produced when
+        # the registry actually mapped something (pseudonymize/hash unused
+        # -> nothing to reverse -> no blob, no empty artifact to manage).
+        reversal_key_blob = registry.save() if registry._map else None
+        return {"exports": exports, "pseudonym_count": len(registry._map),
+                "reversal_key_blob": reversal_key_blob}
+
+
+AUDITOR_CONFIDENCE_FLOOR = 0.98
+
+
+_ESCALATION_REASON_PLAIN: dict[str, str] = {
+    "decision_routed_human_review": "one or more columns need a person's decision",
+    "judge_call_failure": "the automated reviewer could not finish its work",
+    "sentinel_call_failure": "the automated safety check could not finish its work",
+    "empty_decisions": "the automated reviewer did not return any decisions to check",
+    "sentinel_blocking_after_cap": "a safety concern kept coming back after several automated attempts to resolve it",
+    "manager_advisory_early_escalation": "the process was not making progress on its own, so a person should look",
+    "manager_advisory_coverage_escalation": "too many files could not be fully checked, so a person should look before this ships",
+    "manager_advisory_audit_escalation": "the final check flagged something a person should look at",
+    "executor_crashed": "an unexpected error happened while writing the final files",
+}
+
+
+def plain_human_review_reasons(reasons: list[str]) -> list[str]:
+    """Translate the fixed internal reason codes used to route a run to
+    human review into plain English, so this list is safe to show a
+    reviewer directly. Applies to every human-review escalation in the
+    pipeline, not just Auditor's -- the plain-English requirement is
+    cross-cutting, not agent-specific."""
+    out = []
+    for r in reasons:
+        if r in _ESCALATION_REASON_PLAIN:
+            out.append(_ESCALATION_REASON_PLAIN[r])
+        elif isinstance(r, str) and r.startswith("auditor_confidence_below_floor:"):
+            out.append("the final independent check was not confident enough to sign off on its own")
+        else:
+            out.append("the automated review could not finish deciding on its own")
+    return out
+
+
+def auditor_escalation_reason(audit: dict[str, Any]) -> str | None:
+    """Deterministic gate on Auditor's self-reported confidence. A missing
+    or unparseable confidence fails toward the safer path (second human
+    review), never toward silent pass-through -- same fail-closed shape as
+    every other boundary check in this pipeline."""
+    try:
+        confidence = float(audit.get("confidence"))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence < AUDITOR_CONFIDENCE_FLOOR:
+        return f"auditor_confidence_below_floor:{confidence:.2f}"
+    return None
 
 
 class Auditor(Agent):
     NAME = "Auditor"
     PROMPT = (
-        "You are Auditor. Verify Executor produced outputs consistent with Judge's decisions "
-        "and no residual PHI slipped through. Return JSON: "
-        '{"verdict": "clean|issues", "issues": [{"file": str, "problem": str}], '
+        "You are Auditor, the final independent check before a study bundle can be trusted. "
+        "You do two things: (1) re-derive, from the cited rulebook and technique text alone, "
+        "what action each column's HIPAA category calls for, and flag any column where the "
+        "action actually taken disagrees with that independent re-derivation; (2) verify overall "
+        "output is consistent with the decisions and that no residual PHI slipped through. "
+        "You never see row values, only column names, categories, actions, and regulation text. "
+        'Return JSON: {"verdict": "clean|issues", '
+        '"issues": [{"file": str, "column": str, "problem": str}], '
         '"metrics": {"columns_dropped": int, "columns_transformed": int, "columns_kept": int, '
-        '"human_review_required": int, "estimated_leak_prob": 0..1}, "summary": str}. '
-        "Base metrics only on file-level summaries and decision counts (never row values)."
+        '"human_review_required": int, "estimated_leak_prob": 0..1, "action_disagreement_count": int}, '
+        '"confidence": 0..1, "summary": str}. '
+        "confidence is your own honest self-assessment that this audit is correct -- report it "
+        "truthfully; a low number here is what sends a genuinely uncertain case to a human, which "
+        "is the safe outcome, not a failure. Base every judgment only on file-level summaries, "
+        "decision counts, and regulation text (never row values)."
     )
 
-    async def run(self, decisions: list[dict[str, Any]], exports: dict[str, str], files: list[dict[str, Any]]) -> dict[str, Any]:
+    async def run(self, decisions: list[dict[str, Any]], exports: dict[str, str], files: list[dict[str, Any]],
+                  statute: dict[str, Any] | None = None, praxis_methods: dict[str, Any] | None = None) -> dict[str, Any]:
         # Summarise deterministically (no row values sent to LLM)
         summary_by_file: dict[str, dict[str, int]] = {}
+        per_column: list[dict[str, Any]] = []
         for d in decisions:
             fid = d.get("file_id", "")
             b = summary_by_file.setdefault(fid, {"keep": 0, "drop": 0, "transform": 0, "human_review": 0})
@@ -1171,16 +1235,24 @@ class Auditor(Agent):
                 b["human_review"] += 1
             else:
                 b["transform"] += 1
+            per_column.append({"file_id": fid, "column": d.get("column", ""),
+                               "hipaa_category": d.get("hipaa_category") or d.get("category"),
+                               "action_taken": a})
 
         file_meta = [{"file_id": f["file_id"], "name": f["original_name"], "component": f.get("component")} for f in files]
         prompt = (
-            f"File summary counts (no row values): {summary_by_file}\n\n"
+            f"Per-column decisions to re-derive and check (no row values): {per_column}\n\n"
+            f"File summary counts: {summary_by_file}\n\n"
+            f"Jurisdiction rulebook (Statute): {statute or {}}\n\n"
+            f"Best-practice technique per category (Praxis): {praxis_methods or {}}\n\n"
             f"Files: {file_meta}\n\nExports: {list(exports.keys())}\n"
             "Respond with JSON only."
         )
         return await self.call_json(prompt, phase="auditor.verify",
-                                    default={"verdict": "clean", "issues": [], "metrics": {}, "summary": ""},
-                                    status_text="Verifying the executor output against decisions")
+                                    default={"verdict": "issues", "issues": [], "metrics": {},
+                                             "confidence": 0.0,
+                                             "summary": "Auditor call failed; treated as below the confidence floor."},
+                                    status_text="Independently re-deriving the correct action per column")
 
 
 # --- deterministic dataset transformer ------------------------------------
@@ -1225,6 +1297,19 @@ class PseudonymRegistry:
         the per-study salt, so the output cannot be reproduced without the
         server-held key even when the salt input (session id) is public."""
         return _hmac.new(self._salt.encode(), f"{column}:{value}".encode(), _hashlib.sha256).hexdigest()[:16]
+
+    def save(self) -> str:
+        """Encrypt this study's real-value -> pseudonym map plus its salt
+        into one opaque blob. Pure function: no DB access here, so this
+        class stays exactly what it was -- an in-memory registry -- and the
+        caller decides where the blob lives and for how long.
+
+        This is the reversal key: the one piece of data that makes a
+        pseudonymized export re-identifiable. It must never be written next
+        to ``exports`` or into the publication bundle.
+        """
+        from ..crypto import encrypt_reversal_map
+        return encrypt_reversal_map({"salt": self._salt, "map": self._map})
 
 
 def _scrub_text_cell(value: str) -> str:

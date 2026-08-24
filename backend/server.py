@@ -838,6 +838,42 @@ async def session_bundle(sid: str, publication: bool = False, attestation_pdf: b
     )
 
 
+@app.get("/api/sessions/{sid}/reversal-key")
+async def session_reversal_key(sid: str, principal: str = Depends(resolve_principal)):
+    """Download the reversal key: the mapping that would let the study
+    team re-identify their own pseudonymized data. This is the second
+    mandatory deliverable alongside the PHI-handled bundle, gated the same
+    way (session owned by the caller, Publish Guard clean).
+
+    Retention: once downloaded, the blob is deleted from the session
+    document. It also never survives session erasure regardless of whether
+    it was downloaded (DELETE /sessions/{sid} removes the whole session
+    document). This console does not keep a study's re-identification key
+    on file indefinitely by default.
+    """
+    from phi_core.crypto import decrypt_reversal_map
+    db = get_db()
+    session = await _owned_session(sid, principal, {"_id": 0})
+    if session.get("status") not in ("complete", "partially_complete"):
+        raise HTTPException(403, "This session has not completed a clean run yet.")
+    guard = session.get("guard_report") or {}
+    if guard.get("status") != "clean":
+        raise HTTPException(403, "Publish Guard has not certified this session as clean.")
+    blob = session.get("reversal_key_blob")
+    if not blob:
+        raise HTTPException(404, "No reversal key was generated for this run (no column was "
+                                 "pseudonymized or hashed, so there is nothing to reverse).")
+    payload = decrypt_reversal_map(blob)
+    await db.sessions.update_one(_owned_filter(sid, principal), {"$unset": {"reversal_key_blob": ""}})
+    data = json.dumps({"session_id": sid, "salt": payload.get("salt", ""),
+                       "pseudonym_map": payload.get("map", {})}, indent=2).encode()
+    return Response(
+        content=data,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{sid}_reversal_key.json"'},
+    )
+
+
 @app.get("/api/sessions/{sid}/export/{file_id}")
 async def session_export(sid: str, file_id: str, force: bool = False,
                          principal: str = Depends(resolve_principal)):
@@ -1932,8 +1968,8 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     round -- never to columns this same submission defers.
     """
     from phi_core.agents.reasoning import (
-        ACTION_TYPES, Auditor, Executor, Judge, annotate_pending_review,
-        apply_sentinel_hard_rules, validate_decisions, verify_keep_decisions,
+        ACTION_TYPES, Auditor, auditor_escalation_reason, Executor, Judge, annotate_pending_review,
+        apply_sentinel_hard_rules, plain_human_review_reasons, validate_decisions, verify_keep_decisions,
     )
     from phi_core.agents.outward import Scout, Ledger, Herald
     from phi_core.agents.operator import Operator
@@ -2237,6 +2273,16 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
 
             exec_out = await Executor(**common).run(files=files, decisions=scrubbed_decisions, omit_by_file=omit_by_file)
 
+            # Reversal key: same mandatory deliverable as the first-pass
+            # pipeline. pseudonym_salt(session_id) is deterministic, so a
+            # resumed run regenerates identical pseudonyms and this simply
+            # overwrites the earlier blob consistently.
+            if exec_out.get("reversal_key_blob"):
+                await db.sessions.update_one(run_filter, {"$set": {
+                    "reversal_key_blob": exec_out["reversal_key_blob"],
+                    "reversal_key_created_at": datetime.now(timezone.utc).isoformat(),
+                }})
+
             # Scout has no dependency on Operator, Reviewer, Publish Guard,
             # or Auditor, so it starts here and runs in the background
             # across all of them; only Ledger needs its result.
@@ -2317,7 +2363,8 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             await timed_on_phase("auditor_scout", {})
             auditor_agent = Auditor(**common)
             audit, scout = await asyncio.gather(
-                auditor_agent.run(decisions=scrubbed_decisions, exports=exports, files=files),
+                auditor_agent.run(decisions=scrubbed_decisions, exports=exports, files=files,
+                                  statute=session.get("agent_statute"), praxis_methods=session.get("agent_praxis")),
                 scout_task,
                 return_exceptions=True,
             )
@@ -2330,10 +2377,35 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                 await auditor_agent._log("auditor.crashed", "info",
                                           {"error": f"{type(audit).__name__}: {audit}"})
                 audit = {"verdict": "issues", "issues": [{"file": "", "problem": "Auditor crashed; not verified"}],
-                         "metrics": {}, "summary": "Auditor raised an exception; audit not performed."}
+                         "metrics": {}, "confidence": 0.0,
+                         "summary": "Auditor raised an exception; audit not performed."}
             if isinstance(scout, Exception):
                 await scout_agent._log("scout.crashed", "info", {"error": f"{type(scout).__name__}: {scout}"})
                 scout = {}
+
+            # Second human review, same deterministic confidence-floor gate
+            # as the first-pass pipeline -- distinct from Sentinel's
+            # pre-execution round, and fires regardless of entry path.
+            auditor_reason = auditor_escalation_reason(audit)
+            if auditor_reason:
+                await close_last_phase()
+                await db.sessions.update_one(run_filter, {"$set": {
+                    "status": "awaiting_human_review",
+                    "guard_report": guard_report, "export_paths": exports,
+                    "agent_decisions": decisions, "agent_audit": audit,
+                    "operator_failures": op_failed_ids, "reviewer_findings": rv_out["findings"],
+                    "human_review_reasons": [auditor_reason],
+                    "human_review_reasons_plain": plain_human_review_reasons([auditor_reason]),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "phase_timings": phase_timings,
+                    "run_elapsed_s": round(time.perf_counter() - run_started, 3),
+                }})
+                if not scout_task.done():
+                    scout_task.cancel()
+                await _emit(sid, ProgressEvent(phase="awaiting_human_review",
+                                               message="Auditor's confidence was too low; a person needs to confirm this before it can be shared.",
+                                               percent=100.0), run_id=resume_run_id)
+                return
             await timed_on_phase("ledger", {})
 
             ledger = await Ledger(**common).run(decisions=scrubbed_decisions, audit=audit, scout=scout, benchmark_result=None)
