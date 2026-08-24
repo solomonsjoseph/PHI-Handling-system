@@ -405,7 +405,29 @@ Sources: Code anchors "Manager roles and bounds", "Managed LLM recovery", "Manag
 
 ## Operator and Reviewer coverage audit (Level 4)
 
-`Operator` and `Reviewer` are deterministic audit stages that examine written exports and coverage.
+```mermaid
+flowchart TB
+    Executor["Executor writes export bytes"] --> OperatorRead["Operator re-opens written headers and cells"]
+    OperatorRead --> Completeness["Reverse completeness first:<br/>each written header needs a decision or deliberate omission"]
+    Completeness --> ShapeChecks["Per-action verification with _SHAPE_CHECKS:<br/>_YEAR_ONLY_RE, _ZIP3_RE, _HASH_RE, _PSEUDONYM_RE"]
+    ShapeChecks --> Verdicts["Per-column verdicts:<br/>pass or fail"]
+    Verdicts --> OperatorFilter["Drop files with a failed file ID or fail verdict"]
+    OperatorFilter --> ReviewerRead["Reviewer re-opens each remaining export"]
+    ReviewerRead --> Batches["run_batched by file_id:<br/>batch_size=8, pool_size=6"]
+    Batches --> Coverage["Coverage audit:<br/>decision to Operator verdict, real header, omitted columns absent"]
+    Coverage -->|no findings or failed file IDs| Clean["status: clean"]
+    Coverage -->|finding or failed file ID| Issues["status: issues"]
+    Clean --> Filtered["Filtered exports"]
+    Issues --> Filtered
+```
+
+`Operator.run()` re-opens Executor's written files before it verifies records. It performs reverse completeness first: every written header must have a Judge or Sentinel decision, or be listed in `omit_cols`. A header with neither produces an `undecided` fail verdict. It then verifies each decision against the written output. `drop` requires an empty column, `keep` requires the column to be present, and `_SHAPE_CHECKS` tests non-empty transformed cells. The table maps `year_only`, `zip3_truncate`, `hash`, and `pseudonymize` to `_YEAR_ONLY_RE`, `_ZIP3_RE`, `_HASH_RE`, and `_PSEUDONYM_RE`; it maps `cap_age_90` to `_cap_age_90_ok`. A missing or unreadable output file also becomes a failed file ID. The result contains per-column `verdicts`, `failed_file_ids`, and status `clean` or `issues`.
+
+The pipeline removes from its working export view every file with an Operator failed file ID or any fail verdict. `Reviewer.run()` then independently re-opens every remaining export and audits coverage per `file_id`. It checks that each decision has an Operator verdict, that the real written header has the expected coverage when Operator reported no failures, and that each `omit_by_file` column is absent. These checks run through `run_batched(..., batch_size=8, pool_size=6)`. Reviewer returns `clean` or `issues`, findings, coverage counts, and a filtered copy of exports that excludes files with findings or prior Operator failures.
+
+Reviewer closes a gap that Operator cannot close. Operator's reverse-completeness loop skips a written column already listed in `omit_cols`, so it does not synthesize an `undecided` record for an `omit_by_file` column that still appears in the written header. Reviewer alone checks this omission leak against the real header. The current `run_pipeline()` call passes `omit_by_file=None`, so the path is implemented but receives no omission entries in the normal pipeline invocation.
+
+Sources: Code anchors "Operator verification and verdicts", "Reviewer coverage audit", and "Operator and Reviewer pipeline wiring".
 
 ## Human review (Level 5)
 
@@ -450,8 +472,9 @@ Configuration and fixed bounds are documented from their current source definiti
 | Scout | `backend/phi_core/agents/outward.py` | `Scout` | 18 |
 | Ledger and subagents | `backend/phi_core/agents/outward.py` | `LedgerCompare`; `LedgerAggregate`; `Ledger` | 47; 69; 95 |
 | Herald and subagents | `backend/phi_core/agents/outward.py` | `HeraldAbstract`; `HeraldSections`; `Herald` | 144; 171; 198 |
-| Operator | `backend/phi_core/agents/operator.py` | `Operator` | 236 |
-| Reviewer | `backend/phi_core/agents/reviewer.py` | `Reviewer` | 34 |
+| Operator verification and verdicts | `backend/phi_core/agents/operator.py` | `_SHAPE_CHECKS`; `_verify_record`; `Operator.run` | 37-52; 81-233; 236-348 |
+| Reviewer coverage audit | `backend/phi_core/agents/reviewer.py` | `Reviewer`; `Reviewer.run` | 1-23; 34-177 |
+| Operator and Reviewer pipeline wiring | `backend/phi_core/agents/orchestrator.py` | `run_pipeline` | 547-595 |
 | Provider calls and JSON parse | `backend/phi_core/agents/llm.py` | `call_llm`; `parse_json` | 210; 221 |
 | Batching | `backend/phi_core/agents/batching.py` | `run_batched` | 14 |
 | Web cache | `backend/phi_core/agents/cache.py` | `REFRESH_DAYS`; `cache_get`; `cache_put` | 13; 16; 26 |
