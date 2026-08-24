@@ -337,7 +337,71 @@ Source: Code anchors "Herald and subagents".
 
 ## Manager supervision (Level 3)
 
-`Manager` supervises agent calls and records run-level decisions.
+`Agent.call()` delegates a managed LLM call to `Manager.run_supervised()`. The Manager decides only whether the call should retry, receive a timeout extension, receive web search, or escalate. It is not a content reviewer.
+
+```mermaid
+stateDiagram-v2
+    state "failed(error_kind)" as failed
+    [*] --> attempt
+    attempt --> succeeded: reply accepted on attempt 1
+    attempt --> recovered: reply accepted on attempt 2 or 3
+    recovered --> succeeded: record recovered; retain note by error kind
+    attempt --> failed: timeout | empty_reply | invalid_output | off_task | exception:<ClassName>
+    failed --> attempts_exhausted: attempt >= 3 / no _decide or LLM consulted
+    attempts_exhausted --> escalate: record reason="attempts_exhausted"; return original error_kind
+    escalate --> [*]
+    failed --> decide: attempt < 3
+    decide --> escalate: action=escalate
+    decide --> extend_timeout: action=extend_timeout [legal only if not extended]
+    extend_timeout --> retry: extended=true
+    decide --> grant_web_search: action=grant_web_search [legal only if an escalated attempt exists and not already granted]
+    grant_web_search --> retry: switch to web-search attempt
+    decide --> retry: action=retry; Manager note or reuse _notes_that_worked[error_kind]
+    retry --> attempt: backoff 2 s then 5 s; append [Manager operational note] to system prompt
+```
+
+`MAX_ATTEMPTS` is 3: the initial call plus at most two supervised retries. `BACKOFF_S` delays attempt 2 by 2 seconds and attempt 3 by 5 seconds. The Manager's own `_decide()` call has a 12-second timeout. A timeout extension marks the next plain attempt for an extra 30 seconds or the next web-search attempt for an extra 45 seconds.
+
+On the third failed attempt, `run_supervised()` does not call `_decide()`. It records `action="escalate"` and `reason="attempts_exhausted"`, returns an empty reply and the original error kind. `Agent.call()` increments its `call_failures`, logs that error, and returns an empty string to the caller. `invalid_output` and `off_task` are validator failures. The latter includes only `owed` and `delivered` integers. The complete error-kind set is `timeout`, `empty_reply`, `invalid_output`, `off_task`, and `exception:<ClassName>`.
+
+`ManagerDecision.action` is one of `retry`, `extend_timeout`, `grant_web_search`, or `escalate`. Before its final attempt, the legal-action set always contains `retry` and `escalate`; it adds `extend_timeout` only when no extension has been used, and `grant_web_search` only when a web-search closure exists and that tool has not been granted. `ManagerAdvice.action` is either `continue` or `escalate_human_review`.
+
+The Manager supplies this fixed role map and per-call budget to supervised work. The `DEFAULT_BUDGET_S` is 45 seconds. The deterministic roles have the default entry if placed in a charter, although they do not make LLM calls.
+
+| Agent | Fixed role description | Budget seconds |
+| --- | --- | ---: |
+| Lexicon | Reads the data dictionary and returns one entry per documented column. | 40 |
+| Schema | Reads dataset headers only and returns one classification per header. | 25 |
+| Instrument | Reads study form text and returns collected PHI fields. | 40 |
+| Statute | Returns the rulebook for the run's jurisdiction. | 60 |
+| Praxis | Returns the current best-practice technique for one HIPAA category. | 60 |
+| Judge | Returns exactly one handling decision per dataset column. | 40 |
+| Sentinel | Reviews Judge decisions for zero leak and returns issues. | 40 |
+| Executor | Deterministically applies approved decisions and makes no LLM call. | 45 default |
+| Operator | Deterministically self-verifies Executor output against decisions. | 45 default |
+| Reviewer | Deterministically confirms Operator covered every decision. | 45 default |
+| Auditor | Verifies Executor output against decisions and returns metrics. | 25 |
+| Scout | Returns the competitive landscape. | 40 |
+| Ledger.Compare | Returns per-competitor delta notes. | 35 |
+| Ledger.Aggregate | Returns the benchmark rollup. | 35 |
+| Herald.Abstract | Drafts title, abstract, and methods. | 75 |
+| Herald.Sections | Drafts results, discussion, limitations, and conclusion. | 75 |
+
+### Consultation sites
+
+`consult()` is an advisory wall-clock optimization, not a safety gate. It fails open to `continue` when its own decision cannot be obtained. The Judge and Sentinel loop supplies `iteration`, `iteration_cap`, `blocking_count`, `advisory_count`, `decision_count`, `judge_call_failures`, and `sentinel_call_failures`. The Reviewer-stage consult supplies `operator_failed_count`, `reviewer_blocked_count`, and `decision_count`. The Auditor-stage consult supplies `audit_verdict` and `audit_crashed`.
+
+The Auditor consultation is separate from the deterministic `auditor_escalation_reason()`. That gate converts an absent or unparseable confidence to `0.0` and independently returns `auditor_confidence_below_floor:<score>` when confidence is below `AUDITOR_CONFIDENCE_FLOOR = 0.98`. The advisory consult can escalate sooner, but it cannot suppress that threshold.
+
+### Content boundary and guardian broker
+
+The supervision payload uses the agent name in its `agent` field, a fixed `agent_role` description, `phase`, `attempt`, `max_attempts`, `error_kind`, `attempt_seconds`, `budget_seconds`, `over_budget`, `tool_already_granted`, `timeout_already_extended`, `run_history`, `note_that_worked_earlier`, and any `owed` and `delivered` integers. It handles counts, enums, and timings. The fixed role description, rather than a real column name, is the only role context supplied to the Manager LLM.
+
+The guardian broker is the exception. `ask_schema()` and `ask_instrument()` forward a real column or field name to non-LLM `verify()` methods, then log only boolean `present`. `ask_lexicon()` forwards the column name to the LLM-backed `Lexicon.answer()` path, then logs only `verdict` and `queries_used`. The Manager itself does not pass the broker's name or lookup result into `_decide()`.
+
+Manager coaching notes are persisted only after one `scrub_persisted_text()` pass and are truncated to 200 characters. A recovered note is stored in `_notes_that_worked` by error kind and reused for a later matching failure when the current decision provides no note.
+
+Sources: Code anchors "Manager roles and bounds", "Managed LLM recovery", "Manager consultation and escalation", "Manager guardian broker and decision parsing", "Agent call delegation and validation", "Manager consultation call sites", and "Auditor confidence escalation".
 
 ## Operator and Reviewer coverage audit (Level 4)
 
@@ -366,6 +430,13 @@ Configuration and fixed bounds are documented from their current source definiti
 | Pipeline driver | `backend/phi_core/agents/orchestrator.py` | `run_pipeline` | 96 |
 | Base agent | `backend/phi_core/agents/base.py` | `Agent` | 72 |
 | Manager | `backend/phi_core/agents/manager.py` | `Manager` | 26 |
+| Manager roles and bounds | `backend/phi_core/agents/manager.py` | `Manager.ROLES`; `Manager.BUDGET_S`; `Manager.DEFAULT_BUDGET_S`; `Manager.MAX_ATTEMPTS`; `Manager.BACKOFF_S`; `Manager.DECISION_TIMEOUT_S`; `Manager.NOTE_MAX_CHARS` | 59-90; 129-133 |
+| Managed LLM recovery | `backend/phi_core/agents/manager.py` | `Manager.run_supervised`; `Manager._history_digest` | 175-294; 428-439 |
+| Manager consultation and escalation | `backend/phi_core/agents/manager.py` | `Manager.consult`; `Manager.escalate_to_human_review` | 297-351 |
+| Manager guardian broker and decision parsing | `backend/phi_core/agents/manager.py` | `Manager.ask_schema`; `Manager.ask_instrument`; `Manager.ask_lexicon`; `Manager._decide` | 368-400; 441-461 |
+| Agent call delegation and validation | `backend/phi_core/agents/base.py` | `_json_validator`; `Agent.call` | 31-52; 111-180 |
+| Manager consultation call sites | `backend/phi_core/agents/orchestrator.py` | `run_pipeline` | 422-432; 601-614; 683-709 |
+| Auditor confidence escalation | `backend/phi_core/agents/reasoning.py` | `AUDITOR_CONFIDENCE_FLOOR`; `auditor_escalation_reason` | 1172; 1205-1216 |
 | Judge | `backend/phi_core/agents/reasoning.py` | `Judge` | 874 |
 | Sentinel | `backend/phi_core/agents/reasoning.py` | `Sentinel` | 985 |
 | Executor | `backend/phi_core/agents/reasoning.py` | `Executor` | 1065 |
