@@ -434,7 +434,7 @@ Configuration and fixed bounds are documented from their current source definiti
 | Managed LLM recovery | `backend/phi_core/agents/manager.py` | `Manager.run_supervised`; `Manager._history_digest` | 175-294; 428-439 |
 | Manager consultation and escalation | `backend/phi_core/agents/manager.py` | `Manager.consult`; `Manager.escalate_to_human_review` | 297-351 |
 | Manager guardian broker and decision parsing | `backend/phi_core/agents/manager.py` | `Manager.ask_schema`; `Manager.ask_instrument`; `Manager.ask_lexicon`; `Manager._decide` | 368-400; 441-461 |
-| Agent call delegation and validation | `backend/phi_core/agents/base.py` | `_json_validator`; `Agent.call` | 31-52; 111-180 |
+| Agent call delegation and validation | `backend/phi_core/agents/base.py` | `PLAIN_EXTENDED_BUMP_S`; `WEB_SEARCH_EXTENDED_BUMP_S`; `_json_validator`; `Agent.call` | 25-28; 31-52; 111-180 |
 | Manager consultation call sites | `backend/phi_core/agents/orchestrator.py` | `run_pipeline` | 422-432; 601-614; 683-709 |
 | Auditor confidence escalation | `backend/phi_core/agents/reasoning.py` | `AUDITOR_CONFIDENCE_FLOOR`; `auditor_escalation_reason` | 1172; 1205-1216 |
 | Judge | `backend/phi_core/agents/reasoning.py` | `Judge` | 874 |
