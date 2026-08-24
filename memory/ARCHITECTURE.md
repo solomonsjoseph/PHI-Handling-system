@@ -210,7 +210,7 @@ partially.
 | `MAX_COLUMNS_PER_STUDY` (default 500) | n/a | Refuses an oversized study before an unbounded Judge prompt is built. |
 | `FORWARDED_ALLOW_IPS` (default `127.0.0.1`, read by the Docker image's CMD) | Reverse proxy's address when one is in front | If wrong, rate-limit buckets (4.20) either don't reflect real client IPs (too narrow) or trust a spoofable header (too wide). |
 
-Provider credentials (`EMERGENT_LLM_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+Provider credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
 `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `OPENROUTER_API_KEY`): at least one must be set for the
 pipeline to run at all, but none is individually boot-blocking, since the operator may connect
 a ChatGPT OAuth account instead.

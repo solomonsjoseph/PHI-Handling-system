@@ -12,7 +12,7 @@ Datasets (CSV, XLSX, Parquet) expose ONLY column headers to the LLM. Row values 
 
 ## Stack
 
-- **Backend:** FastAPI + Presidio + spaCy + Motor (MongoDB) + Emergent LLM Key (Claude Sonnet 4.5).
+- **Backend:** FastAPI + Presidio + spaCy + Motor (MongoDB) + direct provider key (Claude Sonnet 4.5 by default).
 - **Frontend:** React operator console. Dark theme, brutalist grid, JetBrains Mono.
 - **Corpus:** Deterministic HIPAA Safe Harbor (A-R) + quasi-identifier generator, seeded, reproducible.
 
@@ -23,7 +23,7 @@ Datasets (CSV, XLSX, Parquet) expose ONLY column headers to the LLM. Row values 
   backend/
     server.py               FastAPI service on :8001
     phi_core/               generators, detectors, file_readers, llm_classifier, anonymizer, benchmark, pipeline
-    .env                    MONGO_URL, DB_NAME, EMERGENT_LLM_KEY, DATA_DIR, CORPUS_SEED
+    .env                    MONGO_URL, DB_NAME, ANTHROPIC_API_KEY, DATA_DIR, CORPUS_SEED
     requirements.txt
   frontend/
     src/                    React operator console on :3000

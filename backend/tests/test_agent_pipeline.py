@@ -87,7 +87,7 @@ def test_llm_settings_default(api):
     # before the operator opens Settings.
     assert d["provider"] in ("openrouter", "openai", "anthropic", "gemini")
     assert d["model"]
-    # Settings advertises exactly the four UI providers (no emergent).
+    # Settings advertises exactly the four UI providers.
     assert d["providers"] == ["openrouter", "openai", "anthropic", "gemini"]
 
 

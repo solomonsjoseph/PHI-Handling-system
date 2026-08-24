@@ -2,7 +2,7 @@
 
 Unit tests verify the researcher enforces its grounding gate (refuses
 ungrounded / uncited replies) and correctly caches. The live web-search
-test only runs when EMERGENT_LLM_KEY is present.
+test only runs when ANTHROPIC_API_KEY is present.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import pytest
 
 
 def _has_key() -> bool:
-    return bool(os.environ.get("EMERGENT_LLM_KEY", "").strip())
+    return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
 
 
 @pytest.mark.asyncio
@@ -40,7 +40,7 @@ async def test_researcher_refuses_ungrounded_reply(monkeypatch):
         agent_log = None
 
     fake_db = _FakeDb()
-    cfg = LlmConfig(provider="emergent", model="test", max_tokens=100)
+    cfg = LlmConfig(provider="anthropic", model="test", max_tokens=100)
     agent = CorpusResearcher(session_id="t", llm=cfg, db=fake_db)
     agent.call_json_with_web_search = _fake_call  # type: ignore
     # Bypass mongo cache side effects with no-op stubs
@@ -88,7 +88,7 @@ async def test_researcher_accepts_reply_with_citations(monkeypatch):
         agent_log = None
 
     fake_db = _FakeDb()
-    cfg = LlmConfig(provider="emergent", model="test", max_tokens=100)
+    cfg = LlmConfig(provider="anthropic", model="test", max_tokens=100)
     agent = CorpusResearcher(session_id="t2", llm=cfg, db=fake_db)
     agent.call_json_with_web_search = _fake_call  # type: ignore
     async def _log(*a, **k): return None
@@ -121,7 +121,7 @@ async def test_researcher_uses_cache_on_second_call(monkeypatch):
         agent_log = None
 
     fake_db = _FakeDb()
-    cfg = LlmConfig(provider="emergent", model="test", max_tokens=100)
+    cfg = LlmConfig(provider="anthropic", model="test", max_tokens=100)
     agent = CorpusResearcher(session_id="t3", llm=cfg, db=fake_db)
     agent.call_json_with_web_search = _fake_call  # type: ignore
     async def _log(*a, **k): return None
@@ -135,10 +135,10 @@ async def test_researcher_uses_cache_on_second_call(monkeypatch):
     assert calls == [], "web_search should NOT have been called on a cache hit"
 
 
-# ---- Live integration test (skipped without EMERGENT_LLM_KEY) ----------
+# ---- Live integration test (skipped without ANTHROPIC_API_KEY) ----------
 
 
-@pytest.mark.skipif(not _has_key(), reason="EMERGENT_LLM_KEY not set")
+@pytest.mark.skipif(not _has_key(), reason="ANTHROPIC_API_KEY not set")
 @pytest.mark.asyncio
 async def test_researcher_live_returns_grounded_scenario():
     """Full stack: run the researcher against Claude native web_search on
@@ -152,7 +152,7 @@ async def test_researcher_live_returns_grounded_scenario():
     # Bust cache to force live search
     await db.agent_cache.delete_many({"topic": "corpus_scenario"})
     cfg = LlmConfig(
-        provider="emergent",
+        provider="anthropic",
         model="claude-sonnet-4-5-20250929",
         max_tokens=3000,
     )

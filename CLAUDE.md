@@ -5,9 +5,10 @@
 ## Project
 
 PHI Console. A study team drops in a ZIP (datasets + at least one of forms /
-data_dictionary / mappings), a 12-agent pipeline classifies every column, applies
-HIPAA §164.514 Safe Harbor transformations deterministically, and emits an
-IRB-grade bundle with attestation, benchmark, and manuscript draft.
+data_dictionary / mappings), a 15-agent pipeline (12 original agents plus Manager,
+Operator, and Reviewer) classifies every column, applies HIPAA §164.514 Safe Harbor
+transformations deterministically, and emits an IRB-grade bundle with attestation,
+benchmark, and manuscript draft.
 
 The zero-row-read invariant is the whole product: the LLM sees dataset
 **headers** only. Row values are read exclusively by the deterministic Executor
@@ -31,12 +32,16 @@ operational spec, `/app/memory/PRD.md` for the delivery log.
   backend/
     server.py                     FastAPI on :8001. All /api/* routes.
     phi_core/
-      agents/                     12-agent pipeline (LiteLLM via Emergent Key)
+      agents/                     15-agent pipeline (LiteLLM, direct provider keys)
         base.py                     Agent base class, AgentMessage, ITERATION_CAP
         orchestrator.py             run_pipeline(): parallel launch, phase timings, iteration_cap
         specialists.py              Lexicon, Schema, Instrument (parallel)
         experts.py                  Statute (jurisdiction rules), Praxis (transformation methods)
         reasoning.py                Judge, Sentinel, Executor, Auditor, apply_sentinel_hard_rules
+        manager.py                  Manager: supervises every LLM call (retry/extend/web-search/escalate); deterministic guardian query broker (attach_*/ask_*)
+        operator.py                 Operator: deterministic self-verification of Executor's writes against decisions
+        reviewer.py                 Reviewer: deterministic confirmation Operator covered every decision
+        batching.py                 run_batched(): bounded worker-pool batching shared by Operator/Reviewer
         outward.py                  Scout, Ledger, Herald
         llm.py                      LiteLLM adapter with web_search_20250305 tool
         cache.py                    Weekly-refresh Mongo cache for Statute/Praxis
@@ -56,7 +61,7 @@ operational spec, `/app/memory/PRD.md` for the delivery log.
       planters.py, scenarios.py, edge_cases.py, generate.py, verify.py
       benchmark.py                  Per-run benchmark report: build_report, to_json/markdown/csv, render_figures
     tests/                         340+ regression tests
-    .env                           MONGO_URL, DB_NAME, EMERGENT_LLM_KEY, APP_ENCRYPTION_KEY, ATTESTATION_SIGNING_KEY
+    .env                           MONGO_URL, DB_NAME, ANTHROPIC_API_KEY, APP_ENCRYPTION_KEY, ATTESTATION_SIGNING_KEY
   frontend/
     src/pages/
       Wizard.jsx                   3-step intake + rigor selector (iteration_cap)
@@ -70,7 +75,10 @@ operational spec, `/app/memory/PRD.md` for the delivery log.
   data/exports/                    handled outputs
 ```
 
-## The 12 agents
+## The 15 agents
+
+**Supervisor (spans the whole run):**
+- **Manager** — supervises execution health only (attempt counts, error kinds, elapsed seconds), never content: retries, extends a timeout, grants the web-search tool, or escalates to human review, with coaching notes reused across the run. Also owns the deterministic guardian query broker (`attach_schema`/`ask_schema`, `attach_instrument`/`ask_instrument`, `attach_lexicon`/`ask_lexicon`) so Judge/Sentinel can ask a specialist a targeted question instead of relying only on the broadcast summary.
 
 **Specialists (parallel with Statute + Praxis at t=0):**
 - **Lexicon** — dictionary / mapping (xlsx / csv / docx). Extracts column definitions and code maps.
@@ -85,7 +93,9 @@ operational spec, `/app/memory/PRD.md` for the delivery log.
 - **Judge** — per-column action: keep, drop, cap_age_90, year_only, zip3_truncate, hash, pseudonymize, scrub_text, human_review.
 - **Sentinel** — deterministic hard-rules pass first (dob/ssn/mrn/phone/email/name/zip/age/address/url/ip), then LLM Sentinel for the non-obvious. Blocking issues trigger revision; advisory issues log only.
 - **Executor** — pure Python, no LLM. Applies approved actions to dataset rows.
-- **Auditor** — precision/recall/F1 per HIPAA category, completeness narrative.
+- **Operator** — deterministic. Self-verifies Executor's written output against the approved decisions: completeness first, then a shape check per transform action. Never calls an LLM.
+- **Reviewer** — deterministic. Confirms Operator covered every decision, closing the one gap Operator's own completeness pass can't see (an `omit_by_file` column with no matching decision). Runs before Auditor.
+- **Auditor** — precision/recall/F1 per HIPAA category, completeness narrative, independent re-derivation with self-reported confidence (escalates a second human-review gate below `AUDITOR_CONFIDENCE_FLOOR`). Runs after Publish Guard by design: Publish Guard is the deterministic download gate, and Auditor's verdict is the audit-of-record/recommendation layer on top, not a second gate.
 
 **External / publishing:**
 - **Scout** — competitor landscape (Presidio, Comprehend Medical, Azure, JSL).
@@ -211,20 +221,16 @@ and `os.environ["DB_NAME"]`. Never edit these two.
 The console is deliberately not locked to any hosting platform. Copy
 `backend/.env.example` to `backend/.env` and fill in whichever LLM
 credential you have. The backend auto-detects the default provider in
-this order:
+this order (`phi_core/agents/llm.py::_default_provider`):
 
-1. `EMERGENT_LLM_KEY`   -> Emergent Universal Key (Emergent platform only)
-2. `ANTHROPIC_API_KEY`  -> Anthropic direct (recommended for self-hosted)
-3. `OPENAI_API_KEY`     -> OpenAI direct
+1. `OPENROUTER_API_KEY` -> OpenRouter
+2. `OPENAI_API_KEY`     -> OpenAI direct
+3. `ANTHROPIC_API_KEY`  -> Anthropic direct (recommended for self-hosted)
 4. `GEMINI_API_KEY` / `GOOGLE_API_KEY` -> Google Gemini
-5. `OPENROUTER_API_KEY` -> OpenRouter
 
-The `emergent` provider option is only advertised to the UI when
-`EMERGENT_LLM_KEY` is present, so self-hosted deploys don't see paths
-they can't use. `emergentintegrations` is a soft/lazy import; the app
-works cleanly without it. Statute + Praxis (web-search agents) work
-end-to-end with a plain `ANTHROPIC_API_KEY` via LiteLLM's native
-`web_search_20250305` tool -- no Emergent library required.
+Direct provider keys are the only supported path -- there is no universal-key
+proxy. Statute + Praxis (web-search agents) work end-to-end with a plain
+`ANTHROPIC_API_KEY` via LiteLLM's native `web_search_20250305` tool.
 
 ## Run / redeploy
 
@@ -232,8 +238,7 @@ end-to-end with a plain `ANTHROPIC_API_KEY` via LiteLLM's native
 sudo supervisorctl restart backend frontend
 ```
 
-Emergent Universal Key powers Statute, Praxis, and every LLM agent when
-running on the Emergent platform. Anywhere else, a plain Anthropic key
-(or any BYO key configured through `/settings`) covers the same paths.
-Web-search-capable models (Claude Sonnet 4.5 default) are required for
-Statute + Praxis first-fetch; deterministic fallbacks kick in otherwise.
+A plain Anthropic key (or any BYO key configured through `/settings`) powers
+Statute, Praxis, and every LLM agent. Web-search-capable models (Claude
+Sonnet 4.5 default) are required for Statute + Praxis first-fetch;
+deterministic fallbacks kick in otherwise.

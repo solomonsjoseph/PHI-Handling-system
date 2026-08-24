@@ -46,7 +46,7 @@ Handling decisions are made on that context alone, applied deterministically to 
 
 ## 5. Architecture, in one screen
 
-Twelve agents, each a Claude Sonnet call routed through LiteLLM (Emergent Universal Key by default, BYO-key supported):
+Twelve agents, each a Claude Sonnet call routed through LiteLLM (direct provider key, BYO-key supported):
 
 - **Specialists (parallel):** Lexicon (dictionary), Schema (headers only), Instrument (PDF forms).
 - **Experts (cache-first):** Statute (jurisdiction rulebook), Praxis (PHI transformation techniques).
@@ -82,7 +82,7 @@ We consider the vision met when a stranger can:
 - A PDF form generator (removed by direction; the corpus is datasets + dictionaries only).
 - A "cloud service" for retained PHI storage. Sessions are transient. The bundle is the receipt.
 - A multi-jurisdiction sprawl before US-HIPAA is airtight end-to-end. Stubs exist for EU-GDPR, UK-GDPR, IN-DPDPA, CA-PIPEDA, BR-LGPD; expansion is deferred until the US pipeline runs green every time.
-- A platform-locked appliance. The console runs on any Python + MongoDB host with any of five LLM providers (Anthropic, OpenAI, Gemini, OpenRouter, OpenAI-compatible endpoint, or Emergent Universal Key when available). No component is exclusive to any hosting vendor.
+- A platform-locked appliance. The console runs on any Python + MongoDB host with any of five LLM providers (Anthropic, OpenAI, Gemini, OpenRouter, OpenAI-compatible endpoint). No component is exclusive to any hosting vendor.
 
 ## 9. How progress is measured
 

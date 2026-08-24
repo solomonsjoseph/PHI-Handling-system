@@ -11,7 +11,6 @@ Each entry declares:
   * ``provider_family`` — openrouter|openai|anthropic|gemini
   * ``tier``  — flagship|balanced|fast|reasoning
   * ``supports_web_search`` — native web-search tool available
-  * ``via_emergent_key`` — legacy flag kept for catalog shape / tests
 
 Statute + Praxis web search works today for Anthropic
 (``web_search_20250305``) and Gemini (``googleSearch``).
@@ -39,7 +38,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "anthropic",
         "tier": "reasoning",
         "supports_web_search": True,
-        "via_emergent_key": True,
         "notes": "Anthropic's most capable widely released model; next-gen long-running agents.",
     },
     {
@@ -48,7 +46,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "anthropic",
         "tier": "flagship",
         "supports_web_search": True,
-        "via_emergent_key": True,
         "notes": "Highest reasoning quality for complex agentic coding / enterprise work.",
     },
     {
@@ -57,7 +54,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "anthropic",
         "tier": "balanced",
         "supports_web_search": True,
-        "via_emergent_key": True,
         "notes": "Default. Best combination of speed and intelligence; native web search.",
     },
     {
@@ -66,7 +62,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "anthropic",
         "tier": "fast",
         "supports_web_search": True,
-        "via_emergent_key": True,
         "notes": "Fastest Claude with near-frontier intelligence.",
     },
 
@@ -78,7 +73,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "openai",
         "tier": "flagship",
         "supports_web_search": False,
-        "via_emergent_key": True,
         "notes": "Highest-quality GPT; slower / more expensive.",
     },
     {
@@ -87,7 +81,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "openai",
         "tier": "balanced",
         "supports_web_search": False,
-        "via_emergent_key": True,
         "notes": "Balances intelligence and cost for general-purpose use.",
     },
     {
@@ -96,7 +89,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "openai",
         "tier": "fast",
         "supports_web_search": False,
-        "via_emergent_key": True,
         "notes": "Cost-sensitive, high-volume GPT for classification workloads.",
     },
 
@@ -108,7 +100,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "gemini",
         "tier": "flagship",
         "supports_web_search": True,
-        "via_emergent_key": True,
         "notes": "Advanced intelligence for complex problem-solving; Google Search grounding.",
     },
     {
@@ -117,7 +108,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "gemini",
         "tier": "balanced",
         "supports_web_search": True,
-        "via_emergent_key": True,
         "notes": "Latest natively multimodal reasoning Flash model.",
     },
     {
@@ -126,7 +116,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "gemini",
         "tier": "fast",
         "supports_web_search": True,
-        "via_emergent_key": True,
         "notes": "Fastest, most cost-effective Gemini 3 model.",
     },
 
@@ -137,7 +126,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "openrouter",
         "tier": "flagship",
         "supports_web_search": False,
-        "via_emergent_key": False,
         "notes": "OpenRouter route to Claude Opus 5.",
     },
     {
@@ -146,7 +134,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "openrouter",
         "tier": "balanced",
         "supports_web_search": False,
-        "via_emergent_key": False,
         "notes": "OpenRouter route to Claude Sonnet 5.",
     },
     {
@@ -155,7 +142,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "openrouter",
         "tier": "fast",
         "supports_web_search": False,
-        "via_emergent_key": False,
         "notes": "OpenRouter route to Claude Haiku 4.5.",
     },
     {
@@ -164,7 +150,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "openrouter",
         "tier": "flagship",
         "supports_web_search": False,
-        "via_emergent_key": False,
         "notes": "OpenRouter route to GPT-5.6 Sol.",
     },
     {
@@ -173,7 +158,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "openrouter",
         "tier": "fast",
         "supports_web_search": False,
-        "via_emergent_key": False,
         "notes": "OpenRouter lower-cost GPT route.",
     },
     {
@@ -182,7 +166,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "openrouter",
         "tier": "flagship",
         "supports_web_search": False,
-        "via_emergent_key": False,
         "notes": "OpenRouter route to Gemini 3.1 Pro.",
     },
     {
@@ -191,7 +174,6 @@ CATALOG: list[dict[str, Any]] = [
         "provider_family": "openrouter",
         "tier": "fast",
         "supports_web_search": False,
-        "via_emergent_key": False,
         "notes": "OpenRouter lower-cost Gemini route.",
     },
 ]
@@ -241,8 +223,6 @@ def models_for_provider(provider_family: str) -> list[dict[str, Any]]:
 def default_model_for(provider: str) -> str:
     """Pick a sensible default model id for a provider family."""
     fam = provider
-    if fam == "emergent":
-        fam = "anthropic"
     if fam == "chatgpt":
         # OAuth ChatGPT path is separate; Settings "ChatGPT" maps to openai.
         fam = "openai"
@@ -263,9 +243,6 @@ def catalog_for_ui() -> dict[str, Any]:
             "id": fam,
             "label": label,
             "web_search_available": PROVIDER_FAMILIES[fam]["web_search_tool"] is not None,
-            "via_emergent_key": any(
-                m["provider_family"] == fam and m["via_emergent_key"] for m in CATALOG
-            ),
         }
         for fam, label in UI_PROVIDERS
         if fam in PROVIDER_FAMILIES
@@ -285,17 +262,8 @@ def web_search_tool_for(provider_family: str) -> dict[str, Any] | None:
 
 
 def resolve_family(provider: str, model_id: str) -> str:
-    """Given the top-level provider (emergent/anthropic/openai/...) and the
-    model id, resolve the provider family used for tool routing.
-
-    The ``emergent`` provider is a proxy that routes to anthropic / openai
-    / gemini depending on model id; look up the model in the catalog to
-    determine the underlying family. Falls back to `provider` for BYOK
-    providers that map 1:1 to a family.
-    """
-    if provider == "emergent":
-        for m in CATALOG:
-            if m["id"] == model_id and m["via_emergent_key"]:
-                return m["provider_family"]
-        return "anthropic"  # emergent default
+    """Given the top-level provider (anthropic/openai/gemini/...), resolve
+    the provider family used for tool routing. BYOK providers map 1:1 to a
+    family, so this is currently an identity mapping kept as its own
+    function so tool-routing call sites don't depend on that being true."""
     return provider

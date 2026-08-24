@@ -201,6 +201,15 @@ async def run_pipeline(
     schema_task = schema_agent.run(dataset_files=dataset_files) if schema_agent else _empty({"columns": []})
     inst_task = instrument_agent.run(form_files=form_files) if instrument_agent else _empty({"fields": []})
     lexicon, schema, instrument = await asyncio.gather(lex_task, schema_task, inst_task)
+    # Deterministic guardian query broker: Manager holds the only reference
+    # to each specialist for targeted ask_schema/ask_instrument/ask_lexicon
+    # lookups, attached only when that specialist actually ran.
+    if lexicon_agent:
+        manager.attach_lexicon(lexicon_agent)
+    if schema_agent:
+        manager.attach_schema(schema_agent)
+    if instrument_agent:
+        manager.attach_instrument(instrument_agent)
     # Carried forward for the site/facility cardinality rule. Fakes/mocks
     # in tests never set `_stats`, so default to empty rather than assume
     # a real Schema instance ran.

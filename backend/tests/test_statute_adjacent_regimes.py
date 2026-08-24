@@ -18,7 +18,7 @@ def _agent():
 
     return Statute(
         session_id="statute-test",
-        llm=LlmConfig(provider="emergent", model="test", max_tokens=100),
+        llm=LlmConfig(provider="anthropic", model="test", max_tokens=100),
         db=_FakeDb(),
     )
 

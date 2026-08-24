@@ -31,7 +31,7 @@ def _backend_up() -> bool:
 def test_provider_allow_list_default(monkeypatch):
     monkeypatch.delenv("ALLOWED_LLM_BASE_URL_HOSTS", raising=False)
     assert "openai_compatible" not in allowed_providers()
-    for p in ("emergent", "anthropic", "openai", "gemini", "openrouter"):
+    for p in ("anthropic", "openai", "gemini", "openrouter"):
         assert p in allowed_providers()
 
 

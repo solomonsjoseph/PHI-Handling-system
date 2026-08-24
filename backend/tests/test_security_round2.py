@@ -74,7 +74,7 @@ def test_scrub_decision_only_scrubs_string_fields():
 # ---------- SEC-003 per-provider host allow-list --------------------------
 
 def test_provider_hosts_defined_for_all_standard_providers():
-    for p in ("emergent", "anthropic", "openai", "gemini", "openrouter"):
+    for p in ("anthropic", "openai", "gemini", "openrouter"):
         assert p in PROVIDER_HOSTS
 
 
@@ -88,12 +88,6 @@ def test_anthropic_base_url_must_be_anthropic_host():
     validate_llm_base_url("https://api.anthropic.com/v1", "anthropic")
     with pytest.raises(HTTPException):
         validate_llm_base_url("https://api.evil.example.com/v1", "anthropic")
-
-
-def test_emergent_rejects_any_base_url():
-    # emergent uses the internal proxy and does not accept a base_url.
-    with pytest.raises(HTTPException):
-        validate_llm_base_url("https://api.openai.com/v1", "emergent")
 
 
 def test_openai_compatible_requires_env_hosts(monkeypatch):

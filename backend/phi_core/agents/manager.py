@@ -37,8 +37,18 @@ class Manager(Agent):
       5. escalate_to_human_review() the one path to 'awaiting_human_review'.
       6. close_run()                persistable report of every intervention.
 
-    It is never given a prompt, a reply, a decision, a column name, or a file.
-    Its LLM payload is always counts, enums, and timings.
+    It is never given a prompt, a reply, a decision, or a file. Its LLM
+    payload is always counts, enums, and timings.
+
+    Exception: the deterministic guardian query broker below
+    (``attach_schema``/``ask_schema``, ``attach_instrument``/``ask_instrument``,
+    ``attach_lexicon``/``ask_lexicon``) does pass a column or field name
+    through, so Judge/Sentinel can ask a specialist a targeted question
+    instead of relying only on the broadcast summary. That name and the
+    specialist's lookup result never reach the Manager's own LLM calls --
+    ``ask_schema``/``ask_instrument`` never call an LLM at all, and
+    ``ask_lexicon`` forwards straight to ``Lexicon.answer`` without the
+    Manager itself reading the reply content.
     """
 
     NAME = "Manager"
@@ -120,6 +130,7 @@ class Manager(Agent):
     BACKOFF_S = {2: 2.0, 3: 5.0}        # sleep before attempt N
     DECISION_TIMEOUT_S = 12.0           # the Manager's own calls stay short
     NOTE_MAX_CHARS = 200
+    LEXICON_QUERY_BUDGET = 8             # Lexicon.answer calls an LLM; cap queries/run
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
@@ -130,6 +141,10 @@ class Manager(Agent):
         self._late_calls: list[dict[str, Any]] = []
         self._notes_that_worked: dict[str, str] = {}   # error_kind -> coaching note
         self._escalation: dict[str, Any] | None = None
+        self._schema = None
+        self._instrument = None
+        self._lexicon = None
+        self._lexicon_queries = 0
 
     # ---- 1. open -------------------------------------------------------
     async def run(self, *, roster: list[str], phase_plan: list[str]) -> dict[str, Any]:
@@ -334,6 +349,55 @@ class Manager(Agent):
         return {"status": "awaiting_human_review", "decisions": approved_decisions,
                 "sentinel": sentinel_report, "phase_timings": phase_timings,
                 "manager_report": report}
+
+    # ---- guardian query broker -----------------------------------------
+    # Deterministic lookups a specialist already indexed during its own
+    # run. The Manager holds the only reference for querying purposes so
+    # Judge/Sentinel ask through one place, and every query is logged the
+    # same way regardless of which specialist answered.
+
+    def attach_schema(self, schema) -> None:
+        self._schema = schema
+
+    def attach_instrument(self, instrument) -> None:
+        self._instrument = instrument
+
+    def attach_lexicon(self, lexicon) -> None:
+        self._lexicon = lexicon
+
+    async def ask_schema(self, requesting_agent: str, column: str,
+                          file_id: str | None = None) -> dict[str, Any]:
+        if self._schema is None:
+            return {"available": False, "reason": "schema_not_attached"}
+        result = self._schema.verify(column, file_id)
+        await self._log("manager.ask_schema", "info",
+                        {"requesting_agent": requesting_agent,
+                         "present": result.get("present")})
+        return {"available": True, **result}
+
+    async def ask_instrument(self, requesting_agent: str, field_or_variable: str,
+                              file_id: str | None = None) -> dict[str, Any]:
+        if self._instrument is None:
+            return {"available": False, "reason": "instrument_not_attached"}
+        result = self._instrument.verify(field_or_variable, file_id)
+        await self._log("manager.ask_instrument", "info",
+                        {"requesting_agent": requesting_agent,
+                         "present": result.get("present")})
+        return {"available": True, **result}
+
+    async def ask_lexicon(self, requesting_agent: str, column: str,
+                           assumption: str, reasoning: str) -> dict[str, Any]:
+        if self._lexicon is None:
+            return {"available": False, "reason": "lexicon_not_attached"}
+        if self._lexicon_queries >= self.LEXICON_QUERY_BUDGET:
+            return {"available": False, "reason": "budget_exhausted"}
+        self._lexicon_queries += 1
+        result = await self._lexicon.answer(column, assumption, reasoning)
+        await self._log("manager.ask_lexicon", "info",
+                        {"requesting_agent": requesting_agent,
+                         "verdict": result.get("verdict"),
+                         "queries_used": self._lexicon_queries})
+        return {"available": True, **result}
 
     # ---- 6. close ------------------------------------------------------
     async def close_run(self, outcome: str) -> dict[str, Any]:

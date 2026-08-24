@@ -1,7 +1,7 @@
-"""Shared pytest configuration: load backend/.env so EMERGENT_LLM_KEY and
+"""Shared pytest configuration: load backend/.env so ANTHROPIC_API_KEY and
 MONGO_URL are visible to unit tests that check integrations directly.
 
-Tests that require the live LLM guard on ``EMERGENT_LLM_KEY``; without the
+Tests that require a live LLM guard on ``ANTHROPIC_API_KEY``; without the
 key they skip. Tests that require Mongo guard on ``MONGO_URL``.
 """
 from __future__ import annotations

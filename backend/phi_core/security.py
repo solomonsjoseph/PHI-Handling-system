@@ -27,17 +27,15 @@ from urllib.parse import urlparse
 from fastapi import Cookie, Header, HTTPException
 
 
-ALLOWED_PROVIDERS_DEFAULT = {"emergent", "anthropic", "openai", "gemini", "openrouter", "chatgpt"}
+ALLOWED_PROVIDERS_DEFAULT = {"anthropic", "openai", "gemini", "openrouter", "chatgpt"}
 # Kept behind an explicit env flag because openai_compatible allows a user-
 # controlled base_url which is the SSRF vector called out in SEC-003.
 ALLOWED_PROVIDERS_WITH_CUSTOM = ALLOWED_PROVIDERS_DEFAULT | {"openai_compatible"}
 
 # Known host allow-list per standard provider. `base_url` if given must
 # resolve to one of these hosts for the corresponding provider. Empty tuple
-# means "no base_url is accepted" (provider uses SDK defaults / Emergent
-# proxy).
+# means "no base_url is accepted" (provider uses SDK defaults).
 PROVIDER_HOSTS: dict[str, tuple[str, ...]] = {
-    "emergent": (),
     "anthropic": ("api.anthropic.com",),
     "openai": ("api.openai.com",),
     "gemini": ("generativelanguage.googleapis.com",),

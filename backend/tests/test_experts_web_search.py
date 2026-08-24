@@ -1,6 +1,6 @@
 """Tests for the Statute + Praxis experts armed with web_search.
 
-Live-web tests are gated on EMERGENT_LLM_KEY availability. They are the
+Live-web tests are gated on ANTHROPIC_API_KEY availability. They are the
 canonical proof that the Regulations expert and PHI-Methods expert are
 actually querying the current web rather than emitting stale
 LLM-training-time answers.
@@ -17,7 +17,7 @@ import pytest
 
 
 def _has_key() -> bool:
-    return bool(os.environ.get("EMERGENT_LLM_KEY", "").strip())
+    return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
 
 
 def test_url_extraction_from_reply_text():
@@ -67,13 +67,13 @@ def test_statute_pack_fallback_shape():
 # ---------- Live web-search integration test ----------------------------
 
 
-@pytest.mark.skipif(not _has_key(), reason="EMERGENT_LLM_KEY not set")
+@pytest.mark.skipif(not _has_key(), reason="ANTHROPIC_API_KEY not set")
 def test_live_web_search_returns_urls():
     """End-to-end live test: Anthropic's web_search_20250305 tool must
     execute server-side and return URLs in the response text."""
     from phi_core.agents.llm import call_llm_with_web_search, LlmConfig
     cfg = LlmConfig(
-        provider="emergent",
+        provider="anthropic",
         model="claude-sonnet-4-5-20250929",
         max_tokens=400,
     )

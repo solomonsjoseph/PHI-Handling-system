@@ -17,10 +17,9 @@ def test_catalog_shape():
     for p in payload["providers"]:
         assert "id" in p and "label" in p
         assert "web_search_available" in p
-        assert "via_emergent_key" in p
     for m in payload["models"]:
         for key in ("id", "label", "provider_family", "tier",
-                    "supports_web_search", "via_emergent_key"):
+                    "supports_web_search"):
             assert key in m, f"model {m!r} missing key {key!r}"
 
 
@@ -42,26 +41,6 @@ def test_default_model_for_each_ui_provider():
         mid = default_model_for(fam)
         assert mid in ids
         assert any(m["id"] == mid and m["provider_family"] == fam for m in CATALOG)
-
-
-@pytest.mark.parametrize("model_id,expected_family", [
-    ("claude-sonnet-5", "anthropic"),
-    ("claude-opus-5", "anthropic"),
-    ("gpt-5.6-terra", "openai"),
-    ("gpt-5.6-luna", "openai"),
-    ("gemini-3.1-pro-preview", "gemini"),
-    ("gemini-3.7-flash", "gemini"),
-])
-def test_family_resolution_from_model_id_via_emergent(model_id, expected_family):
-    from phi_core.llm_catalog import resolve_family
-    assert resolve_family("emergent", model_id) == expected_family
-
-
-def test_family_resolution_falls_back_to_anthropic_for_unknown_model():
-    """Emergent + unknown model id -> default to anthropic (Claude is the
-    canonical Emergent-key target)."""
-    from phi_core.llm_catalog import resolve_family
-    assert resolve_family("emergent", "some-future-model-id") == "anthropic"
 
 
 def test_family_resolution_byok_provider_maps_to_itself():
@@ -90,7 +69,6 @@ def test_web_search_tool_selection_per_family():
         ({"OPENAI_API_KEY": "key"}, "openai"),
         ({"ANTHROPIC_API_KEY": "key"}, "anthropic"),
         ({"GEMINI_API_KEY": "key"}, "gemini"),
-        ({"EMERGENT_LLM_KEY": "key"}, "emergent"),
     ],
 )
 def test_environment_key_selects_provider_without_selecting_model(
@@ -99,7 +77,6 @@ def test_environment_key_selects_provider_without_selecting_model(
     from phi_core.agents.llm import LlmConfig, _default_provider
 
     for key in (
-        "EMERGENT_LLM_KEY",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
