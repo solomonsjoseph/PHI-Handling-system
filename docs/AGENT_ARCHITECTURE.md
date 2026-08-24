@@ -10,9 +10,9 @@ The browser clients create and upload sessions through FastAPI. `Wizard.jsx` sta
 
 ```mermaid
 flowchart LR
-    Wizard["Wizard.jsx"] -->|"POST /api/sessions: session configuration; POST intake: ZIP bytes"| Server["FastAPI server.py"]
+    Wizard["Wizard.jsx"] -->|"POST /api/sessions: session configuration; POST /api/sessions/{sid}/intake: ZIP bytes"| Server["FastAPI server.py"]
     Wizard -->|"POST /api/sessions/{sid}/handle?iteration_cap=1..3"| Server
-    Detail["SessionDetail.jsx"] -->|"GET session, results, trace: refetched JSON"| Server
+    Detail["SessionDetail.jsx"] -->|"GET /api/sessions/{sid}, GET /api/sessions/{sid}/results, GET /api/sessions/{sid}/agent-trace: refetched JSON"| Server
     Detail -->|"GET /api/sessions/{sid}/stream, 15 s heartbeat, closes on __end__"| Server
     Server -->|"SSE progress event; client discards payload and refetches"| Detail
     Server -->|"background coroutine: session document, run id, phase callback"| Pipeline["run_pipeline"]
@@ -74,8 +74,9 @@ flowchart TB
     Common --> Specialists
     Statute --> ExpertJoin["await Statute and Praxis"]
     Praxis --> ExpertJoin
-    Specialists --> Attach["attach Lexicon, Schema, Instrument to Manager"]
-    ExpertJoin --> PraxisFailures["log praxis.category_failed; Judge falls back for that category"]
+    ExpertJoin --> PraxisFailure{"any Praxis category failure?"}
+    PraxisFailure -->|"yes"| PraxisFailures["log praxis.category_failed; Judge falls back for that category"]
+    PraxisFailure -->|"no"| Judge
 
     subgraph Loop["Judge and Sentinel loop"]
         Judge["Judge"]
@@ -107,10 +108,19 @@ flowchart TB
 
     subgraph Verification["Execution and verification"]
         Operator["Operator"]
-        OperatorDrop["file dropped from exports, final_status = partially_complete"]
+        OperatorFilter{"op_failed_ids?"}
+        DropFailed["drop failed files from exports"]
         Reviewer["Reviewer replaces exports with filtered view"]
+        Status{"op_failed_ids or reviewer_blocked_ids?"}
+        Partial["final_status = partially_complete"]
+        CompleteStatus["final_status = complete"]
         ReviewerConsult["advisory Manager consult for Reviewer"]
-        Operator --> OperatorDrop --> Reviewer --> ReviewerConsult
+        Operator --> OperatorFilter
+        OperatorFilter -->|"yes"| DropFailed --> Reviewer
+        OperatorFilter -->|"no"| Reviewer
+        Reviewer --> Status
+        Status -->|"yes"| Partial --> ReviewerConsult
+        Status -->|"no"| CompleteStatus --> ReviewerConsult
     end
     ReviewerConsult -->|"coverage advisory escalation"| Pause
 
@@ -146,12 +156,13 @@ flowchart TB
     Projection["Scoped projection prepared by caller"] --> Scrub["Call-site scrub where implemented"]
     Scrub --> JsonCall["call_json with declared default"]
     JsonCall --> Call["Agent.call"]
-    JsonCall -. "passes _json_validator when requested" .-> Validator["_json_validator: invalid_output or off_task counts"]
     Call --> Managed{"Manager attached?"}
     Managed -->|"yes"| Supervised["run_supervised attempt: retry, timeout extension, web-search grant, or escalate"]
     Managed -->|"no"| Single["one plain provider attempt"]
-    Validator -. "accept or failure kind" .-> Supervised
-    Supervised -->|"reply or terminal empty string"| JsonResult["call_json receives reply or empty string"]
+    Supervised -->|"reply"| Validator["_json_validator: invalid_output or off_task counts"]
+    Validator -->|"accepted"| JsonResult["call_json receives reply or empty string"]
+    Validator -->|"invalid output or off_task"| Supervised
+    Supervised -->|"terminal failure returns empty string"| JsonResult
     Single -->|"provider reply"| JsonResult
     Single -->|"timeout increments call_failures and returns empty string"| JsonResult
     Single -->|"provider exception"| Propagate["exception propagates to caller"]
@@ -275,7 +286,7 @@ Source: Code anchors "Herald and subagents".
 #### Manager
 
 - Opens a charter, supervises LLM attempts, records consult advice, brokers guardian queries, escalates to human review, and closes a run report.
-- Uses fixed roles plus counts, enums, timings, and owed/delivered integers for supervision. Guardian broker calls receive a column or field name only to forward it to Schema, Instrument, or Lexicon.
+- Uses fixed roles plus counts, enums, timings, and owed/delivered integers for supervision. `ask_schema` and `ask_instrument` forward a column or field name plus optional file ID to non-LLM `verify()` methods. `ask_lexicon` forwards `column`, `assumption`, and `reasoning` to LLM-backed `Lexicon.answer`; this content-bearing broker exception does not make base-layer log scrubbing an outbound-provider control.
 - Returns charter keys `opened_at`, `max_attempts`, `phase_plan`, and `assignments`; supervision returns a reply, success flag, and the original `error_kind`; closeout reports outcome, phase and intervention counts, bounded histories, reused coaching, and escalation.
 - Logs `action: "escalate"` and `reason: "attempts_exhausted"` on a third failed supervised attempt, while returning its original error kind with no reply. `_decide` failures or illegal actions use the caller's default; `consult` defaults to `continue`.
 
@@ -600,7 +611,7 @@ Sources: Code anchors "Pipeline iteration bound", "Server environment limits and
 | Prompt scrubbing and provider boundary | `backend/phi_core/agents/specialists.py`; `backend/phi_core/agents/base.py` | `Lexicon.run`; `Instrument.run`; `Agent.call`; `Agent.call_with_web_search` | 91; 388; 111-251 |
 | Sentinel default and pipeline failure gate | `backend/phi_core/agents/reasoning.py`; `backend/phi_core/agents/orchestrator.py` | `Sentinel.run`; `run_pipeline` | 1013-1034; 434-512 |
 | Executor unresolved-review refusal | `backend/phi_core/agents/reasoning.py` | `Executor.run` | 1072-1087 |
-| Pipeline iteration bound | `backend/phi_core/agents/base.py`; `backend/phi_core/agents/orchestrator.py` | `ITERATION_CAP`; `run_pipeline` | 268; 153-154; 260-261 |
+| Pipeline iteration bound | `backend/phi_core/agents/orchestrator.py`; `backend/phi_core/agents/base.py` | orchestrator module docstring; `ITERATION_CAP`; `run_pipeline` | 7; 268; 153-154; 260-261 |
 | Pipeline failure and escalation paths | `backend/phi_core/agents/orchestrator.py` | `run_pipeline` | 301-432; 463-530; 547-709 |
 | Server environment limits and retention | `backend/server.py` | `_MAX_CONCURRENT_PIPELINES`; `_MAX_COLUMNS_PER_STUDY`; `RETENTION_DAYS`; `_purge_settled_sessions_loop` | 271-290; 1664-1718 |
 | PHI environment safeguards | `backend/server.py` | `_refuse_to_boot_insecure`; `_HSTS` | 94-120; 140 |
@@ -608,3 +619,5 @@ Sources: Code anchors "Pipeline iteration bound", "Server environment limits and
 ## Documented intent versus current code
 
 This section records divergences between architecture descriptions and current source when they are established from code.
+
+The `backend/phi_core/agents/orchestrator.py` module docstring says the Judge and Sentinel loop is capped at `ITERATION_CAP=2` (line 7). Executable code sets `ITERATION_CAP = 3` and calculates `max_iterations = max(iteration_cap, BLOCKING_ISSUE_FLOOR)`. The session value is clamped to 1 through 3 before that calculation. The diagrams and tunables table use the executable bound rather than the stale docstring. Source: Code anchors "Pipeline iteration bound".
