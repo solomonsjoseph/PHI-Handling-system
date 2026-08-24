@@ -21,10 +21,12 @@ flowchart LR
     Pool["12-agent pool"] -->|"cache reads/writes: topic, jurisdiction, serialized research"| Cache[("web_cache")]
     Pipeline -->|"shared Manager instance, session metadata and file projections"| Pool
     Manager["Manager"] <-->|"supervision: counts, enums, timings, retry decisions"| Pool
+    Request["provider HTTPS request"]
     subgraph Boundary["Untrusted boundary"]
         Providers["LLM providers"]
     end
-    Pool -->|"column headers + scrubbed dictionary text only"| Providers
+    Pool -->|"column headers + scrubbed dictionary text only"| Request
+    Request -->|"provider HTTPS: same scrubbed request"| Providers
     Providers -->|"provider HTTPS: text or JSON replies and web citations"| Pool
     Pipeline -->|"in-process writes: transformed dataset, redacted metadata, narrative output"| Exports["export directory"]
     Detail -->|"GET export or bundle: authenticated request"| Server
