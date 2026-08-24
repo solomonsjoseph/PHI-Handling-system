@@ -431,19 +431,121 @@ Sources: Code anchors "Operator verification and verdicts", "Reviewer coverage a
 
 ## Human review (Level 5)
 
-The review interface and its supporting HTTP layer are identified in the Code anchors table.
+```mermaid
+sequenceDiagram
+    participant Human as Human reviewer
+    participant UI as SessionDetail.jsx
+    participant Server as server.py
+    participant Sessions as sessions collection
+    participant Tail as Resumed pipeline tail
+
+    Server-->>UI: SSE change nudge from GET /api/sessions/{sid}/stream
+    UI->>Server: GET session, GET /results, GET /agent-trace
+    Server-->>UI: refetched session, results, and trace data
+    Human->>UI: Download original dataset for actual-knowledge glance
+    UI->>Server: GET /api/sessions/{sid}/dataset-file/{file_id}
+    Server->>Sessions: Append dataset_file_downloads with principal and timestamp
+    Server-->>UI: Byte-identical original file
+    Human->>UI: Submit approve, comment, or defer for each review row
+    UI->>Server: POST /api/sessions/{sid}/human-review
+    alt comment
+        Server->>Server: Judge.resolve_comment once per commented column
+    else approve or defer
+        Note over Server: No agent call
+    end
+    Server->>Server: validate_decisions, apply_sentinel_hard_rules, verify_keep_decisions, annotate_pending_review
+    alt hard rule changes a human-resolved action
+        Server->>Sessions: provenance = human_overridden_by_hard_rule
+    end
+    alt unresolved rows remain and no row has ever resolved
+        Server->>Sessions: Persist decisions, pending_review, and session_review
+        Server-->>UI: status = still_awaiting, unresolved = N
+    else one or more rows resolved
+        Server->>Sessions: status = anonymizing, new _pipeline_run_id
+        Server-->>UI: status = resuming
+        Server->>Tail: Start background tail only
+        Note over Tail: Executor, Operator, Reviewer, Publish Guard, Auditor and Scout, Ledger, Herald
+    end
+```
+
+`SessionDetail.jsx` treats SSE as a change nudge. Its message handler calls `refresh()`, which refetches the session, `/results`, and the cursor-paginated `/agent-trace`; it does not render the SSE payload. Human-review rows are decisions whose action is `human_review`. The row displays the column, reviewer prompt or reason, suggested action, an optional original-file glance warning, and a pending comment interpretation. Confidence, category, and citation are not part of the review row.
+
+Before any approving or comment-resolving submission for a session with datasets, the reviewer must download at least one original file through `GET /api/sessions/{sid}/dataset-file/{file_id}`. The server records the authenticated principal and timestamp in `dataset_file_downloads`. A non-deferred resolution also requires the `actual_knowledge_ack` attestation. The request-body `reviewer` field is inert. `resolve_principal` supplies the stored identity.
+
+The only accepted modes are `approve`, `comment`, and `defer`. There is no `reject` or `override` mode. Approve copies the server's `suggested_action`, or a pending comment interpretation, onto the decision. Defer leaves the decision as `human_review` and places it in `pending_review`. Neither invokes an agent. Comment invokes `Judge.resolve_comment` once for that column with the scrubbed comment, not dataset cells. A low-confidence or invalid comment interpretation remains pending confirmation.
+
+Every resolved decision is re-gated with `validate_decisions`, `apply_sentinel_hard_rules`, `verify_keep_decisions`, and `annotate_pending_review`. A hard rule that disagrees with a human-approved or human-comment-inferred action wins. The decision records `human_overridden_action` and `provenance = "human_overridden_by_hard_rule"`. If review rows remain and no row has ever been resolved, the endpoint persists review state and returns `{"status": "still_awaiting", "unresolved": N}` without starting work. Otherwise it sets `anonymizing`, creates a new `_pipeline_run_id`, returns `{"status": "resuming"}`, and starts only the tail. It never re-runs Judge or Sentinel.
+
+Sources: Code anchors "Human review endpoint and resumed tail", "Human comment interpretation and deterministic re-gating", "Original dataset review download", "Review UI and SSE refresh", and "Session statuses".
 
 ## PHI boundary and what it does and does not prove
 
-The implementation defines the prompt, export, and review boundaries. This document distinguishes named controls from properties that code alone does not establish.
+```mermaid
+flowchart LR
+    Upload["Uploaded ZIP"] --> Manifest["build_manifest"]
+    Manifest --> Metadata["Manifest file metadata"]
+    Manifest --> Headers["read_csv_columns, read_xlsx_columns, read_parquet_columns"]
+    Metadata --> Projection["Scoped header and metadata projection"]
+    Headers --> Projection
+    Projection --> Scrub["Call-site scrub_for_prompt"]
+    Scrub --> Prompts["Provider-bound prompts"]
+    Manifest --> Values["Dataset values, in process only"]
+    Values --> Executor["Executor"]
+    Values --> Operator["Operator"]
+    Values --> KeepVerify["verify_keep_decisions and detectors"]
+    Executor --> Exports["Written exports"]
+    Exports --> Operator
+```
+
+The named prompt boundary starts with `build_manifest`, then uses dataset headers, row counts, file metadata, and the scoped specialist inputs needed for a task. `read_csv_columns`, `read_xlsx_columns`, and `read_parquet_columns` return headers and a row count rather than retaining row values. Lexicon rule-scrubs dictionary rows before prompt construction. Instrument rule-scrubs the truncated text of tier-2 forms. `Judge.resolve_comment` scrubs the reviewer's free-text comment before building its one-column prompt.
+
+Dataset values are processed in memory by Executor, Operator, `verify_keep_decisions`, and detectors, then by the written export path. This diagram records call-site controls and in-process readers. It does not prove that every provider-bound prompt contains no value-bearing text.
+
+The base `Agent.call` layer scrubs `user_prompt` and replies before persisting `agent_log` rows. That is a logging control, not outbound prompt sanitization: `call_llm` receives the original `user_prompt`. The effective outbound control is the call-site scrub before prompt construction. Sentinel's `call_json` default is `{"verdict": "approved", "issues": []}`, so an outage fails open at that raw default. `Agent.call` increments `sentinel.call_failures`, and `run_pipeline` then forces human review with `sentinel_call_failure`.
+
+Deterministic gates prevent model output from being the only safety control. `validate_decisions` coerces unknown actions to `human_review`; `apply_confidence_floor`, `apply_blocking_floor`, and `apply_sentinel_escalations` route their cases to review; `verify_keep_decisions` demotes a keep when real values match a detector or its file is unreadable. Executor refuses an unresolved `human_review` decision. `scan_all_exports` is the last export gate. Any non-clean result ends the regular run as `blocked`.
+
+Sources: Code anchors "Intake manifest and header readers", "Prompt scrubbing and provider boundary", "Sentinel default and pipeline failure gate", "Deterministic review gates", "Executor unresolved-review refusal", and "Publish guard".
 
 ## Failure and escalation matrix
 
-Failure handling and escalation behavior are defined by the pipeline driver, base agent, Manager, and deterministic gates.
+| Failure or condition | Detector | Automatic response | Terminal state or status | Human visibility |
+| --- | --- | --- | --- | --- |
+| LLM timeout | `Agent.call` timeout and Manager supervision | Supervised recovery may retry, extend timeout, grant web search, or escalate. Failed managed call returns `""` and increments `call_failures`. | Judge or Sentinel failure enters `awaiting_human_review`; other agents use their declared fallback. | Human-review reason is `judge_call_failure` or `sentinel_call_failure` for those two agents. |
+| Empty reply | `_json_validator` through `Manager.run_supervised` | Treat as `empty_reply`, then supervised recovery. | Same managed-call outcome as timeout. | Present when a Judge or Sentinel failure forces review. |
+| Invalid JSON | `_json_validator` through `Manager.run_supervised` | Treat as `invalid_output`, then supervised recovery. | Same managed-call outcome as timeout. | Present when a Judge or Sentinel failure forces review. |
+| Off-task under-delivery | `_json_validator` compares `owed` and `delivered` | Treat as `off_task`, then supervised recovery with only those integers in the Manager payload. | Same managed-call outcome as timeout. | Present when a Judge or Sentinel failure forces review. |
+| Attempts exhausted | Third failed attempt in `Manager.run_supervised` | Set `action = "escalate"` and `reason = "attempts_exhausted"` without consulting Manager's LLM, return `""`, and increment `call_failures`. | Judge or Sentinel failure enters `awaiting_human_review`; other agents use their declared fallback. | The resulting Judge or Sentinel call-failure reason is stored for review. |
+| Judge repeats a Sentinel-rejected action | Anti-loop block in `run_pipeline` | Force that column to `human_review` without resubmitting it to Sentinel. | `awaiting_human_review`. | Reviewer sees the anti-loop review rationale and suggested action. |
+| Confidence below 0.80 | `apply_confidence_floor` | Force the decision to `human_review` and preserve its suggestion. | `awaiting_human_review`. | Reviewer sees the confidence-floor reason and suggested action. |
+| Three Sentinel blocking rounds on one column | Per-column counter and `apply_blocking_floor` with `BLOCKING_ISSUE_FLOOR = 3` | Force the column to `human_review` before a fourth Judge iteration. | `awaiting_human_review`. | Reviewer sees the blocking-floor reason and suggested action. |
+| Keep contradicted by real cell values or unreadable file | `verify_keep_decisions` | Demote keep to `human_review`; unreadable files fail closed the same way. | `awaiting_human_review`. | Reviewer sees the generated review entry. |
+| Executor crash | `try` and `except` around `Executor.run` | Unconditionally call `Manager.escalate_to_human_review` with `executor_crashed`. | `awaiting_human_review`. | `human_review_reasons` includes `executor_crashed`. |
+| Operator crash | `try` and `except` around `Operator.run` | Mark every Executor export as failed and remove all from working exports. | Manager may advise `awaiting_human_review`; otherwise Publish Guard blocks the empty export set as `blocked`. | Advisory escalation is visible if it occurs; otherwise the blocked guard report is visible. |
+| Reviewer crash | `try` and `except` around `Reviewer.run` | Replace its result with no exports and no findings, dropping every remaining export. | Manager may advise `awaiting_human_review`; otherwise Publish Guard blocks the empty export set as `blocked`. | Advisory escalation is visible if it occurs; otherwise the blocked guard report is visible. |
+| Publish Guard status is not clean | `scan_all_exports` | Close Manager run as blocked, persist guard report, cancel Scout, and skip Auditor, Ledger, and Herald. | `blocked`. | Guard report and blocked session state. |
+| Auditor confidence below 0.98 | `auditor_escalation_reason` | Materialize Auditor disagreements and escalate for second human review. | `awaiting_human_review`. | Reason is `auditor_confidence_below_floor:<score>`. |
+| Auditor crash | `asyncio.gather(..., return_exceptions=True)` result check | Substitute `verdict = "issues"` with confidence `0.0`, then deterministic Auditor confidence escalation. | `awaiting_human_review`. | Audit says "Auditor crashed; not verified" and the confidence reason is stored. |
+| Human deferral | `mode = "defer"` in `/human-review` | Keep action as `human_review` and add it to `pending_review`; Executor omits deferred columns only after some decision has resolved. | `still_awaiting` response when no row has ever resolved. Otherwise tail resumes and can end `partially_complete`. | Deferred columns remain on review surface and are withheld from exports. |
+
+Sources: Code anchors "Managed LLM recovery", "Pipeline failure and escalation paths", "Deterministic review gates", "Human review endpoint and resumed tail", and "Publish guard".
 
 ## Tunables reference
 
-Configuration and fixed bounds are documented from their current source definitions.
+| Setting or constant | Source and value | Scope |
+| --- | --- | --- |
+| `iteration_cap` | Session field, clamped with `max(1, min(value, ITERATION_CAP))`; `ITERATION_CAP = 3` | Per session. It can lower the initial cap to 1 through 3. The loop still uses `max(iteration_cap, BLOCKING_ISSUE_FLOOR)`. |
+| `MAX_CONCURRENT_PIPELINES` | Environment variable, default `2` | Process-wide admission cap for `/handle` and human-review resume work. |
+| `MAX_COLUMNS_PER_STUDY` | Environment variable, default `500` | Per-study dataset-column cap, enforced before prompt construction. |
+| `RETENTION_DAYS` | Environment variable, default `30` | Settled-session retention and `agent_log` TTL. |
+| `PHI_ENV` | Environment variable, default `"production"` | Selects development exceptions and production startup, crypto, cookie, and identity safeguards. |
+| `ITERATION_CAP`, `BLOCKING_ISSUE_FLOOR` | Hardcoded `3`, `3` | Not environment-overridable. These bounds control Judge and Sentinel loop behavior. |
+| `CONFIDENCE_FLOOR`, `AUDITOR_CONFIDENCE_FLOOR` | Hardcoded `0.80`, `0.98` | Not environment-overridable. These are deterministic human-review gates. |
+| `PLAIN_TIMEOUT_S`, `WEB_SEARCH_TIMEOUT_S`, extension bumps | Hardcoded `90 s`, `180 s`, `30 s`, `45 s` | Not environment-overridable. Base call limits and one supervised extension. |
+| Manager retries and supervision limits | Hardcoded `MAX_ATTEMPTS = 3`, backoff `2 s` then `5 s`, `DECISION_TIMEOUT_S = 12 s`, `NOTE_MAX_CHARS = 200`, default budget `45 s` | Not environment-overridable. Per-agent budgets are fixed in `Manager.BUDGET_S`. |
+| `REFRESH_DAYS` | Hardcoded `7` | Not environment-overridable. Web-cache freshness period. |
+
+Sources: Code anchors "Pipeline iteration bound", "Server environment limits and retention", "PHI environment safeguards", "Base call timeouts", "Manager roles and bounds", "Deterministic review gates", "Auditor confidence escalation", and "Web cache".
 
 ## Code anchors
 
@@ -490,6 +592,18 @@ Configuration and fixed bounds are documented from their current source definiti
 | Session-detail SSE client | `frontend/src/pages/SessionDetail.jsx` | `SessionDetail` stream effect | 725-729 |
 | Wizard pipeline launch | `frontend/src/pages/Wizard.jsx` | `runPipeline` | 546-559 |
 | Prompt scrubbing call sites | `backend/phi_core/agents/specialists.py` | `Lexicon.run`; `Instrument.run` | 91; 388 |
+| Human review endpoint and resumed tail | `backend/server.py` | `HumanReviewSubmit`; `session_human_review` | 1929-2508 |
+| Human comment interpretation and deterministic re-gating | `backend/server.py`; `backend/phi_core/agents/reasoning.py` | `session_human_review`; `Judge.resolve_comment`; `apply_sentinel_hard_rules`; `verify_keep_decisions`; `annotate_pending_review` | 2037-2147; 955-982; 366-416; 717-871; 212-260 |
+| Original dataset review download | `backend/server.py` | `session_dataset_file` | 2550-2588 |
+| Review UI and SSE refresh | `frontend/src/pages/SessionDetail.jsx`; `backend/server.py` | `refresh`; `SessionDetail` stream effect; `submitReview`; `session_stream` | 669-815; 721-772 |
+| Intake manifest and header readers | `backend/phi_core/intake.py`; `backend/phi_core/file_readers.py` | `build_manifest`; `read_csv_columns`; `read_xlsx_columns`; `read_parquet_columns` | 359-390; 79-100; 190-197 |
+| Prompt scrubbing and provider boundary | `backend/phi_core/agents/specialists.py`; `backend/phi_core/agents/base.py` | `Lexicon.run`; `Instrument.run`; `Agent.call`; `Agent.call_with_web_search` | 91; 388; 111-251 |
+| Sentinel default and pipeline failure gate | `backend/phi_core/agents/reasoning.py`; `backend/phi_core/agents/orchestrator.py` | `Sentinel.run`; `run_pipeline` | 1013-1034; 434-512 |
+| Executor unresolved-review refusal | `backend/phi_core/agents/reasoning.py` | `Executor.run` | 1072-1087 |
+| Pipeline iteration bound | `backend/phi_core/agents/base.py`; `backend/phi_core/agents/orchestrator.py` | `ITERATION_CAP`; `run_pipeline` | 268; 153-154; 260-261 |
+| Pipeline failure and escalation paths | `backend/phi_core/agents/orchestrator.py` | `run_pipeline` | 301-432; 463-530; 547-709 |
+| Server environment limits and retention | `backend/server.py` | `_MAX_CONCURRENT_PIPELINES`; `_MAX_COLUMNS_PER_STUDY`; `RETENTION_DAYS`; `_purge_settled_sessions_loop` | 271-290; 1664-1718 |
+| PHI environment safeguards | `backend/server.py` | `_validate_production_config`; `_HSTS` | 96-120; 140 |
 
 ## Documented intent versus current code
 
