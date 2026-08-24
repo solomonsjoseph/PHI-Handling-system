@@ -408,20 +408,20 @@ Sources: Code anchors "Manager roles and bounds", "Managed LLM recovery", "Manag
 ```mermaid
 flowchart TB
     Executor["Executor writes export bytes"] --> OperatorRead["Operator re-opens written headers and cells"]
-    OperatorRead --> Completeness["Reverse completeness first:<br/>each written header needs a decision or deliberate omission"]
+    OperatorRead --> Completeness["Reverse completeness first:<br/>each written column needs a decision or deliberate omission"]
     Completeness --> ShapeChecks["Per-action verification with _SHAPE_CHECKS:<br/>_YEAR_ONLY_RE, _ZIP3_RE, _HASH_RE, _PSEUDONYM_RE"]
     ShapeChecks --> Verdicts["Per-column verdicts:<br/>pass or fail"]
     Verdicts --> OperatorFilter["Drop files with a failed file ID or fail verdict"]
     OperatorFilter --> ReviewerRead["Reviewer re-opens each remaining export"]
     ReviewerRead --> Batches["run_batched by file_id:<br/>batch_size=8, pool_size=6"]
     Batches --> Coverage["Coverage audit:<br/>decision to Operator verdict, real header, omitted columns absent"]
-    Coverage -->|no findings or failed file IDs| Clean["status: clean"]
+    Coverage -->|no findings and no failed file IDs| Clean["status: clean"]
     Coverage -->|finding or failed file ID| Issues["status: issues"]
     Clean --> Filtered["Filtered exports"]
     Issues --> Filtered
 ```
 
-`Operator.run()` re-opens Executor's written files before it verifies records. It performs reverse completeness first: every written header must have a Judge or Sentinel decision, or be listed in `omit_cols`. A header with neither produces an `undecided` fail verdict. It then verifies each decision against the written output. `drop` requires an empty column, `keep` requires the column to be present, and `_SHAPE_CHECKS` tests non-empty transformed cells. The table maps `year_only`, `zip3_truncate`, `hash`, and `pseudonymize` to `_YEAR_ONLY_RE`, `_ZIP3_RE`, `_HASH_RE`, and `_PSEUDONYM_RE`; it maps `cap_age_90` to `_cap_age_90_ok`. A missing or unreadable output file also becomes a failed file ID. The result contains per-column `verdicts`, `failed_file_ids`, and status `clean` or `issues`.
+`Operator.run()` re-opens Executor's written files before it verifies records. It performs reverse completeness first: every written column must have a Judge or Sentinel decision, or be listed in `omit_cols`. A column with neither produces an `undecided` fail verdict. It then verifies each decision against the written output. `drop` requires an empty column, `keep` requires the column to be present, and `_SHAPE_CHECKS` tests non-empty transformed cells. The table maps `year_only`, `zip3_truncate`, `hash`, and `pseudonymize` to `_YEAR_ONLY_RE`, `_ZIP3_RE`, `_HASH_RE`, and `_PSEUDONYM_RE`; it maps `cap_age_90` to `_cap_age_90_ok`. A missing or unreadable output file also becomes a failed file ID. The result contains per-column `verdicts`, `failed_file_ids`, and status `clean` or `issues`.
 
 The pipeline removes from its working export view every file with an Operator failed file ID or any fail verdict. `Reviewer.run()` then independently re-opens every remaining export and audits coverage per `file_id`. It checks that each decision has an Operator verdict, that the real written header has the expected coverage when Operator reported no failures, and that each `omit_by_file` column is absent. These checks run through `run_batched(..., batch_size=8, pool_size=6)`. Reviewer returns `clean` or `issues`, findings, coverage counts, and a filtered copy of exports that excludes files with findings or prior Operator failures.
 
