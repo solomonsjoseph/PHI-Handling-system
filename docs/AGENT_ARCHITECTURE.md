@@ -72,6 +72,7 @@ flowchart TB
     Common --> Statute
     Common --> Praxis
     Common --> Specialists
+    Specialists --> Attach["attach Lexicon, Schema, Instrument to Manager"]
     Statute --> ExpertJoin["await Statute and Praxis"]
     Praxis --> ExpertJoin
     ExpertJoin --> PraxisFailure{"any Praxis category failure?"}
