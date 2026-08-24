@@ -8,9 +8,11 @@ pass; regenerate the numeric anchors below whenever a cited file moves materiall
 
 ## 1. End-to-end flow
 
-Two entry paths converge on the same twelve-agent pipeline: an operator uploading a real study
-ZIP, and the corpus generator producing a synthetic one for benchmarking. Both produce the same
-intake-manifest/v3 ZIP shape and are handled identically from intake onward.
+Two entry paths converge on a pipeline with twelve roster agents under a Manager, followed by
+Operator and Reviewer deterministic verification stages: an operator uploading a real study ZIP, and
+the corpus generator producing a synthetic one for benchmarking. Both produce the same
+intake-manifest/v3 ZIP shape and are handled identically from intake onward. See
+`docs/AGENT_ARCHITECTURE.md` for the full agent-interaction flowchart.
 
 ```mermaid
 flowchart TD
@@ -75,9 +77,10 @@ flowchart TD
 5. **Experts** (cache-first, fired concurrently with Specialists): `Statute` (jurisdiction
    rulebook) and `Praxis` (per-HIPAA-category transformation technique, one web-search call per
    category run under `asyncio.gather`). Both in `experts.py`.
-6. **Judge <-> Sentinel loop** (`reasoning.py`, up to `iteration_cap` rounds, default 2): `Judge`
-   proposes a `{file_id, column, phi_category, subject, action, reason, confidence, citation}`
-   decision per column. `validate_decisions` coerces it into the executable vocabulary,
+6. **Judge <-> Sentinel loop** (`reasoning.py`, `ITERATION_CAP = 3`, with effective bound
+   `max(iteration_cap, BLOCKING_ISSUE_FLOOR)`): `Judge` proposes a
+   `{file_id, column, phi_category, subject, action, reason, confidence, citation}` decision per
+   column. `validate_decisions` coerces it into the executable vocabulary,
    `apply_sentinel_hard_rules` force-corrects obvious direct identifiers, `Sentinel` reviews for
    zero-leak. Unresolved disagreement past the cap becomes `human_review`.
 7. **Executor** (`reasoning.py`, `PROMPT = ""`, no LLM call ever): applies each approved
@@ -98,9 +101,10 @@ flowchart TD
     runs only); `phi_corpus.benchmark.build_report` turns that into the per-dataset benchmark
     report (markdown, JSON, CSV, three PNGs).
 
-Twelve top-level agents total: Lexicon, Schema, Instrument, Statute, Praxis, Judge, Sentinel,
-Executor, Auditor, Scout, Ledger, Herald. `Ledger` and `Herald` are each a small driver class
-wrapping two internal sub-agent LLM calls; those four sub-agents are not counted separately.
+The 12 roster agents are Lexicon, Schema, Instrument, Statute, Praxis, Judge, Sentinel, Executor,
+Auditor, Scout, Ledger, and Herald. Manager supervises the roster, while Operator and Reviewer are
+deterministic verification stages. `Ledger` and `Herald` are each a small driver class wrapping two
+internal sub-agent LLM calls; those four sub-agents are not counted separately.
 
 ---
 
