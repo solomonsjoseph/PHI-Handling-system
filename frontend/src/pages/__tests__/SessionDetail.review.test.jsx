@@ -3,7 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import axios from 'axios';
 import SessionDetail from '../SessionDetail';
-import { getSession } from '../../lib/api';
+import { getSession, whoami } from '../../lib/api';
 
 jest.mock('axios');
 jest.mock('sonner', () => ({
@@ -18,6 +18,12 @@ jest.mock('../../lib/api', () => ({
   API: '/api',
   getSession: jest.fn(),
   streamUrl: jest.fn(sid => `/api/sessions/${sid}/stream`),
+  // Bare jest.fn(): react-scripts' jest config sets `resetMocks: true`,
+  // which strips any implementation baked into a `jest.mock` factory
+  // before every test -- the resolved value is set fresh in beforeEach
+  // below, same as `getSession`/`streamUrl` already do via
+  // `renderDetail`/explicit calls.
+  whoami: jest.fn(),
 }));
 
 let eventSources;
@@ -39,10 +45,11 @@ const humanReviewDecision = (column, overrides = {}) => ({
   ...overrides,
 });
 
-function renderDetail(decisions) {
+function renderDetail(decisions, sessionOverrides = {}) {
   getSession.mockResolvedValue({
     status: 'awaiting_human_review',
     files: [],
+    ...sessionOverrides,
   });
   axios.get.mockImplementation(url => {
     if (url.includes('/results')) return Promise.resolve({ data: { decisions } });
@@ -56,6 +63,7 @@ function renderDetail(decisions) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  whoami.mockResolvedValue({ principal: 'reviewer-1' });
   eventSources = [];
   window.EventSource = MockEventSource;
 });
@@ -89,7 +97,7 @@ test('blocks review submission until every review row has a mode', async () => {
   const submit = screen.getByTestId('btn-submit-human-review');
 
   expect(submit).toBeDisabled();
-  await user.type(screen.getByTestId('reviewer-id'), 'reviewer-1');
+  expect(await screen.findByTestId('reviewer-id')).toHaveTextContent('reviewer-1');
   await user.click(screen.getByTestId('btn-approve-subject_id'));
 
   expect(submit).toBeDisabled();
@@ -109,7 +117,7 @@ test('requires explicit confirmation before a pending comment interpretation can
   ]);
 
   await screen.findByTestId('review-row-confirm-patient_identifier');
-  await user.type(screen.getByTestId('reviewer-id'), 'reviewer-1');
+  expect(await screen.findByTestId('reviewer-id')).toHaveTextContent('reviewer-1');
   await user.click(screen.getByTestId('actual-knowledge-ack'));
 
   const submit = screen.getByTestId('btn-submit-human-review');
@@ -142,4 +150,32 @@ test('refetches session state when the stream delivers an event', async () => {
   eventSources[0].onmessage({ data: '{"phase":"review"}' });
 
   await waitFor(() => expect(getSession).toHaveBeenCalledTimes(1));
+});
+
+test('confirms Auditor confidence with the open request audit_version', async () => {
+  const user = userEvent.setup();
+  renderDetail([], {
+    audit_version: 'verdict-abc123',
+    audit: {
+      verdict: 'issues', confidence: 0.4, summary: 'Two columns disagree.',
+      issues: [{ file: 'dataset-1', column: 'zip', problem: 'zip3_truncate mismatch' }],
+    },
+  });
+
+  const btn = await screen.findByTestId('btn-confirm-auditor-confidence');
+  expect(screen.getByTestId('auditor-confirmation-panel')).toHaveTextContent('issues');
+  expect(screen.getByTestId('auditor-issues-list')).toHaveTextContent('zip3_truncate mismatch');
+
+  await user.click(btn);
+
+  await waitFor(() => {
+    expect(axios.post).toHaveBeenCalledWith(
+      '/api/sessions/session-1/human-review',
+      expect.objectContaining({
+        confirm_auditor_confidence: true,
+        audit_version: 'verdict-abc123',
+        resolutions: [],
+      }),
+    );
+  });
 });

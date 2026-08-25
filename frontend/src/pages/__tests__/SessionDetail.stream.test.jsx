@@ -2,7 +2,7 @@ import React from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import axios from 'axios';
 import SessionDetail from '../SessionDetail';
-import { getSession, streamUrl } from '../../lib/api';
+import { getSession, streamUrl, whoami } from '../../lib/api';
 
 jest.mock('axios');
 jest.mock('sonner', () => ({
@@ -17,6 +17,7 @@ jest.mock('../../lib/api', () => ({
   API: '/api',
   getSession: jest.fn(),
   streamUrl: jest.fn(sid => `/api/sessions/${sid}/stream`),
+  whoami: jest.fn(),
 }));
 
 let eventSources;
@@ -34,6 +35,7 @@ beforeEach(() => {
   eventSources = [];
   window.EventSource = MockEventSource;
   streamUrl.mockImplementation(sid => `/api/sessions/${sid}/stream`);
+  whoami.mockResolvedValue({ principal: 'reviewer-1' });
   getSession.mockResolvedValue({
     status: 'awaiting_human_review',
     files: [],

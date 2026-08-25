@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import axios from 'axios';
-import { API, getSession, streamUrl } from '../lib/api';
+import { API, getSession, streamUrl, whoami } from '../lib/api';
 import { Btn, Panel, Tag } from '../components/ui';
 
 function StatusChip({ status }) {
@@ -632,15 +632,12 @@ export default function SessionDetail() {
   const [trace, setTrace] = useState([]);
   // { [`${file_id}|${column}`]: { mode: 'approve'|'comment'|'defer', comment: string } }
   const [resolutions, setResolutions] = useState({});
-  const [reviewer, setReviewer] = useState(() => {
-    try { return window.localStorage.getItem('phi_reviewer_id') || ''; }
-    catch (err) {
-      // localStorage unavailable (e.g. sandboxed iframe / private mode)
-      // — fall back to empty and let the operator retype the reviewer id.
-      console.warn('phi_reviewer_id read failed:', err);
-      return '';
-    }
-  });
+  // D13 step 8: the reviewer identity shown here must be the actual
+  // authenticated credential the backend records against every decision
+  // (`resolve_principal`), never an operator-typed value -- a free-text
+  // field could show a name that does not match what the server actually
+  // stamps on the review event. Fetched once on mount below.
+  const [principal, setPrincipal] = useState(null);
   const [reviewComment, setReviewComment] = useState('');
   const [actualKnowledgeAck, setActualKnowledgeAck] = useState(false);
   const [fileReviewAck, setFileReviewAck] = useState(false);
@@ -716,6 +713,10 @@ export default function SessionDetail() {
         .catch(() => setBenchmarkReport(null));
     }
   };
+
+  useEffect(() => {
+    whoami().then(w => setPrincipal(w?.principal || ''));
+  }, []);
 
   useEffect(() => {
     traceCursorRef.current = null;
@@ -796,7 +797,7 @@ export default function SessionDetail() {
   };
 
   const submitReview = async () => {
-    if (!reviewer.trim()) { toast.error('Reviewer id is required'); return; }
+    if (!principal) { toast.error('Not authenticated -- reload the page'); return; }
     const unresolved = humanRows.filter(d => !resolutions[`${d.file_id}|${d.column}`]?.mode);
     if (unresolved.length > 0) {
       toast.error(`Choose approve, comment, or defer for every flagged column (${unresolved.length} left)`);
@@ -815,8 +816,6 @@ export default function SessionDetail() {
       const [file_id, ...rest] = key.split('|');
       return { file_id, column: rest.join('|'), mode: r.mode, comment: r.comment || '' };
     });
-    try { window.localStorage.setItem('phi_reviewer_id', reviewer.trim()); }
-    catch (err) { console.warn('phi_reviewer_id write failed:', err); }
     setBusy(true);
     try {
       const r = await axios.post(`${API}/sessions/${sid}/human-review`, {
@@ -829,6 +828,26 @@ export default function SessionDetail() {
       await refresh();
     } catch (e) {
       toast.error(`review failed: ${e?.response?.data?.detail || e.message}`);
+    } finally { setBusy(false); }
+  };
+
+  const confirmAuditorConfidence = async () => {
+    // D13 step 4/7/8: a confidence-only control, distinct from the
+    // per-column resolutions above -- it answers the Auditor's own
+    // second-review escalation and must echo the exact `audit_version`
+    // that opened it, or the backend rejects it as a stale confirmation.
+    if (!principal) { toast.error('Not authenticated -- reload the page'); return; }
+    if (!session?.audit_version) { toast.error('No open Auditor confirmation on this run'); return; }
+    setBusy(true);
+    try {
+      const r = await axios.post(`${API}/sessions/${sid}/human-review`, {
+        resolutions: [], client_event_id: crypto.randomUUID(),
+        confirm_auditor_confidence: true, audit_version: session.audit_version,
+      });
+      toast.success(`Auditor confidence confirmed (${r.data.status})`);
+      await refresh();
+    } catch (e) {
+      toast.error(`confirmation failed: ${e?.response?.data?.detail || e.message}`);
     } finally { setBusy(false); }
   };
 
@@ -1142,10 +1161,15 @@ export default function SessionDetail() {
           )}
           <div className="grid grid-cols-2 gap-6 mb-6">
             <div>
-              <div className="kicker">Reviewer identity <span className="text-oxblood">(required)</span></div>
-              <input data-testid="reviewer-id" value={reviewer} onChange={e => setReviewer(e.target.value)}
-                     placeholder="jane.doe@lab.edu"
-                     className="mt-2 w-full h-10 bg-transparent border-b border-ink text-ink focus:border-oxblood"/>
+              <div className="kicker">Reviewer identity</div>
+              {/* D13 step 8: read-only -- this is the authenticated
+                  credential from whoami(), never operator-editable text,
+                  so what is displayed here always matches what the
+                  backend actually stamps on the review event. */}
+              <div data-testid="reviewer-id"
+                   className="mt-2 w-full h-10 flex items-center border-b border-ink text-ink font-mono">
+                {principal === null ? 'loading…' : principal || 'not authenticated'}
+              </div>
             </div>
             <div>
               <div className="kicker">Comment</div>
@@ -1182,6 +1206,42 @@ export default function SessionDetail() {
                   I have downloaded and reviewed the original file(s) above in my own tool.
                 </span>
               </label>
+            </div>
+          )}
+
+          {/* D13 step 4/7/8: the Auditor's own second-review escalation.
+              Distinct from the per-column resolutions below -- confidence
+              is telemetry (D12), never evidence, so it is labelled as
+              such; confirming answers only "I have seen this verdict",
+              never "I agree the export is clean". */}
+          {session?.audit_version && (
+            <div className="rule-top pt-5 mb-6" data-testid="auditor-confirmation-panel">
+              <div className="kicker mb-3">Auditor second review</div>
+              <div className="text-[12px] text-ink-2 mb-2">
+                Verdict: <span className="font-mono text-ink">{session.audit?.verdict || 'unknown'}</span>
+                {' · '}Confidence (telemetry, not evidence):{' '}
+                <span className="font-mono text-ink">
+                  {typeof session.audit?.confidence === 'number' ? session.audit.confidence.toFixed(2) : '—'}
+                </span>
+              </div>
+              {session.audit?.summary && (
+                <div className="text-[12px] text-ink-2 mb-2">{session.audit.summary}</div>
+              )}
+              {(session.audit?.issues || []).length > 0 && (
+                <ul className="text-[12px] text-ink-2 list-disc pl-5 mb-3 space-y-1" data-testid="auditor-issues-list">
+                  {session.audit.issues.map((iss, i) => (
+                    <li key={i}>
+                      {iss.file ? <span className="font-mono">{iss.file}</span> : null}
+                      {iss.column ? <span className="font-mono"> · {iss.column}</span> : null}
+                      {': '}{iss.problem || JSON.stringify(iss)}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <Btn size="sm" variant="ghost" onClick={confirmAuditorConfidence}
+                   disabled={busy || !principal} testId="btn-confirm-auditor-confidence">
+                Confirm I have reviewed this verdict
+              </Btn>
             </div>
           )}
 
@@ -1310,7 +1370,7 @@ export default function SessionDetail() {
                 Nothing is flagged for a specific column right now — resume the pipeline to continue.
               </div>
               <div className="flex justify-end">
-                <Btn variant="primary" onClick={submitReview} disabled={busy || !reviewer.trim()} testId="btn-accept-globally">
+                <Btn variant="primary" onClick={submitReview} disabled={busy || !principal} testId="btn-accept-globally">
                   Resume →
                 </Btn>
               </div>

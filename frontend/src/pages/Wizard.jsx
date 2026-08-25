@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { toast } from 'sonner';
 import { useNavigate } from 'react-router-dom';
-import { API } from '../lib/api';
+import { API, whoami } from '../lib/api';
 import { Btn, CheckCard, Tag } from '../components/ui';
 
 const STEPS = [
@@ -346,8 +346,8 @@ function StepUpload({ onNext, setSid, sid, corpusMode, setCorpusMode, setCorpusR
 
 // ---------- STEP 2 --------------------------------------------------------
 
-function StepConfigure({ onNext, onBack, sid, config, setConfig }) {
-  const canNext = config.reviewer.trim().length >= 2;
+function StepConfigure({ onNext, onBack, sid, config, setConfig, principal }) {
+  const canNext = !!principal;
 
   // Sir Q "Sentinel Iteration Cap Tuner": three-lane rigor selector.
   // Fast=1 short-circuits after the first Sentinel pass; Balanced=2 is
@@ -383,14 +383,14 @@ function StepConfigure({ onNext, onBack, sid, config, setConfig }) {
           <div className="text-[12px] text-ink-muted mt-2">Additional jurisdictions ship in the next release.</div>
         </div>
         <div>
-          <div className="kicker">Reviewer identity <span className="text-oxblood">(required)</span></div>
-          <input
-            data-testid="config-reviewer"
-            value={config.reviewer}
-            onChange={e => setConfig({ ...config, reviewer: e.target.value })}
-            placeholder="jane.doe@lab.edu"
-            className="mt-3 w-full h-11 bg-transparent border-b border-ink text-ink text-lg font-display focus:border-oxblood"
-          />
+          <div className="kicker">Reviewer identity</div>
+          {/* D13 step 8: read-only -- this is the authenticated credential
+              from whoami(), never operator-editable text, so it always
+              matches what the backend actually stamps on every decision. */}
+          <div data-testid="config-reviewer"
+               className="mt-3 w-full h-11 flex items-center border-b border-ink text-ink text-lg font-display">
+            {principal === null ? 'loading…' : principal || 'not authenticated'}
+          </div>
           <div className="text-[12px] text-ink-muted mt-2">Recorded on every decision the pipeline emits.</div>
         </div>
         <div>
@@ -531,10 +531,14 @@ export default function Wizard() {
   const [sid, setSid] = useState(null);
   const [config, setConfig] = useState({
     jurisdiction: 'us',
-    reviewer: (typeof window !== 'undefined' && window.localStorage.getItem('phi_reviewer_id')) || '',
     comment: '',
     iteration_cap: 2,
   });
+  // D13 step 8: the authenticated identity recorded on every decision the
+  // pipeline emits. Never operator-editable -- see StepConfigure below,
+  // which used to let an operator type an unrelated "reviewer" string
+  // that the backend never actually read.
+  const [principal, setPrincipal] = useState(null);
   const [output, setOutput] = useState({ publication: false, attestation_pdf: false });
   const [busy, setBusy] = useState(false);
   const [corpusMode, setCorpusMode] = useState(false);
@@ -543,12 +547,15 @@ export default function Wizard() {
   // can hand its result to a future summary panel without another refactor.
   const [, setCorpusResult] = useState(null);
 
+  useEffect(() => {
+    whoami().then(w => setPrincipal(w?.principal || ''));
+  }, []);
+
   const runPipeline = async () => {
     if (!sid) { toast.error('Upload a study package first'); setStep(1); return; }
     setBusy(true);
     try {
       try {
-        window.localStorage.setItem('phi_reviewer_id', config.reviewer.trim());
         window.localStorage.setItem('phi_reviewer_comment', config.comment || '');
         window.localStorage.setItem('phi_output_options', JSON.stringify(output));
       } catch (err) {
@@ -594,7 +601,7 @@ export default function Wizard() {
           />
         )}
         {step === 2 && <StepConfigure onBack={() => setStep(1)} onNext={() => setStep(3)}
-                                       sid={sid} config={config} setConfig={setConfig} />}
+                                       sid={sid} config={config} setConfig={setConfig} principal={principal} />}
         {step === 3 && <StepOutput onBack={() => setStep(2)} onRun={runPipeline}
                                     output={output} setOutput={setOutput} busy={busy} />}
       </main>

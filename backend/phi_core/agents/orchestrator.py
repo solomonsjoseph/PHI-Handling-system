@@ -459,19 +459,23 @@ async def execute_decisions(
         # lever for the reviewer to pull rather than only a status flag
         # that can be blindly resubmitted against a non-deterministic model.
         decisions = materialize_auditor_disagreements(decisions, audit, dictionary_by_column)
-        await db.sessions.update_one(session_filter, {"$set": {
-            "guard_report": guard_report, "export_paths": exports,
-            "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids,
-            "audit": audit, "agent_decisions": decisions,
-        }})
         # D13 step 4/7: a content hash of the actual verdict, not an
         # incrementing counter -- any change to Auditor's issues/metrics
         # for this run mints a new value, so a reviewer's later
         # `confirm_auditor_confidence` submission can be checked against
         # exactly the verdict they saw, not merely "some verdict existed".
+        # Persisted onto the session document (not just the durable
+        # `HumanReviewRequest`) so the frontend's plain `GET
+        # /api/sessions/{sid}` poll can render the confirm control without
+        # a second endpoint.
         audit_version = hashlib.sha256(
             json.dumps(audit, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()[:16]
+        await db.sessions.update_one(session_filter, {"$set": {
+            "guard_report": guard_report, "export_paths": exports,
+            "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids,
+            "audit": audit, "agent_decisions": decisions, "audit_version": audit_version,
+        }})
         return await _escalate_to_human_review(
             db=db, session_filter=session_filter, reasons=reasons,
             reasons_plain=plain_human_review_reasons(reasons),

@@ -863,6 +863,15 @@ def _scrub_session_document(doc: dict) -> dict:
         "agent_decisions", "agent_herald", "agent_ledger",
         "agent_scout", "agent_audit", "agent_sentinel_last",
         "agent_specialists", "agent_statute", "pending_review", "session_review",
+        # `audit` (distinct from `agent_audit`): the orchestrator's
+        # Auditor-escalation path writes the raw Auditor verdict under
+        # this key while the run is still `awaiting_human_review`, before
+        # `agent_audit` is ever set at normal completion. Reviewers now
+        # read this field directly (D13 step 8's Auditor confirmation
+        # control), so it needs the exact same scrub as its post-
+        # completion sibling, not a free pass because it is a different
+        # key name for the same content.
+        "audit",
     ):
         if k in doc:
             doc[k] = _scrub_nested(doc[k])
