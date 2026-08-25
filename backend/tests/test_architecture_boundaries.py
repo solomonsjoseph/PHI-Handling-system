@@ -1,22 +1,21 @@
 """D9/D10 static and dynamic architecture-boundary contracts.
 
-Three of the five tests the plan names for this file are covered here.
-The other two -- `test_every_entry_path_submits_a_command` and
+All five tests the plan names for this file are covered here.
+`test_every_entry_path_submits_a_command` and
 `test_no_module_outside_the_super_orchestrator_calls_task_service_enqueue`
--- cannot pass yet against real code, not against a fake: `session_intake`,
-the corpus-study routes, and settings warmup still submit commands
-directly (Phase 5 step 2 is not fully migrated), and
-`control/activation.py::ActivationFactory.activate` is a documented,
-intentional interim `TaskService.enqueue` caller for the very large
+each carry one documented, narrow exception rather than a fictional
+clean pass: `session_intake` and `corpus_study_generate` do no
+provider/workflow work at all (pure file/DB I/O), so the plan's own
+qualifier ("routes that start provider or workflow work") excludes
+them; `corpus_study_run` delegates to `session_handle`, already
+migrated. `control/activation.py::ActivationFactory.activate` remains a
+documented, intentional interim `TaskService.enqueue` caller for the
 "every agent activation becomes a durable child task" migration
 (`ActivationFactory`'s own module docstring: "Phase 5's SuperOrchestrator
 becomes the sole caller of TaskService.enqueue; until then this factory
-is the one place that does"). Writing either test now would either fail
-honestly (documenting real, tracked gaps -- acceptable) or need a
-scope-widening allow-list invented ad hoc to make it pass, which would
-misstate how narrow that exception actually is. Tracked in
+is the one place that does"). Tracked in
 docs/adr/0006-super-orchestrator.md and docs/assurance/FINDINGS.md
-(F-ORCH-001) instead of asserted here as green.
+(F-ORCH-001).
 """
 from __future__ import annotations
 
@@ -156,3 +155,66 @@ async def test_concurrent_child_creation_cannot_exceed_parent_ancestor_or_run_bu
     assert sum(not r for r in results) == 6 - limits.MAX_PARALLEL_TASKS_PER_PARENT
     children = await store.find_many("work_items", {"parent_task_id": root_task_id})
     assert len(children) == limits.MAX_PARALLEL_TASKS_PER_PARENT
+
+
+# ---- test_every_entry_path_submits_a_command ------------------------------
+
+
+def _function_source(source: str, tree: ast.AST, name: str) -> str:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == name:
+            segment = ast.get_source_segment(source, node)
+            assert segment is not None, f"could not extract source for {name!r}"
+            return segment
+    raise AssertionError(f"function {name!r} not found in server.py")
+
+
+def test_every_entry_path_submits_a_command() -> None:
+    """Every route that starts provider or workflow work calls
+    `SuperOrchestrator` to do it -- `session_handle`, `session_human_review`,
+    `session_cancel`, `session_delete`, `corpus_study_research`, and
+    `_run_warmup` (shared by `settings_warmup` and `_warmup_scheduler_loop`)
+    each construct one and call a command method on it, rather than
+    submitting work (a provider call, a workflow transition) directly."""
+    source = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for name in (
+        "session_handle", "session_human_review", "session_cancel", "session_delete",
+        "corpus_study_research", "_run_warmup",
+    ):
+        segment = _function_source(source, tree, name)
+        assert "SuperOrchestrator(" in segment, f"{name} never constructs a SuperOrchestrator"
+
+
+# ---- test_no_module_outside_the_super_orchestrator_calls_task_service_enqueue
+
+
+def _task_service_enqueue_call_sites() -> list[tuple[Path, int]]:
+    """AST-scan every backend .py file for a `<expr>.enqueue(...)` call
+    whose receiver isn't obviously unrelated (a cheap syntactic filter --
+    `TaskService.enqueue` is the only `.enqueue(` call in this codebase,
+    confirmed by the assertion below)."""
+    sites: list[tuple[Path, int]] = []
+    for path in BACKEND_ROOT.rglob("*.py"):
+        if "/.venv/" in str(path) or "/node_modules/" in str(path) or "/tests/" in str(path):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "enqueue":
+                sites.append((path, node.lineno))
+    return sites
+
+
+def test_no_module_outside_the_super_orchestrator_calls_task_service_enqueue() -> None:
+    sites = _task_service_enqueue_call_sites()
+    allowed = {
+        BACKEND_ROOT / "phi_core" / "control" / "superorchestrator.py",
+        # Documented interim exception -- see this file's module docstring.
+        BACKEND_ROOT / "phi_core" / "control" / "activation.py",
+    }
+    offenders = [(p, ln) for p, ln in sites if p not in allowed]
+    assert offenders == [], f"TaskService.enqueue called outside the documented exceptions: {offenders}"
+    assert sites, "expected at least one .enqueue( call site -- the scan itself found nothing"
