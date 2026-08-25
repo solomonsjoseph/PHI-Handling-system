@@ -14,12 +14,14 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from .artifacts import ArtifactService
 from .context import AgentContext, StoreResearchCache, StoreTraceWriter
 from .gateway import ProviderGateway, ToolGateway
 from .policy import CapabilityPolicy
 from .records import CapabilityGrant
 from .store import ControlStore, MongoControlStore
 from .tasks import TaskService
+from .writer import ArtifactWriter
 
 if TYPE_CHECKING:
     from ..agents.llm import LlmConfig
@@ -83,6 +85,10 @@ class ActivationFactory:
             tools=ToolGateway(self.gateway),
             trace=StoreTraceWriter(self.store, run_id=claimed.run_id, session_id=session_id),
             cache=StoreResearchCache(self.store),
+            artifacts=ArtifactWriter(
+                ArtifactService(self.store, session_id=session_id, run_id=claimed.run_id),
+                producer_task_id=claimed.task_id,
+            ),
             emit=emit,
             manager=manager,
         )

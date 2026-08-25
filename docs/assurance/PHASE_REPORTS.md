@@ -139,3 +139,55 @@
 
 - `Manager.escalate_to_human_review` still writes directly to a database handle rather than routing through a workflow authority; Phase 4-5 replace this with `SuperOrchestrator.request_human_review`. See `F-ORCH-001`.
 - Typed evidence, canonical decision gates, and artifact staging are not yet in place; Statute/Praxis still trust `reply["sources"]`. See `F-EVID-001`, `F-ART-001`, and the Phase 3 row in `docs/assurance/RISK_REGISTER.md`.
+
+## Phase 3: typed contracts and artifact staging
+
+### 1. Verified code-backed baseline relevant to this phase, with `path:line` anchors.
+
+- `orchestrator.py`'s decide loop and `server.py`'s human-review re-gating each called the bare deterministic functions (`verify_keep_decisions`, `annotate_pending_review`) directly with no proof that Executor would receive exactly one decision per real column. Statute (`experts.py`), Praxis (`experts.py`), Scout (`outward.py`), and `CorpusResearcher` (`phi_corpus/researcher.py`) trusted `reply["sources"]` with no tool-call-citation correlation. `reasoning.py`'s `Executor.run` wrote every export directly under `EXPORT_DIR` keyed by original filename, with no `ArtifactRecord` created before the first byte. `session_export`/`session_bundle`/`session_reversal_key` (`server.py`) served a raw filesystem path with a `force` parameter that could override a blocked Publish Guard verdict.
+
+### 2. Files and symbols changed.
+
+- New: `backend/phi_core/control/{gates,evidence,artifacts,adapters,writer}.py`.
+- `backend/phi_core/paths.py`: `STAGING_DIR`, `EVIDENCE_DIR`, `REVERSAL_DIR`, `PUBLISHED_DIR`, `CACHE_DIR`, `run_scoped_dir`, `artifact_id_from_export_alias`.
+- `backend/phi_core/agents/orchestrator.py`: final decision-mutation event routed through `run_decision_gates`; `gate_results` persisted.
+- `backend/phi_core/agents/reasoning.py`: `Executor.run` rewritten onto `ArtifactWriter.stage`/`finalize`, including the atomic narrative-export path and the suffix-alias hard link.
+- `backend/phi_core/agents/experts.py`, `outward.py`, `phi_corpus/researcher.py`: `EvidenceClaim`/`EvidenceSource` verification via `control/evidence.py`, replacing direct `reply["sources"]` trust.
+- `backend/phi_core/control/testing.py`, `activation.py`: `ArtifactWriter` wired into every production and test `AgentContext`.
+- `backend/server.py`: human-review re-gating routed through `run_decision_gates`; `session_export`/`session_bundle`/`session_reversal_key` rewritten onto `ArtifactService.open_for_download`; `force`/`guard_overrides` deleted.
+- `backend/phi_core/publish_guard.py`: `GuardResult.artifact_id`/`sha256`; `scan_names` (Presidio PERSON, HIPAA category A) wired into CSV/TSV/XLSX (per-cell) and TXT/MD (whole-text).
+- `backend/phi_core/agents/reasoning.py`: `validate_decisions` no longer nulls `suggested_action`/`suggested_confidence`/`suggested_reason` for a non-`human_review` decision, so the fixed D11 gate sequence is idempotent when re-run over an already-settled decision list without erasing a deterministic override's provenance (see finding below).
+- `docs/adr/0004-artifact-registry.md`, `docs/adr/0005-evidence-model.md`.
+- Tests: `test_control_{decisions,evidence,artifacts,adapters,writer,evidence_agents}.py`, `test_download_artifact_binding.py`, plus fixture repairs across `test_manager.py`, `test_manager_checkpoints.py`, `test_operator.py`, `test_human_review_invariant.py`, `test_publish_guard.py`, `test_security_findings.py`, `test_certification_invalidation.py`, `test_hardening_gates.py`, `test_narrative_export.py`, `test_realworld_file_shapes.py`, `test_full_path.py`.
+
+### 3. Threat or failure mode addressed, naming the `F-*` finding.
+
+- `F-EVID-001`: Statute/Praxis/Scout/`CorpusResearcher` no longer trust an unverified model-reported source; a claim reaches `VERIFIED` only through `control/evidence.py`'s tool-backed, five-dimension rule.
+- `F-ART-001`: every material Executor output is a hash-tracked `ArtifactRecord` staged before its first byte; a mid-write crash leaves no promotable partial file.
+
+### 4. Data and authority boundaries before and after.
+
+- Before: Executor wrote directly to a shared export directory keyed by original filename; a download route trusted that raw path, and `force=true` could serve a file Publish Guard had blocked. After: every export is staged under a run-scoped artifact root, registered before the first byte, and served only through `ArtifactService.open_for_download`, which refuses on state, generation, or on-disk hash mismatch. `force`/`guard_overrides` are structurally absent from the codebase (`inspect.signature` has no such parameter on any download/publish route). A duplicate, missing, or invented decision can no longer reach Executor: `assert_exact_coverage` proves exact per-column coverage immediately before execute, in both the orchestrator decide loop and the server.py human-review re-gating path, and raises `DecisionGateFailure` (propagating to the existing generic exception handler) on any violation.
+
+### 5. Migration and rollback behaviour, cross-referenced to `docs/assurance/MIGRATION.md`.
+
+- No schema migration; `ArtifactRecord`/`EvidenceClaim`/`EvidenceSource`/`GateResult` collections are additive. Rollback is reverting this phase's commit. `control/adapters.py::legacy_decision_adapter`/`legacy_files_adapter` remain the migration seam for any call site not yet routed onto `run_decision_gates` directly, tracked as `F-ADAPT-001`; Phase 5 removes them once every caller has migrated.
+
+### 6. Tests added and the exact commands run.
+
+- New modules listed above, plus fixture repairs. `ruff check backend`; `cd backend && pytest tests -q -rs`; `pytest tests/test_full_path.py -q` repeated 5 times against a fresh `DATA_DIR` to rule out Presidio-driven flakiness in `scan_names`.
+
+### 7. Exact results, including every failure and every skip with its reason.
+
+- Ruff: clean. Backend suite: `662 passed, 8 skipped` in 110 seconds, no warnings beyond the pre-existing `on_event` deprecation notice. Skips unchanged from Phase 1/2 (no live server, no Anthropic key for two tests, no matching live review session, unavailable OCR binaries for three tests, no matching live decision state).
+- Genuine regressions found and fixed during full-suite verification (the two Phase 3 sub-dispatches had verified only curated test subsets, not the full suite, before this integration pass):
+  - `validate_decisions` unconditionally nulled `suggested_action` for any non-`human_review` decision. `run_decision_gates` re-runs the fixed D11 sequence, including `validate_decisions`, over an already-settled decision list; this silently erased the site-cardinality/hard-rule override provenance a first pass had legitimately set. Fixed by leaving those fields untouched when the action is not `human_review`, restoring idempotency (`test_cardinality_rule.py::test_pipeline_fires_before_sentinel_and_after_age_dob`).
+  - Five test fixtures across `test_manager.py`, `test_manager_checkpoints.py`, and `test_operator.py` constructed a `session["files"]` entry with no `columns` key, which production code always populates before `run_pipeline` (`server.py:1979-1991`). Against the new coverage gate this made every dataset file schema-unreadable, changing which decisions synthesized and which phase the run reached. Fixed by adding the `columns` list each fixture's own `FakeJudge` decisions already implied.
+  - `test_human_review_invariant.py::test_human_review_captures_session_review_offline` used a `SimpleNamespace`-based fake db with no collection-subscript support; `server.py`'s re-gating now persists `gate_results` via `MongoControlStore(db)`, which needs `db["gate_results"]`. Fixed by extending the fake db with a minimal collection double, matching real `AsyncIOMotorDatabase` semantics, and adding a matching `files` entry for the new coverage proof.
+  - `test_operator.py::test_run_pipeline_reviewer_only_finding_excludes_file_and_ends_partially_complete` deliberately fed Judge two decisions for the same `(file_id, column)` to exercise Reviewer's own downstream coverage-mismatch recount. `assert_exact_coverage` now refuses that duplicate before Executor ever runs, making the original scenario unreachable through `orchestrator.run_pipeline`. Renamed to `test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor` and rewritten to assert the new invariant (`DecisionGateFailure`, Executor never invoked); Reviewer's own coverage-mismatch detection remains directly covered, unaffected, by `test_reviewer.py::test_coverage_mismatch_when_zero_fail_verdicts_but_column_count_differs`.
+
+### 8. Remaining risk and deferred work, cross-referenced to `docs/assurance/RISK_REGISTER.md`.
+
+- `decision_version` is stamped `0` on every `GateResult`: nothing yet opens a `WorkflowRun` for a session, so `_next_decision_version`'s CAS increment has no durable counter to key off. Phase 4/5's `SuperOrchestrator`/`RunStore.open_run` wiring closes this gap.
+- Publish Guard and `bundle.py` still read a raw, suffix-bearing filesystem path (Executor's hard-link alias) rather than the artifact registry directly; tracked in `docs/adr/0004-artifact-registry.md`.
+- `Manager.escalate_to_human_review` still writes directly to a database handle rather than routing through a workflow authority. See `F-ORCH-001` and the Phase 4 row in `docs/assurance/RISK_REGISTER.md`.

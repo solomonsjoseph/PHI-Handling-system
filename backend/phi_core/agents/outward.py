@@ -11,9 +11,65 @@ import asyncio
 import json
 from typing import Any
 
+from phi_core.control import evidence as _evidence
 from phi_core.control.context import AgentContext
+from phi_core.control.records import EvidenceClaim
 
 from .base import Agent
+
+# Scout's competitive-landscape citations legitimately point at vendor
+# documentation and project home pages rather than government/legal
+# sources, so the allow-list here is narrower in kind (no claim_support
+# heuristic beyond "this is a plausible project/vendor home"), and any
+# citation whose domain is absent from it simply never reaches VERIFIED
+# and is dropped rather than shown as fact -- see D12 in
+# phi_core.agents.experts for the same pattern applied to Statute/Praxis.
+_AUTHORITATIVE_VENDOR_DOMAINS: frozenset[str] = frozenset({
+    "github.com", "readthedocs.io", "pypi.org", "aws.amazon.com",
+    "azure.microsoft.com", "microsoft.com", "johnsnowlabs.com",
+})
+
+
+def _domain(url: str) -> str:
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _verify_citation(*, run_id: str, task_id: str, system_name: str,
+                     citation: str, cited_urls: set[str]) -> str:
+    """Return ``citation`` unchanged if it is not URL-shaped (plain-text
+    attribution carries no verifiable claim for D12 to check), or the
+    verified URL if it is and reaches VERIFIED, or ``""`` otherwise --
+    never a model-authored URL shown as fact with no tool backing
+    (F-EVID-001).
+    """
+    url = (citation or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return citation
+    domain = _domain(url)
+    on_list = domain in _AUTHORITATIVE_VENDOR_DOMAINS or any(
+        domain.endswith(f".{d}") for d in _AUTHORITATIVE_VENDOR_DOMAINS
+    )
+    tool_backed = _evidence.is_tool_backed(url, cited_urls)
+    dimensions = (
+        {
+            "retrieval_authenticity": ("VERIFIED", "url present in this response's tool citations"),
+            "source_authority": ("VERIFIED", f"{domain} is an allow-listed project/vendor domain"),
+            "claim_support": ("VERIFIED", f"{domain} is the system's own documentation"),
+            "freshness": ("VERIFIED", "retrieved live for this request"),
+            "contradiction": ("VERIFIED", "no contradicting source detected"),
+        }
+        if (tool_backed and on_list)
+        else {"retrieval_authenticity": ("VERIFIED", "url present in this response's tool citations")}
+    )
+    claim = EvidenceClaim(run_id=run_id, task_id=task_id, subject=f"scout:{system_name}",
+                          statement=f"documentation citation for {system_name}")
+    source = _evidence.record_source(claim_id=claim.claim_id, url=url, tool_backed=tool_backed, dimensions=dimensions)
+    evaluated = _evidence.evaluate_claim(claim, [source])
+    return url if evaluated.state == "VERIFIED" else ""
 
 
 class Scout(Agent):
@@ -22,7 +78,9 @@ class Scout(Agent):
         "You are Scout. Compile a competitive landscape of PHI de-identification and PHI "
         "detection systems, both open-source (Presidio, spaCy scrubadub, philter, deid, "
         "MITRE-scrubber, DEID-GPT) and commercial (AWS Comprehend Medical, Azure Health "
-        "de-identification, John Snow Labs, iSchemaView, etc.). Return JSON: "
+        "de-identification, John Snow Labs, iSchemaView, etc.). Search the web for each "
+        "system's own current documentation or repository page and cite the exact URL you "
+        "found. Return JSON: "
         '{"systems": [{"name": str, "kind": "open|commercial", "vendor": str, '
         '"strengths": [str], "weaknesses": [str], "reads_row_values": bool, "citation": str}], '
         '"summary": str}. Focus on their READING policy (rows vs headers only).'
@@ -33,13 +91,27 @@ class Scout(Agent):
         if cached:
             await self._log("scout.cache_hit", "info", {})
             return json.loads(cached["content"])
-        reply = await self.call_json(
+        reply, citations = await self.call_json_with_web_search(
             "Compile the competitive landscape of PHI detection and de-identification systems. JSON only.",
             phase="scout.compile", default={"systems": [], "summary": ""},
+            max_uses=3,
             status_text="Compiling the competitive landscape",
         )
+        cited_urls = {c.get("url") for c in citations if c.get("url")}
+        any_verified = False
+        for system in reply.get("systems") or []:
+            verified_citation = _verify_citation(
+                run_id=self.ctx.run_id, task_id=self.ctx.task_id,
+                system_name=str(system.get("name") or ""),
+                citation=system.get("citation") or "", cited_urls=cited_urls,
+            )
+            any_verified = any_verified or bool(verified_citation)
+            system["citation"] = verified_citation
         if self.ctx.cache:
-            await self.ctx.cache.put("competitor_landscape", "generic", json.dumps(reply), source="llm")
+            await self.ctx.cache.put(
+                "competitor_landscape", "generic", json.dumps(reply),
+                source="web_search" if any_verified else "llm",
+            )
         return reply
 
 

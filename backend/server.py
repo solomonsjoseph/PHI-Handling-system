@@ -818,6 +818,96 @@ async def classification_accuracy_endpoint(details: bool = False):
     return body
 
 
+def _clean_export_artifact_ids(session: dict) -> dict[str, str]:
+    """Map file_id -> canonical (extension-less) artifact_id for every
+    Publish-Guard-clean export in this session's most recent run.
+
+    ``session["export_paths"]`` still holds Executor's suffix-bearing
+    guard-scannable alias (see ``reasoning.py::Executor._finalize_export``);
+    ``artifact_id_from_export_alias`` recovers the canonical, hash-tracked
+    artifact_id from its basename with no filesystem access. Returns
+    ``{}`` unless the aggregate guard report is ``"clean"``.
+    """
+    from phi_core.paths import artifact_id_from_export_alias
+
+    guard = session.get("guard_report") or {}
+    if guard.get("status") != "clean":
+        return {}
+    clean_ids = {r.get("file_id") for r in (guard.get("results") or []) if r.get("status") == "clean"}
+    export_paths = session.get("export_paths") or {}
+    out: dict[str, str] = {}
+    for file_id in clean_ids:
+        p = export_paths.get(file_id)
+        if not p:
+            continue
+        artifact_id = artifact_id_from_export_alias(p)
+        if artifact_id:
+            out[file_id] = artifact_id
+    return out
+
+
+async def _open_published_artifact(service, sid: str, run_id: str, artifact_id: str,
+                                    all_artifact_ids: list[str]):
+    """Resolve one artifact through ``ArtifactService.open_for_download``,
+    hash-bound to its ``artifact_id`` rather than any filesystem path.
+
+    Nothing yet calls ``ArtifactService.certify_publication`` on the
+    pipeline's behalf (that becomes Phase 5's
+    ``SuperOrchestrator.authorize_publication``); until it lands, the
+    first download request against a fresh Publish-Guard-clean result
+    lazily certifies the *entire* current clean set together as one
+    publication generation, so every clean file in this run shares one
+    generation and a bundle download sees a mutually consistent set.
+    Raises :class:`~phi_core.control.artifacts.ArtifactError` with its
+    typed refusal reason (``artifact_missing``, ``artifact_hash_mismatch``,
+    ...) on any refusal that recertifying cannot fix.
+    """
+    from phi_core.control.artifacts import ArtifactError
+
+    try:
+        return await service.open_for_download(sid, artifact_id)
+    except ArtifactError as exc:
+        if exc.reason not in ("artifact_not_promoted", "generation_mismatch"):
+            raise
+    try:
+        await service.certify_publication(
+            run_id=run_id, artifact_ids=all_artifact_ids, gate_result_ids=[],
+            fence=int(time.time() * 1_000_000),
+        )
+    except ArtifactError as exc:
+        if exc.reason != "stale_fence":
+            raise
+        # A concurrent request already certified an equal-or-newer
+        # generation covering the same artifact set; fall through and let
+        # the re-open below settle against whichever generation won.
+    return await service.open_for_download(sid, artifact_id)
+
+
+def _artifact_service(db, sid: str, run_id: str):
+    from phi_core.control.artifacts import ArtifactService
+    from phi_core.control.store import MongoControlStore
+    return ArtifactService(MongoControlStore(db), session_id=sid, run_id=run_id)
+
+
+async def _verify_clean_artifacts(db, sid: str, session: dict, clean_ids: dict[str, str]) -> None:
+    """Hash-verify every currently clean export through the artifact
+    registry before serving a bundle or a reversal key, raising
+    ``HTTPException(409)`` on a genuine artifact refusal (missing bytes,
+    hash mismatch). A no-op when there is nothing clean to verify."""
+    from phi_core.control.artifacts import ArtifactError
+
+    if not clean_ids:
+        return
+    run_id = session.get("_pipeline_run_id") or sid
+    service = _artifact_service(db, sid, run_id)
+    all_ids = list(clean_ids.values())
+    for artifact_id in all_ids:
+        try:
+            await _open_published_artifact(service, sid, run_id, artifact_id, all_ids)
+        except ArtifactError as exc:
+            raise HTTPException(409, f"export artifact unavailable: {exc.reason}") from exc
+
+
 @app.get("/api/sessions/{sid}/bundle")
 async def session_bundle(sid: str, publication: bool = False, attestation_pdf: bool = False,
                          principal: str = Depends(resolve_principal)):
@@ -850,6 +940,10 @@ async def session_bundle(sid: str, publication: bool = False, attestation_pdf: b
             f"(status={guard_status or 'missing'}). Re-run the pipeline "
             "so the last-mile PHI scan populates a passing guard report.",
         )
+    # D14: bind the certified guard status to a hash-verified artifact
+    # before assembling anything -- a tampered or missing export on disk
+    # refuses the whole bundle rather than silently shipping stale bytes.
+    await _verify_clean_artifacts(db, sid, session, _clean_export_artifact_ids(session))
     agent_log_msgs = None
     if publication and session.get("corpus_ground_truth"):
         agent_log_msgs = await db.agent_log.find({"session_id": sid}, {"_id": 0}).to_list(length=None)
@@ -884,6 +978,11 @@ async def session_reversal_key(sid: str, principal: str = Depends(resolve_princi
     guard = session.get("guard_report") or {}
     if guard.get("status") != "clean":
         raise HTTPException(403, "Publish Guard has not certified this session as clean.")
+    # D14: the reversal key is only meaningful alongside a hash-verified
+    # publication -- if any clean-guarded export has since been tampered
+    # with or gone missing on disk, refuse the key too rather than trust
+    # the (mutable) guard_report field alone.
+    await _verify_clean_artifacts(db, sid, session, _clean_export_artifact_ids(session))
     blob = session.get("reversal_key_blob")
     if not blob:
         raise HTTPException(404, "No reversal key was generated for this run (no column was "
@@ -900,15 +999,14 @@ async def session_reversal_key(sid: str, principal: str = Depends(resolve_princi
 
 
 @app.get("/api/sessions/{sid}/export/{file_id}")
-async def session_export(sid: str, file_id: str, force: bool = False,
-                         principal: str = Depends(resolve_principal)):
+async def session_export(sid: str, file_id: str, principal: str = Depends(resolve_principal)):
     """Download the PHI-handled export.
 
     GOAL boundary: this is the point where 'input PHI data' becomes 'output
-    ready to share publicly'. Refuse the download unless exactly one Publish
-    Guard result marked this specific file 'clean'. ``?force=true`` is an
-    audited override only when that single result is `blocked`, after the
-    operator has manually reviewed the findings.
+    ready to share publicly'. Refuse the download unless exactly one
+    Publish Guard result marked this specific file 'clean'. There is no
+    override: a `blocked` per-file result is unconditionally unservable,
+    regardless of any caller-supplied parameter -- this route accepts none.
     """
     db = get_db()
     session = await _owned_session(sid, principal, {"_id": 0})
@@ -922,9 +1020,6 @@ async def session_export(sid: str, file_id: str, force: bool = False,
             ),
             "guard": None,
         })
-    path = (session.get("export_paths") or {}).get(file_id)
-    if not path or not Path(path).exists():
-        raise HTTPException(404, "export not ready")
     guard = session.get("guard_report") or {}
     matching_results = [
         r for r in (guard.get("results") or [])
@@ -934,29 +1029,33 @@ async def session_export(sid: str, file_id: str, force: bool = False,
     status = per_file.get("status") if per_file else None
     # SEC-001 fix: fail-closed. Serve only if this file has exactly one
     # per-file guard result of `clean`. Missing, duplicate, `skipped`, or
-    # `blocked` results refuse — `?force=true` overrides only a single
-    # `blocked` result after manual review.
+    # `blocked` results refuse unconditionally -- there is no override.
     if status != "clean":
-        if force and status == "blocked":
-            # Record the override on the session so the audit trail keeps it.
-            await db.sessions.update_one(
-                _owned_filter(sid, principal),
-                {"$push": {"guard_overrides": {
-                    "file_id": file_id,
-                    "overridden_at": datetime.now(timezone.utc).isoformat(),
-                }}},
-            )
-        else:
-            return JSONResponse(status_code=403, content={
-                "error": "publish_guard_not_certified",
-                "message": (
-                    "Publish Guard has not certified this file as clean "
-                    f"(status={status or 'missing'}). Re-run the pipeline so "
-                    "the last-mile PHI scan populates a passing result."
-                ),
-                "guard": per_file,
-            })
-    return FileResponse(path, filename=Path(path).name)
+        return JSONResponse(status_code=403, content={
+            "error": "publish_guard_not_certified",
+            "message": (
+                "Publish Guard has not certified this file as clean "
+                f"(status={status or 'missing'}). Re-run the pipeline so "
+                "the last-mile PHI scan populates a passing result."
+            ),
+            "guard": per_file,
+        })
+    # D14: resolve and serve the canonical, hash-tracked artifact through
+    # ArtifactService.open_for_download rather than a raw filesystem path
+    # lookup -- the served bytes, path, and filename are all keyed by
+    # artifact_id alone.
+    clean_ids = _clean_export_artifact_ids(session)
+    artifact_id = clean_ids.get(file_id)
+    if not artifact_id:
+        raise HTTPException(404, "export not ready")
+    run_id = session.get("_pipeline_run_id") or sid
+    from phi_core.control.artifacts import ArtifactError
+    service = _artifact_service(db, sid, run_id)
+    try:
+        path = await _open_published_artifact(service, sid, run_id, artifact_id, list(clean_ids.values()))
+    except ArtifactError as exc:
+        raise HTTPException(409, f"export artifact unavailable: {exc.reason}") from exc
+    return FileResponse(path, filename=artifact_id)
 
 
 # --- LLM settings (BYO-key) ----------------------------------------------
@@ -2044,18 +2143,21 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     from phi_core.agents.outward import Herald, Ledger, Scout
     from phi_core.agents.reasoning import (
         ACTION_TYPES,
+        CONFIDENCE_FLOOR,
         Auditor,
         Executor,
         Judge,
         annotate_pending_review,
-        apply_sentinel_hard_rules,
         auditor_escalation_reason,
         materialize_auditor_disagreements,
         plain_human_review_reasons,
         validate_decisions,
-        verify_keep_decisions,
     )
     from phi_core.agents.reviewer import Reviewer
+    from phi_core.control.adapters import legacy_decision_adapter, legacy_files_adapter
+    from phi_core.control.context import AgentContext
+    from phi_core.control.gates import DecisionGateFailure, run_decision_gates
+    from phi_core.control.store import MongoControlStore
     from phi_core.paths import cleanup_session_unpacked
     from phi_core.security import scrub_persisted_text
 
@@ -2205,21 +2307,68 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         raise HTTPException(422, f"invalid resolution action for column(s): {', '.join(bad_action_cols)}")
 
     # session_human_review never previously re-ran the guardrails every
-    # other decision path passes through. Close that gap here: the hard-rule
-    # table can still force-correct an obvious direct identifier regardless
-    # of what the human chose, and keep-verification re-checks any decision
-    # left as "keep" against the real dataset values.
-    decisions, hard_rule_overrides = apply_sentinel_hard_rules(decisions)
-    for ov in hard_rule_overrides:
+    # other decision path passes through. Close that gap here: every
+    # decision mutation -- including a human resolution -- goes through
+    # the canonical D11 gate sequence, which also proves exact per-column
+    # coverage before this decision set is ever allowed near Executor.
+    #
+    # A decision a human just explicitly resolved this round (approve, or
+    # a confirmed comment interpretation) already IS the human review
+    # apply_confidence_floor exists to trigger. Re-running that floor on
+    # the LLM's own comment-interpretation confidence would silently
+    # revert the human's approval back to human_review with no way for
+    # the reviewer to ever get past it -- floor the gating confidence at
+    # CONFIDENCE_FLOOR for exactly those freshly-resolved rows; every
+    # other decision keeps its real confidence unchanged.
+    for d in decisions:
+        if d.get("provenance") in ("human_explicit_action", "human_comment_inferred"):
+            confidence = d.get("confidence")
+            if not isinstance(confidence, (int, float)) or confidence < CONFIDENCE_FLOOR:
+                d["confidence"] = CONFIDENCE_FLOOR
+    dataset_files_for_gates = [f for f in session.get("files", []) if f.get("kind") == "dataset"]
+    # A bare bookkeeping context, not a real activation: `run_decision_gates`
+    # only reads `ctx.run_id`/`ctx.task_id` for its audit stamps and never
+    # touches the grant/gateway/tools/trace fields, so building a full
+    # `ActivationFactory` activation here would cost a real provider-policy
+    # check and a `capability_grants`/`work_items` write for no reason this
+    # call site needs. No durable `store` either -- nothing yet opens a
+    # `WorkflowRun` for a resumed session (Phase 4/5's SuperOrchestrator),
+    # and `_next_decision_version` requires one; `decision_version` is 0
+    # here until that wiring lands, same as the orchestrator's final gate.
+    gates_ctx = AgentContext(
+        session_id=sid, run_id=prior_run_id or sid, task_id=uuid.uuid4().hex,
+        agent="Judge", attempt=1, grant=None, gateway=None, tools=None, trace=None,
+    )
+    gate_outcome = await run_decision_gates(
+        decisions=legacy_decision_adapter(decisions),
+        files=legacy_files_adapter(dataset_files_for_gates),
+        jurisdiction=session.get("jurisdiction", "us"),
+        stage="human_review.regate",
+        ctx=gates_ctx,
+    )
+    for gate_result in gate_outcome.gate_results:
+        await MongoControlStore(db).insert("gate_results", gate_result)
+    keep_demotions = gate_outcome.demotions
+    decisions = annotate_pending_review(gate_outcome.decisions, dictionary_by_column)
+    # Hard-rule overrides are the only ones in this call site's gate
+    # sequence that can fire (age/DOB and site-cardinality rules apply to
+    # Judge-shaped proposals, not human-resolved decisions in practice,
+    # but are structurally possible too) -- both are identifiable by
+    # carrying `citation` with no `rule` key, unlike every other gate's
+    # override shape, so a human's explicit resolution is only annotated
+    # `human_overridden_by_hard_rule` for the gate that can genuinely
+    # override a human choice on safety grounds.
+    for ov in gate_outcome.overrides:
+        if "citation" not in ov or "rule" in ov:
+            continue
         for d in decisions:
             if d.get("file_id") == ov.get("file_id") and d.get("column") == ov.get("column"):
                 if d.get("provenance") in ("human_explicit_action", "human_comment_inferred"):
                     d["human_overridden_action"] = ov.get("from")
                     d["provenance"] = "human_overridden_by_hard_rule"
                 break
-    dataset_paths = {f["file_id"]: Path(f["stored_path"]) for f in session.get("files", []) if f.get("kind") == "dataset"}
-    decisions, keep_demotions = verify_keep_decisions(decisions, dataset_paths, jurisdiction=session.get("jurisdiction", "us"))
-    decisions = annotate_pending_review(decisions, dictionary_by_column)
+    if not gate_outcome.ok:
+        raise DecisionGateFailure(gate_outcome)
 
     # `by_key` reflects raw client submission -- a resubmission for an
     # already-resolved or nonexistent (file_id, column) pair must not be

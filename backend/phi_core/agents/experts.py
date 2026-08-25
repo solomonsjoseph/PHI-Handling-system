@@ -20,9 +20,108 @@ from __future__ import annotations
 import asyncio
 import json as _json
 from typing import Any
+from urllib.parse import urlparse
+
+from phi_core.control import evidence as _evidence
+from phi_core.control.records import EvidenceClaim
 
 from ..jurisdictions import get_pack
 from .base import Agent
+
+# --- D12 evidence verification for web-searched regulatory/method claims -
+#
+# Phase 3 has no infrastructure to fetch and semantically re-check a
+# retrieved page's content, so `source_authority`/`claim_support` below are
+# both keyed off the same allow-list rather than an independent content
+# analysis, `freshness` is fixed VERIFIED at the moment of a live
+# retrieval, and `contradiction` is fixed VERIFIED absent any built
+# detector -- a documented residual risk, to be closed by a stronger
+# evidence pipeline in a later phase, not invented here. What this DOES
+# close is F-EVID-001: a model-authored URL absent from the response's
+# own tool citations can never reach VERIFIED regardless of domain, and
+# every caller below falls back to its existing deterministic pack
+# whenever the resulting claim does not.
+
+_AUTHORITATIVE_LAW_DOMAINS: frozenset[str] = frozenset({
+    "ecfr.gov", "govinfo.gov", "congress.gov", "federalregister.gov",
+    "law.cornell.edu", "hhs.gov", "justice.gov",
+    "eur-lex.europa.eu", "gdpr-info.eu", "meity.gov.in", "prsindia.org",
+    "laws-lois.justice.gc.ca", "planalto.gov.br", "gov.uk",
+})
+
+_AUTHORITATIVE_METHOD_DOMAINS: frozenset[str] = frozenset({
+    "ecfr.gov", "hhs.gov", "nist.gov", "ncbi.nlm.nih.gov",
+    "pubmed.ncbi.nlm.nih.gov", "arxiv.org", "doi.org",
+})
+
+
+def _domain(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _on_allow_list(domain: str, allow_list: frozenset[str]) -> bool:
+    return bool(domain) and (domain in allow_list or any(domain.endswith(f".{d}") for d in allow_list))
+
+
+def _source_dimensions(domain: str, allow_list: frozenset[str]) -> dict[str, tuple[str, str]]:
+    if not _on_allow_list(domain, allow_list):
+        return {"retrieval_authenticity": ("VERIFIED", "url present in this response's tool citations")}
+    return {
+        "retrieval_authenticity": ("VERIFIED", "url present in this response's tool citations"),
+        "source_authority": ("VERIFIED", f"{domain} is an allow-listed primary source"),
+        "claim_support": ("VERIFIED", f"{domain} is the primary source for this request"),
+        "freshness": ("VERIFIED", "retrieved live for this request"),
+        "contradiction": ("VERIFIED", "no contradicting source detected"),
+    }
+
+
+def _verified_source_urls(
+    claim: EvidenceClaim, candidate_urls: list[str], cited_urls: set[str], allow_list: frozenset[str],
+) -> tuple[bool, list[str]]:
+    """Build one ``EvidenceSource`` per candidate URL and run D12's
+    ``evaluate_claim`` -- the only function that decides ``VERIFIED``.
+    Returns ``(verified, urls)`` where ``urls`` is exactly the subset of
+    ``candidate_urls`` whose source came back fully verified.
+    """
+    if not candidate_urls:
+        return False, []
+    sources = [
+        _evidence.record_source(
+            claim_id=claim.claim_id, url=url,
+            tool_backed=_evidence.is_tool_backed(url, cited_urls),
+            dimensions=_source_dimensions(_domain(url), allow_list),
+        )
+        for url in candidate_urls
+    ]
+    evaluated = _evidence.evaluate_claim(claim, sources)
+    verified_urls = [s.url for s in sources if all(v.state == "VERIFIED" for v in s.verifications)]
+    return evaluated.state == "VERIFIED", verified_urls
+
+
+def _verify_research_reply(
+    *, run_id: str, task_id: str, subject: str, statement: str,
+    reply_sources: list[dict[str, Any]] | None, citations: list[dict[str, Any]],
+    allow_list: frozenset[str],
+) -> tuple[bool, list[dict[str, Any]]]:
+    """D12 gate for one web-searched reply.
+
+    Verifies whatever URLs the model itself reported in ``sources``
+    against the response's *actual* tool citations (falling back to the
+    tool's own citation URLs as candidates only when the model reported
+    none at all), and returns the subset that is genuinely grounded.
+    ``reply_sources`` is never trusted as-is -- that is F-EVID-001.
+    """
+    cited_urls = {c.get("url") for c in citations if c.get("url")}
+    candidate_urls = [s.get("url") for s in (reply_sources or []) if s.get("url")] or sorted(cited_urls)
+    claim = EvidenceClaim(run_id=run_id, task_id=task_id, subject=subject, statement=statement)
+    verified, verified_urls = _verified_source_urls(claim, candidate_urls, cited_urls, allow_list)
+    if not verified:
+        return False, []
+    by_url = {s.get("url"): s for s in (reply_sources or []) if s.get("url")}
+    return True, [by_url.get(url, {"url": url}) for url in verified_urls]
 
 
 class Statute(Agent):
@@ -200,9 +299,20 @@ class Statute(Agent):
                 max_uses=3,
                 status_text=f"Researching {jurisdiction} data-protection law online",
             )
-            # Merge tool citations if the LLM did not include them itself.
-            if not reply.get("sources") and citations:
-                reply["sources"] = citations
+            verified, verified_sources = _verify_research_reply(
+                run_id=self.ctx.run_id, task_id=self.ctx.task_id,
+                subject=f"statute:{jurisdiction}",
+                statement=f"HIPAA-equivalent identifier categories and handling rules for {jurisdiction}",
+                reply_sources=reply.get("sources"), citations=citations,
+                allow_list=_AUTHORITATIVE_LAW_DOMAINS,
+            )
+            if verified:
+                reply["sources"] = verified_sources
+            else:
+                # No reported (or tool-returned) source reached VERIFIED --
+                # never ship a regulatory claim on faith. Deterministic,
+                # documented, non-LLM fallback, same as the exception path.
+                reply = self._pack_fallback(pack)
         except Exception as e:  # pragma: no cover — defensive fallback
             await self._log(f"statute.error:{jurisdiction}", "info", {"error": str(e)})
             reply = self._pack_fallback(pack)
@@ -274,10 +384,28 @@ class Statute(Agent):
             )
             if not self._valid_adjacent_regimes(reply):
                 reply = {"adjacent_regimes": self._ADJACENT_REGIMES_FALLBACK}
-            elif citations:
+            else:
+                # Each regime's `sources` is supplementary citation
+                # evidence for text whose actual legal claim is already
+                # locked to the canonical citation string above
+                # (`_valid_adjacent_regimes`); a source that is not
+                # tool-backed is trimmed to nothing rather than kept on
+                # the model's word, never used to fall back to the whole
+                # deterministic table (that table's own sources are
+                # empty too -- there is nothing more to fall back to).
+                cited_urls = {c.get("url") for c in citations if c.get("url")}
                 for regime in reply["adjacent_regimes"]:
-                    if not regime["sources"]:
-                        regime["sources"] = citations
+                    claim = EvidenceClaim(
+                        run_id=self.ctx.run_id, task_id=self.ctx.task_id,
+                        subject=f"statute:adjacent:{regime.get('name')}",
+                        statement=f"supplementary source for the {regime.get('name')} advisory",
+                    )
+                    candidate_urls = [s.get("url") for s in (regime.get("sources") or []) if s.get("url")]
+                    _, verified_urls = _verified_source_urls(
+                        claim, candidate_urls, cited_urls, _AUTHORITATIVE_LAW_DOMAINS,
+                    )
+                    by_url = {s.get("url"): s for s in (regime.get("sources") or []) if s.get("url")}
+                    regime["sources"] = [by_url[url] for url in verified_urls]
         except Exception as e:  # pragma: no cover — defensive fallback
             await self._log(f"statute.adjacent_error:{jurisdiction}", "info",
                             {"error": str(e)})
@@ -471,12 +599,33 @@ class Praxis(Agent):
             if not reply.get("methods"):
                 reply = fallback
                 cache_source = "deterministic"
-            elif citations:
+            else:
+                cited_urls = {c.get("url") for c in citations if c.get("url")}
+                any_verified = False
                 for method in reply["methods"]:
-                    if not method.get("sources"):
-                        method["sources"] = citations
-            if any(method.get("sources") for method in reply["methods"]):
-                cache_source = "web_search"
+                    claim = EvidenceClaim(
+                        run_id=self.ctx.run_id, task_id=self.ctx.task_id,
+                        subject=f"praxis:{category}",
+                        statement=f"supporting source for the {method.get('name')!r} method",
+                    )
+                    candidate_urls = (
+                        [s.get("url") for s in (method.get("sources") or []) if s.get("url")]
+                        or sorted(cited_urls)
+                    )
+                    verified, verified_urls = _verified_source_urls(
+                        claim, candidate_urls, cited_urls, _AUTHORITATIVE_METHOD_DOMAINS,
+                    )
+                    by_url = {s.get("url"): s for s in (method.get("sources") or []) if s.get("url")}
+                    method["sources"] = [by_url.get(url, {"url": url}) for url in verified_urls]
+                    any_verified = any_verified or verified
+                if not any_verified:
+                    # No researched method reached VERIFIED evidence --
+                    # never ship a candidate method on the model's word
+                    # alone. Deterministic, documented, non-LLM fallback.
+                    reply = fallback
+                    cache_source = "deterministic"
+                else:
+                    cache_source = "web_search"
         except Exception as e:  # pragma: no cover
             await self._log(f"praxis.error:{category}", "info", {"error": str(e)})
             reply = fallback

@@ -34,10 +34,13 @@ Public API:
 from __future__ import annotations
 
 import csv
+import hashlib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .detectors import MIN_PRESIDIO_CONFIDENCE
+from .detectors import _analyzer as _presidio_analyzer
 from .jurisdictions import GuardPattern, get_pack
 
 MAX_FINDINGS_PER_FILE = 20
@@ -74,12 +77,18 @@ class Finding:
 
 @dataclass
 class GuardResult:
-    """Result for a single exported file."""
+    """Result for a single exported file, bound to the canonical
+    hash-tracked artifact it scanned rather than a filesystem path:
+    ``artifact_id`` and ``sha256`` identify exactly which bytes were
+    scanned, so a later consumer (download route, bundle builder) can
+    prove it is serving the same content Publish Guard certified."""
     file_id: str
     file_path: str
     status: str  # "clean" | "blocked" | "skipped"
     findings: list[dict[str, Any]] = field(default_factory=list)
     detail: str = ""
+    artifact_id: str = ""
+    sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -138,13 +147,70 @@ def _sanitise_sample(sample: str) -> str:
     return sample[:2] + "*" * (len(sample) - 4) + sample[-2:]
 
 
+def _sha256_of_file(path: Path) -> str:
+    """Hash a scanned file's raw bytes once per scan. The suffix-bearing
+    alias ``Executor._finalize_export`` hard-links next to the canonical
+    (extension-less) artifact shares its inode, so this equals the
+    artifact registry's own recorded ``sha256`` for the same content."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def scan_names(text: str, jurisdiction: str = "us") -> list[Finding]:
+    """Detect person names in ``text`` with Presidio's PERSON recognizer
+    and report each as a HIPAA identifier-category-A finding (Safe
+    Harbor 18(a): names of individuals or relatives).
+
+    The regex/pattern table in ``jurisdictions.py`` has no pattern for a
+    name: a name is free text, not a fixed shape, so it needs an NER pass
+    rather than a pattern match. Every PERSON hit fires unconditionally
+    (no column-category or in-cell-anchor gating), matching this module's
+    fail-closed design: a detected name is a name regardless of which
+    column or file surface it landed in.
+    """
+    if not text.strip():
+        return []
+    pack = get_pack(jurisdiction)
+    category = "A" if "A" in pack.identifier_categories else next(
+        (k for k, v in pack.identifier_categories.items() if "name" in v.lower()), "A",
+    )
+    findings: list[Finding] = []
+    seen: set[tuple[int, str]] = set()
+    for lineno, line in enumerate(text.splitlines() or [text], start=1):
+        if not line.strip():
+            continue
+        try:
+            results = _presidio_analyzer().analyze(
+                text=line, language="en", entities=["PERSON"],
+                score_threshold=MIN_PRESIDIO_CONFIDENCE,
+            )
+        except Exception:
+            continue
+        for r in results:
+            matched = line[r.start:r.end]
+            key = (lineno, matched)
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append(Finding(
+                file="", pattern_id="PRESIDIO_PERSON_NAME", hipaa_category=category,
+                sample=_sanitise_sample(matched), line=lineno,
+            ))
+            if len(findings) >= MAX_FINDINGS_PER_FILE:
+                return findings
+    return findings
+
+
 def scan_export_file(
     file_id: str,
     path: Path,
     column_categories: dict[str, str] | None = None,
     jurisdiction: str = "us",
 ) -> GuardResult:
-    """Scan a single exported file. Only CSV/TSV/XLSX/TXT are inspected.
+    """Scan a single exported file. Only CSV/TSV/XLSX/TXT/MD are inspected.
     Files that cannot be scanned are blocked.
 
     ``column_categories`` maps CSV/XLSX header names to the pipeline's
@@ -153,7 +219,20 @@ def scan_export_file(
     only on cells whose column actually carries that identifier type.
     Non-CSV surfaces fall back to in-cell anchor detection. ``jurisdiction``
     selects which pack's pattern table this file is scanned against.
+    Every CSV/TSV/TXT/MD/XLSX surface additionally runs :func:`scan_names`
+    (Presidio PERSON recognizer, HIPAA category A) unconditionally; every
+    other extension keeps the existing hard block, unscanned.
+
+    The result binds to the canonical hash-tracked artifact it scanned --
+    ``artifact_id`` (recovered from the suffix-bearing alias
+    ``Executor._finalize_export`` hard-links next to the extension-less
+    staged artifact) and ``sha256`` (the exact bytes scanned) -- rather
+    than to ``file_path`` alone, so a later consumer (a download route,
+    the bundle builder) can prove it is serving the same content this
+    scan certified.
     """
+    from .paths import artifact_id_from_export_alias
+
     patterns = get_pack(jurisdiction).patterns
     try:
         ext = path.suffix.lower().lstrip(".")
@@ -163,30 +242,43 @@ def scan_export_file(
     if not path.exists():
         return GuardResult(file_id=file_id, file_path=str(path), status="blocked",
                            detail="export file missing", findings=[])
+    artifact_id = artifact_id_from_export_alias(path)
+    try:
+        sha256 = _sha256_of_file(path)
+    except OSError as e:
+        return GuardResult(file_id=file_id, file_path=str(path), status="blocked",
+                           detail=f"read failed: {e}", findings=[], artifact_id=artifact_id)
     if ext in ("csv", "tsv"):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             return GuardResult(file_id=file_id, file_path=str(path), status="blocked",
-                               detail=f"read failed: {e}", findings=[])
+                               detail=f"read failed: {e}", findings=[],
+                               artifact_id=artifact_id, sha256=sha256)
         findings = _scan_csv_text(text, file_id, path.name, column_categories or {}, patterns)
+        findings += _scan_csv_names(text, jurisdiction)
     elif ext in ("txt", "md"):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             return GuardResult(file_id=file_id, file_path=str(path), status="blocked",
-                               detail=f"read failed: {e}", findings=[])
+                               detail=f"read failed: {e}", findings=[],
+                               artifact_id=artifact_id, sha256=sha256)
         findings = _scan_text(text, file_id, path.name, patterns)
+        findings += scan_names(text, jurisdiction)
     elif ext in ("xlsx", "xls"):
-        findings = _scan_xlsx(file_id, path, column_categories or {}, patterns)
+        findings = _scan_xlsx(file_id, path, column_categories or {}, patterns, jurisdiction=jurisdiction)
     else:
         return GuardResult(file_id=file_id, file_path=str(path), status="blocked",
-                           detail=f"extension {ext!r} cannot be scanned")
+                           detail=f"extension {ext!r} cannot be scanned",
+                           artifact_id=artifact_id, sha256=sha256)
     if findings:
         return GuardResult(file_id=file_id, file_path=str(path), status="blocked",
-                           findings=[asdict(f) for f in findings],
-                           detail=f"{len(findings)} residual PHI finding(s)")
-    return GuardResult(file_id=file_id, file_path=str(path), status="clean")
+                           findings=[asdict(f) for f in findings[:MAX_FINDINGS_PER_FILE]],
+                           detail=f"{len(findings)} residual PHI finding(s)",
+                           artifact_id=artifact_id, sha256=sha256)
+    return GuardResult(file_id=file_id, file_path=str(path), status="clean",
+                       artifact_id=artifact_id, sha256=sha256)
 
 
 def _scan_csv_text(
@@ -229,11 +321,35 @@ def _scan_csv_text(
     return findings
 
 
+def _scan_csv_names(text: str, jurisdiction: str) -> list[Finding]:
+    """Run :func:`scan_names` per cell rather than over the whole line or
+    file: a name detector's context window can otherwise bleed across
+    adjacent fields (a pseudonymized subject id beside a lab-test code,
+    two unrelated cells joined by a comma) and misfire on structured
+    data that is not free text. Skips the header row, matching
+    ``_scan_csv_text``'s own convention."""
+    findings: list[Finding] = []
+    reader = csv.reader(text.splitlines())
+    for lineno, row in enumerate(reader, start=1):
+        if lineno == 1:
+            continue
+        for cell in row:
+            if not cell or not cell.strip():
+                continue
+            for f in scan_names(cell, jurisdiction):
+                f.line = lineno
+                findings.append(f)
+                if len(findings) >= MAX_FINDINGS_PER_FILE:
+                    return findings
+    return findings
+
+
 def _scan_xlsx(
     file_id: str,
     path: Path,
     column_categories: dict[str, str],
     patterns: tuple[GuardPattern, ...],
+    jurisdiction: str = "us",
 ) -> list[Finding]:
     unavailable = [Finding(
         file=path.name, pattern_id="GUARD_UNAVAILABLE", hipaa_category="",
@@ -279,6 +395,17 @@ def _scan_xlsx(
                         ))
                         if len(findings) >= MAX_FINDINGS_PER_FILE:
                             break
+                    if len(findings) >= MAX_FINDINGS_PER_FILE:
+                        break
+                    # Per-cell name scan, same rationale as `_scan_csv_names`:
+                    # avoid bleeding a name detector's context across an
+                    # entire tab-joined row.
+                    if cell.strip():
+                        for f in scan_names(cell, jurisdiction):
+                            f.line = lineno
+                            findings.append(f)
+                            if len(findings) >= MAX_FINDINGS_PER_FILE:
+                                break
                     if len(findings) >= MAX_FINDINGS_PER_FILE:
                         break
                 if len(findings) >= MAX_FINDINGS_PER_FILE:

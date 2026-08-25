@@ -22,12 +22,12 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from phi_core.control.activation import ActivationFactory
+from phi_core.control.adapters import legacy_decision_adapter, legacy_files_adapter
 from phi_core.control.context import AgentContext
 from phi_core.control.store import ControlStore
 
@@ -56,7 +56,6 @@ from .reasoning import (
     materialize_auditor_disagreements,
     plain_human_review_reasons,
     validate_decisions,
-    verify_keep_decisions,
 )
 from .reviewer import Reviewer
 from .specialists import Instrument, Lexicon, Schema
@@ -105,6 +104,8 @@ async def run_pipeline(
     run_id: str | None = None,
     control_store: "ControlStore | None" = None,
 ) -> dict[str, Any]:
+    from phi_core.control.gates import DecisionGateFailure, run_decision_gates
+
     sid = session["id"]
     session_filter = {"id": sid}
     if run_id is not None:
@@ -461,16 +462,53 @@ async def run_pipeline(
     # `reason`/`citation` fields before we persist. The audit found a real
     # patient name in a stored decision reason on the live deployment.
     approved_decisions = [scrub_decision(d) for d in approved_decisions]
-    approved_decisions, keep_demotions = verify_keep_decisions(
-        approved_decisions,
-        {f["file_id"]: Path(f["stored_path"]) for f in dataset_files},
-        jurisdiction=session.get("jurisdiction", "us"),
-    )
-    if keep_demotions:
-        await on_phase("keep_verification", {"demotions": keep_demotions})
     dictionary_by_column = {c.get("name"): c.get("description", "")
                             for c in lexicon.get("columns", []) if c.get("name")}
-    approved_decisions = annotate_pending_review(approved_decisions, dictionary_by_column)
+    # Final, authoritative decision-mutation event before this decision set
+    # is allowed anywhere near Executor: the full canonical D11 gate
+    # sequence, re-run one last time over whatever the Judge/Sentinel loop
+    # converged on. Every gate above already ran per-iteration for cost
+    # reasons (Sentinel review is a paid call, so cheap deterministic
+    # gates run before it); this pass is idempotent over already-settled
+    # decisions and its only NEW contribution is `assert_exact_coverage`,
+    # the fail-closed proof that Executor must never receive a duplicate,
+    # missing, or invented decision.
+    gate_outcome = await run_decision_gates(
+        decisions=legacy_decision_adapter(approved_decisions),
+        files=legacy_files_adapter(dataset_files),
+        statute=statute,
+        instrument=instrument,
+        schema_stats=schema_stats,
+        jurisdiction=session.get("jurisdiction", "us"),
+        blocking_attempts=blocking_attempts,
+        sentinel_report=s if isinstance(s, dict) else None,
+        stage="orchestrator.final_decision",
+        # A fresh real activation, not `judge.ctx`: a test double can
+        # (and does) stand in for `Judge` without retaining `.ctx`, and
+        # this stamp is bookkeeping only -- `run_decision_gates` never
+        # calls the gateway this context carries.
+        ctx=await make_ctx("Judge"),
+        # No durable `store`: nothing yet opens a `WorkflowRun` for this
+        # session (control/runs.py::RunStore.open_run is not wired into
+        # the pipeline until Phase 4/5's SuperOrchestrator), and
+        # `_next_decision_version` requires one to exist. `decision_version`
+        # is therefore 0 here, not a persisted monotonic counter, until
+        # that wiring lands.
+    )
+    for gate_result in gate_outcome.gate_results:
+        await factory.store.insert("gate_results", gate_result)
+    if gate_outcome.overrides:
+        all_sentinel_overrides.extend(gate_outcome.overrides)
+    keep_demotions = gate_outcome.demotions
+    if keep_demotions:
+        await on_phase("keep_verification", {"demotions": keep_demotions})
+    # Re-annotate with the real lexicon-derived dictionary: the gate
+    # sequence's own internal annotate_pending_review pass has no
+    # dictionary context, so this overwrite is purely additive (same
+    # action/confidence/coverage, richer reviewer_prompt text).
+    approved_decisions = annotate_pending_review(gate_outcome.decisions, dictionary_by_column)
+    if not gate_outcome.ok:
+        raise DecisionGateFailure(gate_outcome)
     if isinstance(s, dict):
         s = dict(s)
         if isinstance(s.get("issues"), list):

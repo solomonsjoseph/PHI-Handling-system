@@ -16,6 +16,7 @@ Rules enforced (fail closed on violation):
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 
@@ -75,9 +76,67 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 UPLOAD_DIR = DATA_DIR / "uploads"
 EXPORT_DIR = DATA_DIR / "exports"
 CHATGPT_TOKEN_DIR = DATA_DIR / "chatgpt"
-for _d in (UPLOAD_DIR, EXPORT_DIR, CHATGPT_TOKEN_DIR):
+# D14 artifact-registry roots. ``intake`` reuses ``UPLOAD_DIR`` rather than
+# adding a redundant constant; every other ``ArtifactRecord.root`` literal
+# gets its own directory here.
+STAGING_DIR = DATA_DIR / "staging"
+EVIDENCE_DIR = DATA_DIR / "evidence"
+REVERSAL_DIR = DATA_DIR / "reversal"
+PUBLISHED_DIR = DATA_DIR / "published"
+CACHE_DIR = DATA_DIR / "cache"
+for _d in (
+    UPLOAD_DIR,
+    EXPORT_DIR,
+    CHATGPT_TOKEN_DIR,
+    STAGING_DIR,
+    EVIDENCE_DIR,
+    REVERSAL_DIR,
+    PUBLISHED_DIR,
+    CACHE_DIR,
+):
     _d.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(_d, 0o700)
+
+
+# Run-scoped artifact directories are keyed by ``session_id``/``run_id``, both
+# always internally generated ``uuid4().hex`` identifiers. Restricting them to
+# that exact shape (rather than routing them through ``sanitise_filename``,
+# which merely rejects traversal) means a run-scoped path component can never
+# even superficially resemble a crafted name.
+_ID_RE = re.compile(r"\A[0-9a-f]{8,64}\Z")
+
+
+ARTIFACT_ID_LENGTH = 32  # uuid4().hex: exactly 32 lowercase hex characters
+
+
+def artifact_id_from_export_alias(path: str | Path) -> str:
+    """Recover the canonical, extension-less ``ArtifactService`` artifact_id
+    from a suffix-bearing guard-scannable alias
+    (``agents.reasoning.Executor._finalize_export``): a same-inode hard
+    link whose basename is always the bare artifact_id immediately
+    followed by the export's extension. Returns ``""`` when the basename
+    does not start with a well-formed artifact_id, so a caller can treat
+    an unrecognised path as "no artifact" rather than guessing."""
+    candidate = Path(path).name[:ARTIFACT_ID_LENGTH]
+    if len(candidate) == ARTIFACT_ID_LENGTH and all(c in "0123456789abcdef" for c in candidate):
+        return candidate
+    return ""
+
+
+def run_scoped_dir(base: Path, session_id: str, run_id: str) -> Path:
+    """Return (creating if needed) ``base/session_id/run_id``.
+
+    Raises :class:`UnsafePath` when either id is not a bare lowercase-hex
+    token -- fail closed rather than accept a value that could be crafted
+    to traverse or collide outside the run's own directory.
+    """
+    if not _ID_RE.match(session_id or ""):
+        raise UnsafePath(f"session_id is not a safe run-scoped identifier: {session_id!r}")
+    if not _ID_RE.match(run_id or ""):
+        raise UnsafePath(f"run_id is not a safe run-scoped identifier: {run_id!r}")
+    scoped = base.resolve() / session_id / run_id
+    scoped.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return scoped
 
 
 def cleanup_session_unpacked(sid: str) -> None:

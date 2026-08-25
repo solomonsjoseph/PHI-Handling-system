@@ -17,7 +17,6 @@ from phi_core.publish_guard import scan_all_exports
 
 
 def test_narrative_redaction_extracts_and_redacts_real_text(tmp_path, monkeypatch):
-    monkeypatch.setattr("phi_core.agents.reasoning.EXPORT_DIR", tmp_path)
     src = tmp_path / "consent.txt"
     src.write_text(
         "Consent obtained from James Smith, call 415-555-1234, MRN-12345678.",
@@ -42,7 +41,6 @@ def test_narrative_redaction_extracts_and_redacts_real_text(tmp_path, monkeypatc
 def test_executor_dataset_output_survives_publish_guard(tmp_path, monkeypatch):
     """Executor's dataset export, run through the widened step-5 pattern
     set, must still come out 'clean' for a properly-decided study export."""
-    monkeypatch.setattr("phi_core.agents.reasoning.EXPORT_DIR", tmp_path)
     src = tmp_path / "enrollment.csv"
     src.write_text(
         "patient_name,dob,zip,age,notes\r\n"

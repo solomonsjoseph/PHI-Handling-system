@@ -290,20 +290,16 @@ def test_intake_rejects_xls_dictionary_naming_the_fix(tmp_path):
     assert "save as .xlsx" in rejected[0].reason
 
 
-def test_executor_publishes_withheld_metadata_at_its_scannable_path(tmp_path, monkeypatch):
+def test_executor_publishes_withheld_metadata_at_its_scannable_path(tmp_path):
     """Executor exports the actual withheld marker path for unsupported metadata."""
     import asyncio
 
-    import phi_core.agents.reasoning as reasoning
     from phi_core.agents.reasoning import Executor
     from phi_core.control.testing import make_ctx
     from phi_core.publish_guard import scan_export_file
 
     src = tmp_path / "codebook.docx"
     src.write_text("Jane Q. Patient, MRN 4471129", encoding="utf-8")
-    export_dir = tmp_path / "exports"
-    export_dir.mkdir()
-    monkeypatch.setattr(reasoning, "EXPORT_DIR", export_dir)
 
     result = asyncio.run(Executor(make_ctx("Executor")).run(
         [{
@@ -315,6 +311,6 @@ def test_executor_publishes_withheld_metadata_at_its_scannable_path(tmp_path, mo
         [],
     ))
 
-    actual = export_dir / "dictionary__export.withheld.txt"
-    assert result["exports"]["dictionary"] == str(actual)
+    actual = Path(result["exports"]["dictionary"])
+    assert actual.name.endswith(".withheld.txt")
     assert scan_export_file("dictionary", actual).status == "clean"

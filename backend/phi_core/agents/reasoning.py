@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv as _csv
 import hashlib as _hashlib
 import hmac as _hmac
+import os as _os
 import re as _re
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,6 @@ from ..crypto import pseudonym_salt
 from ..detectors import detect_text
 from ..file_readers import iter_dataset_rows, read_narrative
 from ..jurisdictions import get_pack
-from ..paths import EXPORT_DIR
 from ..publish_guard import should_fire
 from ..security import scrub_persisted_text
 from .base import Agent
@@ -92,10 +92,18 @@ def validate_decisions(
                 d["suggested_confidence"] = None
             reason = d.get("suggested_reason")
             d["suggested_reason"] = str(reason).strip() if isinstance(reason, str) and reason.strip() else None
-        else:
-            d["suggested_action"] = None
-            d["suggested_confidence"] = None
-            d["suggested_reason"] = None
+        # else: leave suggested_action/suggested_confidence/suggested_reason
+        # exactly as given. Judge's own JSON schema never produces these
+        # fields (it always commits to a real action), so on a first-time
+        # Judge decision they are simply absent here. A deterministic
+        # override gate (apply_site_cardinality_rule, apply_sentinel_hard_rules,
+        # ...) may legitimately set `suggested_action` on a forced non-
+        # human_review decision to record what the original proposal was,
+        # for reviewer/audit context. `validate_decisions` must stay
+        # idempotent so control/gates.py can safely re-run the fixed D11
+        # sequence over an already-settled decision list (its documented
+        # contract): actively nulling this field here would silently erase
+        # that provenance the second time the sequence runs.
         subject = d.get("subject")
         if subject not in SUBJECT_TYPES:
             rejections.append({"file_id": file_id, "column": column, "field": "subject", "proposed": subject})
@@ -1077,6 +1085,36 @@ class Executor(Agent):
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
 
+    async def _finalize_export(self, artifact_id: str, tmp_path: Path, file_id: str,
+                               exports: dict[str, str], suffix: str) -> None:
+        """Common tail for every branch below: hash+promote the staged
+        bytes, then record a *guard-scannable* path in ``exports``.
+
+        Never called on a branch that raised before writing `tmp_path`
+        completely -- the artifact then stays ``provisional`` with no
+        bytes under the real (non-``.tmp``) root, exactly the D14
+        atomicity contract.
+
+        The artifact's own canonical stored name is the bare artifact id
+        (D14: no filename, original or otherwise, is ever part of a
+        stored or served path). ``publish_guard.scan_export_file`` --
+        untouched here, still dispatches purely on ``Path.suffix`` --
+        therefore cannot read it directly. Rather than duplicate the
+        exported bytes, hard-link a same-inode, suffix-bearing alias next
+        to the canonical file in the same run-scoped staging directory
+        and hand that alias to ``exports``: zero extra bytes on disk, the
+        canonical artifact record and its hash are untouched, and every
+        current consumer of ``exports`` (Publish Guard, the bundle
+        builder, the still-unmigrated download routes) keeps working
+        unchanged.
+        """
+        await self.ctx.artifacts.finalize(artifact_id)
+        dst = tmp_path.parent.parent / self.ctx.session_id / self.ctx.run_id / artifact_id
+        alias = dst.with_name(dst.name + suffix)
+        _os.link(dst, alias)
+        exports[file_id] = str(alias)
+        await self._log("executor.wrote", "info", {"file_id": file_id, "path": str(alias)})
+
     async def run(self, files: list[dict[str, Any]], decisions: list[dict[str, Any]],
                   omit_by_file: dict[str, set[str]] | None = None) -> dict[str, Any]:
         """Apply decisions to each file. Returns {"exports": {file_id: path}}.
@@ -1088,6 +1126,15 @@ class Executor(Agent):
         entirely -- excluded from ``exports`` -- rather than written as a
         headerless file, so Publish Guard never has to reason about it and
         the manifest can record it as fully deferred (see server.py).
+
+        Every write is staged through ``self.ctx.artifacts``
+        (``control/writer.py::ArtifactWriter``): an ``ArtifactRecord`` is
+        registered ``provisional`` before the first byte, the producer
+        writes to the returned ``.tmp`` path, and only a completed write
+        is hashed and atomically promoted via ``finalize``. A producer
+        that raises leaves that artifact ``provisional`` with nothing at
+        the real path -- there is nothing to clean up, and that file_id
+        simply never reaches ``exports``.
         """
         pending = [(d.get("file_id", ""), d.get("column", "")) for d in decisions if d.get("action") == "human_review"]
         if pending:
@@ -1106,15 +1153,27 @@ class Executor(Agent):
 
         for f in files:
             src = Path(f["stored_path"])
-            dst = EXPORT_DIR / f"{f['file_id']}__export"
             if f["kind"] == "metadata":
                 # SEC-004 fail-closed: dictionary/mapping files can name PHI
                 # (column definitions, code labels) so we run the deterministic
-                # detector over them BEFORE they land in exports/. Never copy
+                # detector over them BEFORE they land in an export. Never copy
                 # verbatim.
-                dst = _redact_metadata_file(src, dst)
+                artifact_id, tmp_path = await self.ctx.artifacts.stage(
+                    "metadata_export", f"{f['file_id']}__export", "restricted_metadata", "export",
+                )
+                written = _redact_metadata_file(src, tmp_path)
+                export_suffix = written.name[len(tmp_path.name):]
+                if written != tmp_path:
+                    # `_redact_metadata_file` names its own output by
+                    # extension (`.csv`/`.xlsx`/`.withheld.txt`) for its
+                    # other caller (`phi_corpus.replay`); `finalize` always
+                    # hashes exactly `tmp_path`, so move the real bytes
+                    # onto it -- same filesystem, so this is also a bare
+                    # rename, never a copy. The extension it chose is kept
+                    # as `export_suffix` for `_finalize_export`'s guard-
+                    # scannable alias below.
+                    written.replace(tmp_path)
             elif f["kind"] == "dataset":
-                dst = EXPORT_DIR / f"{f['file_id']}__export.{f['subtype']}"
                 omit_cols = omit_by_file.get(f["file_id"], set())
                 known_cols = set(f.get("columns") or [])
                 if omit_cols and not known_cols:
@@ -1130,43 +1189,50 @@ class Executor(Agent):
                     await self._log("executor.dataset_fully_deferred", "info",
                                     {"file_id": f["file_id"], "column_count": len(known_cols)})
                     continue
+                export_suffix = f".{f['subtype']}"
+                artifact_id, tmp_path = await self.ctx.artifacts.stage(
+                    "dataset_export", f"{f['file_id']}__export{export_suffix}", "restricted_metadata", "export",
+                )
                 try:
-                    apply_column_actions_to_dataset(src, dst, f["subtype"], by_file.get(f["file_id"], []),
+                    apply_column_actions_to_dataset(src, tmp_path, f["subtype"], by_file.get(f["file_id"], []),
                                                     registry, omit_columns=omit_cols)
                 except Exception as e:
                     # Mirrors the narrative branch below: a write failure must
                     # not crash the whole run or leave a partial file counted
                     # as exported. apply_column_actions_to_dataset already
-                    # guarantees no partial file survives at `dst`; this just
-                    # keeps that file_id out of `exports` instead of raising.
+                    # guarantees no partial file survives at `tmp_path`, and
+                    # skipping `_finalize_export` leaves the artifact
+                    # `provisional` with nothing at the real path either.
                     await self._log("executor.dataset_write_failed", "info",
                                     {"file_id": f["file_id"], "error": type(e).__name__})
                     continue
             else:
-                dst = EXPORT_DIR / f"{f['file_id']}__export.redacted.txt"
+                export_suffix = ".redacted.txt"
+                artifact_id, tmp_path = await self.ctx.artifacts.stage(
+                    "narrative_export", f"{f['file_id']}__export", "restricted_metadata", "export",
+                )
                 try:
                     text = read_narrative(src, f["subtype"])
                 except Exception as e:
                     await self._log("executor.narrative_read_failed", "info",
                                     {"file_id": f["file_id"], "error": type(e).__name__})
-                    dst.write_text(
+                    tmp_path.write_text(
                         f"[REDACTED] narrative extraction failed ({type(e).__name__}); "
                         f"content withheld to prevent PHI leak.\n", encoding="utf-8")
-                    exports[f["file_id"]] = str(dst)
+                    await self._finalize_export(artifact_id, tmp_path, f["file_id"], exports, export_suffix)
                     continue
                 if not text.strip():
                     await self._log("executor.narrative_empty", "info",
                                     {"file_id": f["file_id"]})
-                    dst.write_text(
+                    tmp_path.write_text(
                         f"[NO EXTRACTABLE TEXT] {f['file_id']}\n", encoding="utf-8")
-                    exports[f["file_id"]] = str(dst)
+                    await self._finalize_export(artifact_id, tmp_path, f["file_id"], exports, export_suffix)
                     continue
                 spans = detect_text(text, detectors=["presidio", "rule"])
                 for sp in spans:
                     sp.review_status = "accepted"
-                dst.write_text(apply_to_text(text, spans), encoding="utf-8")
-            exports[f["file_id"]] = str(dst)
-            await self._log("executor.wrote", "info", {"file_id": f["file_id"], "path": str(dst)})
+                tmp_path.write_text(apply_to_text(text, spans), encoding="utf-8")
+            await self._finalize_export(artifact_id, tmp_path, f["file_id"], exports, export_suffix)
         # Persist the pseudonym map size so the auditor can report on linkage coverage.
         await self._log("executor.pseudonym_registry", "info", {"unique_values_pseudonymized": len(registry._map)})
         # `reversal_key_blob` is the mandatory reversal-key deliverable: an

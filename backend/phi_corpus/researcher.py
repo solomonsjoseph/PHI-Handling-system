@@ -28,6 +28,17 @@ import json as _json
 from typing import Any
 
 from phi_core.agents.base import Agent
+from phi_core.agents.experts import _verify_research_reply
+
+# Real public-dataset repositories the researcher's own prompt instructs
+# it to search; see D12 in phi_core.agents.experts for why these five
+# dimensions are the deterministic proxy used in place of a full content
+# re-fetch, and why an unverified reply falls back to a refusal here
+# exactly as an unsourced reply always has.
+_AUTHORITATIVE_DATASET_DOMAINS: frozenset[str] = frozenset({
+    "clinicaltrials.gov", "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov",
+    "nature.com", "zenodo.org", "hdruk.ac.uk", "ukbiobank.ac.uk", "physionet.org",
+})
 
 
 class CorpusResearcher(Agent):
@@ -105,21 +116,31 @@ class CorpusResearcher(Agent):
                          "sources": []},
                 max_uses=3,
             )
-            if isinstance(reply, dict):
-                if not reply.get("sources") and citations:
-                    reply["sources"] = citations
-                # Grounding gate: refuse to return a scenario that has no
-                # source citations — that would be a hallucinated study.
-                if not reply.get("error") and not reply.get("sources"):
+            if isinstance(reply, dict) and not reply.get("error"):
+                verified, verified_sources = _verify_research_reply(
+                    run_id=self.ctx.run_id, task_id=self.ctx.task_id,
+                    subject=f"corpus_researcher:{cache_key}",
+                    statement=f"real de-identified public dataset for study domain {domain!r}",
+                    reply_sources=reply.get("sources"), citations=citations,
+                    allow_list=_AUTHORITATIVE_DATASET_DOMAINS,
+                )
+                # Grounding gate: refuse to return a scenario with no
+                # tool-backed, verified source -- a model-authored URL
+                # absent from the response's own citations is never
+                # accepted as grounding (F-EVID-001). This is strictly
+                # tighter than the previous "has any sources" check.
+                if not verified:
                     reply = {
                         "error": (
-                            "researcher refused: no web citations attached "
-                            "to the returned scenario. Corpus MUST be "
-                            "grounded in a real study."
+                            "researcher refused: no verified, tool-backed web "
+                            "citation attached to the returned scenario. Corpus "
+                            "MUST be grounded in a real study."
                         ),
                         "sources": [],
                         "candidate": reply,
                     }
+                else:
+                    reply["sources"] = verified_sources
         except Exception as e:  # pragma: no cover
             await self._log(f"researcher.error:{cache_key}", "info", {"error": str(e)})
             return {"error": f"{type(e).__name__}: {e}", "sources": []}

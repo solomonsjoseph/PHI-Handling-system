@@ -888,8 +888,10 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
         {
             "id": "session",
             "files": [
-                {"kind": "dataset", "file_id": "f1", "subtype": "csv", "stored_path": str(bad_export)},
-                {"kind": "dataset", "file_id": "f2", "subtype": "csv", "stored_path": str(good_export)},
+                {"kind": "dataset", "file_id": "f1", "subtype": "csv",
+                 "stored_path": str(bad_export), "columns": ["age"]},
+                {"kind": "dataset", "file_id": "f2", "subtype": "csv",
+                 "stored_path": str(good_export), "columns": ["age"]},
             ],
         },
         db,
@@ -917,22 +919,26 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
 # ---- Task 30: Reviewer wired between Operator and Publish Guard -----------
 
 
-def test_run_pipeline_reviewer_only_finding_excludes_file_and_ends_partially_complete(tmp_path, monkeypatch):
-    """Full-pipeline-shaped proof that Reviewer's own coverage check, not
-    Operator's, is what excludes a file from the final export.
+def test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor(tmp_path, monkeypatch):
+    """A duplicate Judge decision for the same (file_id, column) must never
+    reach Executor at all.
 
-    f1 gets two Judge decisions naming the same column ('field', both
-    'drop') -- Operator processes decisions one-for-one and verifies each
-    independently, so a duplicate decision on an already-empty column
-    still verifies clean and Operator reports zero failures for f1. Only
-    Reviewer's independent recount (2 decisions vs. 1 real written
-    column) catches the coverage_mismatch. f2 has one matching decision
-    and is unaffected.
+    Before Phase 3's D11 gate, this scenario (two Judge decisions naming
+    the same column) silently reached Executor and Operator -- Operator
+    verified each decision independently and reported zero failures, so
+    only Reviewer's own downstream recount (still covered directly by
+    `test_reviewer.py::test_coverage_mismatch_when_zero_fail_verdicts_but_
+    column_count_differs`) caught the mismatch after the fact. Now
+    `run_decision_gates`'s `assert_exact_coverage` proves exactly-one-
+    decision-per-real-column *before* Executor ever runs, so the duplicate
+    is refused upstream and `run_pipeline` raises `DecisionGateFailure`
+    instead of ever producing a partially-complete export.
 
-    The real Operator and real Reviewer both run; every other agent is a
-    fake double, mirroring the Task 28 proof test above.
+    Every agent but Judge is a fake double; Executor is faked to record
+    whether it was ever invoked, proving the gate runs strictly before it.
     """
     from phi_core.agents import orchestrator
+    from phi_core.control.gates import DecisionGateFailure
 
     f1_export = tmp_path / "f1_export.csv"
     _write_csv(f1_export, ["field"], [[""]])  # dropped column: empty cell
@@ -1011,11 +1017,14 @@ def test_run_pipeline_reviewer_only_finding_excludes_file_and_ends_partially_com
         async def run(self, **_kwargs):
             return {"issues": []}
 
+    executor_calls: list[int] = []
+
     class FakeExecutor:
         def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
+            executor_calls.append(1)
             return {"exports": {"f1": str(f1_export), "f2": str(f2_export)}}
 
     class FakeAuditor:
@@ -1071,40 +1080,24 @@ def test_run_pipeline_reviewer_only_finding_excludes_file_and_ends_partially_com
         phase_events.append((phase, payload))
 
     db = FakeDb()
-    result = asyncio.run(orchestrator.run_pipeline(
-        {
-            "id": "session",
-            "files": [
-                {"kind": "dataset", "file_id": "f1", "subtype": "csv", "stored_path": str(f1_export)},
-                {"kind": "dataset", "file_id": "f2", "subtype": "csv", "stored_path": str(f2_export)},
-            ],
-        },
-        db,
-        LlmConfig(provider="anthropic", model="test", max_tokens=100),
-        emit,
-        on_phase,
-        control_store=MemoryControlStore(),
-    ))
+    with pytest.raises(DecisionGateFailure) as excinfo:
+        asyncio.run(orchestrator.run_pipeline(
+            {
+                "id": "session",
+                "files": [
+                    {"kind": "dataset", "file_id": "f1", "subtype": "csv",
+                     "stored_path": str(f1_export), "columns": ["field"]},
+                    {"kind": "dataset", "file_id": "f2", "subtype": "csv",
+                     "stored_path": str(f2_export), "columns": ["field"]},
+                ],
+            },
+            db,
+            LlmConfig(provider="anthropic", model="test", max_tokens=100),
+            emit,
+            on_phase,
+            control_store=MemoryControlStore(),
+        ))
 
-    # Operator itself reported this file clean: no fail verdict, not in
-    # failed_file_ids -- the exclusion is Reviewer's finding alone.
-    assert result["operator_failures"] == []
-
-    assert "f1" not in result["exports"]
-    assert result["exports"] == {"f2": str(f2_export)}
-
-    reviewer_findings = result["reviewer_findings"]
-    assert any(f["kind"] == "coverage_mismatch" and f["file_id"] == "f1"
-               for f in reviewer_findings)
-    assert not any(f["file_id"] == "f2" for f in reviewer_findings)
-
-    assert result["status"] == "partially_complete"
-
-    reviewer_events = [e for e in phase_events if e[0] == "reviewer"]
-    assert len(reviewer_events) == 1
-
-    completion_update = db.sessions.updates[-1]["$set"]
-    assert completion_update["status"] == "partially_complete"
-    assert completion_update["export_paths"] == {"f2": str(f2_export)}
-    assert any(f["kind"] == "coverage_mismatch" and f["file_id"] == "f1"
-               for f in completion_update["reviewer_findings"])
+    assert "duplicate_decision" in str(excinfo.value)
+    assert not executor_calls, "Executor must never run once the coverage proof has failed"
+    assert not any(phase == "reviewer" for phase, _ in phase_events)

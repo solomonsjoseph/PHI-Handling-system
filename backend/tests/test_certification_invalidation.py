@@ -111,15 +111,16 @@ async def test_processing_session_refuses_stale_clean_export_without_override(mo
     })
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
-    response = await srv.session_export("sid", "dataset", force=False)
+    response = await srv.session_export("sid", "dataset")
 
     assert response.status_code == 403
     assert db.updates == []
 
 
 @pytest.mark.asyncio
-async def test_processing_session_refuses_force_without_recording_override(monkeypatch, tmp_path):
-    """The audited force path is unavailable until the session completes."""
+async def test_processing_session_refuses_export_regardless_of_result(monkeypatch, tmp_path):
+    """A blocked per-file result stays refused until the session completes;
+    there is no override parameter that could change that."""
     import server as srv
 
     export = tmp_path / "export.csv"
@@ -135,7 +136,7 @@ async def test_processing_session_refuses_force_without_recording_override(monke
     })
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
-    response = await srv.session_export("sid", "dataset", force=True)
+    response = await srv.session_export("sid", "dataset")
 
     assert response.status_code == 403
     assert db.updates == []
@@ -275,8 +276,7 @@ async def test_handle_claim_revokes_old_exports_before_worker_runs(monkeypatch, 
     assert "export_paths" not in db.doc
     assert len(scheduled) == 1
 
-    assert (await srv.session_export("sid", "dataset", force=False, principal="reviewer")).status_code == 403
-    assert (await srv.session_export("sid", "dataset", force=True, principal="reviewer")).status_code == 403
+    assert (await srv.session_export("sid", "dataset", principal="reviewer")).status_code == 403
     with pytest.raises(HTTPException) as excinfo:
         await srv.session_bundle("sid", publication=False, attestation_pdf=False, principal="reviewer")
     assert excinfo.value.status_code == 403
@@ -393,9 +393,15 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_completed_blocked_export_retains_audited_force_override(monkeypatch, tmp_path):
-    """A settled blocked result still permits the existing audited force flow."""
+async def test_completed_blocked_export_has_no_override_and_records_nothing(monkeypatch, tmp_path):
+    """A settled blocked result stays blocked; D14/Phase 3 removed the
+    audited ``force`` override entirely, so there is no parameter left to
+    exercise it with and no ``guard_overrides`` record is ever written."""
+    import inspect
+
     import server as srv
+
+    assert "force" not in inspect.signature(srv.session_export).parameters
 
     export = tmp_path / "blocked.csv"
     export.write_text("reviewed export", encoding="utf-8")
@@ -410,33 +416,50 @@ async def test_completed_blocked_export_retains_audited_force_override(monkeypat
     })
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
-    response = await srv.session_export("sid", "dataset", force=True)
+    with pytest.raises(TypeError):
+        await srv.session_export("sid", "dataset", force=True)  # type: ignore[call-arg]
 
-    assert response.status_code == 200
-    assert db.updates[-1][0][1]["$push"]["guard_overrides"]["file_id"] == "dataset"
+    response = await srv.session_export("sid", "dataset")
+
+    assert response.status_code == 403
+    assert db.updates == []
 
 
 @pytest.mark.asyncio
-async def test_completed_clean_export_retains_normal_download(monkeypatch, tmp_path):
-    """A settled clean per-file certification still permits a normal download."""
+async def test_completed_clean_export_retains_normal_download(monkeypatch):
+    """A settled clean per-file certification still permits a normal
+    download, now served through ArtifactService.open_for_download bound
+    to the canonical artifact_id/sha256 rather than a raw path lookup."""
     import server as srv
+    from phi_core.control.artifacts import ArtifactService
+    from phi_core.control.store import MemoryControlStore
 
-    export = tmp_path / "clean.csv"
-    export.write_text("clean export", encoding="utf-8")
+    sid = "c" * 32
+    run_id = "d" * 32
+    store = MemoryControlStore()
+    service = ArtifactService(store, session_id=sid, run_id=run_id)
+    artifact_id, tmp = await service.stage("dataset_export", "dataset__export.csv", "restricted_metadata", "export")
+    tmp.write_bytes(b"clean export")
+    await service.finalize(artifact_id)
+
     db = _ConditionalStubDB({
-        "id": "sid",
+        "id": sid,
         "status": "complete",
-        "export_paths": {"dataset": str(export)},
+        "_pipeline_run_id": run_id,
+        "export_paths": {"dataset": f"/staging/{sid}/{run_id}/{artifact_id}.csv"},
         "guard_report": {
             "status": "clean",
             "results": [{"file_id": "dataset", "status": "clean"}],
         },
     })
     monkeypatch.setattr(srv, "get_db", lambda: db)
+    monkeypatch.setattr(srv, "_artifact_service",
+                        lambda _db, s, r: ArtifactService(store, session_id=s, run_id=r))
 
-    response = await srv.session_export("sid", "dataset")
+    response = await srv.session_export(sid, "dataset")
 
     assert response.status_code == 200
+    assert response.path.read_bytes() == b"clean export"
     assert db.updates == []
 
 
@@ -452,7 +475,7 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
         "intake_status": "ready",
         "status": "awaiting_human_review",
         "_pipeline_run_id": "classification-claim",
-        "files": [],
+        "files": [{"file_id": "dataset", "kind": "dataset", "stored_path": "/tmp/dataset.csv", "columns": ["subject_id"]}],
         "agent_decisions": [{
             "file_id": "dataset",
             "column": "subject_id",
@@ -460,6 +483,7 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
             "suggested_action": "drop",
             "suggested_reason": "direct identifier",
         }],
+        "dataset_file_downloads": [{"file_id": "dataset"}],
     })
     scheduled = []
 
@@ -509,7 +533,7 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
         "owner": "reviewer",
         "intake_status": "ready",
         "status": "awaiting_human_review",
-        "files": [],
+        "files": [{"file_id": "dataset", "kind": "dataset", "stored_path": "/tmp/dataset.csv", "columns": ["subject_id"]}],
         "agent_decisions": [{
             "file_id": "dataset",
             "column": "subject_id",
@@ -517,6 +541,7 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
             "suggested_action": "drop",
             "suggested_reason": "direct identifier",
         }],
+        "dataset_file_downloads": [{"file_id": "dataset"}],
     })
     emitted = []
     scheduled = []
@@ -616,6 +641,8 @@ async def test_stale_unresolved_human_review_cannot_overwrite_claimed_tail(monke
         "id": "sid",
         "status": "anonymizing",
         "_pipeline_run_id": "newer-tail-claim",
+        "files": [{"file_id": "dataset", "kind": "dataset", "stored_path": "/tmp/dataset.csv",
+                   "columns": ["custom_flagged_field"]}],
         "agent_decisions": decisions,
     })
     monkeypatch.setattr(srv, "get_db", lambda: db)

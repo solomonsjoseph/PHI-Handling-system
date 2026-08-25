@@ -37,7 +37,7 @@ class _NoMatchDB:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("call", [
     lambda srv: srv.session_get("sid", principal="mallory"),
-    lambda srv: srv.session_export("sid", "file1", force=False, principal="mallory"),
+    lambda srv: srv.session_export("sid", "file1", principal="mallory"),
     lambda srv: srv.session_bundle("sid", publication=False, attestation_pdf=False, principal="mallory"),
     lambda srv: srv.corpus_study_benchmark("sid", principal="mallory"),
     lambda srv: srv.corpus_study_benchmark_download("sid", principal="mallory"),

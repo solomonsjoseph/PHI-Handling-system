@@ -156,7 +156,27 @@ def test_human_review_captures_session_review_offline(monkeypatch):
         "owner": "reviewer-1",
         "status": "awaiting_human_review",
         "agent_decisions": [{"file_id": "file-1", "column": "review_target", "action": "human_review"}],
+        # `run_decision_gates`'s `assert_exact_coverage` requires every
+        # decision's (file_id, column) to name a real column of a known
+        # file; the fixture must reflect that, not just the decision list.
+        "files": [{"file_id": "file-1", "kind": "dataset", "columns": ["review_target"]}],
     }
+
+    class _FakeCollection:
+        async def insert_one(self, document):
+            return SimpleNamespace(inserted_id="fake-id")
+
+    class FakeDb:
+        """Minimal Motor-shaped double: `.sessions` for the session lookup
+        `session_human_review` reads/writes directly, `[...]` subscript for
+        every other collection it opens through `MongoControlStore`
+        (`gate_results`), matching real `AsyncIOMotorDatabase` semantics."""
+
+        def __init__(self) -> None:
+            self.sessions = MemorySessions()
+
+        def __getitem__(self, _name: str) -> "_FakeCollection":
+            return _FakeCollection()
 
     class MemorySessions:
         async def find_one(self, query, projection=None):
@@ -171,7 +191,7 @@ def test_human_review_captures_session_review_offline(monkeypatch):
             session.update(update["$set"])
             return SimpleNamespace(matched_count=1)
 
-    monkeypatch.setattr(server, "get_db", lambda: SimpleNamespace(sessions=MemorySessions()))
+    monkeypatch.setattr(server, "get_db", lambda: FakeDb())
     result = asyncio.run(
         server.session_human_review(
             session["id"],

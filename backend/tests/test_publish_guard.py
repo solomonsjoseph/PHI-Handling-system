@@ -638,3 +638,124 @@ def test_age_over_89_ignores_cap_output(tmp_path: Path):
     ])
     r = scan_export_file("f1", p)
     assert r.status == "clean", r
+
+
+# ---------- scan_names / HIPAA category A (Phase 3 step 6) ----------------
+
+def _write_csv_as_artifact(tmp_path: Path, rows: list[list[str]], suffix: str = ".csv") -> tuple[Path, str]:
+    """Write a CSV whose basename matches the real
+    ``<artifact_id><suffix>`` shape the Executor's guard-scannable alias
+    uses, and return ``(path, artifact_id)``."""
+    import uuid
+    artifact_id = uuid.uuid4().hex
+    p = tmp_path / f"{artifact_id}{suffix}"
+    return _write_csv(tmp_path, p.name, rows), artifact_id
+
+
+def test_planted_person_name_blocks_with_category_a_finding(tmp_path: Path):
+    """A planted person name in an otherwise-clean CSV export blocks
+    publication with a HIPAA category A finding, even though nothing in
+    the fixed regex pattern table matches a name."""
+    p, artifact_id = _write_csv_as_artifact(tmp_path, [
+        ["study_arm", "notes"],
+        ["ARM_A", "routine visit, no issues"],
+        ["ARM_B", "seen and reported by Jane Doe"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "PRESIDIO_PERSON_NAME" and f["hipaa_category"] == "A"
+              for f in r.findings)
+    assert r.artifact_id == artifact_id
+
+
+
+
+def test_scan_names_detects_person_across_txt_and_md():
+    from phi_core.publish_guard import scan_names
+    findings = scan_names("Patient contact: Maria Gonzalez called today.", "us")
+    assert any(f.hipaa_category == "A" and f.pattern_id == "PRESIDIO_PERSON_NAME" for f in findings)
+
+
+def test_scan_names_empty_text_is_clean():
+    from phi_core.publish_guard import scan_names
+    assert scan_names("", "us") == []
+    assert scan_names("   \n   \n", "us") == []
+
+
+def test_scan_names_does_not_fire_on_ordinary_clinical_text():
+    """No column-category or anchor gating is needed for names, but this
+    still must not blanket-flag every capitalised word -- Presidio's NER
+    model, not a bare capitalisation heuristic, decides."""
+    from phi_core.publish_guard import scan_names
+    findings = scan_names("Systolic Blood Pressure, Heart Rate, Study Arm A", "us")
+    assert findings == []
+
+
+def test_xlsx_export_blocks_on_planted_name(tmp_path: Path):
+    """The name scan is wired into the XLSX branch too, not only CSV."""
+    import uuid
+    openpyxl = pytest.importorskip("openpyxl")
+    artifact_id = uuid.uuid4().hex
+    p = tmp_path / f"{artifact_id}.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["study_arm", "notes"])
+    ws.append(["ARM_A", "routine visit"])
+    ws.append(["ARM_B", "seen by Dr. Robert Chen"])
+    wb.save(p)
+
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"
+    assert any(f["pattern_id"] == "PRESIDIO_PERSON_NAME" and f["hipaa_category"] == "A"
+              for f in r.findings)
+
+
+def test_unsupported_extension_hard_block_unchanged_by_name_scan(tmp_path: Path):
+    """A format outside CSV/TSV/TXT/MD/XLSX keeps the existing hard block,
+    unscanned -- scan_names never even runs for it."""
+    p, artifact_id = _write_csv_as_artifact(tmp_path, [["a"]], suffix=".pdf")
+    p.write_bytes(b"%PDF-1.4\n")
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"
+    assert r.detail == "extension 'pdf' cannot be scanned"
+    assert r.artifact_id == artifact_id
+
+
+# ---------- artifact_id / sha256 binding (Phase 3 step 5/6) ---------------
+
+def test_guard_result_binds_artifact_id_and_sha256_not_filename(tmp_path: Path):
+    import hashlib
+    p, artifact_id = _write_csv_as_artifact(tmp_path, [
+        ["study_arm", "notes"],
+        ["ARM_A", "routine visit"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "clean"
+    assert r.artifact_id == artifact_id
+    assert r.sha256 == hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def test_guard_result_sha256_changes_when_bytes_change(tmp_path: Path):
+    """The recorded hash is bound to the exact bytes scanned, so a later
+    consumer can detect any post-scan tampering."""
+    p, _ = _write_csv_as_artifact(tmp_path, [
+        ["study_arm", "notes"],
+        ["ARM_A", "routine visit"],
+    ])
+    r1 = scan_export_file("f1", p)
+    p.write_text("study_arm,notes\nARM_A,tampered after scan\n", encoding="utf-8")
+    r2 = scan_export_file("f1", p)
+    assert r1.sha256 != r2.sha256
+    assert r1.artifact_id == r2.artifact_id  # same artifact, different generation of bytes
+
+
+def test_guard_result_artifact_id_empty_for_non_alias_filename(tmp_path: Path):
+    """A path whose basename does not start with a well-formed 32-hex
+    artifact_id (legacy/ad hoc naming) yields an empty artifact_id rather
+    than a guessed value."""
+    p = _write_csv(tmp_path, "not_an_artifact_alias.csv", [
+        ["study_arm", "notes"],
+        ["ARM_A", "routine visit"],
+    ])
+    r = scan_export_file("f1", p)
+    assert r.artifact_id == ""

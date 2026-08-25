@@ -172,7 +172,8 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
         db = FakeDb()
         result = asyncio.run(orchestrator.run_pipeline(
             {"id": "session", "files": [
-                {"kind": "dataset", "file_id": "f1", "subtype": "csv", "stored_path": "/tmp/does-not-matter.csv"},
+                {"kind": "dataset", "file_id": "f1", "subtype": "csv",
+                 "stored_path": "/tmp/does-not-matter.csv", "columns": ["id"]},
             ]}, db, LlmConfig(provider="anthropic", model="test", max_tokens=100), emit, on_phase,
             control_store=MemoryControlStore(),
         ))

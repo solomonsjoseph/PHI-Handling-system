@@ -164,12 +164,6 @@ def test_planted_corpus_full_path_uses_real_safety_components(tmp_path, monkeypa
     resumed = _run_deterministic_gates(resumed_proposals, dataset_paths, stats)
     assert not [decision for decision in resumed if decision["action"] == "human_review"]
 
-    from phi_core.agents import reasoning
-
-    export_dir = tmp_path / "exports"
-    export_dir.mkdir()
-    monkeypatch.setattr(reasoning, "EXPORT_DIR", export_dir)
-
     async def complete_local_workflow() -> tuple[dict[str, str], dict[str, Any], dict[str, Any]]:
         exports = (await Executor(make_ctx("Executor")).run(files, resumed))["exports"]
         operator = await Operator(make_ctx("Operator")).run(files, resumed, exports)

@@ -16,6 +16,8 @@ def _praxis() -> Praxis:
 async def test_method_for_c_returns_multiple_schema_complete_methods_and_names_category(monkeypatch):
     agent = _praxis()
     agent._log = AsyncMock()
+    year_only_url = "https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164#p-164.514(b)(2)(i)(C)"
+    offset_url = "https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164#p-164.514(b)(1)"
     searched = AsyncMock(return_value=({
         "category": "C",
         "methods": [
@@ -27,7 +29,7 @@ async def test_method_for_c_returns_multiple_schema_complete_methods_and_names_c
                 "utility_preserving": True,
                 "clinical_impact": "Retains annual trends.",
                 "reference_paper": "45 CFR 164.514(b)(2)(i)(C)",
-                "sources": [],
+                "sources": [{"url": year_only_url, "title": "45 CFR 164.514"}],
             },
             {
                 "name": "Per-patient random date offset",
@@ -37,11 +39,11 @@ async def test_method_for_c_returns_multiple_schema_complete_methods_and_names_c
                 "utility_preserving": True,
                 "clinical_impact": "Retains intervals within each patient.",
                 "reference_paper": "45 CFR 164.514(b)(1)",
-                "sources": [],
+                "sources": [{"url": offset_url, "title": "45 CFR 164.514"}],
             },
         ],
         "as_of": "2026-08-18",
-    }, []))
+    }, [{"url": year_only_url}, {"url": offset_url}]))
     agent.call_json_with_web_search = searched
 
     reply = await agent.method_for("C")

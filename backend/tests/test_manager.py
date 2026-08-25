@@ -429,6 +429,9 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
             escalate_calls.append(kwargs)
             return SENTINEL_RESULT
 
+        def attach_schema(self, _schema_agent):
+            return None
+
         async def close_run(self, outcome):
             return {}
 
@@ -439,6 +442,12 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
         async def run(self, **_kwargs):
             return {}
 
+    class FakeSchema:
+        def __init__(self, *_a, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {"columns": []}
     class FakePraxis:
         def __init__(self, *_a, **_kwargs):
             pass
@@ -465,6 +474,7 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "Manager", FakeManager)
     monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
+    monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
     monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
@@ -480,7 +490,8 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
         phase_events.append((phase, payload))
 
     result = asyncio.run(orchestrator.run_pipeline(
-        {"id": "s", "files": []}, db, LlmConfig(provider="anthropic", model="test", max_tokens=100),
+        {"id": "s", "files": [{"kind": "dataset", "file_id": "f", "columns": ["c"]}]},
+        db, LlmConfig(provider="anthropic", model="test", max_tokens=100),
         emit, on_phase, control_store=MemoryControlStore()))
 
     assert result is SENTINEL_RESULT

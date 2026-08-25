@@ -6,9 +6,12 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+from .artifacts import ArtifactService
 from .context import AgentContext, ResearchCache
 from .gateway import GatewayRequest, GatewayResult, ToolGateway
 from .policy import CapabilityPolicy
+from .store import MemoryControlStore
+from .writer import ArtifactWriter
 
 
 @dataclass(frozen=True)
@@ -63,18 +66,29 @@ class MemoryResearchCache:
 def make_ctx(agent: str, **overrides: Any) -> AgentContext:
     """Build a task-scoped context for an agent unit test.
 
-    ``gateway``, ``trace``, ``cache``, and identifiers may be overridden.
-    The factory never exposes a database handle.
+    ``gateway``, ``trace``, ``cache``, ``artifacts``, ``evidence``, and
+    identifiers may be overridden. The factory never exposes a database
+    handle. ``session_id``/``run_id`` default to a fresh hex token (not a
+    literal placeholder) because ``run_scoped_dir`` -- and therefore the
+    default ``artifacts`` facade below -- refuses anything else.
     """
     run_id = overrides.pop("run_id", uuid4().hex)
     task_id = overrides.pop("task_id", uuid4().hex)
-    session_id = overrides.pop("session_id", "test-session")
+    session_id = overrides.pop("session_id", uuid4().hex)
     policy = overrides.pop("policy", CapabilityPolicy(_TestLlmConfig()))
     task_type = overrides.pop("task_type", agent.lower().replace(".", "_"))
     grant = overrides.pop("grant", policy.issue_grant(run_id=run_id, task_id=task_id, agent=agent, task_type=task_type))
     gateway = overrides.pop("gateway", FakeGateway())
     trace = overrides.pop("trace", MemoryTrace())
     cache: ResearchCache | None = overrides.pop("cache", MemoryResearchCache())
+    store = overrides.pop("store", None)
+    artifacts = overrides.pop("artifacts", None)
+    if artifacts is None:
+        artifacts = ArtifactWriter(
+            ArtifactService(store or MemoryControlStore(), session_id=session_id, run_id=run_id),
+            producer_task_id=task_id,
+        )
+    evidence = overrides.pop("evidence", None)
     if overrides:
         unknown = ", ".join(sorted(overrides))
         raise TypeError(f"unsupported context override(s): {unknown}")
@@ -89,4 +103,6 @@ def make_ctx(agent: str, **overrides: Any) -> AgentContext:
         tools=ToolGateway(gateway),  # type: ignore[arg-type]
         trace=trace,
         cache=cache,
+        artifacts=artifacts,
+        evidence=evidence,
     )

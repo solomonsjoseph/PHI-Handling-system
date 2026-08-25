@@ -39,7 +39,7 @@ async def test_researcher_refuses_ungrounded_reply(monkeypatch):
     reply = await agent.research("cardiology")
 
     assert "error" in reply
-    assert "no web citations" in reply["error"]
+    assert "no verified, tool-backed web citation" in reply["error"]
     assert reply["candidate"] == ungrounded
 
 
@@ -68,7 +68,7 @@ async def test_researcher_accepts_reply_with_citations(monkeypatch):
     }
 
     async def _fake_call(prompt, phase, default=None, max_uses=3):
-        return grounded, []
+        return grounded, [{"url": "https://ukbiobank.ac.uk/enable-your-research/about-our-data"}]
 
     agent = CorpusResearcher(make_ctx("CorpusResearcher"))
     agent.call_json_with_web_search = _fake_call  # type: ignore

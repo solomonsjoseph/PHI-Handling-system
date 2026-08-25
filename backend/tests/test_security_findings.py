@@ -107,25 +107,41 @@ async def test_export_refuses_when_guard_result_missing(monkeypatch, tmp_path):
            "export_paths": {"a": str(p)},
            "guard_report": {"status": "clean", "results": []}}  # no per-file entry for "a"
     monkeypatch.setattr(srv, "get_db", lambda: _StubDB(doc))
-    resp = await srv.session_export("sid", "a", force=False)
+    resp = await srv.session_export("sid", "a")
     assert resp.status_code == 403
     body = resp.body.decode()
     assert "not_certified" in body or "not certified" in body.lower()
 
 
 @pytest.mark.asyncio
-async def test_export_serves_only_on_clean_per_file(monkeypatch, tmp_path):
+async def test_export_serves_only_on_clean_per_file(monkeypatch):
+    """A per-file clean result serves the canonical artifact through
+    ArtifactService.open_for_download, hash-bound to its artifact_id."""
     import server as srv
-    p = tmp_path / "export.txt"
-    p.write_text("clean text", encoding="utf-8")
-    doc = {"id": "sid", "status": "complete",
-           "export_paths": {"a": str(p)},
+    from phi_core.control.artifacts import ArtifactService
+    from phi_core.control.store import MemoryControlStore
+
+    sid = "a" * 32
+    run_id = "b" * 32
+    store = MemoryControlStore()
+    service = ArtifactService(store, session_id=sid, run_id=run_id)
+    artifact_id, tmp = await service.stage("dataset_export", "a__export.txt", "restricted_metadata", "export")
+    tmp.write_bytes(b"clean text")
+    await service.finalize(artifact_id)
+
+    doc = {"id": sid, "status": "complete", "_pipeline_run_id": run_id,
+           "export_paths": {"a": f"/staging/{sid}/{run_id}/{artifact_id}.txt"},
            "guard_report": {"status": "clean",
                              "results": [{"file_id": "a", "status": "clean"}]}}
     monkeypatch.setattr(srv, "get_db", lambda: _StubDB(doc))
-    resp = await srv.session_export("sid", "a", force=False)
+    monkeypatch.setattr(srv, "_artifact_service",
+                        lambda _db, s, r: ArtifactService(store, session_id=s, run_id=r))
+
+    resp = await srv.session_export(sid, "a")
     # FileResponse: status_code is 200 by default.
     assert getattr(resp, "status_code", 200) == 200
+    assert resp.path.read_bytes() == b"clean text"
+    assert resp.filename == artifact_id
 
 
 @pytest.mark.asyncio
@@ -146,7 +162,7 @@ async def test_export_refuses_skipped_per_file_status(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(srv, "get_db", lambda: _StubDB(doc))
 
-    response = await srv.session_export("sid", "a", force=False)
+    response = await srv.session_export("sid", "a")
 
     assert response.status_code == 403
 
@@ -173,7 +189,7 @@ async def test_export_refuses_conflicting_per_file_guard_results(monkeypatch, tm
     }
     monkeypatch.setattr(srv, "get_db", lambda: _StubDB(doc))
 
-    response = await srv.session_export("sid", "a", force=False)
+    response = await srv.session_export("sid", "a")
 
     assert response.status_code == 403
 
@@ -200,7 +216,7 @@ async def test_export_refuses_duplicate_clean_per_file_results(monkeypatch, tmp_
     db = _StubDB(doc)
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
-    response = await srv.session_export("sid", "a", force=False)
+    response = await srv.session_export("sid", "a")
 
     assert response.status_code == 403
     assert db.updates == []
@@ -214,8 +230,10 @@ async def test_export_refuses_duplicate_clean_per_file_results(monkeypatch, tmp_
         [],
     ],
 )
-async def test_export_force_refuses_skipped_or_missing_results(monkeypatch, tmp_path, results):
-    """Only explicitly blocked files may use the audited force override."""
+async def test_export_refuses_skipped_or_missing_results_unconditionally(monkeypatch, tmp_path, results):
+    """There is no override for an unscanned or missing per-file result;
+    the route accepts no such parameter at all (see the dedicated
+    signature test below)."""
     import server as srv
 
     p = tmp_path / "export.txt"
@@ -229,7 +247,7 @@ async def test_export_force_refuses_skipped_or_missing_results(monkeypatch, tmp_
     db = _StubDB(doc)
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
-    response = await srv.session_export("sid", "a", force=True)
+    response = await srv.session_export("sid", "a")
 
     assert response.status_code == 403
     assert db.updates == []
@@ -244,8 +262,9 @@ async def test_export_force_refuses_skipped_or_missing_results(monkeypatch, tmp_
         [{"file_id": "a", "status": "clean"}, {"file_id": "a", "status": "blocked"}],
     ],
 )
-async def test_export_force_refuses_duplicate_or_conflicting_results(monkeypatch, tmp_path, results):
-    """Force cannot override malformed Guard results or create an audit record."""
+async def test_export_refuses_duplicate_or_conflicting_results_unconditionally(monkeypatch, tmp_path, results):
+    """Malformed Guard results refuse the download and create no audit
+    record; there is no caller-supplied override that could change that."""
     import server as srv
 
     p = tmp_path / "export.txt"
@@ -259,18 +278,24 @@ async def test_export_force_refuses_duplicate_or_conflicting_results(monkeypatch
     db = _StubDB(doc)
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
-    response = await srv.session_export("sid", "a", force=True)
+    response = await srv.session_export("sid", "a")
 
     assert response.status_code == 403
     assert db.updates == []
 
 
-
-
 @pytest.mark.asyncio
-async def test_export_force_override_still_records_blocked_download(monkeypatch, tmp_path):
-    """The audited override remains available only for blocked files."""
+async def test_export_blocked_result_stays_blocked_and_route_accepts_no_override_parameter(monkeypatch, tmp_path):
+    """D14/Phase 3 removed the audited ``force`` override entirely: the
+    route's signature carries no such parameter (a caller-supplied one is
+    simply rejected by Python's own call binding), and a blocked per-file
+    result is unconditionally unservable -- no ``guard_overrides`` record
+    is ever written."""
+    import inspect
+
     import server as srv
+
+    assert "force" not in inspect.signature(srv.session_export).parameters
 
     p = tmp_path / "blocked.txt"
     p.write_text("operator-reviewed", encoding="utf-8")
@@ -286,16 +311,13 @@ async def test_export_force_override_still_records_blocked_download(monkeypatch,
     db = _StubDB(doc)
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
-    response = await srv.session_export("sid", "a", force=True, principal="op1")
+    with pytest.raises(TypeError):
+        await srv.session_export("sid", "a", force=True, principal="op1")  # type: ignore[call-arg]
 
-    assert getattr(response, "status_code", 200) == 200
-    assert len(db.updates) == 1
-    args, kwargs = db.updates[0]
-    assert args[0] == {"id": "sid", "owner": "op1"}
-    assert kwargs == {}
-    override = args[1]["$push"]["guard_overrides"]
-    assert override["file_id"] == "a"
-    assert override["overridden_at"]
+    response = await srv.session_export("sid", "a", principal="op1")
+
+    assert response.status_code == 403
+    assert db.updates == []
 
 
 def test_bundle_omits_unclean_and_unreported_exports(tmp_path):
