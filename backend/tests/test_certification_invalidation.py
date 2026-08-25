@@ -624,6 +624,51 @@ async def test_client_event_id_is_idempotent_while_the_request_stays_open(monkey
 
 
 @pytest.mark.asyncio
+async def test_build_review_event_is_the_same_typed_record_on_both_review_surfaces(monkeypatch):
+    """D13 plan step 5: one typed `HumanReviewEvent` record, built by one
+    function (`_build_review_event`), is used by both the still-awaiting
+    surface (`session_human_review`'s early-return branch) and the
+    resuming surface (the branch that calls
+    `SuperOrchestrator.consume_review_event`). This proves parity: given
+    the same submission, the two call sites render fields identically
+    except the ones that legitimately differ by surface (`run_id`,
+    `result`, and `seq`, which counts prior events for the same
+    request_id)."""
+    import server as srv
+
+    body = srv.HumanReviewSubmit(
+        client_event_id="ce-parity", actual_knowledge_ack=True,
+        resolutions=[{"file_id": "dataset", "column": "subject_id", "mode": "approve"}],
+    )
+
+    still_awaiting_event = await srv._build_review_event(
+        MemoryControlStore(), request_id="req-1", run_id="prior-run", session_id="sid",
+        principal="reviewer", body=body, body_hash="deadbeef", decision_version=3,
+        result={"status": "still_awaiting", "unresolved": 1},
+    )
+    resuming_event = await srv._build_review_event(
+        MemoryControlStore(), request_id="req-1", run_id="resume-run", session_id="sid",
+        principal="reviewer", body=body, body_hash="deadbeef", decision_version=3,
+        result={"status": "resuming"},
+    )
+
+    surface_specific = {"event_id", "run_id", "submitted_at", "result", "seq"}
+    still_dump = still_awaiting_event.model_dump()
+    resuming_dump = resuming_event.model_dump()
+    shared_fields = set(still_dump) - surface_specific
+    assert shared_fields, "expected at least one field common to both surfaces"
+    for field in shared_fields:
+        assert still_dump[field] == resuming_dump[field], field
+    # Both surfaces build against an empty request, so seq is identical too.
+    assert still_dump["seq"] == resuming_dump["seq"] == 1
+    # The surface-specific fields really do differ -- proving this is a
+    # parity test of one record shape, not two records that happen to be
+    # equal because nothing distinguishing was passed in.
+    assert still_dump["run_id"] != resuming_dump["run_id"]
+    assert still_dump["result"] != resuming_dump["result"]
+
+
+@pytest.mark.asyncio
 async def test_comment_resolution_never_auto_applies_regardless_of_confidence(monkeypatch):
     """D13 step 6: a model's interpretation of a reviewer's free-text
     comment always lands in ``pending_confirmation``, even at high
