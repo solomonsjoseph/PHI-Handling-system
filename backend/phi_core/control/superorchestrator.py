@@ -148,23 +148,29 @@ class SuperOrchestrator:
         if iteration_cap < 0:
             raise ValueError("iteration_cap must not be negative")
         run_id = run_id or uuid4().hex
-        now = _now()
-        run = WorkflowRun(
-            run_id=run_id,
-            session_id=session_id,
-            workflow_version=WORKFLOW_VERSION,
-            policy_version=POLICY_VERSION,
-            run_type=run_type,
-            state="running",
-            node="charter",
-            checkpoint={"node": "charter", "checkpoint_version": CHECKPOINT_VERSION, "payload_refs": []},
-            checkpoint_version=CHECKPOINT_VERSION,
-            started_at=now,
-            updated_at=now,
-            correlation_id=correlation_id or run_id,
-            budget=ResourceBudget(wall_seconds=limits.MAX_RUN_WALL_S),
-        )
-        await self._store.insert("workflow_runs", run)
+        existing = await self._store.get_one("workflow_runs", {"run_id": run_id})
+        if existing is None:
+            now = _now()
+            run = WorkflowRun(
+                run_id=run_id,
+                session_id=session_id,
+                workflow_version=WORKFLOW_VERSION,
+                policy_version=POLICY_VERSION,
+                run_type=run_type,
+                state="running",
+                node="charter",
+                checkpoint={"node": "charter", "checkpoint_version": CHECKPOINT_VERSION, "payload_refs": []},
+                checkpoint_version=CHECKPOINT_VERSION,
+                started_at=now,
+                updated_at=now,
+                correlation_id=correlation_id or run_id,
+                budget=ResourceBudget(wall_seconds=limits.MAX_RUN_WALL_S),
+            )
+            await self._store.insert("workflow_runs", run)
+        else:
+            run = WorkflowRun.model_validate(existing)
+            if run.session_id != session_id:
+                raise WorkflowError(f"run_id {run_id!r} does not belong to session {session_id!r}")
         await self._tasks.enqueue(
             run_id=run_id,
             session_id=session_id,

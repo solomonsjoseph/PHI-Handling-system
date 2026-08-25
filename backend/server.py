@@ -2713,7 +2713,9 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             f"pipeline capacity exhausted ({_MAX_CONCURRENT_PIPELINES} concurrent runs); retry shortly",
             headers={"Retry-After": "30"},
         )
-    resume_run_id = uuid.uuid4().hex
+    # A human decision resumes the same workflow run. Legacy sessions that
+    # predate durable WorkflowRun records receive one now, under a fresh id.
+    resume_run_id = prior_run_id or uuid.uuid4().hex
     claim = await db.sessions.update_one(
         review_filter,
         {"$set": {
@@ -2736,19 +2738,25 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             f"human-review resume conflicts with active session (status={current.get('status') or 'missing'})",
         )
 
-    # Phase 4 step 2/4: submit and return. `_handle_pipeline_resume` (one
-    # of the `Worker` instances `_startup_maintenance` started) claims and
-    # runs the shared `execute_decisions` tail; every SSE progress event,
-    # timeout, cancellation, and completion write it produces is identical
-    # to what this route's own inline closure used to do. Every field the
-    # handler needs (`agent_decisions`, `pending_review`, `session_review`)
-    # was already persisted onto the session document by the claim above.
+    # Phase 5 step 2/9: submit and return. The atomic `review_filter`
+    # claim preserves the existing session fence. SuperOrchestrator either
+    # reuses its matching WorkflowRun or opens one for a pre-migration
+    # session, then creates the durable `pipeline_resume` root task; this
+    # route never calls TaskService.enqueue directly.
     from phi_core.control.policy import CapabilityPolicy
+    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
 
-    await TaskService(MongoControlStore(db), CapabilityPolicy(cfg)).enqueue(
-        run_id=resume_run_id, session_id=sid, worker="Pipeline", task_type="pipeline_resume",
+    control_store = MongoControlStore(db)
+    await SuperOrchestrator(
+        control_store, TaskService(control_store, CapabilityPolicy(cfg))
+    ).start_run(
+        session_id=sid,
+        principal=principal,
+        run_type="study",
         correlation_id=resume_run_id,
+        run_id=resume_run_id,
+        root_task_type="pipeline_resume",
     )
     return {"status": "resuming"}
 

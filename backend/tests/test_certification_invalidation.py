@@ -498,8 +498,10 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
 
     assert response == {"status": "resuming"}
     assert db.doc["status"] == "anonymizing"
-    assert db.doc["_pipeline_run_id"] != "classification-claim"
+    assert db.doc["_pipeline_run_id"] == "classification-claim"
     assert len(db["work_items"].docs) == 1
+    assert db["work_items"].docs[0]["task_type"] == "pipeline_resume"
+    assert db["work_items"].docs[0]["input_ref"] == {"run_type": "study"}
     with pytest.raises(HTTPException) as excinfo:
         await srv.session_handle("sid", principal="reviewer")
     assert excinfo.value.status_code == 409

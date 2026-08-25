@@ -91,6 +91,24 @@ async def test_start_run_can_enqueue_a_pipeline_resume_root_task() -> None:
 
 
 @pytest.mark.asyncio
+async def test_start_run_reuses_an_existing_run_for_a_pipeline_resume() -> None:
+    orch, _tasks, store = _rig()
+    run = await orch.start_run(session_id=SESSION_ID, principal="operator-1")
+
+    resumed = await orch.start_run(
+        session_id=SESSION_ID,
+        principal="operator-1",
+        run_id=run.run_id,
+        root_task_type="pipeline_resume",
+    )
+
+    assert resumed.run_id == run.run_id
+    assert len(await store.find_many("workflow_runs", {"run_id": run.run_id})) == 1
+    tasks = await store.find_many("work_items", {"run_id": run.run_id})
+    assert [task["task_type"] for task in tasks] == ["pipeline_run", "pipeline_resume"]
+
+
+@pytest.mark.asyncio
 async def test_start_run_refuses_an_anonymous_principal() -> None:
     orch, _tasks, _store = _rig()
     with pytest.raises(CapabilityDenied):
