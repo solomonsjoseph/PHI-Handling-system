@@ -2441,13 +2441,11 @@ class HumanReviewSubmit(BaseModel):
     # `orchestrator.execute_decisions` with the fresh-run path, which has
     # no override concept. This field is kept only for request-shape
     # compatibility; it is currently inert. D13 step 5 (Phase 6) restores
-    # a generalized version of this lever through `HumanReviewService`.
+    # a generalized version through `HumanReviewService`.
     confirm_auditor_confidence: bool = False
-    # HHS §164.514(b)(2)(ii) "actual knowledge" attestation. IRB-required
-    # procedural step separate from the technical Safe Harbor method.
-    # Required only when this submission resolves (approves/comments) at
-    # least one column -- a submission that only defers makes no
-    # actual-knowledge claim about anything.
+    # HHS §164.514(b)(2)(ii) "actual knowledge" attestation. Required only
+    # when this submission resolves (approves/comments) at least one column;
+    # a submission that only defers makes no actual-knowledge claim.
     actual_knowledge_ack: bool = False
 
 
@@ -2482,7 +2480,6 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         annotate_pending_review,
         validate_decisions,
     )
-    from phi_core.control.adapters import legacy_decision_adapter, legacy_files_adapter
     from phi_core.control.context import AgentContext
     from phi_core.control.gates import DecisionGateFailure, run_decision_gates
     from phi_core.control.store import MongoControlStore
@@ -2667,8 +2664,8 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         agent="Judge", attempt=1, grant=None, gateway=None, tools=None, trace=None,
     )
     gate_outcome = await run_decision_gates(
-        decisions=legacy_decision_adapter(decisions),
-        files=legacy_files_adapter(dataset_files_for_gates),
+        decisions=decisions,
+        files=dataset_files_for_gates,
         jurisdiction=session.get("jurisdiction", "us"),
         stage="human_review.regate",
         ctx=gates_ctx,

@@ -27,7 +27,6 @@ from typing import Any, Awaitable, Callable
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from phi_core.control.activation import ActivationFactory
-from phi_core.control.adapters import legacy_decision_adapter, legacy_files_adapter
 from phi_core.control.context import AgentContext
 from phi_core.control.store import ControlStore
 
@@ -824,8 +823,8 @@ async def run_pipeline(
     # the fail-closed proof that Executor must never receive a duplicate,
     # missing, or invented decision.
     gate_outcome = await run_decision_gates(
-        decisions=legacy_decision_adapter(approved_decisions),
-        files=legacy_files_adapter(dataset_files),
+        decisions=approved_decisions,
+        files=dataset_files,
         statute=statute,
         instrument=instrument,
         schema_stats=schema_stats,
