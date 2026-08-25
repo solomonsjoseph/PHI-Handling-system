@@ -34,6 +34,7 @@ from phi_core.paths import (
     REVERSAL_DIR,
     STAGING_DIR,
     UPLOAD_DIR,
+    is_safe_scoped_id,
     run_scoped_dir,
     sanitise_filename,
 )
@@ -90,6 +91,37 @@ def _hash_file(path: Any) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+async def is_session_tombstoned(store: ControlStore, session_id: str) -> bool:
+    """Whether ``tombstone_session`` has already marked ``session_id`` for
+    erasure. Checked by :meth:`ArtifactService.stage` so a worker still
+    finishing a run it was never told to stop cannot recreate an artifact
+    for a session the operator already asked to delete."""
+    return await store.get_one("session_tombstones", {"session_id": session_id}) is not None
+
+
+async def tombstone_session(store: ControlStore, session_id: str) -> None:
+    """Mark ``session_id`` for erasure (Phase 4 step 7, session-deletion
+    coordination). Idempotent: tombstoning an already-tombstoned session is
+    a no-op, never a duplicate-key error."""
+    if await is_session_tombstoned(store, session_id):
+        return
+    await store.insert("session_tombstones", {"session_id": session_id, "tombstoned_at": _now()})
+
+
+def erase_session_artifacts(session_id: str) -> None:
+    """Delete every on-disk artifact directory for ``session_id`` across
+    every artifact root (staging, evidence, reversal, published, cache).
+
+    Purely filesystem-level: the caller is responsible for erasing the
+    matching ``artifacts``/``publication_pointers`` store records
+    separately (``ArtifactService.erase_session_records``), since that
+    needs the async ``ControlStore`` this function does not take."""
+    if not is_safe_scoped_id(session_id):
+        raise ArtifactError("unsafe_session_id", session_id)
+    for root_dir in _ROOT_DIRS.values():
+        shutil.rmtree(root_dir / session_id, ignore_errors=True)
+
+
 class ArtifactService:
     """Owns every artifact-root write and every ``artifacts``/``publication_pointers`` transition.
 
@@ -122,7 +154,15 @@ class ArtifactService:
         served path is keyed by ``artifact_id`` alone, so an original
         upload filename can never leak into a path, an index, or a served
         ``Content-Disposition``.
+
+        Phase 4 step 7: refuses with ``ArtifactError("session_tombstoned", ...)``
+        once ``tombstone_session`` has marked this artifact's session for
+        erasure. A worker still finishing a run it was never told to stop
+        cannot recreate an artifact for a session the operator already
+        asked to delete.
         """
+        if await is_session_tombstoned(self._store, self.session_id):
+            raise ArtifactError("session_tombstoned", self.session_id)
         sanitise_filename(filename)  # raises UnsafePath on a malformed name; result discarded by design
         if root not in _ROOT_DIRS:
             raise ArtifactError("unknown_root", f"no such artifact root: {root!r}")
@@ -289,3 +329,17 @@ class ArtifactService:
         if actual_sha256 != record.sha256:
             raise ArtifactError("artifact_hash_mismatch", f"expected={record.sha256} actual={actual_sha256}")
         return path
+
+    async def erase_session_records(self, session_id: str) -> int:
+        """Delete every ``artifacts`` and ``publication_pointers`` record
+        for ``session_id`` (Phase 4 step 7). Returns the number of records
+        removed. Call ``erase_session_artifacts(session_id)`` for the
+        matching on-disk cleanup; this method only touches the store."""
+        removed = 0
+        for artifact in await self._store.find_many("artifacts", {"session_id": session_id}):
+            if await self._store.delete_one("artifacts", {"artifact_id": artifact["artifact_id"]}):
+                removed += 1
+        for pointer in await self._store.find_many("publication_pointers", {"session_id": session_id}):
+            if await self._store.delete_one("publication_pointers", {"pointer_id": pointer["pointer_id"]}):
+                removed += 1
+        return removed

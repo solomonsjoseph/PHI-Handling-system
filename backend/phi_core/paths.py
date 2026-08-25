@@ -106,6 +106,14 @@ for _d in (
 _ID_RE = re.compile(r"\A[0-9a-f]{8,64}\Z")
 
 
+def is_safe_scoped_id(value: str | None) -> bool:
+    """Whether ``value`` is a bare lowercase-hex identifier safe to use as
+    a run-scoped directory component. Exposes ``_ID_RE``'s validation to
+    callers (e.g. ``control/artifacts.py::erase_session_artifacts``) that
+    need to check a single id, not a ``base/session_id/run_id`` join."""
+    return bool(_ID_RE.match(value or ""))
+
+
 ARTIFACT_ID_LENGTH = 32  # uuid4().hex: exactly 32 lowercase hex characters
 
 

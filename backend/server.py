@@ -610,10 +610,32 @@ async def session_list(principal: str = Depends(resolve_principal)):
 @app.delete("/api/sessions/{sid}")
 async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
     """Right-to-erasure: remove the session document, its agent_log rows,
-    its UPLOAD_DIR/<sid> tree, and every path in export_paths."""
+    its UPLOAD_DIR/<sid> tree, every path in export_paths, and every
+    registered artifact (Phase 4 step 7).
+
+    Coordinates with active work: the session is tombstoned before
+    anything is deleted, so ``ArtifactService.stage`` refuses for this
+    session from this point forward -- a worker still finishing a run
+    that was never told to stop cannot recreate an artifact for a
+    session already marked for erasure. Recursive task cancellation via
+    ``TaskService.cancel_subtree`` has no effect yet: no production route
+    enqueues pipeline work through ``TaskService`` (Phase 4 steps 4/5,
+    not yet done), so there is no ``WorkItem`` tree to cancel. Once that
+    migration lands, the tombstone-then-cancel-then-erase order here
+    already matches the plan's required sequence.
+    """
     import shutil
+
+    from phi_core.control.artifacts import ArtifactService, erase_session_artifacts, tombstone_session
+    from phi_core.control.store import MongoControlStore
+
     db = get_db()
-    doc = await _owned_session(sid, principal, {"_id": 0, "export_paths": 1})
+    doc = await _owned_session(sid, principal, {"_id": 0, "export_paths": 1, "_pipeline_run_id": 1})
+    control_store = MongoControlStore(db)
+    await tombstone_session(control_store, sid)
+    run_id = doc.get("_pipeline_run_id") or sid
+    await ArtifactService(control_store, session_id=sid, run_id=run_id).erase_session_records(sid)
+    erase_session_artifacts(sid)
     for p in (doc.get("export_paths") or {}).values():
         if p:
             try:

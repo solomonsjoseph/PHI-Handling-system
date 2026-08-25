@@ -211,3 +211,83 @@ async def test_open_for_download_refuses_for_an_unknown_artifact() -> None:
     with pytest.raises(ArtifactError) as exc:
         await service.open_for_download(service.session_id, "no-such-artifact")
     assert exc.value.reason == "artifact_missing"
+
+
+# ---- Phase 4 step 7: session-deletion coordination ------------------------
+
+
+@pytest.mark.asyncio
+async def test_stage_refuses_once_the_session_is_tombstoned() -> None:
+    from phi_core.control.artifacts import tombstone_session
+
+    service, store = _service()
+    await tombstone_session(store, service.session_id)
+
+    with pytest.raises(ArtifactError) as exc:
+        await service.stage("dataset_export", "report.csv", "restricted_metadata", "short")
+    assert exc.value.reason == "session_tombstoned"
+
+
+@pytest.mark.asyncio
+async def test_tombstone_session_is_idempotent() -> None:
+    from phi_core.control.artifacts import is_session_tombstoned, tombstone_session
+
+    store = MemoryControlStore()
+    await tombstone_session(store, "a" * 32)
+    await tombstone_session(store, "a" * 32)  # second call: no-op, not a duplicate-key error
+    assert await is_session_tombstoned(store, "a" * 32) is True
+    assert len(await store.find_many("session_tombstones", {"session_id": "a" * 32})) == 1
+
+
+@pytest.mark.asyncio
+async def test_is_session_tombstoned_false_for_an_untouched_session() -> None:
+    from phi_core.control.artifacts import is_session_tombstoned
+
+    store = MemoryControlStore()
+    assert await is_session_tombstoned(store, "a" * 32) is False
+
+
+@pytest.mark.asyncio
+async def test_erase_session_records_deletes_only_the_named_sessions_records() -> None:
+    store = MemoryControlStore()
+    victim = ArtifactService(store, session_id="a" * 32, run_id="b" * 32)
+    survivor = ArtifactService(store, session_id="c" * 32, run_id="d" * 32)
+    v_id = await _stage_and_finalize(victim, b"erase me")
+    s_id = await _stage_and_finalize(survivor, b"keep me")
+    await victim.certify_publication(run_id=victim.run_id, artifact_ids=[v_id], gate_result_ids=[], fence=1)
+    await survivor.certify_publication(run_id=survivor.run_id, artifact_ids=[s_id], gate_result_ids=[], fence=1)
+
+    removed = await victim.erase_session_records("a" * 32)
+
+    assert removed == 2  # one artifact record, one publication pointer
+    assert await store.get_one("artifacts", {"artifact_id": v_id}) is None
+    assert await store.get_one("artifacts", {"artifact_id": s_id}) is not None
+    assert await store.find_many("publication_pointers", {"session_id": "a" * 32}) == []
+    assert await store.find_many("publication_pointers", {"session_id": "c" * 32}) != []
+
+
+def test_erase_session_artifacts_removes_on_disk_directories_across_every_root(tmp_path, monkeypatch) -> None:
+    from phi_core.control import artifacts as artifacts_module
+
+    session_id = "e" * 32
+    monkeypatch.setattr(
+        artifacts_module,
+        "_ROOT_DIRS",
+        {"staging": tmp_path / "staging", "published": tmp_path / "published"},
+    )
+    for root in artifacts_module._ROOT_DIRS.values():
+        (root / session_id).mkdir(parents=True)
+        (root / session_id / "leftover.bin").write_bytes(b"x")
+
+    artifacts_module.erase_session_artifacts(session_id)
+
+    for root in artifacts_module._ROOT_DIRS.values():
+        assert not (root / session_id).exists()
+
+
+def test_erase_session_artifacts_refuses_an_unsafe_session_id() -> None:
+    from phi_core.control.artifacts import erase_session_artifacts
+
+    with pytest.raises(ArtifactError) as exc:
+        erase_session_artifacts("../../etc")
+    assert exc.value.reason == "unsafe_session_id"

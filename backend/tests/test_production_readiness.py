@@ -151,9 +151,10 @@ def test_cleanup_session_unpacked_removes_only_unpacked_subdir(tmp_path, monkeyp
 async def test_session_delete_removes_document_files_and_agent_log(tmp_path, monkeypatch):
     import server as srv
 
+    sid = "a" * 32  # a real session id is always a bare uuid4().hex token
     export = tmp_path / "export.csv"
     export.write_text("redacted", encoding="utf-8")
-    session_dir = srv.UPLOAD_DIR / "sess-erase-test"
+    session_dir = srv.UPLOAD_DIR / sid
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "marker.txt").write_text("x", encoding="utf-8")
 
@@ -161,25 +162,47 @@ async def test_session_delete_removes_document_files_and_agent_log(tmp_path, mon
         def __init__(self):
             self.deleted = []
         async def find_one(self, query, *_a, **_kw):
-            return {"id": "sess-erase-test", "owner": "alice", "export_paths": {"a": str(export)}}
+            return {"id": sid, "owner": "alice", "export_paths": {"a": str(export)}}
         async def delete_many(self, query):
             self.deleted.append(("agent_log", query))
         async def delete_one(self, query):
             self.deleted.append(("sessions", query))
+
+    class _EmptyControlCollection:
+        """Every control-plane collection `session_delete` touches
+        (`session_tombstones`, `artifacts`, `publication_pointers`) via
+        `MongoControlStore` -- empty in this test, matching real Motor
+        semantics closely enough (insert succeeds, nothing to find)."""
+        async def insert_one(self, document):
+            from types import SimpleNamespace
+            return SimpleNamespace(inserted_id="fake-id")
+        async def find_one(self, query, *_a, **_kw):
+            return None
+        def find(self, query):
+            async def _empty_cursor():
+                return
+                yield  # pragma: no cover - makes this an async generator
+            return _empty_cursor()
+        async def delete_one(self, query):
+            from types import SimpleNamespace
+            return SimpleNamespace(deleted_count=0)
 
     class _StubDB:
         def __init__(self):
             self.sessions = _StubCollection()
             self.agent_log = self.sessions
 
+        def __getitem__(self, _name: str) -> _EmptyControlCollection:
+            return _EmptyControlCollection()
+
     db = _StubDB()
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
-    resp = await srv.session_delete("sess-erase-test", principal="alice")
+    resp = await srv.session_delete(sid, principal="alice")
     assert resp == {"deleted": True}
     assert not export.exists()
     assert not session_dir.exists()
-    assert ("sessions", {"id": "sess-erase-test", "owner": "alice"}) in db.sessions.deleted
+    assert ("sessions", {"id": sid, "owner": "alice"}) in db.sessions.deleted
 
 
 @pytest.mark.asyncio
