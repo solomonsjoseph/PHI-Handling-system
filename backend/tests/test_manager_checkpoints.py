@@ -34,6 +34,46 @@ def test_auditor_escalation_reason_fails_closed_on_missing_or_bad_confidence():
     assert auditor_escalation_reason({"confidence": None}) is not None
 
 
+def test_auditor_escalation_reason_blocks_a_high_confidence_issues_verdict():
+    """D12/plan step 2: confidence is telemetry only. A high-confidence
+    'issues' verdict must not silently pass just because the number is
+    high -- confidence can raise a review, it can never suppress one."""
+    audit = {
+        "verdict": "issues",
+        "issues": [{"file": "dataset", "column": "mrn", "problem": "action disagreement"}],
+        "confidence": 0.999,
+    }
+    reason = auditor_escalation_reason(audit)
+    assert reason == "auditor_issues_verdict"
+    # A clean verdict at the same confidence, or an issues verdict with an
+    # empty issues list (nothing concrete to act on), does not trip this.
+    assert auditor_escalation_reason({"verdict": "clean", "confidence": 0.999}) is None
+    assert auditor_escalation_reason({"verdict": "issues", "issues": [], "confidence": 0.999}) is None
+
+
+def test_auditor_escalation_reason_catches_unknown_or_mismatched_artifact_identity():
+    """A verdict naming an artifact absent from the real export set, or
+    whose hash no longer matches, is untrustworthy regardless of
+    confidence or verdict -- it was computed against something other than
+    what is about to ship (a stale replay or a hallucinated check)."""
+    refs = {"dataset": "abc123"}
+    clean_audit = {"verdict": "clean", "confidence": 0.999,
+                   "artifacts_checked": [{"file_id": "dataset", "sha256": "abc123"}]}
+    assert auditor_escalation_reason(clean_audit, artifact_refs=refs) is None
+
+    unknown_file = {"verdict": "clean", "confidence": 0.999,
+                     "artifacts_checked": [{"file_id": "not-a-real-file", "sha256": "abc123"}]}
+    assert auditor_escalation_reason(unknown_file, artifact_refs=refs) == "auditor_artifact_identity_mismatch"
+
+    stale_hash = {"verdict": "clean", "confidence": 0.999,
+                  "artifacts_checked": [{"file_id": "dataset", "sha256": "stale-hash-from-a-prior-run"}]}
+    assert auditor_escalation_reason(stale_hash, artifact_refs=refs) == "auditor_artifact_identity_mismatch"
+
+    # No artifact_refs supplied at all (call site opted out): the check is
+    # simply not applied, same as any other None-defaulted optional gate.
+    assert auditor_escalation_reason(unknown_file, artifact_refs=None) is None
+
+
 def test_plain_human_review_reasons_never_leaks_raw_codes():
     reasons = ["executor_crashed", "auditor_confidence_below_floor:0.42", "unknown_future_code"]
     plain = plain_human_review_reasons(reasons)

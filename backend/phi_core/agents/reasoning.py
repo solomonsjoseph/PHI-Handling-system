@@ -1257,6 +1257,8 @@ _ESCALATION_REASON_PLAIN: dict[str, str] = {
     "manager_advisory_coverage_escalation": "too many files could not be fully checked, so a person should look before this ships",
     "manager_advisory_audit_escalation": "the final check flagged something a person should look at",
     "executor_crashed": "an unexpected error happened while writing the final files",
+    "auditor_issues_verdict": "the final independent check found a specific problem that needs a person's decision",
+    "auditor_artifact_identity_mismatch": "the final check could not confirm it reviewed the exact files about to be shared",
 }
 
 
@@ -1277,17 +1279,42 @@ def plain_human_review_reasons(reasons: list[str]) -> list[str]:
     return out
 
 
-def auditor_escalation_reason(audit: dict[str, Any]) -> str | None:
-    """Deterministic gate on Auditor's self-reported confidence. A missing
-    or unparseable confidence fails toward the safer path (second human
-    review), never toward silent pass-through -- same fail-closed shape as
-    every other boundary check in this pipeline."""
+def auditor_escalation_reason(audit: dict[str, Any], *, artifact_refs: dict[str, str] | None = None) -> str | None:
+    """Deterministic gate on Auditor's output. Fails toward the safer path
+    (second human review) on any of three independent grounds, never
+    toward silent pass-through -- same fail-closed shape as every other
+    boundary check in this pipeline:
+
+    1. Self-reported confidence below ``AUDITOR_CONFIDENCE_FLOOR`` (a
+       missing or unparseable confidence counts as 0.0).
+    2. A high-confidence ``"issues"`` verdict with at least one recorded
+       issue. Confidence is telemetry (D12): it can raise a review request
+       but it can never turn a genuine issues finding into a silent pass.
+    3. Artifact identity: when ``artifact_refs`` (``{file_id: sha256}`` for
+       every export actually on disk) is supplied, every entry Auditor's
+       response names in ``artifacts_checked`` must reference a real
+       ``file_id`` in that map with a matching ``sha256``. An unknown
+       ``file_id`` or a stale/mismatched hash means the audit was computed
+       against something other than what is about to ship -- a stale
+       replayed response or a hallucinated verification -- and must not be
+       trusted regardless of its confidence or verdict.
+    """
     try:
         confidence = float(audit.get("confidence"))
     except (TypeError, ValueError):
         confidence = 0.0
     if confidence < AUDITOR_CONFIDENCE_FLOOR:
         return f"auditor_confidence_below_floor:{confidence:.2f}"
+    if audit.get("verdict") == "issues" and audit.get("issues"):
+        return "auditor_issues_verdict"
+    if artifact_refs is not None:
+        for checked in audit.get("artifacts_checked") or []:
+            if not isinstance(checked, dict):
+                return "auditor_artifact_identity_mismatch"
+            file_id = checked.get("file_id")
+            sha256 = checked.get("sha256")
+            if file_id not in artifact_refs or artifact_refs.get(file_id) != sha256:
+                return "auditor_artifact_identity_mismatch"
     return None
 
 
@@ -1342,7 +1369,10 @@ class Auditor(Agent):
         '"issues": [{"file": str, "column": str, "problem": str}], '
         '"metrics": {"columns_dropped": int, "columns_transformed": int, "columns_kept": int, '
         '"human_review_required": int, "estimated_leak_prob": 0..1, "action_disagreement_count": int}, '
+        '"artifacts_checked": [{"file_id": str, "sha256": str}], '
         '"confidence": 0..1, "summary": str}. '
+        "artifacts_checked must echo back, EXACTLY as given to you below, the file_id and sha256 of "
+        "every export you reviewed -- never invented, never from memory of a prior run. "
         "confidence is your own honest self-assessment that this audit is correct -- report it "
         "truthfully; a low number here is what sends a genuinely uncertain case to a human, which "
         "is the safe outcome, not a failure. Base every judgment only on file-level summaries, "
@@ -1350,7 +1380,8 @@ class Auditor(Agent):
     )
 
     async def run(self, decisions: list[dict[str, Any]], exports: dict[str, str], files: list[dict[str, Any]],
-                  statute: dict[str, Any] | None = None, praxis_methods: dict[str, Any] | None = None) -> dict[str, Any]:
+                  artifact_refs: list[tuple[str, str]], statute: dict[str, Any] | None = None,
+                  praxis_methods: dict[str, Any] | None = None) -> dict[str, Any]:
         # Summarise deterministically (no row values sent to LLM)
         summary_by_file: dict[str, dict[str, int]] = {}
         per_column: list[dict[str, Any]] = []
@@ -1371,17 +1402,19 @@ class Auditor(Agent):
                                "action_taken": a})
 
         file_meta = [{"file_id": f["file_id"], "name": f["file_id"], "component": f.get("component")} for f in files]
+        artifact_lines = [{"file_id": file_id, "sha256": sha256} for file_id, sha256 in artifact_refs]
         prompt = (
             f"Per-column decisions to re-derive and check (no row values): {per_column}\n\n"
             f"File summary counts: {summary_by_file}\n\n"
             f"Jurisdiction rulebook (Statute): {statute or {}}\n\n"
             f"Best-practice technique per category (Praxis): {praxis_methods or {}}\n\n"
-            f"Files: {file_meta}\n\nExports: {list(exports.keys())}\n"
+            f"Files: {file_meta}\n\nExports: {list(exports.keys())}\n\n"
+            f"Artifacts to echo back exactly in artifacts_checked: {artifact_lines}\n"
             "Respond with JSON only."
         )
         return await self.call_json(prompt, phase="auditor.verify",
                                     default={"verdict": "issues", "issues": [], "metrics": {},
-                                             "confidence": 0.0,
+                                             "artifacts_checked": [], "confidence": 0.0,
                                              "summary": "Auditor call failed; treated as below the confidence floor."},
                                     status_text="Independently re-deriving the correct action per column")
 

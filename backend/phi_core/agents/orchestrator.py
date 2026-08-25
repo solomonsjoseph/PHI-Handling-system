@@ -391,9 +391,17 @@ async def execute_decisions(
     # Operator/Reviewer/Publish Guard). Ledger + Herald still need
     # Auditor's metrics + Scout's landscape so they wait on both here.
     await on_phase("auditor_scout", {})
+    from phi_core.control.artifacts import _hash_file
+    artifact_refs: list[tuple[str, str]] = []
+    for file_id, path in exports.items():
+        try:
+            sha256, _size = _hash_file(path)
+        except OSError:
+            continue
+        artifact_refs.append((file_id, sha256))
     auditor_agent = Auditor(await make_ctx("Auditor"))
     audit, scout, benchmark = await asyncio.gather(
-        auditor_agent.run(decisions=decisions, exports=exports, files=files,
+        auditor_agent.run(decisions=decisions, exports=exports, files=files, artifact_refs=artifact_refs,
                           statute=statute, praxis_methods=praxis_methods),
         scout_task,
         _empty(None),   # placeholder for future synthetic benchmark run
@@ -423,7 +431,7 @@ async def execute_decisions(
     # advisory: this is the design doc's "second human review", distinct
     # from Sentinel's pre-execution round -- it must fire on the numbers
     # every time, never fail open the way `consult()` legitimately does.
-    auditor_reason = auditor_escalation_reason(audit)
+    auditor_reason = auditor_escalation_reason(audit, artifact_refs=dict(artifact_refs))
     if audit_advice.action == "escalate_human_review" or auditor_reason:
         reasons = [r for r in ("manager_advisory_audit_escalation" if audit_advice.action == "escalate_human_review" else None,
                                auditor_reason) if r]
