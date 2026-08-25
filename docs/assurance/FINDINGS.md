@@ -57,11 +57,20 @@
 ## F-ORCH-001
 
 - Owner: control-plane program
-- Code anchors: `backend/phi_core/agents/orchestrator.py:96-766`, `backend/server.py:1814-1890,2246-2508`, `backend/phi_core/agents/manager.py:311-336`
-- Acceptance tests: `backend/tests/test_architecture_boundaries.py`, `backend/tests/test_control_bounds.py`
+- Code anchors: `backend/phi_core/agents/orchestrator.py:96-766`, `backend/server.py:1814-1890,2246-2508`, `backend/phi_core/agents/manager.py:311-336`, `backend/phi_core/control/superorchestrator.py::SuperOrchestrator`
+- Acceptance tests: `backend/tests/test_control_superorchestrator.py`, planned `backend/tests/test_architecture_boundaries.py`, `backend/tests/test_control_bounds.py`
 - Status: open
-- Disposition: Phases 4 and 5 install the versioned workflow table and Super Orchestrator as the sole workflow writer.
-- Residual risk: every future entry route must retain the command boundary.
+- Disposition: Phase 5 step 1 lands `SuperOrchestrator`, the D9 exclusive-authority class (fenced node transitions, budget/depth/fanout-checked child delegation, review request/consume, acceptance) -- fully tested against `MemoryControlStore`, but not yet called from a production route. No entry route routes through it yet; `Manager.escalate_to_human_review` still writes human-review state directly from all four of its callers.
+- Residual risk: every future entry route must retain the command boundary, and steps 2/4/5/7/8/9 (route migration, `escalate_to_human_review` deletion, Ledger/Herald as durable children, D5 enqueue/gateway enforcement, the boundary tests, `control/adapters.py` deletion) remain open.
+
+## F-ADAPT-001
+
+- Owner: control-plane program
+- Code anchors: `backend/phi_core/control/adapters.py::legacy_decision_adapter,legacy_files_adapter`, `backend/phi_core/agents/orchestrator.py` (decide loop), `backend/server.py` (human-review re-gating)
+- Acceptance tests: none yet; closes when every caller of `run_decision_gates` passes the typed `list[dict]`/files projection directly and this module is deleted
+- Status: open
+- Disposition: Phase 5 step 9 deletes this module once its two remaining call sites adopt the typed contract directly. Neither call site has moved yet.
+- Residual risk: none while the module exists -- it is a pure normalization shim with no authority of its own; tracked so its removal is not silently dropped once the last caller moves.
 
 ## F-HITL-001
 

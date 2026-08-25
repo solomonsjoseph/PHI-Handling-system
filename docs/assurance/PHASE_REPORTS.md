@@ -236,3 +236,46 @@ Steps 1-7 of the plan's ten-step Phase 4 are landed and verified, plus step 2's 
 - Since that update, part of step 5 also landed: `execute_decisions`'s three exit paths that leave Scout's background `asyncio.create_task` running (Publish Guard blocked, the operator cancel/`PipelineCancelled` branch, and the coverage-advice escalation branch) now cancel and await it through a shared `_cancel_and_await` helper before returning, rather than firing `scout_task.cancel()` without ever observing the cancellation land. The coverage-advice escalation branch previously did not cancel Scout at all, matching the "Scout leak" the plan names at the pre-refactor `orchestrator.py:545`. A new regression test (`test_manager.py::test_coverage_escalation_fences_scouts_background_task`) captures Scout's real `asyncio.Task` via a `create_task` interception and asserts it is `.done()` and `.cancelled()` after `run_pipeline` returns. Full `TaskService`-lifecycle management of Scout as a durable child `WorkItem` (the rest of step 5's "Scout becomes a durable child task") still requires `AgentContext` to carry the claimed lease `fence`, which it does not yet.
 - `cancel_subtree` (part of step 7's "await or fence children") was not yet meaningfully callable from `session_delete` as of the prior checkpoint below: no production route enqueued pipeline work through `TaskService`, so no `WorkItem` tree existed to cancel. The tombstone-then-erase ordering already implemented is what actually prevents resurrection today. See the following entry: `session_handle`/`session_human_review` now enqueue through `TaskService`, so a `WorkItem` tree exists for `cancel_subtree` to walk, though `session_delete` itself does not yet call it (recursive cancellation on delete remains a step-7 gap, tracked in `docs/assurance/RISK_REGISTER.md`).
 - Since that update, the remainder of step 2 and step 8 landed: `session_handle` and `session_human_review` now call `TaskService.enqueue` and return `{"status": "started"|"resuming"}` rather than launching a bare `asyncio.create_task`; `_startup_maintenance` starts `_MAX_CONCURRENT_PIPELINES` `Worker` instances (registered for `pipeline_run`/`pipeline_resume`) in place of the single always-inert loop from the earlier checkpoint. `_admit_pipeline_run`'s in-process concurrency cap and immediate-429 contract are unchanged, checked in the route before enqueue; `_release_pipeline_run` moved to the handlers' own `finally` block so the slot frees when the pipeline genuinely finishes, not when the HTTP response returns. `control/policy.py::MANIFESTS` gained a `"Pipeline"` role for the enqueued unit itself. A crashed run now recovers automatically once its lease expires (`reconcile_leases` + the next `Worker` poll re-run the handler), rather than only through the 900-second orphan sweep; that sweep is kept, unmodified, as the backstop for a `WorkItem` that exhausts every retry attempt (`F-DUR-001`'s residual risk) and for any pre-migration session with no `WorkflowRun`. `docs/adr/0003-task-and-lease-model.md` records this decision and its consequences. Phase 4 steps 5 (Scout `TaskService`-lifecycle), 9 (`HumanReviewService`/`TraceEventStore` fencing), and 10 (boundary kill tests) remain open, each blocked on a component from a later phase; see `F-DUR-001`, `F-ORCH-001`, and the Phase 4 row in `docs/assurance/RISK_REGISTER.md`.
+
+## Phase 5 (in progress): Super Orchestrator and bounded delegation
+
+Step 1 of the plan's nine-step Phase 5 is landed and verified; steps 2-9 are not started. Two steps text-described as Phase 5 work were found already landed by an earlier phase during this checkpoint's investigation and needed no new code: `ArtifactService.certify_publication`/`PublicationPointer` (step 3, already production-called from `server.py:1197`, already tested in `test_control_artifacts.py`) and `control/policy.py::TEAMS` (part of step 6, already defined with the exact five requirement labels). This entry checkpoints the verified infrastructure before the larger route-migration work.
+
+### 1. Verified code-backed baseline relevant to this phase, with `path:line` anchors.
+
+- `control/workflow.py`'s D9 node table and `TRANSITIONS` map (built in Phase 4) were fully tested but had no production caller: `workflow_runs.node` was stamped `"charter"` at creation (`control/runs.py::RunStore.open_run`, called from `server.py:2323`) and never advanced anywhere. `Manager.escalate_to_human_review` (`manager.py:322-336`) still writes human-review state directly; `orchestrator.py` calls it from four sites (`:173`, `:272`, `:380`, `:913`). `control/superorchestrator.py` did not exist.
+
+### 2. Files and symbols changed.
+
+- New: `backend/phi_core/control/superorchestrator.py::SuperOrchestrator` (`start_run`, `cancel_run`, `advance`, `create_child_work`, `request_human_review`, `consume_review_event`, `accept_result`, `recover`, `authorize_publication`, `terminal_outcome`).
+- `backend/phi_core/control/tasks.py`: added a read-only `TaskService.policy` property so `create_child_work` can re-validate a parent's grant without a second, separately constructed `CapabilityPolicy`.
+- `docs/adr/0006-super-orchestrator.md`.
+- Tests: `test_control_superorchestrator.py` (26 tests, one or more per method plus refusal paths).
+
+### 3. Threat or failure mode addressed, naming the `F-*` finding.
+
+- `F-ORCH-001` (partial): the exclusive-authority primitive D9 requires now exists and is independently tested (CAS-fenced node transitions that fail closed on an unmodelled outcome, budget/depth/fanout-checked child delegation, acceptance that a child cannot self-grant). No production route uses it yet, so the finding is not closed.
+
+### 4. Data and authority boundaries before and after.
+
+- Unchanged in production: every entry route still opens/advances workflow state exactly as before (`RunStore.open_run` directly; `Manager.escalate_to_human_review` directly; no route calls `TaskService.enqueue` for a child task). `SuperOrchestrator` is additive infrastructure with no caller in this phase's traffic path, matching Phase 4's own first checkpoint.
+
+### 5. Migration and rollback behaviour, cross-referenced to `docs/assurance/MIGRATION.md`.
+
+- No schema migration. `TaskService.policy` is a pure read-only property addition. Rollback is reverting this commit.
+
+### 6. Tests added and the exact commands run.
+
+- `test_control_superorchestrator.py`. `ruff check backend`; `cd backend && DATA_DIR=<fresh tmp dir> pytest tests -q -rs`.
+
+### 7. Exact results, including every failure and every skip with its reason.
+
+- Ruff: clean. Backend suite: `760 passed, 8 skipped` in 142 seconds (734 from the Phase 4 checkpoint plus 26 new). Skips unchanged from prior phases.
+
+### 8. Remaining risk and deferred work, cross-referenced to `docs/assurance/RISK_REGISTER.md`.
+
+- Step 2 (route every entry path -- `session_handle`, `session_human_review`, `session_cancel`, `session_delete`, `session_intake`, `corpus_study_generate/run/research`, `settings_warmup`/`_run_warmup`/`_warmup_scheduler_loop`, `_startup_maintenance`'s recovery path -- through `SuperOrchestrator`) is not started. `start_run` mints its own `run_id` (D9's signature takes none); `session_handle`'s existing CAS-claim-then-open-run ordering, where the session claim is today's only concurrency guard, needs to be resolved before that route can move.
+- Step 4 (delete `Manager.escalate_to_human_review`, repoint its four `orchestrator.py` callers to `SuperOrchestrator.request_human_review`) is not started.
+- Step 5 (Ledger/Herald as durable `create_child_work` children) is not started; it needs a `MANIFESTS` change (a non-empty `allowed_child_task_types`) that does not exist yet -- confirmed every current manifest entry has `allowed_child_task_types=frozenset()`, so any `create_child_work` call in production would currently refuse.
+- Step 6's remainder (`docs/adr/0007-agent-teams.md`, the per-team ceiling assertion) is open; `TEAMS` itself is already landed.
+- Steps 7 (`test_control_bounds.py`), 8 (`test_architecture_boundaries.py`), and 9 (delete `control/adapters.py`, close `F-ADAPT-001`) are not started. See `F-ORCH-001`, `F-DUR-001`, `F-ADAPT-001`, and the Phase 5 row in `docs/assurance/RISK_REGISTER.md`.
