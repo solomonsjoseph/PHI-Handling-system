@@ -36,7 +36,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
-from .limits import HEARTBEAT_INTERVAL_S, LEASE_RECONCILE_INTERVAL_S, LEASE_SECONDS
+from .limits import HEARTBEAT_INTERVAL_S, LEASE_RECONCILE_INTERVAL_S, LEASE_SECONDS, MAX_ATTEMPTS_PER_TASK
 from .records import OutboxEntry, WorkflowRun, WorkItem
 from .store import ControlStore
 from .tasks import TaskService
@@ -285,12 +285,29 @@ async def drain_outbox(
                         "drain_outbox: handler for kind=%s entry_id=%s (%s/%s) failed",
                         entry.kind, entry.entry_id, collection, id_value,
                     )
-                    remaining.append(
-                        entry.model_copy(
-                            update={"attempts": entry.attempts + 1, "last_error": str(exc)[:500]}
-                        )
+                    failed_entry = entry.model_copy(
+                        update={"attempts": entry.attempts + 1, "last_error": str(exc)[:500]}
                     )
-                    changed = True
+                    if failed_entry.attempts >= MAX_ATTEMPTS_PER_TASK:
+                        # Past the retry ceiling: stop retrying forever in
+                        # place. Move the entry to a dead-letter record
+                        # (never dropped silently) and remove it from the
+                        # owner's outbox so a permanently-failing handler
+                        # cannot grow that array without bound.
+                        await store.insert(
+                            "outbox_dead_letters",
+                            {
+                                "collection": collection,
+                                "owner_id": id_value,
+                                "entry": failed_entry.model_dump(),
+                                "dead_lettered_at": _now_iso(),
+                            },
+                        )
+                        changed = True
+                        processed += 1
+                    else:
+                        remaining.append(failed_entry)
+                        changed = True
                     continue
                 changed = True
                 processed += 1

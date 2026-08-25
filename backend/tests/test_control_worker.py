@@ -302,6 +302,33 @@ async def test_drain_outbox_records_attempts_and_last_error_on_handler_exception
 
 
 @pytest.mark.asyncio
+async def test_drain_outbox_dead_letters_an_entry_past_the_retry_ceiling() -> None:
+    """An entry whose handler keeps failing must not retry forever in
+    place: once its ``attempts`` reaches ``MAX_ATTEMPTS_PER_TASK`` it is
+    moved to ``outbox_dead_letters`` (never dropped) and removed from the
+    owning document's ``outbox`` array."""
+    from phi_core.control.limits import MAX_ATTEMPTS_PER_TASK
+
+    store = MemoryControlStore()
+    entry = OutboxEntry(kind="trace", attempts=MAX_ATTEMPTS_PER_TASK - 1)
+    await _run_with_outbox(store, entry)
+
+    async def failing_handler(_store, _entry):
+        raise RuntimeError("relay boom")
+
+    processed = await drain_outbox(store, handlers={"trace": failing_handler})
+
+    assert processed == 1
+    stored = await store.get_one("workflow_runs", {"run_id": RUN_ID})
+    assert stored["outbox"] == []  # removed, not left retrying forever
+    dead_letters = await store.find_many("outbox_dead_letters", {})
+    assert len(dead_letters) == 1
+    assert dead_letters[0]["entry"]["entry_id"] == entry.entry_id
+    assert dead_letters[0]["entry"]["attempts"] == MAX_ATTEMPTS_PER_TASK
+    assert "relay boom" in dead_letters[0]["entry"]["last_error"]
+
+
+@pytest.mark.asyncio
 async def test_drain_outbox_scans_work_items_outbox_too() -> None:
     service, store = _service()
     task = await _enqueue(service)

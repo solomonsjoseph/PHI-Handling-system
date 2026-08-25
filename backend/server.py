@@ -49,6 +49,7 @@ Everything else (/, /static/...) is the built frontend SPA, mounted last
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -359,15 +360,55 @@ async def _fail_session_correlated(db, sid: str, run_filter: dict, e: Exception,
     streaming raw exception text. Full detail (exception type, message,
     traceback) goes to the server log against a short correlation id; the
     stored session and the SSE client see only a fixed message plus that
-    id, matching the global unhandled-exception handler's contract."""
+    id, matching the global unhandled-exception handler's contract.
+
+    Phase 4 step 6: ``cleanup_session_unpacked`` only runs when this
+    handler's own run-filtered ``update_one`` actually matched a document.
+    ``run_filter`` includes ``_pipeline_run_id``, so a stale worker from an
+    already-superseded run (the session moved on to a newer run, or was
+    reset) loses this race and must not delete a newer run's unpacked
+    input tree out from under it.
+    """
     error_id = uuid.uuid4().hex[:12]
     _log.error(
         "session %s pipeline worker failure [%s]: %s: %s",
         sid, error_id, type(e).__name__, e, exc_info=True,
     )
-    await db.sessions.update_one(run_filter, {"$set": {"status": "failed", "error": "pipeline failed", "error_id": error_id}})
-    cleanup_session_unpacked(sid)
+    result = await db.sessions.update_one(run_filter, {"$set": {"status": "failed", "error": "pipeline failed", "error_id": error_id}})
+    if getattr(result, "matched_count", 0):
+        cleanup_session_unpacked(sid)
     await _emit(sid, ProgressEvent(phase="failed", message=f"pipeline error (id {error_id}); see server logs"), run_id=run_id)
+
+
+async def _validate_rerun_inputs(files: list[dict]) -> list[str]:
+    """Phase 4 step 6: rerun admission check. Returns the ``file_id``s
+    whose ``stored_path`` is missing or no longer re-hashes to the
+    recorded ``sha256`` -- a file deleted, truncated, or modified on disk
+    since intake. A non-empty result means ``/handle`` must refuse with
+    ``409 error="reintake_required"`` rather than let the pipeline run
+    against silently-changed or absent input bytes."""
+    stale: list[str] = []
+    for f in files:
+        stored_path = f.get("stored_path")
+        expected_sha256 = f.get("sha256")
+        file_id = f.get("file_id", "")
+        if not stored_path or not expected_sha256:
+            continue
+        path = Path(stored_path)
+        if not path.exists():
+            stale.append(file_id)
+            continue
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    digest.update(chunk)
+        except OSError:
+            stale.append(file_id)
+            continue
+        if digest.hexdigest() != expected_sha256:
+            stale.append(file_id)
+    return stale
 
 
 # --- Health ----------------------------------------------------------------
@@ -1915,6 +1956,19 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
     session = await _owned_session(sid, principal)
     if session.get("intake_status") not in ("ready",):
         raise HTTPException(400, f"intake not ready (status={session.get('intake_status')})")
+    # Phase 4 step 6: rerun admission. A file deleted, truncated, or
+    # modified on disk since intake (including a stale/incomplete
+    # reintake) must never silently run through the pipeline; refuse
+    # with a distinct, actionable error rather than let Executor read
+    # missing or changed bytes.
+    stale_file_ids = await _validate_rerun_inputs(session.get("files") or [])
+    if stale_file_ids:
+        raise HTTPException(
+            409,
+            {"error": "reintake_required",
+             "detail": f"{len(stale_file_ids)} input file(s) missing or changed since intake",
+             "file_ids": stale_file_ids},
+        )
     if not _admit_pipeline_run():
         raise HTTPException(
             429,
