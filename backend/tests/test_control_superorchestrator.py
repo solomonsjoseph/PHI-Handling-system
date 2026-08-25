@@ -76,6 +76,21 @@ async def test_start_run_uses_a_route_claimed_run_id_for_its_run_and_root_task()
 
 
 @pytest.mark.asyncio
+async def test_start_run_can_enqueue_a_pipeline_resume_root_task() -> None:
+    orch, _tasks, store = _rig()
+
+    run = await orch.start_run(
+        session_id=SESSION_ID,
+        principal="operator-1",
+        root_task_type="pipeline_resume",
+    )
+
+    tasks = await store.find_many("work_items", {"run_id": run.run_id})
+    assert len(tasks) == 1
+    assert tasks[0]["task_type"] == "pipeline_resume"
+
+
+@pytest.mark.asyncio
 async def test_start_run_refuses_an_anonymous_principal() -> None:
     orch, _tasks, _store = _rig()
     with pytest.raises(CapabilityDenied):

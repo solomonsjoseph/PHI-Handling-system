@@ -129,6 +129,7 @@ class SuperOrchestrator:
         iteration_cap: int = 0,
         correlation_id: str = "",
         run_id: str | None = None,
+        root_task_type: str = "pipeline_run",
     ) -> WorkflowRun:
         """Open a new ``WorkflowRun`` at the ``charter`` node and enqueue its
         durable root ``Pipeline`` task.
@@ -136,9 +137,11 @@ class SuperOrchestrator:
         Fails closed on an anonymous caller. A route that atomically claims
         a session before starting work may pass that claim's fresh
         ``run_id`` so its session fence, ``WorkflowRun``, and root task
-        share one identity. Other callers omit it and receive a minted
-        id. This method remains the sole `TaskService.enqueue` caller for
-        the new root task.
+        share one identity. ``root_task_type`` permits the same durable
+        Pipeline authority to schedule a fresh run or a human-review resume.
+        Other callers omit both and receive a minted id and
+        ``"pipeline_run"`` root. This method remains the sole
+        `TaskService.enqueue` caller for root work.
         """
         if not principal:
             raise CapabilityDenied("start_run requires an authenticated principal")
@@ -166,7 +169,7 @@ class SuperOrchestrator:
             run_id=run_id,
             session_id=session_id,
             worker="Pipeline",
-            task_type="pipeline_run",
+            task_type=root_task_type,
             input_ref={"run_type": run_type},
             correlation_id=correlation_id or run_id,
         )
