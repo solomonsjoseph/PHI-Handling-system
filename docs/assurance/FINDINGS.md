@@ -48,11 +48,11 @@
 ## F-DUR-001
 
 - Owner: control-plane program
-- Code anchors: `backend/server.py:1736-1891,2247-2508,340-353,1746-1783`, `backend/phi_core/agents/orchestrator.py:545`
-- Acceptance tests: `backend/tests/test_control_durable.py`
+- Code anchors: `backend/server.py::session_handle,session_human_review,_startup_maintenance`, `backend/phi_core/control/tasks.py::TaskService`, `backend/phi_core/control/worker.py::Worker`
+- Acceptance tests: `backend/tests/test_control_tasks.py`, `backend/tests/test_control_workflow.py`, `backend/tests/test_control_worker.py`, `backend/tests/test_human_review_resume_execution.py`
 - Status: open
-- Disposition: Phase 4 replaces detached work with leased, fenced work records and outbox recovery.
-- Residual risk: standalone Mongo limits atomicity to a document and embedded outbox.
+- Disposition: Phase 4 lands leased, fenced `WorkItem` records, a CAS-safe `TaskService`, and an N-worker claim loop; `session_handle`/`session_human_review` now enqueue through it instead of a bare per-request `asyncio.create_task`. A crashed run's lease expires and `reconcile_leases` returns it to `ready` for automatic re-execution, replacing the previous "wait 900 seconds, then require a manual resubmission" recovery path for that case; the 900-second sweep remains as the backstop for a `WorkItem` that exhausts every retry attempt.
+- Residual risk: standalone Mongo limits atomicity to a document and embedded outbox; `control/worker.py`'s `OUTBOX_HANDLERS` registry is still empty (nothing yet produces an `OutboxEntry`), Scout is not yet a `TaskService`-lifecycle child task, and the boundary kill tests proving recovery survives a process death mid-transition are not written.
 
 ## F-ORCH-001
 
