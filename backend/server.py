@@ -2654,7 +2654,11 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     # all, or a resubmission after the request has already resolved, falls
     # through unchanged -- `request_id` stays None and no idempotency
     # protection applies, same as this route's behavior before this check
-    # existed.
+    # existed. `open_requests` holds at most one entry:
+    # `SuperOrchestrator.request_human_review` supersedes any prior open
+    # request for a run_id before opening a new one (D13's "only supersede
+    # closes" invariant), so a rerun escalation never leaves two competing
+    # open requests for this query to pick between.
     request_id: str | None = None
     open_request_doc: dict | None = None
     if prior_run_id:

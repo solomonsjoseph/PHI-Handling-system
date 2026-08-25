@@ -353,6 +353,12 @@ class HumanReviewRequest(ControlRecord):
     state: Literal["open", "resolved", "superseded", "cancelled"] = "open"
     created_at: str = Field(default_factory=_now)
     resolved_at: str = ""
+    # D13 ("only supersede closes it, recording principal, reason, and
+    # policy_version"): populated only when state == "superseded", never
+    # for a normal resolve via consume_review_event.
+    superseded_by: str = ""
+    superseded_reason: str = ""
+    superseded_policy_version: str = ""
 
 
 class ResolutionEntry(ControlRecord):

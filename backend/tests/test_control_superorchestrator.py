@@ -335,6 +335,67 @@ async def test_request_human_review_opens_a_request_and_pauses_the_run() -> None
 
 
 @pytest.mark.asyncio
+async def test_a_second_escalation_supersedes_the_first_open_request() -> None:
+    """D13: a rerun (e.g. Auditor) that escalates again before the first
+    request is resolved must not leave two simultaneously-open requests
+    for the same run_id -- the older one is superseded, recording who,
+    why, and against which policy_version."""
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+
+    first = await orch.request_human_review(
+        run_id=run.run_id, node="human_review_audit", reason_codes=["auditor_confidence_below_floor:0.30"],
+        decision_version=1, audit_version="verdict-v1",
+    )
+    second = await orch.request_human_review(
+        run_id=run.run_id, node="human_review_audit", reason_codes=["auditor_issues_verdict"],
+        decision_version=1, audit_version="verdict-v2",
+    )
+
+    stored_first = await store.get_one("human_review_requests", {"request_id": first.request_id})
+    assert stored_first["state"] == "superseded"
+    assert stored_first["superseded_by"] == "system"
+    assert stored_first["superseded_reason"]
+    assert stored_first["superseded_policy_version"]
+    stored_second = await store.get_one("human_review_requests", {"request_id": second.request_id})
+    assert stored_second["state"] == "open"
+    open_requests = await store.find_many("human_review_requests", {"run_id": run.run_id, "state": "open"})
+    assert [r["request_id"] for r in open_requests] == [second.request_id]
+
+
+@pytest.mark.asyncio
+async def test_supersede_human_review_is_idempotent_on_a_resolved_request() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    request = await orch.request_human_review(
+        run_id=run.run_id, node="human_review_decisions", reason_codes=["blocking_issue"], decision_version=1,
+    )
+    event = HumanReviewEvent(
+        request_id=request.request_id, run_id=run.run_id, session_id=SESSION_ID,
+        workflow_version="wf/1", task_id="", seq=1, client_event_id="c1",
+        principal="reviewer-1", kind="resolution", body_hash="deadbeef",
+    )
+    await orch.consume_review_event(run_id=run.run_id, event=event)
+
+    result = await orch.supersede_human_review(
+        request_id=request.request_id, principal="admin-1", reason="test", policy_version="policy/1",
+    )
+
+    assert result.state == "resolved"
+    assert result.superseded_by == ""
+    stored = await store.get_one("human_review_requests", {"request_id": request.request_id})
+    assert stored["state"] == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_supersede_human_review_refuses_unknown_request_id() -> None:
+    orch, _tasks, _store = _rig()
+    with pytest.raises(WorkflowError):
+        await orch.supersede_human_review(
+            request_id="no-such-request", principal="admin-1", reason="test", policy_version="policy/1",
+        )
+
+@pytest.mark.asyncio
 async def test_consume_review_event_resolves_the_request_and_resumes_the_run() -> None:
     orch, _tasks, store = _rig()
     run = await _started_run(orch)

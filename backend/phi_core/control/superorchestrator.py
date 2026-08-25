@@ -378,6 +378,21 @@ class SuperOrchestrator:
         """
         run = await self._load_run(run_id)
         validate_node(node)
+        # D13: "a rerun of Auditor produces a new audit_version and cannot
+        # clear an older request; only supersede closes it." Without this,
+        # a second escalation before the first is resolved leaves two
+        # simultaneously "open" requests for the same run_id, and every
+        # reader that picks "the" open request (session_human_review's
+        # find_many(...)[0]) binds to an arbitrary one of them. At most
+        # one open request per run_id, always: superseding here, at the
+        # sole issuance point, is the one place that invariant can be
+        # enforced unconditionally rather than hoped for by every caller.
+        for stale in await self._store.find_many("human_review_requests", {"run_id": run_id, "state": "open"}):
+            await self.supersede_human_review(
+                request_id=stale["request_id"], principal="system",
+                reason=f"superseded by new escalation at node={node!r} (reasons={list(reason_codes)!r})",
+                policy_version=POLICY_VERSION,
+            )
         request = HumanReviewRequest(
             run_id=run_id,
             session_id=run.session_id,
@@ -401,6 +416,40 @@ class SuperOrchestrator:
         if not matched:
             raise WorkflowError(f"lost the race pausing run_id={run_id!r} for human review")
         return request
+
+    # ---- supersede_human_review ---------------------------------------------
+
+    async def supersede_human_review(
+        self, *, request_id: str, principal: str, reason: str, policy_version: str,
+    ) -> HumanReviewRequest:
+        """Close an open ``HumanReviewRequest`` without a review event (D13).
+
+        The only other way a request leaves ``"open"`` is
+        ``consume_review_event`` resolving it with an actual reviewer
+        submission. This is for the case D13 names explicitly: a new
+        Auditor verdict (or any other re-escalation) makes an older open
+        request moot before a reviewer ever acted on it -- there is no
+        review event to consume, only an explicit reason this class
+        records. Idempotent: a request that already left ``"open"`` (by
+        either path, or a concurrent supersede) is returned unchanged.
+        """
+        doc = await self._store.get_one("human_review_requests", {"request_id": request_id})
+        if doc is None:
+            raise WorkflowError(f"unknown request_id: {request_id!r}")
+        request = HumanReviewRequest.model_validate(doc)
+        if request.state != "open":
+            return request
+        superseded = request.model_copy(update={
+            "state": "superseded", "resolved_at": _now(),
+            "superseded_by": principal, "superseded_reason": reason,
+            "superseded_policy_version": policy_version,
+        })
+        matched = await self._store.compare_and_set(
+            "human_review_requests", {"request_id": request_id}, {"state": "open"}, superseded
+        )
+        if not matched:
+            raise WorkflowError(f"lost the race superseding request_id={request_id!r}")
+        return superseded
 
     # ---- consume_review_event ----------------------------------------------
 
