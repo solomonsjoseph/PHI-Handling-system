@@ -95,6 +95,28 @@ async def _check_cancel(db: AsyncIOMotorDatabase, sid: str, on_phase: PhaseCb) -
         raise PipelineCancelled()
 
 
+async def _cancel_and_await(task: "asyncio.Task[Any]") -> None:
+    """Cancel ``task`` and wait for the cancellation to actually land.
+
+    ``Task.cancel()`` alone only requests cancellation; the task keeps
+    running until it next reaches an await point, and a caller that
+    never awaits it again never observes whether that landed cleanly or
+    raised something else. Every exit path this helper is used on is
+    about to return or re-raise, so this is the last chance to fence
+    Scout's still-running background task before the caller moves on.
+    """
+    if task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        # The cancellation itself, or any exception the task raised on
+        # its way out, is expected here and not this function's problem
+        # to surface -- the caller has already decided the run is done.
+        pass
+
+
 async def execute_decisions(
     *,
     db: AsyncIOMotorDatabase,
@@ -242,6 +264,11 @@ async def execute_decisions(
     if coverage_advice.action == "escalate_human_review":
         await db.sessions.update_one(session_filter, {"$set": {
             "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids}})
+        # Recursive cancellation (D9/Phase 4 step 5): this return path
+        # previously left Scout's background task running unobserved --
+        # the "Scout leak" the plan names explicitly. Fence it here,
+        # before returning, same as every other exit path below.
+        await _cancel_and_await(scout_task)
         return await manager.escalate_to_human_review(
             session_filter=session_filter, reasons=["manager_advisory_coverage_escalation"],
             reasons_plain=plain_human_review_reasons(["manager_advisory_coverage_escalation"]),
@@ -289,7 +316,7 @@ async def execute_decisions(
                 "operator_failures": op_failed_ids,
             }},
         )
-        scout_task.cancel()
+        await _cancel_and_await(scout_task)
         cleanup_session_unpacked(sid)
         return {"status": "blocked", "guard": guard_report,
                 "decisions": decisions, "phase_timings": phase_timings}
@@ -297,7 +324,7 @@ async def execute_decisions(
     try:
         await _check_cancel(db, sid, on_phase)
     except PipelineCancelled:
-        scout_task.cancel()
+        await _cancel_and_await(scout_task)
         raise
 
     # Auditor (Scout already started earlier, in parallel with

@@ -499,6 +499,167 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
     assert "sentinel_blocking_after_cap" in escalate_calls[0]["reasons"]
 
 
+
+def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
+    """Phase 4 step 5: the coverage-advice escalation path (Reviewer stage)
+    previously returned without ever cancelling or awaiting Scout's
+    background `asyncio.create_task` -- the exact "Scout leak" the plan
+    names. `execute_decisions` must fence it before returning."""
+    from phi_core.agents import orchestrator
+
+    escalate_calls: list[dict] = []
+    scout_started = asyncio.Event()
+
+    class FakeManager:
+        def __init__(self, *_a, **_kwargs):
+            pass
+
+        async def run(self, *, roster, phase_plan):
+            return {}
+
+        async def note_phase(self, phase, elapsed_s):
+            return None
+
+        async def consult(self, *, agent_name, phase, signal):
+            if agent_name == "Reviewer":
+                return ManagerAdvice(action="escalate_human_review", note=None)
+            return ManagerAdvice(action="continue", note=None)
+
+        async def escalate_to_human_review(self, **kwargs):
+            escalate_calls.append(kwargs)
+            return {"status": "awaiting_human_review"}
+
+        def attach_schema(self, _schema_agent):
+            return None
+
+        async def close_run(self, outcome):
+            return {}
+
+        async def _log(self, *_a, **_kw):
+            return None
+
+    class FakeStatute:
+        def __init__(self, *_a, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {}
+
+    class FakeSchema:
+        def __init__(self, *_a, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {"columns": []}
+
+    class FakePraxis:
+        def __init__(self, *_a, **_kwargs):
+            pass
+
+        async def method_for(self, _category):
+            return {}
+
+    class FakeJudge:
+        def __init__(self, *_a, **_kwargs):
+            self.call_failures = 0
+            self.last_message_id = None
+
+        async def run(self, **_kwargs):
+            return {"decisions": [{"file_id": "f", "column": "c",
+                                   "action": "keep", "confidence": 0.95,
+                                   "phi_category": "NONE", "citation": "",
+                                   "reason": "r", "subject": "participant"}]}
+
+    class FakeSentinel:
+        def __init__(self, *_a, **_kwargs):
+            self.call_failures = 0
+
+        async def run(self, **_kwargs):
+            return {"issues": []}
+
+    class FakeExecutor:
+        def __init__(self, *_a, **_kwargs):
+            pass
+
+        async def run(self, files, decisions, omit_by_file=None):
+            return {"exports": {"f": "/tmp/does-not-matter.csv"}}
+
+    class FakeOperator:
+        def __init__(self, *_a, **_kwargs):
+            pass
+
+        async def run(self, files, decisions, exports, omit_by_file=None):
+            return {"failed_file_ids": [], "verdicts": []}
+
+    class FakeReviewer:
+        def __init__(self, *_a, **_kwargs):
+            pass
+
+        async def run(self, decisions, operator_result, exports, omit_by_file=None):
+            return {"exports": exports, "findings": []}
+
+    class FakeScout:
+        def __init__(self, *_a, **_kwargs):
+            pass
+
+        async def _log(self, *_a, **_kw):
+            return None
+
+        async def run(self, **_kwargs):
+            scout_started.set()
+            await asyncio.sleep(300)  # never legitimately reached
+            return {}
+
+    monkeypatch.setattr(orchestrator, "Manager", FakeManager)
+    monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
+    monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
+    monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
+    monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
+    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
+    monkeypatch.setattr(orchestrator, "Operator", FakeOperator)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
+    monkeypatch.setattr(orchestrator, "Scout", FakeScout)
+
+    captured_scout_tasks: list = []
+    real_create_task = orchestrator.asyncio.create_task
+
+    def _capture_create_task(coro, *a, **kw):
+        task = real_create_task(coro, *a, **kw)
+        if coro.__qualname__.endswith("FakeScout.run"):
+            captured_scout_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(orchestrator.asyncio, "create_task", _capture_create_task)
+
+    db = FakeDb()
+
+    async def emit(_message):
+        return None
+
+    async def on_phase(_phase, _payload):
+        return None
+
+    result = asyncio.run(orchestrator.run_pipeline(
+        {"id": "s", "files": [{"kind": "dataset", "file_id": "f", "columns": ["c"]}]},
+        db, LlmConfig(provider="anthropic", model="test", max_tokens=100),
+        emit, on_phase, control_store=MemoryControlStore()))
+
+    assert result == {"status": "awaiting_human_review"}
+    assert len(escalate_calls) == 1
+    assert escalate_calls[0]["reasons"] == ["manager_advisory_coverage_escalation"]
+    # `run_pipeline` already returned; a fenced Scout must be cancelled and
+    # done, not still sleeping in the background with no one left to
+    # observe it (`Task.done()`/`.cancelled()` read plain object state,
+    # no running loop required, so this is safe to assert post-`asyncio.run`).
+    # Whether Scout's body ever reached `scout_started.set()` before the
+    # cancellation landed is a scheduling-timing detail, not the property
+    # under test -- either way the task must not be left pending.
+    assert len(captured_scout_tasks) == 1
+    assert captured_scout_tasks[0].done()
+    assert captured_scout_tasks[0].cancelled()
+
+
 # ---- constructor parity: Ledger / Herald accept a manager-bearing context --
 
 
