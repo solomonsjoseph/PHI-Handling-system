@@ -23,6 +23,16 @@ except Exception:
 os.environ.setdefault("DB_NAME", "phi_handling")
 os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
 os.environ.setdefault("PHI_ENV", "dev")
+# D13 step 1: session_human_review authorizes against REVIEWER_PRINCIPALS,
+# not merely session ownership. Only "dev" gets a role for free in
+# PHI_ENV=dev; every other principal the test suite exercises as a
+# reviewer needs an explicit entry here, same as a real deployment would
+# configure for its own reviewer accounts.
+os.environ.setdefault(
+    "REVIEWER_PRINCIPALS",
+    "dev:lead_reviewer,reviewer:lead_reviewer,reviewer-1:lead_reviewer,alice:lead_reviewer,"
+    "operator:lead_reviewer",
+)
 
 
 import pytest

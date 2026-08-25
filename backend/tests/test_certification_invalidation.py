@@ -506,6 +506,100 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
         await srv.session_handle("sid", principal="reviewer")
     assert excinfo.value.status_code == 409
 
+@pytest.mark.asyncio
+async def test_comment_resolution_never_auto_applies_regardless_of_confidence(monkeypatch):
+    """D13 step 6: a model's interpretation of a reviewer's free-text
+    comment always lands in ``pending_confirmation``, even at high
+    self-reported confidence. The prior ``>=0.60`` auto-apply let an LLM's
+    guess become the operative de-identification decision with no human
+    ever confirming it; this proves that path is gone and a second,
+    explicit reviewer confirmation is required before anything applies."""
+    import server as srv
+    from phi_core.agents import reasoning
+    from phi_core.control import activation
+
+    db = _ConditionalStubDB({
+        "id": "sid",
+        "owner": "reviewer",
+        "intake_status": "ready",
+        "status": "awaiting_human_review",
+        "_pipeline_run_id": "run-1",
+        "files": [{"file_id": "dataset", "kind": "dataset", "stored_path": "/tmp/dataset.csv",
+                   "columns": ["research_flag"]}],
+        "agent_decisions": [{
+            "file_id": "dataset",
+            "column": "research_flag",
+            "action": "human_review",
+            "suggested_action": "drop",
+            "suggested_reason": "direct identifier",
+        }],
+        "dataset_file_downloads": [{"file_id": "dataset"}],
+    })
+
+    class FakeActivationFactory:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def activate(self, **_kw):
+            return SimpleNamespace()
+
+    class FakeJudge:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def resolve_comment(self, **_kw):
+            # Deliberately high confidence: proves the removal is
+            # unconditional, not merely a lowered threshold.
+            return {"action": "drop", "reason": "direct identifier, no research value", "confidence": 0.99}
+
+    async def fake_cfg():
+        return SimpleNamespace(provider="test", model="test")
+
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+    monkeypatch.setattr(srv, "_current_llm_cfg", fake_cfg)
+    monkeypatch.setattr(activation, "ActivationFactory", FakeActivationFactory)
+    monkeypatch.setattr(reasoning, "Judge", FakeJudge)
+
+    response = await srv.session_human_review(
+        "sid",
+        srv.HumanReviewSubmit(
+            reviewer="reviewer",
+            actual_knowledge_ack=True,
+            resolutions=[{
+                "file_id": "dataset",
+                "column": "research_flag",
+                "mode": "comment",
+                "comment": "this is a direct identifier with no research value; drop it",
+            }],
+        ),
+        principal="reviewer",
+    )
+
+    assert response == {"status": "still_awaiting", "unresolved": 1}
+    decision = db.doc["agent_decisions"][0]
+    assert decision["action"] == "human_review"
+    assert decision["pending_confirmation"] == {
+        "action": "drop", "reason": "direct identifier, no research value", "confidence": 0.99,
+    }
+    assert db.doc["status"] == "awaiting_human_review"  # never resumed the pipeline
+    assert len(db["work_items"].docs) == 0
+
+    # Round 2: only an explicit reviewer confirmation applies it.
+    response2 = await srv.session_human_review(
+        "sid",
+        srv.HumanReviewSubmit(
+            reviewer="reviewer",
+            actual_knowledge_ack=True,
+            resolutions=[{"file_id": "dataset", "column": "research_flag", "mode": "approve"}],
+        ),
+        principal="reviewer",
+    )
+    assert response2 == {"status": "resuming"}
+    decision2 = db.doc["agent_decisions"][0]
+    assert decision2["action"] == "drop"
+    assert decision2["provenance"] == "human_comment_inferred"
+
+
 
 @pytest.mark.asyncio
 async def test_cancel_submits_the_existing_run_to_super_orchestrator(monkeypatch):
@@ -699,6 +793,7 @@ async def test_stale_unresolved_human_review_cannot_overwrite_claimed_tail(monke
                 actual_knowledge_ack=True,
                 resolutions=[],
             ),
+            principal="reviewer",
         )
 
     assert excinfo.value.status_code == 409

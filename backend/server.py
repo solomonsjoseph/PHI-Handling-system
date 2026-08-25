@@ -83,6 +83,8 @@ from phi_core.security import (
     require_api_token,
     resolve_principal,
     resolve_principal_soft,
+    reviewer_principals,
+    reviewer_role,
     scrub_decision,
     token_principals,
     validate_llm_base_url,
@@ -121,6 +123,9 @@ def _refuse_to_boot_insecure() -> None:
     problems: list[str] = []
     if not token_principals():
         problems.append("API_TOKENS (or legacy API_TOKEN) must be set")
+    if not reviewer_principals():
+        problems.append("REVIEWER_PRINCIPALS must be set (name:role,... with role in "
+                         "reviewer|lead_reviewer)")
     cors_raw = os.environ.get("CORS_ALLOWED_ORIGINS", "").strip()
     if not cors_raw or "*" in {o.strip() for o in cors_raw.split(",")}:
         problems.append("CORS_ALLOWED_ORIGINS must be set to a specific origin list, not '*'")
@@ -2511,6 +2516,8 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
 
     db = get_db()
     session = await _owned_session(sid, principal)
+    if reviewer_role(principal) is None:
+        raise HTTPException(403, "principal is not an authorized reviewer (see REVIEWER_PRINCIPALS)")
     has_dataset_files = any(f.get("kind") == "dataset" for f in (session.get("files") or []))
     if any_resolution and has_dataset_files and not (session.get("dataset_file_downloads") or []):
         raise HTTPException(
@@ -2584,21 +2591,19 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                 confidence = 0.0
             if action not in resolvable_actions:
                 action = None
-            if action is None or confidence < 0.60:
-                # Held for confirmation -- stays on human_review, not resolved this round.
-                d["pending_confirmation"] = {"action": action, "reason": reason, "confidence": confidence}
-                d["reviewer_comment"] = row_comment
-                d["reviewer"] = reviewer
-                d["reviewed_at"] = ts
-                continue
-            d["action"] = action
-            d["reason"] = f"human comment (interpreted) by {reviewer}: {reason}"
-            d["confidence"] = confidence
+            # D13 step 6: every model interpretation of free text requires an
+            # explicit reviewer confirmation submission, regardless of the
+            # model's self-reported confidence. The prior >=0.60 auto-apply
+            # let an LLM's guess become the operative de-identification
+            # decision with no human ever confirming it -- inconsistent with
+            # the HHS 45 CFR 164.514(b)(2)(ii) actual-knowledge attestation
+            # this same request already requires. A reviewer confirms with a
+            # separate mode="approve" submission (see below).
+            d["pending_confirmation"] = {"action": action, "reason": reason, "confidence": confidence}
             d["reviewer_comment"] = row_comment
             d["reviewer"] = reviewer
             d["reviewed_at"] = ts
-            d["provenance"] = "human_comment_inferred"
-            d.pop("pending_confirmation", None)
+            continue
         elif mode == "approve":
             pending = d.get("pending_confirmation")
             if pending:

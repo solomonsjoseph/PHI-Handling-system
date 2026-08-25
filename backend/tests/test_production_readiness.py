@@ -26,12 +26,14 @@ def _run_import(env_overrides: dict[str, str]) -> subprocess.CompletedProcess:
 def test_production_boot_refuses_without_api_tokens():
     proc = _run_import({
         "PHI_ENV": "production", "API_TOKENS": "", "API_TOKEN": "",
+        "REVIEWER_PRINCIPALS": "",
         "CORS_ALLOWED_ORIGINS": "", "MONGO_URL": "mongodb://localhost:27017",
         "APP_ENCRYPTION_KEY": "", "ATTESTATION_SIGNING_KEY": "",
         "DATA_DIR": "/tmp/phi_data",
     })
     assert proc.returncode != 0
     assert "API_TOKENS" in proc.stderr
+    assert "REVIEWER_PRINCIPALS" in proc.stderr
     assert "CORS_ALLOWED_ORIGINS" in proc.stderr
     assert "MONGO_URL" in proc.stderr
 
@@ -85,6 +87,32 @@ def test_token_principals_parses_api_tokens_and_legacy_token(monkeypatch):
     monkeypatch.delenv("API_TOKEN", raising=False)
     principals = token_principals()
     assert principals == {"tok-a": "alice", "tok-b": "bob"}
+
+def test_reviewer_principals_parses_name_role_pairs_and_drops_unknown_roles(monkeypatch):
+    from phi_core.security import reviewer_principals
+    monkeypatch.setenv("REVIEWER_PRINCIPALS", "alice:lead_reviewer,bob:reviewer,eve:admin")
+    principals = reviewer_principals()
+    assert principals == {"alice": "lead_reviewer", "bob": "reviewer"}
+
+
+def test_reviewer_role_grants_dev_lead_reviewer_only_when_unset_and_only_to_dev(monkeypatch):
+    from phi_core.security import reviewer_role
+    monkeypatch.delenv("REVIEWER_PRINCIPALS", raising=False)
+    monkeypatch.setenv("PHI_ENV", "dev")
+    assert reviewer_role("dev") == "lead_reviewer"
+    assert reviewer_role("someone-else") is None
+    monkeypatch.setenv("PHI_ENV", "production")
+    assert reviewer_role("dev") is None
+
+
+def test_reviewer_role_respects_configured_principals_over_the_dev_fallback(monkeypatch):
+    from phi_core.security import reviewer_role
+    monkeypatch.setenv("REVIEWER_PRINCIPALS", "alice:reviewer")
+    monkeypatch.setenv("PHI_ENV", "dev")
+    assert reviewer_role("alice") == "reviewer"
+    # Once REVIEWER_PRINCIPALS is configured at all, the "dev" convenience
+    # principal no longer gets a free role unless explicitly listed.
+    assert reviewer_role("dev") is None
 
 
 @pytest.mark.asyncio

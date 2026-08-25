@@ -331,6 +331,45 @@ def token_principals() -> dict[str, str]:
     return out
 
 
+REVIEWER_ROLES = frozenset({"reviewer", "lead_reviewer"})
+
+
+def reviewer_principals() -> dict[str, str]:
+    """Parse ``REVIEWER_PRINCIPALS`` (``name:role,name2:role2``, roles drawn
+    from :data:`REVIEWER_ROLES`) into principal name -> role. An entry with
+    an unrecognized role is dropped rather than silently accepted at a role
+    it never named -- fail closed, not fail open. Returns an empty dict when
+    unset."""
+    out: dict[str, str] = {}
+    raw = os.environ.get("REVIEWER_PRINCIPALS", "").strip()
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair or ":" not in pair:
+            continue
+        name, _, role = pair.partition(":")
+        name, role = name.strip(), role.strip()
+        if name and role in REVIEWER_ROLES:
+            out[name] = role
+    return out
+
+
+def reviewer_role(principal: str) -> str | None:
+    """The reviewer role ``principal`` holds, or ``None`` if they hold none.
+
+    D13 step 1: when ``REVIEWER_PRINCIPALS`` is unset and ``PHI_ENV=dev``,
+    principal ``dev`` alone is granted ``lead_reviewer`` as a local
+    convenience; every other principal has no role until the operator
+    configures one. Outside dev, an unset ``REVIEWER_PRINCIPALS`` is a boot
+    violation (:func:`token_principals`-shaped: see ``_refuse_to_boot_insecure``
+    in ``server.py``), so this function never needs its own dev-vs-prod
+    fallback beyond the single named convenience principal.
+    """
+    principals = reviewer_principals()
+    if not principals and os.environ.get("PHI_ENV", "production") == "dev" and principal == "dev":
+        return "lead_reviewer"
+    return principals.get(principal)
+
+
 async def resolve_principal(
     x_api_token: str | None = Header(default=None),
     phi_session: str | None = Cookie(default=None),
