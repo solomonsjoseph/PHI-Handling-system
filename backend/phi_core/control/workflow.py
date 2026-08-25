@@ -41,20 +41,19 @@ concurrency and retry loops into the fixed checkpoint sequence D9 asks for:
   today's ``DecisionGateFailure`` (currently an uncaught exception); its
   ``"human_review_needed"``/``"proceed"`` outcomes model today's
   ``human_needed`` branch (``orchestrator.py:524-568``).
-- ``execute``'s ``"crashed"`` outcome models today's Executor-crash
-  escalation (``orchestrator.py:574-586``, reason ``executor_crashed``),
-  which today calls ``Manager.escalate_to_human_review`` directly; this
-  table records it as returning to ``human_review_decisions`` so a
-  resumed run re-enters ``execute`` exactly as D9 requires, once
-  Phase 5 (D10) repoints that call onto
-  ``SuperOrchestrator.request_human_review``.
+- ``execute``'s ``"crashed"`` outcome models the Executor-crash
+  escalation (``orchestrator.py::_escalate_to_human_review``, reason
+  ``executor_crashed``, routed through
+  ``SuperOrchestrator.request_human_review`` per D10); this table
+  records it as returning to ``human_review_decisions`` so a resumed run
+  re-enters ``execute`` exactly as D9 requires.
 - ``publish_guard``'s ``"blocked"`` outcome is a terminal, matching
   today's `status="blocked"` short-circuit (``orchestrator.py:681-702``)
   exactly: a blocked export never proceeds to audit.
-- ``audit``'s ``"escalate"`` outcome models today's Auditor-confidence and
-  advisory-coverage escalations (``orchestrator.py:657-670,739-765``),
-  both currently routed through ``Manager.escalate_to_human_review`` and
-  both funnelled onto the one ``human_review_audit`` node D9 names.
+- ``audit``'s ``"escalate"`` outcome models the Auditor-confidence and
+  advisory-coverage escalations (``orchestrator.py::_escalate_to_human_review``,
+  the reviewer- and auditor-stage call sites), both funnelled onto the
+  one ``human_review_audit`` node D9 names.
 - ``publish``'s two non-terminal outcomes mirror today's ``final_status``
   computation (``orchestrator.py:651,789``): ``"complete"`` when neither
   Operator nor Reviewer excluded a file, ``"partially_complete"``

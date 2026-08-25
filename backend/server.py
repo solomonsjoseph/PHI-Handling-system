@@ -484,7 +484,7 @@ async def _handle_pipeline_run(store, work_item) -> dict[str, Any]:
         # loading screens. 15 min is 5x the observed 190 s happy path
         # and 2x the worst historical case (~340 s + Herald 90 s x2).
         result = await asyncio.wait_for(
-            run_agent_pipeline(session, db, cfg, emit_msg, on_phase, run_id=run_id),
+            run_agent_pipeline(session, db, cfg, emit_msg, on_phase, run_id=run_id, control_store=store),
             timeout=900,
         )
         await _emit(sid, ProgressEvent(phase="complete", message=f"Pipeline done: {result.get('status')}", percent=100.0), run_id=run_id)
@@ -636,6 +636,7 @@ async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
                 "pending_review": pending_review,
                 "human_review_required": bool(pending_review),
             },
+            run_id=run_id, store=store,
         )
 
     try:

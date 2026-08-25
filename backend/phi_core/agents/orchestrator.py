@@ -116,6 +116,63 @@ async def _cancel_and_await(task: "asyncio.Task[Any]") -> None:
         pass
 
 
+async def _escalate_to_human_review(
+    *, db: AsyncIOMotorDatabase, session_filter: dict[str, Any], reasons: list[str],
+    reasons_plain: list[str], close_last_phase: Callable[[], Awaitable[None]],
+    phase_timings: dict[str, Any], run_elapsed_s: float,
+    approved_decisions: list[dict[str, Any]], sentinel_report: dict[str, Any] | None,
+    manager: Manager, store: "ControlStore | None", run_id: str, node: str,
+) -> dict[str, Any]:
+    """The single path by which a run becomes 'awaiting_human_review' (D10).
+
+    Manager keeps ``close_run`` (the deterministic report) but no longer
+    owns the workflow-authority write: this function persists the session
+    document itself, exactly matching every other decision-mutation call
+    site's own pattern, then asks ``SuperOrchestrator.request_human_review``
+    to open the durable, typed ``HumanReviewRequest`` and pause the run at
+    ``node``. Every current caller of the deleted
+    ``Manager.escalate_to_human_review`` calls this instead.
+
+    Tolerates an unknown ``run_id`` (``store`` is ``None``, or no
+    ``WorkflowRun`` exists yet for it): the session-document write above is
+    the tested, load-bearing contract every caller of this function
+    depends on; the durable request is additive until every entry path
+    reliably opens a run through ``SuperOrchestrator.start_run`` first.
+    """
+    # Mirrors what the deleted `Manager.escalate_to_human_review` set
+    # internally, so `close_run`'s report still carries the same
+    # `"escalation"` field content it always has.
+    manager._escalation = {"reasons": reasons}
+    await manager._log("manager.escalate", "info", {"reasons": reasons})
+    await close_last_phase()
+    report = await manager.close_run("awaiting_human_review")
+    await db.sessions.update_one(session_filter, {"$set": {
+        "status": "awaiting_human_review",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "phase_timings": phase_timings,
+        "run_elapsed_s": round(run_elapsed_s, 3),
+        "human_review_reasons": reasons,
+        "human_review_reasons_plain": reasons_plain,
+        "manager_report": report,
+    }})
+    if store is not None and run_id:
+        from phi_core.control.policy import CapabilityPolicy
+        from phi_core.control.superorchestrator import SuperOrchestrator
+        from phi_core.control.tasks import TaskService
+        from phi_core.control.workflow import WorkflowError
+
+        try:
+            await SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None))).request_human_review(
+                run_id=run_id, node=node, reason_codes=reasons, decision_version=0,
+            )
+        except WorkflowError as exc:
+            if not str(exc).startswith("unknown run_id:"):
+                raise
+    return {"status": "awaiting_human_review", "decisions": approved_decisions,
+            "sentinel": sentinel_report, "phase_timings": phase_timings,
+            "manager_report": report}
+
+
 async def execute_decisions(
     *,
     db: AsyncIOMotorDatabase,
@@ -137,6 +194,8 @@ async def execute_decisions(
     sentinel_report: dict[str, Any] | None = None,
     extra_completion_fields: dict[str, Any] | None = None,
     extra_result_fields: dict[str, Any] | None = None,
+    run_id: str = "",
+    store: "ControlStore | None" = None,
 ) -> dict[str, Any]:
     """The D9 ``execute`` node onward -- Executor, Operator, Reviewer,
     Publish Guard, Auditor/Scout, Ledger, Herald, and the terminal
@@ -169,12 +228,13 @@ async def execute_decisions(
         # escalation itself is unconditional, fixed code -- see manager.py.
         await manager._log("executor.crashed", "info",
                            {"error_kind": f"exception:{type(exc).__name__}"})
-        return await manager.escalate_to_human_review(
-            session_filter=session_filter, reasons=["executor_crashed"],
+        return await _escalate_to_human_review(
+            db=db, session_filter=session_filter, reasons=["executor_crashed"],
             reasons_plain=plain_human_review_reasons(["executor_crashed"]),
             close_last_phase=close_last_phase, phase_timings=phase_timings,
             run_elapsed_s=time.perf_counter() - run_started,
-            approved_decisions=decisions, sentinel_report=sentinel_report)
+            approved_decisions=decisions, sentinel_report=sentinel_report,
+            manager=manager, store=store, run_id=run_id, node="human_review_decisions")
 
     # Reversal key: the mandatory second deliverable (PHI-handled output
     # plus the key to reverse it), distinct from the optional publishing
@@ -268,12 +328,13 @@ async def execute_decisions(
         # the "Scout leak" the plan names explicitly. Fence it here,
         # before returning, same as every other exit path below.
         await _cancel_and_await(scout_task)
-        return await manager.escalate_to_human_review(
-            session_filter=session_filter, reasons=["manager_advisory_coverage_escalation"],
+        return await _escalate_to_human_review(
+            db=db, session_filter=session_filter, reasons=["manager_advisory_coverage_escalation"],
             reasons_plain=plain_human_review_reasons(["manager_advisory_coverage_escalation"]),
             close_last_phase=close_last_phase, phase_timings=phase_timings,
             run_elapsed_s=time.perf_counter() - run_started,
-            approved_decisions=decisions, sentinel_report=sentinel_report)
+            approved_decisions=decisions, sentinel_report=sentinel_report,
+            manager=manager, store=store, run_id=run_id, node="human_review_audit")
 
     # Publish Guard: deterministic last-mile PHI scan on emitted exports.
     # GOAL invariant: exports are only 'ready to share publicly' after this
@@ -376,12 +437,13 @@ async def execute_decisions(
             "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids,
             "audit": audit, "agent_decisions": decisions,
         }})
-        return await manager.escalate_to_human_review(
-            session_filter=session_filter, reasons=reasons,
+        return await _escalate_to_human_review(
+            db=db, session_filter=session_filter, reasons=reasons,
             reasons_plain=plain_human_review_reasons(reasons),
             close_last_phase=close_last_phase, phase_timings=phase_timings,
             run_elapsed_s=time.perf_counter() - run_started,
-            approved_decisions=decisions, sentinel_report=sentinel_report)
+            approved_decisions=decisions, sentinel_report=sentinel_report,
+            manager=manager, store=store, run_id=run_id, node="human_review_audit")
 
     await _check_cancel(db, sid, on_phase)
 
@@ -909,12 +971,14 @@ async def run_pipeline(
         }},
     )
     if human_needed:
-        return await manager.escalate_to_human_review(
-            session_filter=session_filter, reasons=reasons,
+        return await _escalate_to_human_review(
+            db=db, session_filter=session_filter, reasons=reasons,
             reasons_plain=plain_human_review_reasons(reasons),
             close_last_phase=close_last_phase, phase_timings=_phase_timings,
             run_elapsed_s=time.perf_counter() - _run_started,
-            approved_decisions=approved_decisions, sentinel_report=s)
+            approved_decisions=approved_decisions, sentinel_report=s,
+            manager=manager, store=control_store, run_id=effective_run_id,
+            node="human_review_decisions")
 
     return await execute_decisions(
         db=db, sid=sid, session=session, session_filter=session_filter,
@@ -926,6 +990,7 @@ async def run_pipeline(
         run_started=_run_started, sentinel_report=s,
         extra_completion_fields={"advisory_issues": advisory_issues, "iteration_cap": iteration_cap},
         extra_result_fields={"advisory_issues": advisory_issues, "iteration_cap": iteration_cap},
+        run_id=effective_run_id, store=control_store,
     )
 
 

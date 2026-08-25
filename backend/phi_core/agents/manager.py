@@ -34,8 +34,12 @@ class Manager(Agent):
                                    tool, or give up -- with a coaching note.
       4. consult()                 answer an agent that is unsure whether to keep
                                    working or hand off to a human.
-      5. escalate_to_human_review() the one path to 'awaiting_human_review'.
-      6. close_run()                persistable report of every intervention.
+      5. close_run()                persistable report of every intervention.
+
+    Per D10, Manager no longer owns any path to 'awaiting_human_review':
+    the deleted escalate_to_human_review() write moved to the shared
+    orchestrator._escalate_to_human_review() helper and
+    SuperOrchestrator.request_human_review(), the durable authority.
 
     It is never given a prompt, a reply, a decision, or a file. Its LLM
     payload is always counts, enums, and timings.
@@ -318,38 +322,6 @@ class Manager(Agent):
         await self._log(f"manager.consult.{agent_name}", "info", record)
         return ManagerAdvice(action=decision.action, note=decision.note)
 
-    # ---- 5. escalate ---------------------------------------------------
-    async def escalate_to_human_review(
-        self, *, session_filter: dict[str, Any], reasons: list[str],
-        close_last_phase: Callable[[], Awaitable[None]],
-        phase_timings: dict[str, Any], run_elapsed_s: float,
-        approved_decisions: list[dict[str, Any]], sentinel_report: dict[str, Any],
-        reasons_plain: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """The single path by which a run becomes 'awaiting_human_review'.
-
-        ``reasons_plain`` is an optional plain-English rendering of
-        ``reasons`` (see ``reasoning.plain_human_review_reasons``) --
-        Manager stays domain-agnostic and just stores whatever the caller
-        hands it, so this list is what a reviewer should actually be shown,
-        never the raw internal reason codes.
-        """
-        self._escalation = {"reasons": reasons}
-        await self._log("manager.escalate", "info", {"reasons": reasons})
-        await close_last_phase()
-        report = await self.close_run("awaiting_human_review")
-        await self._db.sessions.update_one(session_filter, {"$set": {
-            "status": "awaiting_human_review",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "phase_timings": phase_timings,
-            "run_elapsed_s": round(run_elapsed_s, 3),
-            "human_review_reasons": reasons,
-            "human_review_reasons_plain": reasons_plain or reasons,
-            "manager_report": report,
-        }})
-        return {"status": "awaiting_human_review", "decisions": approved_decisions,
-                "sentinel": sentinel_report, "phase_timings": phase_timings,
-                "manager_report": report}
 
     # ---- guardian query broker -----------------------------------------
     # Deterministic lookups a specialist already indexed during its own

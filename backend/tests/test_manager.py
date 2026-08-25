@@ -336,6 +336,11 @@ def test_consult_fails_open_on_manager_error():
 
 
 def test_escalate_to_human_review_persists_and_returns_documented_keys():
+    """D10: Manager.escalate_to_human_review is deleted; every caller uses
+    the shared orchestrator._escalate_to_human_review helper instead, which
+    keeps the exact same observable session write and return shape."""
+    from phi_core.agents import orchestrator
+
     db = FakeDb()
     m = Manager(make_ctx("Manager"), db=db)
     closed: list[bool] = []
@@ -343,11 +348,13 @@ def test_escalate_to_human_review_persists_and_returns_documented_keys():
     async def close_last_phase():
         closed.append(True)
 
-    result = asyncio.run(m.escalate_to_human_review(
-        session_filter={"id": "s"}, reasons=["judge_call_failure"],
+    result = asyncio.run(orchestrator._escalate_to_human_review(
+        db=db, session_filter={"id": "s"}, reasons=["judge_call_failure"],
+        reasons_plain=["judge_call_failure"],
         close_last_phase=close_last_phase, phase_timings={"a": 1},
         run_elapsed_s=12.3, approved_decisions=[{"action": "keep"}],
-        sentinel_report={"verdict": "approved"}))
+        sentinel_report={"verdict": "approved"}, manager=m,
+        store=None, run_id="", node="human_review_decisions"))
 
     assert closed == [True]
     assert db.sessions.updates
@@ -356,6 +363,7 @@ def test_escalate_to_human_review_persists_and_returns_documented_keys():
     assert update_doc["$set"]["status"] == "awaiting_human_review"
     assert update_doc["$set"]["human_review_reasons"] == ["judge_call_failure"]
     assert "manager_report" in update_doc["$set"]
+    assert update_doc["$set"]["manager_report"]["escalation"] == {"reasons": ["judge_call_failure"]}
     assert set(result) == {"status", "decisions", "sentinel", "phase_timings", "manager_report"}
     assert result["status"] == "awaiting_human_review"
     assert result["decisions"] == [{"action": "keep"}]
@@ -406,11 +414,11 @@ def test_call_failures_counted_once_not_per_retry():
 # ---- orchestrator delegation -----------------------------------------------
 
 
-def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
+def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
+    """D10: Manager.escalate_to_human_review is deleted; run_pipeline's
+    decide-loop escalation now writes the session document itself and
+    returns the documented shape directly, not through a Manager method."""
     from phi_core.agents import orchestrator
-
-    SENTINEL_RESULT = {"marker": "fake-manager-escalation-result"}
-    escalate_calls: list[dict] = []
 
     class FakeManager:
         def __init__(self, *_a, **_kwargs):
@@ -425,15 +433,14 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
         async def consult(self, *, agent_name, phase, signal):
             return ManagerAdvice(action="continue", note=None)
 
-        async def escalate_to_human_review(self, **kwargs):
-            escalate_calls.append(kwargs)
-            return SENTINEL_RESULT
+        async def _log(self, *_a, **_kw):
+            return None
 
         def attach_schema(self, _schema_agent):
             return None
 
         async def close_run(self, outcome):
-            return {}
+            return {"outcome": outcome}
 
     class FakeStatute:
         def __init__(self, *_a, **_kwargs):
@@ -494,9 +501,11 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
         db, LlmConfig(provider="anthropic", model="test", max_tokens=100),
         emit, on_phase, control_store=MemoryControlStore()))
 
-    assert result is SENTINEL_RESULT
-    assert len(escalate_calls) == 1
-    assert "sentinel_blocking_after_cap" in escalate_calls[0]["reasons"]
+    assert result["status"] == "awaiting_human_review"
+    filt, update_doc = db.sessions.updates[-1]
+    assert filt == {"id": "s"}
+    assert update_doc["$set"]["status"] == "awaiting_human_review"
+    assert "sentinel_blocking_after_cap" in update_doc["$set"]["human_review_reasons"]
 
 
 
@@ -507,7 +516,6 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
     names. `execute_decisions` must fence it before returning."""
     from phi_core.agents import orchestrator
 
-    escalate_calls: list[dict] = []
     scout_started = asyncio.Event()
 
     class FakeManager:
@@ -525,9 +533,8 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
                 return ManagerAdvice(action="escalate_human_review", note=None)
             return ManagerAdvice(action="continue", note=None)
 
-        async def escalate_to_human_review(self, **kwargs):
-            escalate_calls.append(kwargs)
-            return {"status": "awaiting_human_review"}
+        async def _log(self, *_a, **_kw):
+            return None
 
         def attach_schema(self, _schema_agent):
             return None
@@ -535,8 +542,6 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
         async def close_run(self, outcome):
             return {}
 
-        async def _log(self, *_a, **_kw):
-            return None
 
     class FakeStatute:
         def __init__(self, *_a, **_kwargs):
@@ -645,9 +650,10 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
         db, LlmConfig(provider="anthropic", model="test", max_tokens=100),
         emit, on_phase, control_store=MemoryControlStore()))
 
-    assert result == {"status": "awaiting_human_review"}
-    assert len(escalate_calls) == 1
-    assert escalate_calls[0]["reasons"] == ["manager_advisory_coverage_escalation"]
+    assert result["status"] == "awaiting_human_review"
+    filt, update_doc = db.sessions.updates[-1]
+    assert filt == {"id": "s"}
+    assert update_doc["$set"]["human_review_reasons"] == ["manager_advisory_coverage_escalation"]
     # `run_pipeline` already returned; a fenced Scout must be cancelled and
     # done, not still sleeping in the background with no one left to
     # observe it (`Task.done()`/`.cancelled()` read plain object state,
