@@ -1604,11 +1604,23 @@ async def corpus_study_research(body: CorpusStudyResearchBody):
     Mongo collection so it survives restart and shows up in the catalog.
     """
     from phi_core.control.activation import ActivationFactory
+    from phi_core.control.policy import CapabilityPolicy
+    from phi_core.control.store import MongoControlStore
+    from phi_core.control.superorchestrator import SuperOrchestrator
+    from phi_core.control.tasks import TaskService
     from phi_corpus.researcher import CorpusResearcher
     db = get_db()
     cfg = await _current_llm_cfg()
-    factory = ActivationFactory(db, cfg)
+    control_store = MongoControlStore(db)
     run_id = uuid.uuid4().hex
+    # Phase 5 step 2: a real WorkflowRun (run_type="maintenance"), not just
+    # the ActivationFactory-issued grant CorpusResearcher already had --
+    # this is what makes D5's run-level bounds (MAX_TOKENS_PER_RUN and
+    # friends) apply to a research call at all.
+    await SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(cfg))).start_run(
+        session_id="corpus-researcher", principal="api-token", run_type="maintenance", run_id=run_id,
+    )
+    factory = ActivationFactory(db, cfg, store=control_store)
     ctx = await factory.activate(session_id="corpus-researcher", run_id=run_id, agent="CorpusResearcher")
     agent = CorpusResearcher(ctx)
     reply = await agent.research(body.domain)
@@ -1804,10 +1816,6 @@ async def corpus_study_run(body: CorpusStudyRunBody, principal: str = Depends(re
     }
 
 
-# Keep task references alive so CPython does not GC them mid-flight.
-_CORPUS_STUDY_TASKS: dict[str, asyncio.Task] = {}
-
-
 @app.get("/api/corpus/study/verify/{sid}")
 async def corpus_study_verify(sid: str, principal: str = Depends(resolve_principal)):
     """Compare the pipeline's actual decisions against the corpus ground
@@ -1990,6 +1998,10 @@ async def _run_warmup(db, cfg) -> dict:
     """Run Statute + all 17 Praxis warmups. Shared by manual and scheduled paths."""
     from phi_core.agents.experts import Praxis, Statute
     from phi_core.control.activation import ActivationFactory
+    from phi_core.control.policy import CapabilityPolicy
+    from phi_core.control.store import MongoControlStore
+    from phi_core.control.superorchestrator import SuperOrchestrator
+    from phi_core.control.tasks import TaskService
 
     warmup_sid = f"warmup:{uuid.uuid4().hex[:8]}"
     warmup_run_id = uuid.uuid4().hex
@@ -1997,7 +2009,14 @@ async def _run_warmup(db, cfg) -> dict:
     async def _noop_emit(_msg):  # pragma: no cover - trivial
         return None
 
-    factory = ActivationFactory(db, cfg)
+    control_store = MongoControlStore(db)
+    # Phase 5 step 2: a real WorkflowRun (run_type="warmup") so D5's
+    # run-level bounds apply across these 18 provider calls, not only the
+    # per-task ceiling each ActivationFactory-issued grant already had.
+    await SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(cfg))).start_run(
+        session_id=warmup_sid, principal="api-token", run_type="warmup", run_id=warmup_run_id,
+    )
+    factory = ActivationFactory(db, cfg, store=control_store)
     hipaa_cats = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K",
                   "L", "M", "N", "O", "P", "Q", "R"]
 
@@ -2011,12 +2030,16 @@ async def _run_warmup(db, cfg) -> dict:
         return_exceptions=True,
     )
     statute_res, praxis_res = await asyncio.gather(statute_task, praxis_task)
-
     praxis_ok = [c for c, r in zip(hipaa_cats, praxis_res, strict=True)
                  if not isinstance(r, Exception)]
     praxis_err = [{"category": c, "error": type(r).__name__}
                   for c, r in zip(hipaa_cats, praxis_res, strict=True)
                   if isinstance(r, Exception)]
+    # Praxis is called via `method_for`, never `run`, so it never gets
+    # `Agent.__init_subclass__`'s completion wrap; complete its one shared
+    # task explicitly, matching orchestrator.py's per-category equivalent.
+    if praxis_agent.ctx.tasks is not None:
+        await praxis_agent.ctx.tasks.complete({"primed": praxis_ok, "failed": praxis_err})
     return {
         "ok": True,
         "statute": {"jurisdiction": statute_res.get("jurisdiction", "us"),
