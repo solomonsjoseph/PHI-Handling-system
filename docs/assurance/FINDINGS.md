@@ -75,11 +75,11 @@
 ## F-HITL-001
 
 - Owner: control-plane program
-- Code anchors: `backend/server.py:1929-2023,2374-2421`, `frontend/src/pages/SessionDetail.jsx:635-643,781-808,1128-1131`, `frontend/src/pages/Wizard.jsx:349-393,533-556`
-- Acceptance tests: `backend/tests/test_control_review.py`, frontend review tests
+- Code anchors: `backend/server.py::session_human_review,HumanReviewSubmit`, `backend/phi_core/security.py::reviewer_principals,reviewer_role`, `backend/phi_core/agents/reasoning.py::auditor_escalation_reason,Auditor.run`, `frontend/src/pages/SessionDetail.jsx:635-643,781-808,1128-1131`, `frontend/src/pages/Wizard.jsx:349-393,533-556`
+- Acceptance tests: `backend/tests/test_certification_invalidation.py`, `backend/tests/test_production_readiness.py`, `backend/tests/test_manager_checkpoints.py`, `backend/tests/test_control_decisions.py`, planned `backend/tests/test_control_review.py`, frontend review tests
 - Status: open
-- Disposition: Phase 6 persists typed idempotent review events before any provider work and binds them to identity, audit, decision, and delivery versions.
-- Residual risk: reviewer policy remains operator-controlled.
+- Disposition: `REVIEWER_PRINCIPALS`-backed authorization now gates `session_human_review` (D13 step 1) and boots insecure without it outside dev. Comment-mode resolution never auto-applies regardless of confidence (D13 step 6): every model interpretation of free text now requires a separate, explicit reviewer confirmation. `auditor_escalation_reason` now blocks a high-confidence `issues` verdict unconditionally and rejects an audit naming an unknown or hash-mismatched artifact (plan step 2, partial: evidence-sufficiency and deterministic-gate-result inputs to the same gate are not yet wired -- no established data path threads `EvidenceClaim`/`GateResult` objects into Auditor's context). `decision_version` itself is owned end-to-end by `run_decision_gates` (D11, verified in `test_control_decisions.py`), but `session_human_review`'s own gate call still runs with no `store`, so `decision_version` stays 0 on that path and the D13 step 8 delivery-gate match on `(principal, file_id, decision_version)` is not yet implemented; today's check remains "any download ever occurred." `control/review.py::HumanReviewService` (D13's typed idempotent-event/fencing wrapper) does not exist yet -- `session_human_review` is still one large synchronous route, not authorize-then-persist-then-durably-drain. Judge's typed proposal record (plan step 1) and Operator/Reviewer's source-vs-export value comparison (plan step 6) are not started.
+- Residual risk: reviewer policy remains operator-controlled. The `HumanReviewService`/outbox-durable-worker gap means a crash between validating a submission and finishing its provider call loses that submission's comment interpretation (the caller gets a 5xx and must resubmit) rather than surviving via the already-built `review_resume` outbox kind, which has no handler registered yet.
 
 ## F-OBS-001
 

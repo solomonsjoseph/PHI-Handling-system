@@ -281,3 +281,50 @@ Phase 5 steps 1 and 3 are landed and verified; step 2 has its first production e
 - Step 9 is complete: `control/adapters.py` and its dedicated shim tests are deleted. Both live `run_decision_gates` callers now receive the typed decision list and hydrated session-file projection they already hold, with no conversion layer; `F-ADAPT-001` is resolved.
 - Step 7 is partial: `create_child_work` now enforces `MAX_TASKS_PER_RUN`, `MAX_PARALLEL_TASKS_PER_RUN`, and `MAX_PARALLEL_TASKS_PER_PARENT` at enqueue time, alongside the already-existing depth/fanout/budget-widen checks. `test_control_bounds.py` covers all five refusal paths, the shared `_int_env` env-var-override mechanism, and the per-agent-manifest-tightens-the-global-default contract (`Scout`'s `max_attempts=1`). The remaining 11 of 18 D5 bounds (wall-clock ceilings, and running token/cost/tool-call/artifact-byte totals) have no enforcement point in this codebase: they need a usage accumulator on `WorkflowRun.usage`/`CapabilityGrant.usage` maintained by the gateway and `ArtifactService`, neither of which exists yet, and are not attempted here rather than faked. The plan's "recorded as a `TraceEvent`" requirement is deliberately deferred for the same reason: `TraceEvent.seq`/`.prev_hash`/`.hash` need Phase 7's `TraceEventStore` monotonic-sequence and hash-chain authority; writing ad-hoc rows now risks data Phase 7 would have to reconcile. See `F-ORCH-001`, `F-DUR-001`, and the Phase 5 row in `docs/assurance/RISK_REGISTER.md`.
 - Step 8 is partial: `test_manager_holds_no_workflow_authority`, `test_only_the_artifact_service_writes_the_publication_pointer` (both static AST scans), and `test_concurrent_child_creation_cannot_exceed_parent_ancestor_or_run_budgets` (fires 6 concurrent `create_child_work` calls against a `MAX_PARALLEL_TASKS_PER_PARENT=3` ceiling; exactly 3 succeed, 3 refuse) are landed and pass against real code. The other two named tests -- `test_no_module_outside_the_super_orchestrator_calls_task_service_enqueue` and `test_every_entry_path_submits_a_command` -- surfaced a real scope discovery instead of being written as fakes: `control/activation.py::ActivationFactory.activate` is a documented, currently-necessary `TaskService.enqueue` caller outside `SuperOrchestrator` (its own module docstring already names this: "Phase 5's SuperOrchestrator becomes the sole caller of TaskService.enqueue; until then this factory is the one place that does"). Every individual agent activation across the entire 20-agent roster goes through it, not through `create_child_work` -- closing this for real is "every agent activation becomes a durable, budget-checked child task," materially larger than step 5's "Ledger/Herald" framing suggests. Tracked in `F-ORCH-001` rather than asserted green.
+
+## Phase 6 (in progress): evidence and human review
+
+### 1. Verified code-backed baseline relevant to this phase, with `path:line` anchors.
+
+- D11 (`control/gates.py::run_decision_gates`) and D12 (`control/evidence.py`) were already substantially landed before this phase's work began: `decision_version` CAS-increment is real and tested (`test_control_decisions.py`), and the tool-backed evidence rule is real and tested (`test_control_evidence.py`). This phase's own scope is D13 (human review) and the two Auditor/Judge/Operator strengthening steps the plan lists alongside it.
+- `session_human_review` (`backend/server.py`) was one large synchronous route with no reviewer-role authorization, an auto-apply-at->=0.60-confidence branch for comment interpretation, and a `decision_version` that stayed 0 on every call because its gate invocation carried no `store`.
+
+### 2. Files and symbols changed.
+
+- `backend/phi_core/security.py`: `reviewer_principals()`/`reviewer_role()`.
+- `backend/server.py`: `_refuse_to_boot_insecure` REVIEWER_PRINCIPALS check; `session_human_review` reviewer-role gate; comment-mode resolution rewritten to always produce `pending_confirmation`.
+- `backend/phi_core/agents/reasoning.py`: `auditor_escalation_reason` gains the issues-verdict and artifact-identity checks; `Auditor.run` gains `artifact_refs` and the `artifacts_checked` response field; `_ESCALATION_REASON_PLAIN` gains the two new codes.
+- `backend/phi_core/agents/orchestrator.py`: computes `artifact_refs` (file_id, sha256 via `ArtifactService`'s own `_hash_file`) at the `auditor_scout` phase and threads it through both the Auditor call and the escalation gate.
+- `backend/tests/conftest.py`: test-suite-wide `REVIEWER_PRINCIPALS` default covering every principal name the existing suite already exercises as a reviewer.
+- `backend/tests/test_certification_invalidation.py`, `test_production_readiness.py`, `test_manager_checkpoints.py`, `test_control_decisions.py`: new and updated tests for every behavior above.
+- `docs/assurance/FINDINGS.md`: `F-HITL-001` updated with concrete progress and the precise remaining gap.
+
+### 3. Threat or failure mode addressed, naming the `F-*` finding.
+
+- `F-HITL-001`: an unauthenticated-for-review-purposes principal (session ownership alone) could resolve human-review decisions; an LLM's own interpretation of a reviewer's free-text comment could become the operative de-identification decision at >=0.60 self-reported confidence with no human ever confirming it; a high-confidence Auditor `issues` verdict passed through uncontested; nothing verified an Auditor's audit was computed against the artifacts actually about to ship rather than a stale or hallucinated set.
+
+### 4. Data and authority boundaries before and after.
+
+- Before: any session owner could submit human-review resolutions; comment interpretation applied itself past a bare confidence number; Auditor's confidence alone gated escalation.
+- After: `session_human_review` requires both session ownership and a configured reviewer role (`reviewer`/`lead_reviewer`); comment interpretation always requires a second, explicit reviewer confirmation; Auditor's issues verdicts and artifact identity are independent, confidence-independent gates.
+
+### 5. Rollback: exact steps to revert safely, and what state (if any) survives a rollback.
+
+- `git revert` the three commits for this phase's slices so far. No durable-record schema changed (no `ControlRecord` field added or removed); `REVIEWER_PRINCIPALS` is additive configuration a rollback simply stops reading.
+
+### 6. Tests added and the exact commands run.
+
+- `test_comment_resolution_never_auto_applies_regardless_of_confidence`, `test_reviewer_principals_parses_name_role_pairs_and_drops_unknown_roles`, `test_reviewer_role_grants_dev_lead_reviewer_only_when_unset_and_only_to_dev`, `test_reviewer_role_respects_configured_principals_over_the_dev_fallback`, `test_auditor_escalation_reason_blocks_a_high_confidence_issues_verdict`, `test_auditor_escalation_reason_catches_unknown_or_mismatched_artifact_identity`, `test_high_confidence_auditor_issue_blocks_completion`. `ruff check backend`; `cd backend && DATA_DIR=<fresh tmp dir> pytest tests -q -rs`.
+
+### 7. Exact results, including every failure and every skip with its reason.
+
+- Ruff: clean. Backend suite: `774 passed, 8 skipped` (772 from the Phase 5 checkpoint plus 2 net new after accounting for one test split across files). Skips unchanged from prior phases.
+
+### 8. Remaining risk and deferred work, cross-referenced to `docs/assurance/RISK_REGISTER.md`.
+
+- Step 1 (Judge typed proposal record validated against `OUTPUT_SCHEMAS["judge_decisions"]`) is not started.
+- Step 2 is partial: see `F-HITL-001` for the exact evidence-sufficiency/deterministic-gate-result gap.
+- Steps 3-5 (`HumanReviewService`, `client_event_id`/`audit_version` field changes, typed-audit-record parity) are not started; `control/review.py` does not exist. `session_human_review` remains one large synchronous route rather than an authorize-then-persist-then-durably-drain flow through the already-built `review_resume` outbox kind (no handler registered for it in `worker.py::OUTBOX_HANDLERS` yet).
+- Step 6 (Operator/Reviewer source-vs-export value comparison) is not started.
+- Step 7 (`decision_version` ownership) is done at the D11 layer; `session_human_review`'s own gate call still passes no `store`, so its `decision_version` stays 0 and the D13 step 8 delivery-gate match on `(principal, file_id, decision_version)` is not implemented -- today's check remains "any download ever occurred on this session."
+- Step 8 (frontend `whoami()`/reviewer-identity plumbing) is not started.
