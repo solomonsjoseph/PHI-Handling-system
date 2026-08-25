@@ -50,6 +50,30 @@ async def test_start_run_opens_at_charter_with_a_committed_checkpoint() -> None:
     stored = await store.get_one("workflow_runs", {"run_id": run.run_id})
     assert stored["node"] == "charter"
 
+    root_tasks = await store.find_many("work_items", {"run_id": run.run_id})
+    assert len(root_tasks) == 1
+    assert root_tasks[0]["worker"] == "Pipeline"
+    assert root_tasks[0]["task_type"] == "pipeline_run"
+    assert root_tasks[0]["parent_task_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_start_run_uses_a_route_claimed_run_id_for_its_run_and_root_task() -> None:
+    orch, _tasks, store = _rig()
+    claimed_run_id = "b" * 32
+
+    run = await orch.start_run(
+        session_id=SESSION_ID,
+        principal="operator-1",
+        correlation_id="handle-command",
+        run_id=claimed_run_id,
+    )
+
+    assert run.run_id == claimed_run_id
+    tasks = await store.find_many("work_items", {"run_id": claimed_run_id})
+    assert len(tasks) == 1
+    assert tasks[0]["correlation_id"] == "handle-command"
+
 
 @pytest.mark.asyncio
 async def test_start_run_refuses_an_anonymous_principal() -> None:

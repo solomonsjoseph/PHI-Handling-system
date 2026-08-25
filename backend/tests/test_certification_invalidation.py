@@ -270,6 +270,7 @@ async def test_handle_claim_revokes_old_exports_before_worker_runs(monkeypatch, 
     assert "export_paths" not in db.doc
     assert len(db["work_items"].docs) == 1
     assert db["work_items"].docs[0]["task_type"] == "pipeline_run"
+    assert db["work_items"].docs[0]["input_ref"] == {"run_type": "study"}
 
     assert (await srv.session_export("sid", "dataset", principal="reviewer")).status_code == 403
     with pytest.raises(HTTPException) as excinfo:

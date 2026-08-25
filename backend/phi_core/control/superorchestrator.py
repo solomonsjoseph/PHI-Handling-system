@@ -128,20 +128,23 @@ class SuperOrchestrator:
         run_type: str = "study",
         iteration_cap: int = 0,
         correlation_id: str = "",
+        run_id: str | None = None,
     ) -> WorkflowRun:
-        """Open a new ``WorkflowRun`` at the ``charter`` node.
+        """Open a new ``WorkflowRun`` at the ``charter`` node and enqueue its
+        durable root ``Pipeline`` task.
 
-        Fails closed on an anonymous caller. Mints its own ``run_id`` --
-        D9's signature does not accept one -- so a caller that needs the
-        id before this returns (to CAS-claim its own idempotency record,
-        for instance) must sequence that claim after this call, keyed on
-        the returned ``run.run_id``.
+        Fails closed on an anonymous caller. A route that atomically claims
+        a session before starting work may pass that claim's fresh
+        ``run_id`` so its session fence, ``WorkflowRun``, and root task
+        share one identity. Other callers omit it and receive a minted
+        id. This method remains the sole `TaskService.enqueue` caller for
+        the new root task.
         """
         if not principal:
             raise CapabilityDenied("start_run requires an authenticated principal")
         if iteration_cap < 0:
             raise ValueError("iteration_cap must not be negative")
-        run_id = uuid4().hex
+        run_id = run_id or uuid4().hex
         now = _now()
         run = WorkflowRun(
             run_id=run_id,
@@ -159,6 +162,14 @@ class SuperOrchestrator:
             budget=ResourceBudget(wall_seconds=limits.MAX_RUN_WALL_S),
         )
         await self._store.insert("workflow_runs", run)
+        await self._tasks.enqueue(
+            run_id=run_id,
+            session_id=session_id,
+            worker="Pipeline",
+            task_type="pipeline_run",
+            input_ref={"run_type": run_type},
+            correlation_id=correlation_id or run_id,
+        )
         return run
 
     # ---- cancel_run -----------------------------------------------------

@@ -2316,15 +2316,21 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
     if cap is not None:
         session["iteration_cap"] = cap
     from phi_core.control.opaque import OpaqueMap
-    from phi_core.control.runs import RunStore
+    from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.store import MongoControlStore
+    from phi_core.control.superorchestrator import SuperOrchestrator
+    from phi_core.control.tasks import TaskService
 
-    run_store = MongoControlStore(db)
-    workflow_run = await RunStore(run_store).open_run(
+    control_store = MongoControlStore(db)
+    workflow_run = await SuperOrchestrator(
+        control_store, TaskService(control_store, CapabilityPolicy(cfg))
+    ).start_run(
         session_id=sid,
-        run_id=run_id,
+        principal=principal,
         run_type="study",
+        iteration_cap=cap or 0,
         correlation_id=run_id,
+        run_id=run_id,
     )
     opaque = OpaqueMap(run_id, workflow_run.opaque_map)
     for file_record in session.get("files") or []:
@@ -2332,18 +2338,10 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
     await db.sessions.update_one({"id": sid, "_pipeline_run_id": run_id}, {"$set": {"files": session.get("files") or []}})
     await db.workflow_runs.update_one({"run_id": run_id}, {"$set": {"opaque_map": workflow_run.opaque_map}})
 
-    # Phase 4 step 2/4: submit and return. `_handle_pipeline_run` (one of
-    # the `Worker` instances `_startup_maintenance` started) claims and
-    # executes this task; every SSE progress event, timeout, cancellation,
-    # and completion write it produces is identical to what this route's
-    # own `asyncio.create_task(worker())` closure used to do inline.
-    from phi_core.control.policy import CapabilityPolicy
-    from phi_core.control.tasks import TaskService
-
-    await TaskService(MongoControlStore(db), CapabilityPolicy(cfg)).enqueue(
-        run_id=run_id, session_id=sid, worker="Pipeline", task_type="pipeline_run",
-        correlation_id=run_id,
-    )
+    # Phase 5 step 2/9: the route owns its legacy session admission claim
+    # and then submits the command. SuperOrchestrator owns the WorkflowRun
+    # and creates the durable root Pipeline work item; this route never
+    # calls TaskService.enqueue directly.
     return {"status": "started", "llm": {"provider": cfg.provider, "model": cfg.model}}
 
 
