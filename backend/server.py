@@ -2197,13 +2197,15 @@ class HumanReviewSubmit(BaseModel):
     # Auditor's confidence-floor gate (design doc "second human review") can
     # fire with zero actionable per-column issues -- just a bare self-
     # reported number below the floor. There is no per-column decision to
-    # resolve in that case, so approve/comment/defer cannot clear it. This
-    # is the explicit lever: a reviewer who has read Auditor's full summary
-    # and metrics (surfaced in plain English) and decides to proceed anyway
-    # sets this, under the same accountability gate as any other
-    # human decision here (actual_knowledge_ack required). It has no effect
-    # when Auditor has real per-column issues -- those still require
-    # resolving through `resolutions` like any other human_review decision.
+    # resolve in that case, so approve/comment/defer cannot clear it.
+    #
+    # Phase 4 step 4 deleted the bespoke override that used to read this
+    # field (`_run_tail`'s `confidence_override_applies` block), per the
+    # plan's explicit instruction: the resume tail now shares
+    # `orchestrator.execute_decisions` with the fresh-run path, which has
+    # no override concept. This field is kept only for request-shape
+    # compatibility; it is currently inert. D13 step 5 (Phase 6) restores
+    # a generalized version of this lever through `HumanReviewService`.
     confirm_auditor_confidence: bool = False
     # HHS §164.514(b)(2)(ii) "actual knowledge" attestation. IRB-required
     # procedural step separate from the technical Safe Harbor method.
@@ -2237,21 +2239,13 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     actual-knowledge attestation, scoped to the columns resolved this
     round -- never to columns this same submission defers.
     """
-    from phi_core.agents.operator import Operator
-    from phi_core.agents.outward import Herald, Ledger, Scout
     from phi_core.agents.reasoning import (
         ACTION_TYPES,
         CONFIDENCE_FLOOR,
-        Auditor,
-        Executor,
         Judge,
         annotate_pending_review,
-        auditor_escalation_reason,
-        materialize_auditor_disagreements,
-        plain_human_review_reasons,
         validate_decisions,
     )
-    from phi_core.agents.reviewer import Reviewer
     from phi_core.control.adapters import legacy_decision_adapter, legacy_files_adapter
     from phi_core.control.context import AgentContext
     from phi_core.control.gates import DecisionGateFailure, run_decision_gates
@@ -2563,262 +2557,90 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     async def on_phase(phase: str, payload: dict):
         await _emit(sid, ProgressEvent(phase=f"agent_phase:{phase}", message=phase, payload=payload), run_id=resume_run_id)
 
-
-
     async def worker():
-        async def _run_tail():
-            phase_timings: dict[str, dict[str, float]] = {}
-            last_phase: dict[str, str | float | None] = {"key": None, "t0": 0.0}
-            run_started = time.perf_counter()
+        # D9 resume: the same `execute_decisions` tail
+        # (`phi_core.agents.orchestrator`) a fresh run reaches from
+        # `gate_decisions`'s `proceed` outcome is reached here from
+        # `human_review_decisions`'s `resolved` outcome -- one shared
+        # implementation, not a second copy kept in sync by hand
+        # (Phase 4 step 4; see `docs/adr/0001-workflow-engine.md`).
+        from phi_core.agents import orchestrator
+        from phi_core.agents.manager import Manager
+        from phi_core.control.activation import ActivationFactory
 
-            async def timed_on_phase(phase: str, payload: dict) -> None:
-                now = time.perf_counter()
-                previous = last_phase["key"]
-                if previous and previous != phase:
-                    timing = phase_timings.setdefault(
-                        str(previous), {"start_s": float(last_phase["t0"]) - run_started},
-                    )
-                    timing["end_s"] = now - run_started
-                    timing["duration_ms"] = (now - float(last_phase["t0"])) * 1000
-                phase_timings.setdefault(phase, {"start_s": now - run_started})
-                last_phase["key"] = phase
-                last_phase["t0"] = now
-                await on_phase(phase, payload)
+        phase_timings: dict[str, dict[str, float]] = {}
+        last_phase: dict[str, str | float | None] = {"key": None, "t0": 0.0}
+        run_started = time.perf_counter()
+        manager_box: dict[str, "Manager | None"] = {"value": None}
 
-            async def close_last_phase() -> None:
-                previous = last_phase["key"]
-                if not previous:
-                    return
-                now = time.perf_counter()
+        async def timed_on_phase(phase: str, payload: dict) -> None:
+            now = time.perf_counter()
+            previous = last_phase["key"]
+            if previous and previous != phase:
                 timing = phase_timings.setdefault(
                     str(previous), {"start_s": float(last_phase["t0"]) - run_started},
                 )
-                timing.setdefault("end_s", now - run_started)
-                timing.setdefault("duration_ms", (now - float(last_phase["t0"])) * 1000)
+                timing["end_s"] = now - run_started
+                timing["duration_ms"] = (now - float(last_phase["t0"])) * 1000
+            phase_timings.setdefault(phase, {"start_s": now - run_started})
+            last_phase["key"] = phase
+            last_phase["t0"] = now
+            if manager_box["value"] is not None:
+                await manager_box["value"].note_phase(phase, now - run_started)
+            await on_phase(phase, payload)
 
-            from phi_core.control.activation import ActivationFactory
-            _factory = ActivationFactory(db, cfg)
-            async def _actx(agent: str):
-                return await _factory.activate(session_id=sid, run_id=resume_run_id, agent=agent, emit=emit_msg)
+        async def close_last_phase() -> None:
+            previous = last_phase["key"]
+            if not previous:
+                return
+            now = time.perf_counter()
+            timing = phase_timings.setdefault(
+                str(previous), {"start_s": float(last_phase["t0"]) - run_started},
+            )
+            timing.setdefault("end_s", now - run_started)
+            timing.setdefault("duration_ms", (now - float(last_phase["t0"])) * 1000)
+
+        _factory = ActivationFactory(db, cfg)
+
+        async def _actx(agent: str):
+            return await _factory.activate(
+                session_id=sid, run_id=resume_run_id, agent=agent, emit=emit_msg,
+                manager=manager_box["value"],
+            )
+
+        async def _run_resume() -> dict[str, Any]:
+            manager = Manager(await _actx("Manager"), db=db)
+            manager_box["value"] = manager
+            await manager.run(
+                roster=["Executor", "Operator", "Reviewer", "Auditor", "Scout", "Ledger", "Herald"],
+                phase_plan=["executor", "operator", "reviewer", "publish_guard",
+                            "auditor_scout", "ledger", "herald"],
+            )
             resolved_decisions = [d for d in decisions if d.get("action") != "human_review"]
             scrubbed_decisions = [scrub_decision(d) for d in resolved_decisions]
             omit_by_file: dict[str, set[str]] = {}
             for entry in pending_review:
                 omit_by_file.setdefault(entry["file_id"], set()).add(entry["column"])
-            await timed_on_phase("executor", {"decision_count": len(scrubbed_decisions)})
-
-            exec_out = await Executor(await _actx("Executor")).run(files=files, decisions=scrubbed_decisions, omit_by_file=omit_by_file)
-
-            # Reversal key: same mandatory deliverable as the first-pass
-            # pipeline. pseudonym_salt(session_id) is deterministic, so a
-            # resumed run regenerates identical pseudonyms and this simply
-            # overwrites the earlier blob consistently.
-            if exec_out.get("reversal_key_blob"):
-                await db.sessions.update_one(run_filter, {"$set": {
-                    "reversal_key_blob": exec_out["reversal_key_blob"],
-                    "reversal_key_created_at": datetime.now(timezone.utc).isoformat(),
-                }})
-
-            # Scout has no dependency on Operator, Reviewer, Publish Guard,
-            # or Auditor, so it starts here and runs in the background
-            # across all of them; only Ledger needs its result.
-            scout_agent = Scout(await _actx("Scout"))
-            scout_task = asyncio.create_task(scout_agent.run())
-
-            await timed_on_phase("operator", {"decision_count": len(scrubbed_decisions)})
-            op_out = await Operator(await _actx("Operator")).run(files=files, decisions=scrubbed_decisions,
-                                                  exports=exec_out["exports"], omit_by_file=omit_by_file)
-            # Operator's own `failed_file_ids` only covers a file it could
-            # not read or that never made it into `exports` at all. A
-            # shape-check or reverse-completeness failure surfaces as a
-            # per-column 'fail' verdict on an otherwise-readable file, and
-            # must block that file from `exports` exactly the same way.
-            op_failed_ids = sorted(set(op_out["failed_file_ids"]) |
-                                   {v["file_id"] for v in op_out["verdicts"] if v.get("verdict") == "fail"})
-            exports = {fid: p for fid, p in exec_out["exports"].items()
-                      if fid not in op_failed_ids}
-
-            # Reviewer: confirms Operator's coverage of every decision
-            # against the real written export, catching gaps Operator's
-            # own pass cannot see. Its own filtered exports become
-            # canonical for every remaining step below, starting with
-            # Publish Guard.
-            await timed_on_phase("reviewer", {"decision_count": len(scrubbed_decisions)})
-            rv_out = await Reviewer(await _actx("Reviewer")).run(
-                decisions=scrubbed_decisions,
-                operator_result={"failed_file_ids": op_failed_ids, "verdicts": op_out["verdicts"]},
-                exports=exports,
-                omit_by_file=omit_by_file,
-            )
-            reviewer_blocked_ids = sorted(set(exports) - set(rv_out["exports"]))
-            exports = rv_out["exports"]
-
-            from phi_core.publish_guard import scan_all_exports as _scan_all_exports
-            if exec_out["exports"]:
-                # `exports` (Operator-then-Reviewer-filtered) is what
-                # actually gets scanned.
-                # If Operator's checks wiped every file out of a non-empty
-                # Executor output, scan_all_exports naturally reports
-                # `blocked` on the resulting empty dict (scanned == 0) --
-                # exactly the existing "can't certify clean" behavior, no
-                # special-casing needed here.
-                guard_report = _scan_all_exports(exports, decisions=scrubbed_decisions,
-                                                 jurisdiction=session.get("jurisdiction", "us")).to_dict()
-            else:
-                # Executor itself produced nothing exportable this round
-                # (e.g. every column of the only dataset is still deferred).
-                # This is a legitimate empty-so-far state, not a leak --
-                # Publish Guard's own "no exports to scan" reading would
-                # otherwise report `blocked`, which is wrong here.
-                guard_report = {"status": "clean", "results": [], "scanned": 0, "blocked": 0}
-            await timed_on_phase("publish_guard", {
-                "status": guard_report["status"],
-                "scanned": guard_report["scanned"],
-                "blocked": guard_report["blocked"],
-            })
-
-            if guard_report["status"] != "clean":
-                await close_last_phase()
-
-                await db.sessions.update_one(run_filter, {"$set": {
-                    "status": "blocked",
-                    "guard_report": guard_report,
-                    "export_paths": exports,
-                    "agent_decisions": decisions,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "phase_timings": phase_timings,
-                    "run_elapsed_s": round(time.perf_counter() - run_started, 3),
-                    "operator_failures": op_failed_ids,
-                    "reviewer_findings": rv_out["findings"],
-
-                }})
-                scout_task.cancel()
-                cleanup_session_unpacked(sid)
-                await _emit(sid, ProgressEvent(phase="blocked", message="publish guard blocked this run", percent=100.0), run_id=resume_run_id)
-                return
-            await timed_on_phase("auditor_scout", {})
-            auditor_agent = Auditor(await _actx("Auditor"))
-            audit, scout = await asyncio.gather(
-                auditor_agent.run(decisions=scrubbed_decisions, exports=exports, files=files,
-                                  statute=session.get("agent_statute"), praxis_methods=session.get("agent_praxis")),
-                scout_task,
-                return_exceptions=True,
-            )
-            # Auditor/Scout are presentational (Publish Guard already gated
-            # the export above); an unhandled exception here must not crash
-            # a run that already succeeded. Log it and fall back to a
-            # report that visibly says "not verified" rather than claiming
-            # a clean audit it never performed.
-            if isinstance(audit, Exception):
-                await auditor_agent._log("auditor.crashed", "info",
-                                          {"error": f"{type(audit).__name__}: {audit}"})
-                audit = {"verdict": "issues", "issues": [{"file": "", "problem": "Auditor crashed; not verified"}],
-                         "metrics": {}, "confidence": 0.0,
-                         "summary": "Auditor raised an exception; audit not performed."}
-            if isinstance(scout, Exception):
-                await scout_agent._log("scout.crashed", "info", {"error": f"{type(scout).__name__}: {scout}"})
-                scout = {}
-
-            # Second human review, same deterministic confidence-floor gate
-            # as the first-pass pipeline -- distinct from Sentinel's
-            # pre-execution round, and fires regardless of entry path.
-            auditor_reason = auditor_escalation_reason(audit)
-            # The confidence-only override: a bare low self-reported number
-            # with zero actionable per-column issues has no decision for
-            # `resolutions` to act on. A reviewer who explicitly confirms
-            # (having been shown Auditor's full summary/metrics) after
-            # actually attesting actual knowledge is trusted once, logged,
-            # never silently -- this is NOT honored when Auditor has real
-            # per-column issues, which must still be resolved normally.
-            confidence_override_applies = (
-                bool(auditor_reason) and not (audit.get("issues") or [])
-                and body.confirm_auditor_confidence and body.actual_knowledge_ack
-            )
-            if confidence_override_applies:
-                await db.sessions.update_one(run_filter, {"$push": {
-                    "auditor_confidence_overrides": {
-                        "reviewer": reviewer, "reviewed_at": ts,
-                        "confidence": audit.get("confidence"),
-                        "summary": audit.get("summary", ""),
-                    }
-                }})
-                auditor_reason = None
-            if auditor_reason:
-                await close_last_phase()
-                # Same materialization as the first-pass pipeline: give the
-                # reviewer an actual per-column question to answer instead
-                # of a bare status flag that can only be blindly resubmitted.
-                # NOTE: assigned to a new name, not `decisions` -- `decisions`
-                # is a name from the enclosing function that this nested
-                # `_run_tail` closure only reads; assigning to it here would
-                # make Python treat it as local for the WHOLE function body,
-                # breaking every earlier read of it (UnboundLocalError).
-                materialized_decisions = materialize_auditor_disagreements(decisions, audit, dictionary_by_column)
-                await db.sessions.update_one(run_filter, {"$set": {
-                    "status": "awaiting_human_review",
-                    "guard_report": guard_report, "export_paths": exports,
-                    "agent_decisions": materialized_decisions, "agent_audit": audit,
-                    "operator_failures": op_failed_ids, "reviewer_findings": rv_out["findings"],
-                    "human_review_reasons": [auditor_reason],
-                    "human_review_reasons_plain": plain_human_review_reasons([auditor_reason]),
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "phase_timings": phase_timings,
-                    "run_elapsed_s": round(time.perf_counter() - run_started, 3),
-                }})
-                if not scout_task.done():
-                    scout_task.cancel()
-                await _emit(sid, ProgressEvent(phase="awaiting_human_review",
-                                               message="Auditor's confidence was too low; a person needs to confirm this before it can be shared.",
-                                               percent=100.0), run_id=resume_run_id)
-                return
-            await timed_on_phase("ledger", {})
-
-            ledger = await Ledger(
-                await _actx("Ledger"), await _actx("Ledger.Compare"), await _actx("Ledger.Aggregate"),
-            ).run(decisions=scrubbed_decisions, audit=audit, scout=scout, benchmark_result=None)
-            await timed_on_phase("herald", {})
-
-            herald = await Herald(
-                await _actx("Herald"), await _actx("Herald.Abstract"), await _actx("Herald.Sections"),
-            ).run(ledger=ledger, audit=audit, target_venue=session.get("target_venue") or "JAMIA Open")
-            await close_last_phase()
-            run_elapsed_s = round(time.perf_counter() - run_started, 3)
-
-            final_status = "partially_complete" if (pending_review or op_failed_ids or reviewer_blocked_ids) else "complete"
-            completion_update = {
-                "$set": {
-                    "agent_audit": audit,
-                    "agent_ledger": ledger,
-                    "agent_herald": herald,
-                    "agent_scout": scout,
-                    "guard_report": guard_report,
+            return await orchestrator.execute_decisions(
+                db=db, sid=sid, session=session, session_filter=run_filter,
+                files=files, decisions=scrubbed_decisions,
+                statute=session.get("agent_statute"), praxis_methods=session.get("agent_praxis"),
+                dictionary_by_column=dictionary_by_column,
+                make_ctx=_actx, manager=manager, on_phase=timed_on_phase,
+                close_last_phase=close_last_phase, phase_timings=phase_timings,
+                run_started=run_started, omit_by_file=omit_by_file,
+                extra_completion_fields={
                     "session_review": session_review_history,
                     "pending_review": pending_review,
-                    "export_paths": exports,
-                    "status": final_status,
                     "human_review_required": bool(pending_review),
-                    "phase_timings": phase_timings,
-                    "run_elapsed_s": run_elapsed_s,
-                    "operator_failures": op_failed_ids,
-                    "reviewer_findings": rv_out["findings"],
-
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
-            }
-            await db.sessions.update_one(run_filter, completion_update)
-            if final_status == "complete":
-                # Only a fully-resolved session releases the original files --
-                # a partially_complete session keeps them so a later
-                # resolution round can resume Executor against them.
-                cleanup_session_unpacked(sid)
-            await _emit(sid, ProgressEvent(
-                phase=final_status,
-                message="pipeline complete after human review" if final_status == "complete"
-                        else f"partial export ready; {len(pending_review)} column(s) still pending review",
-                percent=100.0), run_id=resume_run_id)
+            )
 
         try:
-            await asyncio.wait_for(_run_tail(), timeout=900)
+            result = await asyncio.wait_for(_run_resume(), timeout=900)
+            await _emit(sid, ProgressEvent(
+                phase="complete", message=f"Resume done: {result.get('status')}", percent=100.0,
+            ), run_id=resume_run_id)
         except asyncio.TimeoutError:
             await db.sessions.update_one(run_filter, {"$set": {
                 "status": "failed",
@@ -2827,7 +2649,19 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             cleanup_session_unpacked(sid)
             await _emit(sid, ProgressEvent(phase="failed", message="Resume hit the 15-minute wall-clock ceiling."), run_id=resume_run_id)
         except Exception as e:
-            await _fail_session_correlated(db, sid, run_filter, e, run_id=resume_run_id)
+            from phi_core.agents.orchestrator import PipelineCancelled
+            if isinstance(e, PipelineCancelled):
+                await db.sessions.update_one(run_filter, {"$set": {
+                    "status": "cancelled",
+                    "cancelled_at": datetime.now(timezone.utc).isoformat(),
+                }})
+                cleanup_session_unpacked(sid)
+                await _emit(sid, ProgressEvent(
+                    phase="cancelled", message="Resume cancelled by operator.",
+                    payload={"reason": "operator_cancel"},
+                ), run_id=resume_run_id)
+            else:
+                await _fail_session_correlated(db, sid, run_filter, e, run_id=resume_run_id)
         finally:
             _release_pipeline_run()
             await _emit(sid, ProgressEvent(phase="__end__", message="stream end"), run_id=resume_run_id)

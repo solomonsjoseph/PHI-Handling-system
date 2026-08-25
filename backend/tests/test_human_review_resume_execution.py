@@ -1,0 +1,402 @@
+"""End-to-end proof that `session_human_review`'s resume worker actually
+drives `orchestrator.execute_decisions` to completion -- the extraction
+Phase 4 step 4 introduced (deleting `_run_tail` in favor of the same
+shared tail a fresh run uses). Every other `test_human_review_invariant.py`
+test only exercises the synchronous decision-resolution half of the route;
+the background `asyncio.create_task(worker())` it launches was never
+actually awaited to completion anywhere until this file.
+"""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+
+def _matches(doc: dict, query: dict) -> bool:
+    """Enough of Mongo's query language for this route's own filters:
+    plain equality, `$in`, `$nin`, and `$exists`."""
+    for key, expected in query.items():
+        actual = doc.get(key)
+        if isinstance(expected, dict) and set(expected) <= {"$in", "$nin", "$exists"}:
+            if "$in" in expected and actual not in expected["$in"]:
+                return False
+            if "$nin" in expected and actual in expected["$nin"]:
+                return False
+            if "$exists" in expected and (key in doc) != expected["$exists"]:
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
+class _FakeCollection:
+    """Minimal in-memory stand-in for an ``AsyncIOMotorCollection``, enough
+    for ``MongoControlStore`` to read and write control-plane records
+    (``capability_grants``, ``work_items``, ``trace_events``, ``agent_log``,
+    ``gate_results``, ...) without a real Mongo connection."""
+
+    def __init__(self):
+        self.docs: list[dict] = []
+
+    async def insert_one(self, doc):
+        self.docs.append(dict(doc))
+
+    async def find_one(self, query, *_a, **_kw):
+        for d in self.docs:
+            if _matches(d, query):
+                return dict(d)
+        return None
+
+    def find(self, query):
+        async def _cursor():
+            for d in self.docs:
+                if _matches(d, query):
+                    yield dict(d)
+        return _cursor()
+
+    async def replace_one(self, query, replacement):
+        for i, d in enumerate(self.docs):
+            if _matches(d, query):
+                self.docs[i] = dict(replacement)
+                return SimpleNamespace(matched_count=1)
+        return SimpleNamespace(matched_count=0)
+
+    async def update_one(self, query, update):
+        for d in self.docs:
+            if _matches(d, query):
+                d.update(update.get("$set", {}))
+                for key in update.get("$unset", {}):
+                    d.pop(key, None)
+                return SimpleNamespace(matched_count=1)
+        return SimpleNamespace(matched_count=0)
+
+    async def delete_one(self, query):
+        for i, d in enumerate(self.docs):
+            if _matches(d, query):
+                del self.docs[i]
+                return SimpleNamespace(deleted_count=1)
+        return SimpleNamespace(deleted_count=0)
+
+
+class _StubDB:
+    """`.sessions` is the session document itself (single-session tests
+    only need one); every other collection name (subscript or attribute,
+    matching real Motor's `db["x"]` == `db.x`) is a fresh `_FakeCollection`."""
+
+    def __init__(self, doc: dict):
+        self.doc = doc
+        self.sessions = self
+        self.updates: list[dict] = []
+        self._collections: dict[str, _FakeCollection] = {}
+
+    def __getitem__(self, name: str) -> _FakeCollection:
+        return self._collections.setdefault(name, _FakeCollection())
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self[name]
+
+    async def find_one(self, query, *_a, **_kw):
+        if _matches(self.doc, query):
+            return dict(self.doc)
+        return None
+
+    async def update_one(self, query, update):
+        if not _matches(self.doc, query):
+            return SimpleNamespace(matched_count=0)
+        self.updates.append(dict(update.get("$set", {})))
+        self.doc.update(update.get("$set", {}))
+        for key in update.get("$unset", {}):
+            self.doc.pop(key, None)
+        return SimpleNamespace(matched_count=1)
+
+
+def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> str:
+    import csv
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_session_human_review_resume_worker_runs_execute_decisions_to_completion(tmp_path, monkeypatch):
+    import server as srv
+    from phi_core.agents import orchestrator
+
+    src = tmp_path / "dm.csv"
+    sha = _write_csv(src, ["id", "field"], [["1", "x"], ["2", "y"]])
+
+    session_doc = {
+        "id": "a" * 32,
+        "owner": "alice",
+        "status": "awaiting_human_review",
+        "jurisdiction": "us",
+        "files": [{"file_id": "f1", "kind": "dataset", "subtype": "csv",
+                   "stored_path": str(src), "sha256": sha, "columns": ["id", "field"]}],
+        "agent_decisions": [
+            {"file_id": "f1", "column": "id", "action": "drop", "phi_category": "A",
+             "citation": "45 CFR 164.514(b)(2)(i)(A)", "confidence": 0.95, "reason": "identifier"},
+            {"file_id": "f1", "column": "field", "action": "human_review",
+             "suggested_action": "keep", "suggested_reason": "clinical value",
+             "phi_category": "R", "confidence": 0.5, "reason": "needs review"},
+        ],
+        "agent_specialists": {"lexicon": {"columns": []}},
+        "agent_statute": {},
+        "agent_praxis": {},
+        "dataset_file_downloads": [{"file_id": "f1", "principal": "alice"}],
+    }
+    db = _StubDB(session_doc)
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+
+    captured_tasks: list = []
+    real_create_task = asyncio.create_task
+
+    def _capture_create_task(coro, *a, **kw):
+        captured_tasks.append(coro)
+        # Return a real, already-cancelled-safe task the caller can ignore;
+        # the test drives `coro` itself directly below.
+        async def _noop():
+            return None
+        return real_create_task(_noop(), *a, **kw)
+
+    monkeypatch.setattr(srv.asyncio, "create_task", _capture_create_task)
+
+    class FakeExecutor:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def run(self, files, decisions, omit_by_file=None):
+            dst = tmp_path / "f1_export.csv"
+            dst.write_text("field\nx\ny\n", encoding="utf-8")
+            return {"exports": {"f1": str(dst)}}
+
+    class FakeOperator:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def run(self, files, decisions, exports, omit_by_file=None):
+            return {"failed_file_ids": [], "verdicts": []}
+
+    class FakeReviewer:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def run(self, decisions, operator_result, exports, omit_by_file=None):
+            return {"exports": exports, "findings": []}
+
+    class FakeAuditor:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def _log(self, *_a, **_kw):
+            return None
+
+        async def run(self, **_kw):
+            return {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+
+    class FakeScout:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def _log(self, *_a, **_kw):
+            return None
+
+        async def run(self, **_kw):
+            return {}
+
+    class FakeLedger:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def run(self, **_kw):
+            return {"summary": "ledger"}
+
+    class FakeHerald:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def run(self, **_kw):
+            return {"abstract": "herald"}
+
+    monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
+    monkeypatch.setattr(orchestrator, "Operator", FakeOperator)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
+    monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
+    monkeypatch.setattr(orchestrator, "Scout", FakeScout)
+    monkeypatch.setattr(orchestrator, "Ledger", FakeLedger)
+    monkeypatch.setattr(orchestrator, "Herald", FakeHerald)
+
+    body = srv.HumanReviewSubmit(
+        resolutions=[{"file_id": "f1", "column": "field", "mode": "approve"}],
+        comment="",
+        actual_knowledge_ack=True,
+    )
+    resp = await srv.session_human_review("a" * 32, body, "alice")
+    assert resp == {"status": "resuming"}
+    assert len(captured_tasks) == 1
+
+    # Drive the captured worker() coroutine to completion directly --
+    # `asyncio.create_task` was intercepted above so the real one never ran.
+    await asyncio.wait_for(captured_tasks[0], timeout=30)
+
+    # The final state proves the shared `execute_decisions` tail actually
+    # ran: Ledger/Herald outputs landed, status reflects a clean run with
+    # no columns still pending, and the resume-specific bookkeeping
+    # (`session_review`, `pending_review`, `human_review_required`) that
+    # only `execute_decisions`'s `extra_completion_fields` merge produces
+    # is present.
+    assert session_doc["status"] == "complete"
+    assert session_doc["agent_ledger"] == {"summary": "ledger"}
+    assert session_doc["agent_herald"] == {"abstract": "herald"}
+    assert session_doc["export_paths"] == {"f1": str(tmp_path / "f1_export.csv")}
+    assert session_doc["pending_review"] == []
+    assert session_doc["human_review_required"] is False
+    assert len(session_doc["session_review"]) == 1
+    assert session_doc["session_review"][0]["reviewer"] == "alice"
+    assert session_doc["session_review"][0]["resolved_columns"] == [{"file_id": "f1", "column": "field"}]
+
+
+@pytest.mark.asyncio
+async def test_session_human_review_resume_worker_leaves_partially_complete_when_a_column_stays_deferred(tmp_path, monkeypatch):
+    """One column approved, a second explicitly deferred: the resume must
+    still execute (Executor/Operator/Reviewer run against the resolved
+    column via `omit_by_file`), but the final status must be
+    `partially_complete`, not `complete` -- exactly the property that
+    made `_run_tail` a separate implementation from the fresh path before
+    this extraction shared `omit_by_file` through `execute_decisions`."""
+    import server as srv
+    from phi_core.agents import orchestrator
+
+    src = tmp_path / "dm.csv"
+    sha = _write_csv(src, ["a", "b"], [["1", "x"], ["2", "y"]])
+
+    session_doc = {
+        "id": "b" * 32,
+        "owner": "alice",
+        "status": "awaiting_human_review",
+        "jurisdiction": "us",
+        "files": [{"file_id": "f1", "kind": "dataset", "subtype": "csv",
+                   "stored_path": str(src), "sha256": sha, "columns": ["a", "b"]}],
+        "agent_decisions": [
+            {"file_id": "f1", "column": "a", "action": "human_review",
+             "suggested_action": "keep", "suggested_reason": "clinical value",
+             "phi_category": "R", "confidence": 0.5, "reason": "needs review"},
+            {"file_id": "f1", "column": "b", "action": "human_review",
+             "suggested_action": "drop", "suggested_reason": "identifier",
+             "phi_category": "A", "confidence": 0.5, "reason": "needs review"},
+        ],
+        "agent_specialists": {"lexicon": {"columns": []}},
+        "agent_statute": {},
+        "agent_praxis": {},
+        "dataset_file_downloads": [{"file_id": "f1", "principal": "alice"}],
+    }
+    db = _StubDB(session_doc)
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+
+    captured_tasks: list = []
+    real_create_task = asyncio.create_task
+
+    def _capture_create_task(coro, *a, **kw):
+        captured_tasks.append(coro)
+        async def _noop():
+            return None
+        return real_create_task(_noop(), *a, **kw)
+
+    monkeypatch.setattr(srv.asyncio, "create_task", _capture_create_task)
+
+    executor_calls: list[dict] = []
+
+    class FakeExecutor:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def run(self, files, decisions, omit_by_file=None):
+            executor_calls.append({"decisions": decisions, "omit_by_file": omit_by_file})
+            dst = tmp_path / "f1_export.csv"
+            dst.write_text("a\nx\ny\n", encoding="utf-8")
+            return {"exports": {"f1": str(dst)}}
+
+    class FakeOperator:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def run(self, files, decisions, exports, omit_by_file=None):
+            return {"failed_file_ids": [], "verdicts": []}
+
+    class FakeReviewer:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def run(self, decisions, operator_result, exports, omit_by_file=None):
+            return {"exports": exports, "findings": []}
+
+    class FakeAuditor:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def _log(self, *_a, **_kw):
+            return None
+
+        async def run(self, **_kw):
+            return {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+
+    class FakeScout:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def _log(self, *_a, **_kw):
+            return None
+
+        async def run(self, **_kw):
+            return {}
+
+    class FakeLedger:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def run(self, **_kw):
+            return {}
+
+    class FakeHerald:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        async def run(self, **_kw):
+            return {}
+
+    monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
+    monkeypatch.setattr(orchestrator, "Operator", FakeOperator)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
+    monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
+    monkeypatch.setattr(orchestrator, "Scout", FakeScout)
+    monkeypatch.setattr(orchestrator, "Ledger", FakeLedger)
+    monkeypatch.setattr(orchestrator, "Herald", FakeHerald)
+
+    body = srv.HumanReviewSubmit(
+        resolutions=[
+            {"file_id": "f1", "column": "a", "mode": "approve"},
+            {"file_id": "f1", "column": "b", "mode": "defer"},
+        ],
+        comment="",
+        actual_knowledge_ack=True,
+    )
+    resp = await srv.session_human_review("b" * 32, body, "alice")
+    assert resp == {"status": "resuming"}
+    await asyncio.wait_for(captured_tasks[0], timeout=30)
+
+    assert len(executor_calls) == 1
+    # Only the resolved column reaches Executor; the deferred one is
+    # excluded from `decisions` and named in `omit_by_file` instead.
+    assert {d["column"] for d in executor_calls[0]["decisions"]} == {"a"}
+    assert executor_calls[0]["omit_by_file"] == {"f1": {"b"}}
+
+    assert session_doc["status"] == "partially_complete"
+    assert session_doc["pending_review"] == [{"file_id": "f1", "column": "b"}]
+    assert session_doc["human_review_required"] is True

@@ -95,6 +95,329 @@ async def _check_cancel(db: AsyncIOMotorDatabase, sid: str, on_phase: PhaseCb) -
         raise PipelineCancelled()
 
 
+async def execute_decisions(
+    *,
+    db: AsyncIOMotorDatabase,
+    sid: str,
+    session: dict[str, Any],
+    session_filter: dict[str, Any],
+    files: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+    statute: dict[str, Any],
+    praxis_methods: dict[str, Any],
+    dictionary_by_column: dict[str, str],
+    make_ctx: Callable[[str], Awaitable[AgentContext]],
+    manager: Manager,
+    on_phase: PhaseCb,
+    close_last_phase: Callable[[], Awaitable[None]],
+    phase_timings: dict[str, dict[str, float]],
+    run_started: float,
+    omit_by_file: dict[str, set[str]] | None = None,
+    sentinel_report: dict[str, Any] | None = None,
+    extra_completion_fields: dict[str, Any] | None = None,
+    extra_result_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The D9 ``execute`` node onward -- Executor, Operator, Reviewer,
+    Publish Guard, Auditor/Scout, Ledger, Herald, and the terminal
+    completion write.
+
+    Reached identically whether ``gate_decisions`` transitioned here
+    directly (``proceed``: a fresh run with no ``human_review`` decisions
+    left) or via ``human_review_decisions`` (``resolved``: a resume,
+    possibly with some columns still deferred through ``omit_by_file``)
+    -- the exact D9 property (``docs/adr/0001-workflow-engine.md``) that
+    lets a caller delete a separate resume-only reimplementation of this
+    tail rather than keep two divergent copies in sync by hand.
+
+    ``extra_completion_fields``/``extra_result_fields`` are merged into
+    the terminal (complete/partially_complete) completion write and
+    returned result only -- not into the blocked/escalated early-exit
+    writes, matching what both call sites already needed independently
+    before this extraction (a fresh run's ``advisory_issues``/
+    ``iteration_cap``; a human-review resume's ``session_review``/
+    ``pending_review``/``human_review_required``).
+    """
+    await on_phase("executor", {"decision_count": len(decisions)})
+    try:
+        exec_out = await Executor(await make_ctx("Executor")).run(
+            files=files, decisions=decisions, omit_by_file=omit_by_file)
+    except Exception as exc:
+        # Executor is deterministic and irreversible (writes exports to disk);
+        # a crash here must never be papered over by an LLM's advice.
+        # consult() fails open by design and is never a safety gate, so the
+        # escalation itself is unconditional, fixed code -- see manager.py.
+        await manager._log("executor.crashed", "info",
+                           {"error_kind": f"exception:{type(exc).__name__}"})
+        return await manager.escalate_to_human_review(
+            session_filter=session_filter, reasons=["executor_crashed"],
+            reasons_plain=plain_human_review_reasons(["executor_crashed"]),
+            close_last_phase=close_last_phase, phase_timings=phase_timings,
+            run_elapsed_s=time.perf_counter() - run_started,
+            approved_decisions=decisions, sentinel_report=sentinel_report)
+
+    # Reversal key: the mandatory second deliverable (PHI-handled output
+    # plus the key to reverse it), distinct from the optional publishing
+    # stack below. Persisted now, separate from `exports`, never bundled.
+    if exec_out.get("reversal_key_blob"):
+        await db.sessions.update_one(session_filter, {"$set": {
+            "reversal_key_blob": exec_out["reversal_key_blob"],
+            "reversal_key_created_at": datetime.now(timezone.utc).isoformat(),
+        }})
+
+    # Scout has no dependency on Operator, Reviewer, Publish Guard, or
+    # Auditor, so it starts here and runs in the background across all of
+    # them; only Ledger/Herald actually need its result.
+    scout_agent = Scout(await make_ctx("Scout"))
+    scout_task = asyncio.create_task(scout_agent.run())
+
+    # Operator: deterministic self-verification of what Executor wrote,
+    # one stage before Publish Guard, mirroring the Judge/Sentinel split one
+    # stage later. exec_out["exports"] stays Executor's own factual record
+    # of what it wrote and is never mutated here; `exports` is the
+    # Operator-then-Reviewer-filtered view every later step in this
+    # function uses.
+    await on_phase("operator", {"decision_count": len(decisions)})
+    try:
+        op_out = await Operator(await make_ctx("Operator")).run(
+            files=files, decisions=decisions, exports=exec_out["exports"], omit_by_file=omit_by_file)
+    except Exception as exc:
+        # Fail open into the existing failed-file machinery: a file Operator
+        # cannot verify is dropped from exports exactly like an unreadable
+        # file already is, rather than trusting it or inventing a new path.
+        await manager._log("operator.crashed", "info",
+                           {"error_kind": f"exception:{type(exc).__name__}"})
+        op_out = {"failed_file_ids": list(exec_out["exports"].keys()), "verdicts": []}
+    # Operator's own `failed_file_ids` only covers a file it could not read
+    # or that never made it into `exports` at all (see operator.py). A
+    # shape-check or reverse-completeness failure surfaces as a per-column
+    # 'fail' verdict on an otherwise-readable file, and must block that
+    # file from `exports` exactly the same way -- fold both into one set.
+    op_failed_ids = sorted(set(op_out["failed_file_ids"]) |
+                           {v["file_id"] for v in op_out["verdicts"] if v.get("verdict") == "fail"})
+    exports = {fid: p for fid, p in exec_out["exports"].items()
+              if fid not in op_failed_ids}
+
+    # Reviewer: confirms Operator's coverage of every decision against
+    # the real written export, catching gaps Operator's own pass cannot see
+    # (e.g. an omit_by_file column that leaked into the header). Its own
+    # filtered exports become canonical for every remaining step below,
+    # starting with Publish Guard.
+    await on_phase("reviewer", {"decision_count": len(decisions)})
+    try:
+        rv_out = await Reviewer(await make_ctx("Reviewer")).run(
+            decisions=decisions,
+            operator_result={"failed_file_ids": op_failed_ids, "verdicts": op_out["verdicts"]},
+            exports=exports,
+            omit_by_file=omit_by_file,
+        )
+    except Exception as exc:
+        # Same fail-open shape as Operator above: an unverifiable file is
+        # dropped from exports, never trusted.
+        await manager._log("reviewer.crashed", "info",
+                           {"error_kind": f"exception:{type(exc).__name__}"})
+        rv_out = {"exports": {}, "findings": []}
+    reviewer_blocked_ids = sorted(set(exports) - set(rv_out["exports"]))
+    exports = rv_out["exports"]
+    # A run with any column still deferred via `omit_by_file` (a resume
+    # that left some columns pending) can never be "complete" -- a fresh
+    # run's `omit_by_file` is always empty, since `gate_decisions` never
+    # reaches this function while a `human_review` decision is present,
+    # so this reduces to the original `op_failed_ids or reviewer_blocked_ids`
+    # check there. `decisions` itself is deliberately not consulted here:
+    # a resume caller pre-filters `decisions` to exclude every still-
+    # pending column before calling this function (its `omit_by_file` is
+    # the authoritative record of what remains pending).
+    final_status = ("partially_complete" if (op_failed_ids or reviewer_blocked_ids or omit_by_file)
+                    else "complete")
+
+    # Advisory checkpoint: a Manager consult here is never a safety gate
+    # (Publish Guard below remains the deterministic boundary regardless of
+    # its advice); it only lets a systemically bad run reach a human sooner
+    # than Publish Guard's blunter "blocked" report would.
+    coverage_advice = await manager.consult(
+        agent_name="Reviewer", phase="reviewer",
+        signal={"operator_failed_count": len(op_failed_ids),
+                "reviewer_blocked_count": len(reviewer_blocked_ids),
+                "decision_count": len(decisions)})
+    if coverage_advice.action == "escalate_human_review":
+        await db.sessions.update_one(session_filter, {"$set": {
+            "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids}})
+        return await manager.escalate_to_human_review(
+            session_filter=session_filter, reasons=["manager_advisory_coverage_escalation"],
+            reasons_plain=plain_human_review_reasons(["manager_advisory_coverage_escalation"]),
+            close_last_phase=close_last_phase, phase_timings=phase_timings,
+            run_elapsed_s=time.perf_counter() - run_started,
+            approved_decisions=decisions, sentinel_report=sentinel_report)
+
+    # Publish Guard: deterministic last-mile PHI scan on emitted exports.
+    # GOAL invariant: exports are only 'ready to share publicly' after this
+    # boundary check clears. Runs synchronously; downloads are 403 until clean.
+    from ..publish_guard import scan_all_exports as _scan_all_exports
+    if exec_out["exports"]:
+        # If Operator's checks wiped every file out of a non-empty
+        # Executor output, scan_all_exports naturally reports "blocked"
+        # on the resulting empty dict (scanned == 0) -- exactly the
+        # existing "can't certify clean" behavior, no special-casing
+        # needed here.
+        guard_report = _scan_all_exports(
+            exports, decisions=decisions, jurisdiction=session.get("jurisdiction", "us")
+        ).to_dict()
+    else:
+        # Executor itself produced nothing exportable this round (e.g.
+        # every column of the only dataset is still deferred). This is a
+        # legitimate empty-so-far state, not a leak.
+        guard_report = {"status": "clean", "results": [], "scanned": 0, "blocked": 0}
+    await on_phase("publish_guard", {"status": guard_report["status"],
+                                     "scanned": guard_report["scanned"],
+                                     "blocked": guard_report["blocked"]})
+
+    if guard_report["status"] != "clean":
+        await close_last_phase()
+        manager_report = await manager.close_run("blocked")
+        await db.sessions.update_one(
+            session_filter,
+            {"$set": {
+                "status": "blocked",
+                "guard_report": guard_report,
+                "export_paths": exports,
+                "agent_decisions": decisions,
+                "phase_timings": phase_timings,
+                "run_elapsed_s": round(time.perf_counter() - run_started, 3),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "manager_report": manager_report,
+                "reviewer_findings": rv_out["findings"],
+                "operator_failures": op_failed_ids,
+            }},
+        )
+        scout_task.cancel()
+        cleanup_session_unpacked(sid)
+        return {"status": "blocked", "guard": guard_report,
+                "decisions": decisions, "phase_timings": phase_timings}
+
+    try:
+        await _check_cancel(db, sid, on_phase)
+    except PipelineCancelled:
+        scout_task.cancel()
+        raise
+
+    # Auditor (Scout already started earlier, in parallel with
+    # Operator/Reviewer/Publish Guard). Ledger + Herald still need
+    # Auditor's metrics + Scout's landscape so they wait on both here.
+    await on_phase("auditor_scout", {})
+    auditor_agent = Auditor(await make_ctx("Auditor"))
+    audit, scout, benchmark = await asyncio.gather(
+        auditor_agent.run(decisions=decisions, exports=exports, files=files,
+                          statute=statute, praxis_methods=praxis_methods),
+        scout_task,
+        _empty(None),   # placeholder for future synthetic benchmark run
+        return_exceptions=True,
+    )
+    # Auditor/Scout are presentational (Publish Guard already gated the
+    # export above); an unhandled exception here must not crash a run that
+    # already succeeded. Log it and fall back to a report that visibly says
+    # "not verified" rather than claiming a clean audit it never performed.
+    audit_crashed = isinstance(audit, Exception)
+    if audit_crashed:
+        await auditor_agent._log("auditor.crashed", "info",
+                                  {"error": f"{type(audit).__name__}: {audit}"})
+        audit = {"verdict": "issues", "issues": [{"file": "", "problem": "Auditor crashed; not verified"}],
+                 "metrics": {}, "confidence": 0.0,
+                 "summary": "Auditor raised an exception; audit not performed."}
+    if isinstance(scout, Exception):
+        await scout_agent._log("scout.crashed", "info", {"error": f"{type(scout).__name__}: {scout}"})
+        scout = {}
+    if isinstance(benchmark, Exception):
+        benchmark = None
+
+    audit_advice = await manager.consult(
+        agent_name="Auditor", phase="auditor_scout",
+        signal={"audit_verdict": str(audit.get("verdict")), "audit_crashed": audit_crashed})
+    # The confidence-floor escalation is a deterministic gate, not an LLM
+    # advisory: this is the design doc's "second human review", distinct
+    # from Sentinel's pre-execution round -- it must fire on the numbers
+    # every time, never fail open the way `consult()` legitimately does.
+    auditor_reason = auditor_escalation_reason(audit)
+    if audit_advice.action == "escalate_human_review" or auditor_reason:
+        reasons = [r for r in ("manager_advisory_audit_escalation" if audit_advice.action == "escalate_human_review" else None,
+                               auditor_reason) if r]
+        # Turn any per-column Auditor disagreement into a resolvable
+        # human_review decision, so this second review has an actual
+        # lever for the reviewer to pull rather than only a status flag
+        # that can be blindly resubmitted against a non-deterministic model.
+        decisions = materialize_auditor_disagreements(decisions, audit, dictionary_by_column)
+        await db.sessions.update_one(session_filter, {"$set": {
+            "guard_report": guard_report, "export_paths": exports,
+            "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids,
+            "audit": audit, "agent_decisions": decisions,
+        }})
+        return await manager.escalate_to_human_review(
+            session_filter=session_filter, reasons=reasons,
+            reasons_plain=plain_human_review_reasons(reasons),
+            close_last_phase=close_last_phase, phase_timings=phase_timings,
+            run_elapsed_s=time.perf_counter() - run_started,
+            approved_decisions=decisions, sentinel_report=sentinel_report)
+
+    await _check_cancel(db, sid, on_phase)
+
+    # Ledger (split into Compare + Aggregate under the hood).
+    await on_phase("ledger", {})
+    ledger = await Ledger(
+        await make_ctx("Ledger"),
+        await make_ctx("Ledger.Compare"),
+        await make_ctx("Ledger.Aggregate"),
+    ).run(decisions=decisions, audit=audit, scout=scout, benchmark_result=benchmark)
+
+    await _check_cancel(db, sid, on_phase)
+
+    # Herald (split into Abstract + Sections under the hood so no LLM
+    # call exceeds the 90 s hard timeout).
+    await on_phase("herald", {})
+    herald = await Herald(
+        await make_ctx("Herald"),
+        await make_ctx("Herald.Abstract"),
+        await make_ctx("Herald.Sections"),
+    ).run(ledger=ledger, audit=audit, target_venue=session.get("target_venue") or "JAMIA Open")
+
+    await close_last_phase()
+    manager_report = await manager.close_run(final_status)
+    result = {
+        "status": final_status,
+        "decisions": decisions,
+        "audit": audit,
+        "scout": scout,
+        "ledger": ledger,
+        "herald": herald,
+        "exports": exports,
+        "guard": guard_report,
+        "phase_timings": phase_timings,
+        "run_elapsed_s": round(time.perf_counter() - run_started, 3),
+        "manager_report": manager_report,
+        "operator_failures": op_failed_ids,
+        "reviewer_findings": rv_out["findings"],
+    }
+    result.update(extra_result_fields or {})
+    completion_set = {
+        "agent_audit": audit,
+        "agent_ledger": ledger,
+        "agent_herald": herald,
+        "agent_scout": scout,
+        "guard_report": guard_report,
+        "export_paths": exports,
+        "status": final_status,
+        "phase_timings": phase_timings,
+        "run_elapsed_s": result["run_elapsed_s"],
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "manager_report": manager_report,
+        "operator_failures": op_failed_ids,
+        "reviewer_findings": rv_out["findings"],
+    }
+    completion_set.update(extra_completion_fields or {})
+    await db.sessions.update_one(session_filter, {"$set": completion_set})
+    if final_status == "complete":
+        cleanup_session_unpacked(sid)
+    return result
+
+
 async def run_pipeline(
     session: dict[str, Any],
     db: AsyncIOMotorDatabase,
@@ -567,266 +890,17 @@ async def run_pipeline(
             run_elapsed_s=time.perf_counter() - _run_started,
             approved_decisions=approved_decisions, sentinel_report=s)
 
-    # 5. Executor
-    await on_phase("executor", {"decision_count": len(approved_decisions)})
-    try:
-        exec_out = await Executor(await make_ctx("Executor")).run(files=files, decisions=approved_decisions)
-    except Exception as exc:
-        # Executor is deterministic and irreversible (writes exports to disk);
-        # a crash here must never be papered over by an LLM's advice.
-        # consult() fails open by design and is never a safety gate, so the
-        # escalation itself is unconditional, fixed code -- see manager.py.
-        await manager._log("executor.crashed", "info",
-                           {"error_kind": f"exception:{type(exc).__name__}"})
-        return await manager.escalate_to_human_review(
-            session_filter=session_filter, reasons=["executor_crashed"],
-            reasons_plain=plain_human_review_reasons(["executor_crashed"]),
-            close_last_phase=close_last_phase, phase_timings=_phase_timings,
-            run_elapsed_s=time.perf_counter() - _run_started,
-            approved_decisions=approved_decisions, sentinel_report=s)
-
-    # Reversal key: the mandatory second deliverable (PHI-handled output
-    # plus the key to reverse it), distinct from the optional publishing
-    # stack below. Persisted now, separate from `exports`, never bundled.
-    if exec_out.get("reversal_key_blob"):
-        await db.sessions.update_one(session_filter, {"$set": {
-            "reversal_key_blob": exec_out["reversal_key_blob"],
-            "reversal_key_created_at": datetime.now(timezone.utc).isoformat(),
-        }})
-
-    # Scout has no dependency on Operator, Reviewer, Publish Guard, or
-    # Auditor, so it starts here and runs in the background across all of
-    # them; only Ledger/Herald actually need its result.
-    scout_agent = Scout(await make_ctx("Scout"))
-    scout_task = asyncio.create_task(scout_agent.run())
-
-    # 5a. Operator: deterministic self-verification of what Executor wrote,
-    # one stage before Publish Guard, mirroring the Judge/Sentinel split one
-    # stage later. exec_out["exports"] stays Executor's own factual record
-    # of what it wrote and is never mutated here; `exports` is the
-    # Operator-then-Reviewer-filtered view every later step in this
-    # function uses.
-    await on_phase("operator", {"decision_count": len(approved_decisions)})
-    try:
-        op_out = await Operator(await make_ctx("Operator")).run(files=files, decisions=approved_decisions,
-                                                                 exports=exec_out["exports"])
-    except Exception as exc:
-        # Fail open into the existing failed-file machinery: a file Operator
-        # cannot verify is dropped from exports exactly like an unreadable
-        # file already is, rather than trusting it or inventing a new path.
-        await manager._log("operator.crashed", "info",
-                           {"error_kind": f"exception:{type(exc).__name__}"})
-        op_out = {"failed_file_ids": list(exec_out["exports"].keys()), "verdicts": []}
-    # Operator's own `failed_file_ids` only covers a file it could not read
-    # or that never made it into `exports` at all (see operator.py). A
-    # shape-check or reverse-completeness failure surfaces as a per-column
-    # 'fail' verdict on an otherwise-readable file, and must block that
-    # file from `exports` exactly the same way -- fold both into one set.
-    op_failed_ids = sorted(set(op_out["failed_file_ids"]) |
-                           {v["file_id"] for v in op_out["verdicts"] if v.get("verdict") == "fail"})
-    exports = {fid: p for fid, p in exec_out["exports"].items()
-              if fid not in op_failed_ids}
-
-    # 5b. Reviewer: confirms Operator's coverage of every decision against
-    # the real written export, catching gaps Operator's own pass cannot see
-    # (e.g. an omit_by_file column that leaked into the header). Its own
-    # filtered exports become canonical for every remaining step below,
-    # starting with Publish Guard.
-    await on_phase("reviewer", {"decision_count": len(approved_decisions)})
-    try:
-        rv_out = await Reviewer(await make_ctx("Reviewer")).run(
-            decisions=approved_decisions,
-            operator_result={"failed_file_ids": op_failed_ids, "verdicts": op_out["verdicts"]},
-            exports=exports,
-            omit_by_file=None,
-        )
-    except Exception as exc:
-        # Same fail-open shape as Operator above: an unverifiable file is
-        # dropped from exports, never trusted.
-        await manager._log("reviewer.crashed", "info",
-                           {"error_kind": f"exception:{type(exc).__name__}"})
-        rv_out = {"exports": {}, "findings": []}
-    reviewer_blocked_ids = sorted(set(exports) - set(rv_out["exports"]))
-    exports = rv_out["exports"]
-    final_status = "partially_complete" if (op_failed_ids or reviewer_blocked_ids) else "complete"
-
-    # Advisory checkpoint: a Manager consult here is never a safety gate
-    # (Publish Guard below remains the deterministic boundary regardless of
-    # its advice); it only lets a systemically bad run reach a human sooner
-    # than Publish Guard's blunter "blocked" report would.
-    coverage_advice = await manager.consult(
-        agent_name="Reviewer", phase="reviewer",
-        signal={"operator_failed_count": len(op_failed_ids),
-                "reviewer_blocked_count": len(reviewer_blocked_ids),
-                "decision_count": len(approved_decisions)})
-    if coverage_advice.action == "escalate_human_review":
-        await db.sessions.update_one(session_filter, {"$set": {
-            "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids}})
-        return await manager.escalate_to_human_review(
-            session_filter=session_filter, reasons=["manager_advisory_coverage_escalation"],
-            reasons_plain=plain_human_review_reasons(["manager_advisory_coverage_escalation"]),
-            close_last_phase=close_last_phase, phase_timings=_phase_timings,
-            run_elapsed_s=time.perf_counter() - _run_started,
-            approved_decisions=approved_decisions, sentinel_report=s)
-
-    # 5c. Publish Guard: deterministic last-mile PHI scan on emitted exports.
-    # GOAL invariant: exports are only 'ready to share publicly' after this
-    # boundary check clears. Runs synchronously; downloads are 403 until clean.
-    from ..publish_guard import scan_all_exports as _scan_all_exports
-    guard_report = _scan_all_exports(exports, decisions=approved_decisions, jurisdiction=session.get("jurisdiction", "us")).to_dict()
-    await on_phase("publish_guard", {"status": guard_report["status"],
-                                     "scanned": guard_report["scanned"],
-                                     "blocked": guard_report["blocked"]})
-
-    if guard_report["status"] != "clean":
-        await close_last_phase()
-        manager_report = await manager.close_run("blocked")
-        await db.sessions.update_one(
-            session_filter,
-            {"$set": {
-                "status": "blocked",
-                "guard_report": guard_report,
-                "export_paths": exports,
-                "agent_decisions": approved_decisions,
-                "phase_timings": _phase_timings,
-                "run_elapsed_s": round(time.perf_counter() - _run_started, 3),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "manager_report": manager_report,
-                "reviewer_findings": rv_out["findings"],
-                "operator_failures": op_failed_ids,
-            }},
-        )
-        scout_task.cancel()
-        cleanup_session_unpacked(sid)
-        return {"status": "blocked", "guard": guard_report,
-                "decisions": approved_decisions, "phase_timings": _phase_timings}
-
-    try:
-        await _check_cancel(db, sid, on_phase)
-    except PipelineCancelled:
-        scout_task.cancel()
-        raise
-
-    # 6+7. Auditor (Scout already started earlier, in parallel with
-    # Operator/Reviewer/Publish Guard). Ledger + Herald still need
-    # Auditor's metrics + Scout's landscape so they wait on both here.
-    await on_phase("auditor_scout", {})
-    auditor_agent = Auditor(await make_ctx("Auditor"))
-    audit, scout, benchmark = await asyncio.gather(
-        auditor_agent.run(decisions=approved_decisions, exports=exports, files=files,
-                          statute=statute, praxis_methods=praxis_methods),
-        scout_task,
-        _empty(None),   # placeholder for future synthetic benchmark run
-        return_exceptions=True,
+    return await execute_decisions(
+        db=db, sid=sid, session=session, session_filter=session_filter,
+        files=files, decisions=approved_decisions,
+        statute=statute, praxis_methods=praxis_methods,
+        dictionary_by_column=dictionary_by_column,
+        make_ctx=make_ctx, manager=manager, on_phase=on_phase,
+        close_last_phase=close_last_phase, phase_timings=_phase_timings,
+        run_started=_run_started, sentinel_report=s,
+        extra_completion_fields={"advisory_issues": advisory_issues, "iteration_cap": iteration_cap},
+        extra_result_fields={"advisory_issues": advisory_issues, "iteration_cap": iteration_cap},
     )
-    # Auditor/Scout are presentational (Publish Guard already gated the
-    # export above); an unhandled exception here must not crash a run that
-    # already succeeded. Log it and fall back to a report that visibly says
-    # "not verified" rather than claiming a clean audit it never performed.
-    audit_crashed = isinstance(audit, Exception)
-    if audit_crashed:
-        await auditor_agent._log("auditor.crashed", "info",
-                                  {"error": f"{type(audit).__name__}: {audit}"})
-        audit = {"verdict": "issues", "issues": [{"file": "", "problem": "Auditor crashed; not verified"}],
-                 "metrics": {}, "confidence": 0.0,
-                 "summary": "Auditor raised an exception; audit not performed."}
-    if isinstance(scout, Exception):
-        await scout_agent._log("scout.crashed", "info", {"error": f"{type(scout).__name__}: {scout}"})
-        scout = {}
-    if isinstance(benchmark, Exception):
-        benchmark = None
-
-    audit_advice = await manager.consult(
-        agent_name="Auditor", phase="auditor_scout",
-        signal={"audit_verdict": str(audit.get("verdict")), "audit_crashed": audit_crashed})
-    # The confidence-floor escalation is a deterministic gate, not an LLM
-    # advisory: this is the design doc's "second human review", distinct
-    # from Sentinel's pre-execution round -- it must fire on the numbers
-    # every time, never fail open the way `consult()` legitimately does.
-    auditor_reason = auditor_escalation_reason(audit)
-    if audit_advice.action == "escalate_human_review" or auditor_reason:
-        reasons = [r for r in ("manager_advisory_audit_escalation" if audit_advice.action == "escalate_human_review" else None,
-                               auditor_reason) if r]
-        # Turn any per-column Auditor disagreement into a resolvable
-        # human_review decision, so this second review has an actual
-        # lever for the reviewer to pull rather than only a status flag
-        # that can be blindly resubmitted against a non-deterministic model.
-        approved_decisions = materialize_auditor_disagreements(approved_decisions, audit, dictionary_by_column)
-        await db.sessions.update_one(session_filter, {"$set": {
-            "guard_report": guard_report, "export_paths": exports,
-            "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids,
-            "audit": audit, "agent_decisions": approved_decisions,
-        }})
-        return await manager.escalate_to_human_review(
-            session_filter=session_filter, reasons=reasons,
-            reasons_plain=plain_human_review_reasons(reasons),
-            close_last_phase=close_last_phase, phase_timings=_phase_timings,
-            run_elapsed_s=time.perf_counter() - _run_started,
-            approved_decisions=approved_decisions, sentinel_report=s)
-
-    await _check_cancel(db, sid, on_phase)
-
-    # 7. Ledger (split into Compare + Aggregate under the hood).
-    await on_phase("ledger", {})
-    ledger = await Ledger(
-        await make_ctx("Ledger"),
-        await make_ctx("Ledger.Compare"),
-        await make_ctx("Ledger.Aggregate"),
-    ).run(decisions=approved_decisions, audit=audit, scout=scout, benchmark_result=benchmark)
-
-    await _check_cancel(db, sid, on_phase)
-
-    # 8. Herald (split into Abstract + Sections under the hood so no LLM
-    # call exceeds the 90 s hard timeout).
-    await on_phase("herald", {})
-    herald = await Herald(
-        await make_ctx("Herald"),
-        await make_ctx("Herald.Abstract"),
-        await make_ctx("Herald.Sections"),
-    ).run(ledger=ledger, audit=audit, target_venue=session.get("target_venue") or "JAMIA Open")
-
-    await close_last_phase()
-    manager_report = await manager.close_run(final_status)
-    result = {
-        "status": final_status,
-        "decisions": approved_decisions,
-        "audit": audit,
-        "scout": scout,
-        "ledger": ledger,
-        "herald": herald,
-        "exports": exports,
-        "guard": guard_report,
-        "advisory_issues": advisory_issues,
-        "phase_timings": _phase_timings,
-        "run_elapsed_s": round(time.perf_counter() - _run_started, 3),
-        "iteration_cap": iteration_cap,
-        "manager_report": manager_report,
-        "operator_failures": op_failed_ids,
-        "reviewer_findings": rv_out["findings"],
-    }
-    completion_update = {
-        "$set": {
-            "agent_audit": audit,
-            "agent_ledger": ledger,
-            "agent_herald": herald,
-            "agent_scout": scout,
-            "advisory_issues": advisory_issues,
-            "guard_report": guard_report,
-            "export_paths": exports,
-            "status": final_status,
-            "phase_timings": _phase_timings,
-            "run_elapsed_s": result["run_elapsed_s"],
-            "iteration_cap": iteration_cap,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "manager_report": manager_report,
-            "operator_failures": op_failed_ids,
-            "reviewer_findings": rv_out["findings"],
-        },
-    }
-    await db.sessions.update_one(session_filter, completion_update)
-    if final_status == "complete":
-        cleanup_session_unpacked(sid)
-    return result
 
 
 def _summarise_issues(issues: list[dict[str, Any]]) -> str:

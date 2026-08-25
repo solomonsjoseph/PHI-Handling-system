@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (partial: `TaskService` and `control/worker.py` exist and are tested; no production route enqueues through them yet — see Consequences)
+Accepted (partial: `TaskService` and `control/worker.py` exist and are tested; no production route enqueues through them yet, see Consequences)
 
 ## Context
 
@@ -18,4 +18,4 @@ Accepted (partial: `TaskService` and `control/worker.py` exist and are tested; n
 
 - The CAS/fence discipline is real and independently tested (a concurrent `claim` race, a stale-fence `complete` rejection, and lease-expiry reconciliation each have a dedicated test), but no production code path has been switched onto it yet: `session_handle` and `session_human_review` still run their per-request `asyncio.create_task` closures unchanged, and the three new background loops start with an empty handler registry (`OUTBOX_HANDLERS` is `{}`), so `drain_outbox` currently has nothing to actually drain.
 - The 900-second orphan sweep in `_startup_maintenance` is unchanged; replacing it with lease reconciliation (keeping a backstop sweep only for pre-migration sessions with no `WorkflowRun`) requires the routes to actually enqueue through `TaskService` first, which has not happened yet.
-- This ADR documents the infrastructure decision now so the migration that wires `session_handle`/`session_human_review` onto `TaskService.enqueue` plus the `control/workflow.py` node table (deleting `_run_tail`) has a stable, already-verified foundation to build on, rather than a moving target.
+- `server.py::session_human_review`'s resume path now shares `phi_core.agents.orchestrator.execute_decisions` with the fresh-run path (`docs/adr/0001-workflow-engine.md`), so `_run_tail` is already deleted; that migration did not need `TaskService`. What remains here is enqueuing `session_handle`/`session_human_review` themselves through `TaskService.enqueue` so a process restart mid-run recovers via lease reconciliation instead of the wall-clock orphan sweep.
