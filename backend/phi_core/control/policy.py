@@ -22,6 +22,15 @@ class CapabilityDenied(PermissionError):
     """Raised when a request falls outside a manifest-derived grant."""
 
 
+class BudgetExceeded(CapabilityDenied):
+    """A ``CapabilityDenied`` raised specifically by a D5 resource-ceiling
+    check (enqueue-time or gateway-time), never by an identity, scope, or
+    data-class policy check. Callers that must record a refusal as a
+    ``TraceEvent`` with ``outcome="budget_exceeded"`` -- and only a
+    genuine budget refusal, not every denial -- catch this subclass
+    specifically before the broader ``CapabilityDenied`` handler."""
+
+
 OUTPUT_SCHEMAS: Mapping[str, Mapping[str, object]] = MappingProxyType(
     {
         "header_analysis": MappingProxyType({"type": "object"}),

@@ -42,8 +42,10 @@ from uuid import uuid4
 
 from . import limits
 from .artifacts import ArtifactService
+from .context import StoreTraceWriter
 from .policy import MANIFESTS, POLICY_VERSION, CapabilityDenied, _bounded_budget
 from .records import CapabilityGrant, HumanReviewEvent, HumanReviewRequest, ResourceBudget, WorkflowRun, WorkItem
+from .runs import check_run_budget
 from .store import ControlStore
 from .tasks import TaskService
 from .workflow import (
@@ -169,7 +171,11 @@ class SuperOrchestrator:
                 started_at=now,
                 updated_at=now,
                 correlation_id=correlation_id or run_id,
-                budget=ResourceBudget(wall_seconds=limits.MAX_RUN_WALL_S),
+                budget=ResourceBudget(
+                    wall_seconds=limits.MAX_RUN_WALL_S, max_tokens=limits.MAX_TOKENS_PER_RUN,
+                    max_cost_usd=limits.MAX_COST_PER_RUN_USD, max_tool_calls=limits.MAX_TOOL_CALLS_PER_RUN,
+                    max_artifact_bytes=limits.MAX_ARTIFACT_BYTES_PER_RUN,
+                ),
             )
             await self._store.insert("workflow_runs", run)
         else:
@@ -291,38 +297,51 @@ class SuperOrchestrator:
         parent = await self._load_task(parent_task_id)
         if parent.run_id != run_id:
             raise WorkflowError(f"parent task {parent_task_id!r} does not belong to run {run_id!r}")
-        grant_document = await self._store.get_one("capability_grants", {"grant_id": parent.grant_id})
-        if grant_document is None:
-            raise CapabilityDenied(f"parent task {parent_task_id!r} has no capability grant")
-        grant = CapabilityGrant.model_validate(grant_document)
-        siblings = await self._store.find_many("work_items", {"parent_task_id": parent_task_id})
-        # check_child's fanout ceiling counts total children ever created
-        # (D5: "Ledger and Herald each need 2"), excluding only explicitly
-        # voided ones -- unchanged from its original definition.
-        fanout_siblings = [s for s in siblings if s.get("state") not in ("cancelled", "rejected", "superseded")]
-        self._tasks.policy.check_child(grant, task_type, depth=parent.depth + 1, children=len(fanout_siblings))
-        live_siblings = [s for s in siblings if s.get("state") not in _TERMINAL_TASK_STATES]
-        if len(live_siblings) >= limits.MAX_PARALLEL_TASKS_PER_PARENT:
-            raise CapabilityDenied(
-                f"parent {parent_task_id!r} already has {len(live_siblings)} live children "
-                f"(MAX_PARALLEL_TASKS_PER_PARENT={limits.MAX_PARALLEL_TASKS_PER_PARENT})"
+        try:
+            await check_run_budget(self._store, run_id)
+            grant_document = await self._store.get_one("capability_grants", {"grant_id": parent.grant_id})
+            if grant_document is None:
+                raise CapabilityDenied(f"parent task {parent_task_id!r} has no capability grant")
+            grant = CapabilityGrant.model_validate(grant_document)
+            siblings = await self._store.find_many("work_items", {"parent_task_id": parent_task_id})
+            # check_child's fanout ceiling counts total children ever created
+            # (D5: "Ledger and Herald each need 2"), excluding only explicitly
+            # voided ones -- unchanged from its original definition.
+            fanout_siblings = [s for s in siblings if s.get("state") not in ("cancelled", "rejected", "superseded")]
+            self._tasks.policy.check_child(grant, task_type, depth=parent.depth + 1, children=len(fanout_siblings))
+            live_siblings = [s for s in siblings if s.get("state") not in _TERMINAL_TASK_STATES]
+            if len(live_siblings) >= limits.MAX_PARALLEL_TASKS_PER_PARENT:
+                raise CapabilityDenied(
+                    f"parent {parent_task_id!r} already has {len(live_siblings)} live children "
+                    f"(MAX_PARALLEL_TASKS_PER_PARENT={limits.MAX_PARALLEL_TASKS_PER_PARENT})"
+                )
+            run_tasks = await self._store.find_many("work_items", {"run_id": run_id})
+            if len(run_tasks) >= limits.MAX_TASKS_PER_RUN:
+                raise CapabilityDenied(
+                    f"run_id={run_id!r} already created {len(run_tasks)} tasks "
+                    f"(MAX_TASKS_PER_RUN={limits.MAX_TASKS_PER_RUN})"
+                )
+            live_run_tasks = [t for t in run_tasks if t.get("state") not in _TERMINAL_TASK_STATES]
+            if len(live_run_tasks) >= limits.MAX_PARALLEL_TASKS_PER_RUN:
+                raise CapabilityDenied(
+                    f"run_id={run_id!r} already has {len(live_run_tasks)} live tasks "
+                    f"(MAX_PARALLEL_TASKS_PER_RUN={limits.MAX_PARALLEL_TASKS_PER_RUN})"
+                )
+            worker = _worker_for_task_type(task_type)
+            ceiling = _bounded_budget(MANIFESTS[worker].budget)
+            if _budget_widens(budget, ceiling):
+                raise CapabilityDenied(f"proposed budget for {task_type!r} exceeds {worker!r}'s manifest authority")
+        except CapabilityDenied as exc:
+            # Every refusal in this method -- run-wall, depth, fanout,
+            # per-parent/per-run parallelism, task-count, and budget-widen
+            # -- lands here once, so no denial site can be added later
+            # without also being traced. D5 step 7 (Mandatory acceptance
+            # tests): the refusal is always a `TraceEvent` with
+            # `outcome="budget_exceeded"`, never only a raised exception.
+            await StoreTraceWriter(self._store, run_id=run_id, session_id=parent.session_id).emit(
+                outcome="budget_exceeded", status_text=str(exc), task_id=parent_task_id, agent=parent.worker,
             )
-        run_tasks = await self._store.find_many("work_items", {"run_id": run_id})
-        if len(run_tasks) >= limits.MAX_TASKS_PER_RUN:
-            raise CapabilityDenied(
-                f"run_id={run_id!r} already created {len(run_tasks)} tasks "
-                f"(MAX_TASKS_PER_RUN={limits.MAX_TASKS_PER_RUN})"
-            )
-        live_run_tasks = [t for t in run_tasks if t.get("state") not in _TERMINAL_TASK_STATES]
-        if len(live_run_tasks) >= limits.MAX_PARALLEL_TASKS_PER_RUN:
-            raise CapabilityDenied(
-                f"run_id={run_id!r} already has {len(live_run_tasks)} live tasks "
-                f"(MAX_PARALLEL_TASKS_PER_RUN={limits.MAX_PARALLEL_TASKS_PER_RUN})"
-            )
-        worker = _worker_for_task_type(task_type)
-        ceiling = _bounded_budget(MANIFESTS[worker].budget)
-        if _budget_widens(budget, ceiling):
-            raise CapabilityDenied(f"proposed budget for {task_type!r} exceeds {worker!r}'s manifest authority")
+            raise
         return await self._tasks.enqueue(
             run_id=run_id,
             session_id=parent.session_id,

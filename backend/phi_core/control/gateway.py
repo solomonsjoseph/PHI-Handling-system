@@ -14,10 +14,13 @@ from fastapi import HTTPException
 from phi_core.anonymizer import scrub_for_prompt
 from phi_core.security import scrub_persisted_text, validate_llm_base_url, validate_llm_provider
 
+from . import limits
 from .egress import _STRUCTURAL_KEYS, canonical_payload, egress_digest
-from .policy import CapabilityDenied, CapabilityPolicy
-from .records import CapabilityGrant, DataClass
+from .policy import BudgetExceeded, CapabilityDenied, CapabilityPolicy
+from .records import CapabilityGrant, DataClass, TraceEvent
+from .runs import check_run_budget, record_run_usage
 from .store import ControlStore
+from .workflow import WorkflowError
 
 litellm.suppress_debug_info = True
 litellm.drop_params = True
@@ -183,12 +186,16 @@ class ProviderGateway:
     async def complete(self, req: GatewayRequest) -> GatewayResult:
         try:
             grant = await self._grant_for(req)
-            self._validate_request(req, grant)
+            await self._validate_request(req, grant)
             messages, tools = self._build_messages(req)
             messages, _ = _scrub(messages)
             tools, _ = _scrub(tools)
             if _contains_restricted_content(messages) or _contains_restricted_content(tools):
                 return self._denied(req, "unresolved_restricted_content")
+        except BudgetExceeded as exc:
+            reason = scrub_persisted_text(str(exc))
+            await self._record_budget_denial(req, reason)
+            return self._denied(req, reason)
         except (CapabilityDenied, HTTPException, RuntimeError, ValueError) as exc:
             return self._denied(req, scrub_persisted_text(str(exc)))
 
@@ -223,7 +230,26 @@ class ProviderGateway:
                 self._latency(started), "denied", "provider_mismatch", egress_digest(mismatch_payload),
             )
 
+        usage = _usage(response)
+        total_tokens = int(usage.get("total_tokens", 0))
+        cost_usd = total_tokens / 1000 * limits.ASSUMED_USD_PER_1K_TOKENS
+        tool_calls = len(tools)
+        # Real provider consumption happened regardless of what happens next
+        # (an oversized output is still a spent call) -- record it against
+        # the run before either return below, best-effort: a usage-record
+        # race must never fail an otherwise-successful/oversized call.
+        try:
+            await record_run_usage(self._store, req.run_id, tokens=total_tokens, cost_usd=cost_usd, tool_calls=tool_calls)
+        except WorkflowError:
+            pass
+
         content = _text_content(response.choices[0].message.content)
+        if len(content.encode("utf-8")) > limits.MAX_OUTPUT_BYTES:
+            await self._record_budget_denial(req, "MAX_OUTPUT_BYTES exceeded")
+            return GatewayResult(
+                "", (), actual_provider, actual_model, str(getattr(response, "id", "")), usage, cost_usd,
+                self._latency(started), "denied", "MAX_OUTPUT_BYTES exceeded", digest,
+            )
         events = tuple(
             ToolEvent(
                 tool=str(tool["name"]), requested=True, executed=True, status="ok",
@@ -232,7 +258,7 @@ class ProviderGateway:
             for tool in tools
         )
         return GatewayResult(
-            content, events, actual_provider, actual_model, str(getattr(response, "id", "")), _usage(response), 0.0,
+            content, events, actual_provider, actual_model, str(getattr(response, "id", "")), usage, cost_usd,
             self._latency(started), "ok", "", digest,
         )
 
@@ -251,7 +277,7 @@ class ProviderGateway:
             raise CapabilityDenied("grant has expired")
         return grant
 
-    def _validate_request(self, req: GatewayRequest, grant: CapabilityGrant) -> None:
+    async def _validate_request(self, req: GatewayRequest, grant: CapabilityGrant) -> None:
         if req.policy_version != grant.policy_version or req.agent != grant.agent:
             raise CapabilityDenied("request identity does not match grant")
         self._policy.check_provider(grant, req.provider, req.model, req.endpoint)
@@ -259,19 +285,31 @@ class ProviderGateway:
         validate_llm_provider(req.provider)
         validate_llm_base_url(req.endpoint, req.provider)
         if req.max_tokens <= 0 or req.max_tokens > grant.budget.max_tokens:
-            raise CapabilityDenied("token budget exceeds grant")
+            raise BudgetExceeded("MAX_TOKENS_PER_TASK: token budget exceeds grant")
         if req.max_cost_usd < 0 or req.max_cost_usd > grant.budget.max_cost_usd:
-            raise CapabilityDenied("cost budget exceeds grant")
+            raise BudgetExceeded("MAX_COST_PER_TASK_USD: cost budget exceeds grant")
         if req.timeout_s <= 0 or req.timeout_s > grant.budget.wall_seconds:
-            raise CapabilityDenied("timeout exceeds grant")
+            raise BudgetExceeded("MAX_TASK_WALL_S: timeout exceeds grant")
         if set(req.allowed_tools) - set(grant.tools):
             raise CapabilityDenied("request includes an ungranted tool")
         if req.allowed_tools and req.provider != "anthropic":
             raise CapabilityDenied("tool_unsupported_by_provider")
+        if sum(req.allowed_tools.values()) > grant.budget.max_tool_calls:
+            raise BudgetExceeded("MAX_TOOL_CALLS_PER_TASK: aggregate tool-call budget exceeds grant")
         for tool, uses in req.allowed_tools.items():
             self._policy.check_tool(grant, tool, uses=uses)
             if tool != "web_search":
                 raise CapabilityDenied(f"unsupported tool {tool!r}")
+        input_bytes = (
+            len(req.system_prompt.encode("utf-8")) + len(req.user_prompt.encode("utf-8"))
+            + sum(len(result.content.encode("utf-8")) for result in req.tool_results)
+        )
+        if input_bytes > limits.MAX_INPUT_BYTES:
+            raise BudgetExceeded("MAX_INPUT_BYTES exceeded")
+        await check_run_budget(
+            self._store, req.run_id, tokens=req.max_tokens, cost_usd=req.max_cost_usd,
+            tool_calls=sum(req.allowed_tools.values()),
+        )
 
     @staticmethod
     def _build_messages(req: GatewayRequest) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -306,6 +344,34 @@ class ProviderGateway:
     @staticmethod
     def _latency(started: float) -> int:
         return int((time.monotonic() - started) * 1000)
+
+    async def _record_budget_denial(self, req: GatewayRequest, reason: str) -> None:
+        """Insert a ``TraceEvent`` with ``outcome="budget_exceeded"`` for a
+        gateway-time D5 refusal. Duplicates ``StoreTraceWriter.emit``'s
+        ``event_seq`` CAS-allocation rather than importing it: ``context.py``
+        imports this module, so the reverse import would cycle. Best-effort
+        against a run with no durable ``WorkflowRun`` (nothing to allocate
+        a seq under) or a lost CAS race after 8 attempts -- a missed trace
+        row must never turn a real denial into a raised exception."""
+        seq = 0
+        for _ in range(8):
+            current = await self._store.get_one("workflow_runs", {"run_id": req.run_id})
+            if current is None:
+                return
+            seq = int(current.get("event_seq", 0)) + 1
+            updated = dict(current)
+            updated["event_seq"] = seq
+            if await self._store.compare_and_set(
+                "workflow_runs", {"run_id": req.run_id}, {"event_seq": current.get("event_seq", 0)}, updated
+            ):
+                break
+        else:
+            return
+        event = TraceEvent(
+            run_id=req.run_id, seq=seq, session_id=req.session_id, task_id=req.task_id, agent=req.agent,
+            input_class=req.input_class, output_class=req.input_class, outcome="budget_exceeded", status_text=reason,
+        )
+        await self._store.insert("trace_events", event)
 
     @staticmethod
     def _denied(req: GatewayRequest, reason: str) -> GatewayResult:

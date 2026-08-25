@@ -39,8 +39,11 @@ from phi_core.paths import (
     sanitise_filename,
 )
 
+from .policy import BudgetExceeded
 from .records import ArtifactRecord, DataClass, PublicationPointer
+from .runs import check_run_budget, record_run_usage
 from .store import ControlStore
+from .workflow import WorkflowError
 
 _ROOT_DIRS: Mapping[str, Any] = {
     "intake": UPLOAD_DIR,
@@ -213,9 +216,26 @@ class ArtifactService:
         # final path.
         sha256, size = _hash_file(tmp_path)
 
+        # D5 (Phase 5 step 7): MAX_ARTIFACT_BYTES_PER_RUN is a run-wide
+        # aggregate, checked here rather than at `stage()` time because
+        # only `finalize()` knows the real byte count. Refused before the
+        # rename, so the tmp file and the provisional record are left
+        # exactly as any other pre-`os.replace` failure leaves them.
+        try:
+            await check_run_budget(self._store, self.run_id, artifact_bytes=size)
+        except BudgetExceeded as exc:
+            raise ArtifactError("artifact_bytes_budget_exceeded", str(exc)) from exc
+
         final_dir = run_scoped_dir(_root_dir(record.root), self.session_id, self.run_id)
         final_path = final_dir / artifact_id
         os.replace(tmp_path, final_path)
+        # Real bytes are on disk now regardless of what the CAS below does
+        # -- record the consumption before it, best-effort: a usage-record
+        # race must never turn a successful promotion into a raised error.
+        try:
+            await record_run_usage(self._store, self.run_id, artifact_bytes=size)
+        except WorkflowError:
+            pass
 
         updated = record.model_copy(update={"sha256": sha256, "size_bytes": size, "state": "staged"})
         if not await self._store.compare_and_set(
