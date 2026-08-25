@@ -23,7 +23,7 @@ from typing import Any
 from ..file_readers import iter_dataset_rows
 from .base import Agent
 from .batching import run_batched
-from .reasoning import _read_dataset_headers, _scrub_text_cell
+from .reasoning import _apply_action, _read_dataset_headers, _scrub_text_cell
 
 
 def _cap_age_90_ok(value: str) -> bool:
@@ -50,6 +50,55 @@ _SHAPE_CHECKS = {
     "hash": lambda v: bool(_HASH_RE.match(v)),
     "pseudonymize": lambda v: bool(_PSEUDONYM_RE.match(v)),
 }
+
+# Actions whose shape check alone cannot catch a wrong-but-well-shaped value
+# (e.g. an age capped to the wrong number, a ZIP truncated from the wrong
+# source digits). D13 plan step 6: when the source column was read, recompute
+# the expected transform from each source cell and compare against what
+# Executor actually wrote, in addition to the existing shape check.
+_SOURCE_COMPARABLE_ACTIONS = frozenset({"cap_age_90", "year_only", "zip3_truncate", "pseudonymize"})
+# Every action `Operator.run` must load the source column for, to make
+# either this value comparison or `scrub_text`'s change-detection possible.
+_SOURCE_REQUIRED_ACTIONS = _SOURCE_COMPARABLE_ACTIONS | {"scrub_text"}
+
+
+def _pseudonymize_consistent(relevant: list[tuple[str, str]]) -> bool:
+    """True iff the source-to-written mapping over this column is a
+    consistent function (equal source values map to the same written
+    pseudonym) and injective (distinct source values never collide on the
+    same written pseudonym). Never inspects the pseudonym algorithm itself
+    -- Operator has no registry salt -- only the mapping's shape."""
+    forward: dict[str, str] = {}
+    reverse: dict[str, str] = {}
+    for source_value, written_value in relevant:
+        if written_value == "":
+            return False
+        prior = forward.get(source_value)
+        if prior is not None:
+            if prior != written_value:
+                return False
+            continue
+        if written_value in reverse:
+            return False
+        forward[source_value] = written_value
+        reverse[written_value] = source_value
+    return True
+
+
+def _source_value_mismatch_problem(action: str, column: str, cells: list[str],
+                                    source_cells: list[str]) -> str | None:
+    """Row-aligned comparison of every non-empty source cell's expected
+    transform against Executor's written cell. Returns ``None`` when
+    consistent, else a problem string that never contains a raw value."""
+    relevant = [(s, w) for s, w in zip(source_cells, cells, strict=True) if s != ""]
+    if action == "pseudonymize":
+        ok = _pseudonymize_consistent(relevant)
+        problem = "equal source values did not map to equal pseudonyms, or distinct source values collided"
+    else:
+        ok = all(_apply_action(source_value, action, column) == written_value
+                  for source_value, written_value in relevant)
+        problem = "exported value does not match the transform of the source value"
+    return None if ok else f"{action}: {problem}"
 
 
 def _read_columns(path: str, ext: str) -> tuple[list[str], dict[str, list[str]]]:
@@ -170,16 +219,26 @@ def _verify_record(record: dict[str, Any], view: dict[str, Any] | None) -> dict[
     shape_check = _SHAPE_CHECKS.get(action)
     if shape_check is not None:
         ok = all(shape_check(v) for v in non_empty)
-        verdict.update(
-            checks=[{"name": "column_presence", "pass": True}, {"name": "shape", "pass": ok}],
-            verdict="pass" if ok else "fail",
-            # Never the raw offending value -- a malformed cap_age_90 cell
-            # could still be sensitive-shaped, so only the failure of the
-            # shape check itself is reported, never the cell's content.
-            problem="" if ok else f"{action}: a written cell failed the expected output shape check",
-            performed=f"column transformed via {action}, {len(non_empty)} value(s) checked" if ok
-            else f"column transformed via {action}, one or more values fail the expected shape",
-        )
+        checks = [{"name": "column_presence", "pass": True}, {"name": "shape", "pass": ok}]
+        # Never the raw offending value -- a malformed cap_age_90 cell
+        # could still be sensitive-shaped, so only the failure of the
+        # shape check itself is reported, never the cell's content.
+        problem = "" if ok else f"{action}: a written cell failed the expected output shape check"
+        performed = (f"column transformed via {action}, {len(non_empty)} value(s) checked" if ok
+                     else f"column transformed via {action}, one or more values fail the expected shape")
+        source = view.get("source")
+        if ok and action in _SOURCE_COMPARABLE_ACTIONS and not view.get("source_error") and source is not None:
+            # Shape alone cannot catch a wrong-but-well-shaped value (an age
+            # capped to the wrong number, a ZIP truncated from the wrong
+            # digits). When the source column was read, recompute the
+            # expected transform per D13 plan step 6.
+            value_problem = _source_value_mismatch_problem(action, column, cells, source.get(column, []))
+            checks.append({"name": "source_value_match", "pass": value_problem is None})
+            if value_problem is not None:
+                ok = False
+                problem = value_problem
+                performed = f"column transformed via {action}, exported value does not match the source transform"
+        verdict.update(checks=checks, verdict="pass" if ok else "fail", problem=problem, performed=performed)
         return verdict
 
     if action == "scrub_text":
@@ -291,7 +350,7 @@ class Operator(Agent):
 
             source: dict[str, list[str]] | None = None
             source_error = False
-            if any(d.get("action") == "scrub_text" for d in group):
+            if any(d.get("action") in _SOURCE_REQUIRED_ACTIONS for d in group):
                 src_path = f.get("stored_path")
                 if not src_path:
                     source_error = True

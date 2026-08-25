@@ -319,6 +319,112 @@ def test_all_action_types_pass_against_a_real_executor_export(tmp_path):
     assert result["status"] == "clean"
 
 
+def test_cap_age_90_wrong_value_passes_shape_but_fails_source_comparison(tmp_path):
+    """D13 plan step 6: a shape check alone cannot catch a well-formed but
+    wrong age cap. Source age 96 must become '90+'; a corrupted export that
+    writes a different, still-valid-shaped age ('89') passes the old shape
+    check and must now be caught by the source comparison."""
+    src = tmp_path / "in.csv"
+    _write_csv(src, ["age"], [["96"]])
+    dst = tmp_path / "out.csv"
+    _write_csv(dst, ["age"], [["89"]])  # valid shape (0-89), wrong: source caps to '90+'
+    files = [_dataset_file("f1", str(src))]
+    decisions = [{"file_id": "f1", "column": "age", "action": "cap_age_90",
+                  "phi_category": "C", "citation": "45 CFR 164.514(b)(2)(i)(C)"}]
+    exports = {"f1": str(dst)}
+
+    op = Operator(make_ctx("Operator"))
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    v = result["verdicts"][0]
+    assert v["verdict"] == "fail"
+    assert "96" not in v["problem"]
+    assert "89" not in v["problem"]
+    assert any(c["name"] == "shape" and c["pass"] for c in v["checks"])
+    assert any(c["name"] == "source_value_match" and not c["pass"] for c in v["checks"])
+    assert result["status"] == "issues"
+
+
+def test_year_only_wrong_value_fails_source_comparison(tmp_path):
+    src = tmp_path / "in.csv"
+    _write_csv(src, ["dob"], [["1980-05-01"]])
+    dst = tmp_path / "out.csv"
+    _write_csv(dst, ["dob"], [["1981"]])  # valid shape (4 digits), wrong year
+    files = [_dataset_file("f1", str(src))]
+    decisions = [{"file_id": "f1", "column": "dob", "action": "year_only",
+                  "phi_category": "C", "citation": "45 CFR 164.514(b)(2)(i)(C)"}]
+    exports = {"f1": str(dst)}
+
+    op = Operator(make_ctx("Operator"))
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    v = result["verdicts"][0]
+    assert v["verdict"] == "fail"
+    assert any(c["name"] == "source_value_match" and not c["pass"] for c in v["checks"])
+
+
+def test_zip3_truncate_wrong_value_fails_source_comparison(tmp_path):
+    src = tmp_path / "in.csv"
+    _write_csv(src, ["zip"], [["90210"]])
+    dst = tmp_path / "out.csv"
+    _write_csv(dst, ["zip"], [["903"]])  # valid shape (3 digits), wrong: source truncates to '902'
+    files = [_dataset_file("f1", str(src))]
+    decisions = [{"file_id": "f1", "column": "zip", "action": "zip3_truncate",
+                  "phi_category": "B", "citation": "45 CFR 164.514(b)(2)(i)(B)"}]
+    exports = {"f1": str(dst)}
+
+    op = Operator(make_ctx("Operator"))
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    v = result["verdicts"][0]
+    assert v["verdict"] == "fail"
+    assert any(c["name"] == "source_value_match" and not c["pass"] for c in v["checks"])
+
+
+def test_pseudonymize_inconsistent_mapping_fails_source_comparison(tmp_path):
+    """D13 plan step 6: equal source values must map to equal pseudonyms,
+    and distinct source values must never collide. Both violations are
+    checked without Operator ever knowing the registry's salt or
+    algorithm -- only the mapping's shape."""
+    src = tmp_path / "in.csv"
+    _write_csv(src, ["name"], [["Jane Doe"], ["Jane Doe"]])
+    dst = tmp_path / "out.csv"
+    _write_csv(dst, ["name"], [["Paaaaaaaa"], ["Pbbbbbbbb"]])  # same source, different pseudonyms
+    files = [_dataset_file("f1", str(src))]
+    decisions = [{"file_id": "f1", "column": "name", "action": "pseudonymize",
+                  "phi_category": "A", "citation": "45 CFR 164.514(b)(2)(i)(A)"}]
+    exports = {"f1": str(dst)}
+
+    op = Operator(make_ctx("Operator"))
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    v = result["verdicts"][0]
+    assert v["verdict"] == "fail"
+    assert "Jane Doe" not in v["problem"]
+    assert any(c["name"] == "source_value_match" and not c["pass"] for c in v["checks"])
+
+
+def test_cap_age_90_without_source_still_passes_on_shape_alone(tmp_path):
+    """Plan step 6 says 'keep every existing check' -- when no stored_path
+    is available the value comparison cannot run at all, and Operator
+    falls back to the pre-existing shape-only check rather than failing
+    closed (unlike scrub_text, which has always required source)."""
+    dst = tmp_path / "out.csv"
+    _write_csv(dst, ["age"], [["90+"]])
+    files = [_dataset_file("f1")]  # no stored_path
+    decisions = [{"file_id": "f1", "column": "age", "action": "cap_age_90",
+                  "phi_category": "C", "citation": "45 CFR 164.514(b)(2)(i)(C)"}]
+    exports = {"f1": str(dst)}
+
+    op = Operator(make_ctx("Operator"))
+    result = asyncio.run(op.run(files, decisions, exports))
+
+    v = result["verdicts"][0]
+    assert v["verdict"] == "pass"
+    assert [c["name"] for c in v["checks"]] == ["column_presence", "shape"]
+    assert result["status"] == "clean"
+
+
 def test_cap_age_90_shape_violation_is_caught(tmp_path):
     """A corrupted export (age never capped) is caught, and the raw
     offending value never appears in the reported problem text."""
