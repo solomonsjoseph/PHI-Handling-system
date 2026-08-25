@@ -10,7 +10,6 @@ Both agents follow the same cache-first / web-search-second policy:
    tool enabled so the answer reflects the latest primary-law text or
    published method. Citations are stored alongside the JSON reply.
 3. On tool error / timeout, fall back to the deterministic pack in
-   ``phi_core/jurisdictions.py`` so the pipeline never blocks on an
    external service.
 
 Both agents return JSON with a fixed schema so the Classifier (Judge) can
@@ -24,7 +23,6 @@ from typing import Any
 
 from ..jurisdictions import get_pack
 from .base import Agent
-from .cache import cache_get, cache_put
 
 
 class Statute(Agent):
@@ -171,7 +169,7 @@ class Statute(Agent):
         return hipaa
 
     async def _hipaa_rules_for(self, jurisdiction: str) -> dict[str, Any]:
-        cached = await cache_get(self.db, "regulation_rules", jurisdiction)
+        cached = await self.ctx.cache.get("regulation_rules", jurisdiction) if self.ctx.cache else None
         if cached:
             await self._log(f"statute.cache_hit:{jurisdiction}", "info",
                             {"topic": "regulation_rules"})
@@ -216,16 +214,18 @@ class Statute(Agent):
         if reply.get("age_aggregation_threshold") is None:
             reply["age_aggregation_threshold"] = pack.age_aggregation_threshold
 
-        await cache_put(self.db, "regulation_rules", jurisdiction,
-                        _json.dumps(reply),
-                        source="web_search" if reply.get("sources") else "llm")
+        if self.ctx.cache:
+            await self.ctx.cache.put(
+                "regulation_rules", jurisdiction, _json.dumps(reply),
+                source="web_search" if reply.get("sources") else "llm",
+            )
         return reply
 
     async def _adjacent_regimes_for(self, jurisdiction: str) -> dict[str, Any]:
         if jurisdiction != "us":
             return {"adjacent_regimes": []}
 
-        cached = await cache_get(self.db, "adjacent_regulations", jurisdiction)
+        cached = await self.ctx.cache.get("adjacent_regulations", jurisdiction) if self.ctx.cache else None
 
         if cached:
             await self._log(f"statute.cache_hit:{jurisdiction}", "info",
@@ -283,17 +283,17 @@ class Statute(Agent):
                             {"error": str(e)})
             reply = {"adjacent_regimes": self._ADJACENT_REGIMES_FALLBACK}
 
-        await cache_put(
-            self.db,
-            "adjacent_regulations",
-            jurisdiction,
-            _json.dumps(reply),
-            source=(
-                "web_search"
-                if any(regime.get("sources") for regime in reply["adjacent_regimes"])
-                else "llm"
-            ),
-        )
+        if self.ctx.cache:
+            await self.ctx.cache.put(
+                "adjacent_regulations",
+                jurisdiction,
+                _json.dumps(reply),
+                source=(
+                    "web_search"
+                    if any(regime.get("sources") for regime in reply["adjacent_regimes"])
+                    else "llm"
+                ),
+            )
         return reply
 
     @staticmethod
@@ -427,7 +427,7 @@ class Praxis(Agent):
 
     async def method_for(self, category: str) -> dict[str, Any]:
         cache_topic = f"phi_method_v2:{category}"
-        cached = await cache_get(self.db, cache_topic, "generic")
+        cached = await self.ctx.cache.get(cache_topic, "generic") if self.ctx.cache else None
         if cached:
             payload = _json.loads(cached["content"])
             await self._log(
@@ -443,8 +443,8 @@ class Praxis(Agent):
                 f"praxis.deterministic:{category}", "info",
                 {"method": reply["methods"][0]["name"]},
             )
-            await cache_put(self.db, cache_topic, "generic", _json.dumps(reply),
-                            source="deterministic")
+            if self.ctx.cache:
+                await self.ctx.cache.put(cache_topic, "generic", _json.dumps(reply), source="deterministic")
             return reply
 
         pack = get_pack("us")
@@ -484,8 +484,8 @@ class Praxis(Agent):
 
         reply["category"] = category
         reply.setdefault("as_of", "web-search")
-        await cache_put(self.db, cache_topic, "generic", _json.dumps(reply),
-                        source=cache_source)
+        if self.ctx.cache:
+            await self.ctx.cache.put(cache_topic, "generic", _json.dumps(reply), source=cache_source)
         return reply
 
     async def run(self, categories: list[str]) -> dict[str, Any]:

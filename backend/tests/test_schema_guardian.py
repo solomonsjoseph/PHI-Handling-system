@@ -13,19 +13,7 @@ from pathlib import Path
 import openpyxl
 import pytest
 from phi_core.agents.specialists import Schema
-
-
-class FakeAgentLog:
-    def __init__(self):
-        self.rows: list[dict] = []
-
-    async def insert_one(self, doc):
-        self.rows.append(doc)
-
-
-class FakeDb:
-    def __init__(self):
-        self.agent_log = FakeAgentLog()
+from phi_core.control.testing import make_ctx
 
 
 class NoLlmSchema(Schema):
@@ -40,7 +28,7 @@ class NoLlmSchema(Schema):
 
 
 def _schema() -> NoLlmSchema:
-    return NoLlmSchema(session_id="s", llm=None, db=FakeDb())
+    return NoLlmSchema(make_ctx("Schema"))
 
 
 def _write_csv(path: Path, headers: list[str], rows: list[list[str]]) -> None:
@@ -128,9 +116,9 @@ def test_schema_logs_and_skips_a_file_with_no_headers(tmp_path):
     result = asyncio.run(schema.run(dataset_files=dataset_files))
 
     assert result["columns"] == []
-    error_rows = [r for r in schema.db.agent_log.rows if r["phase"] == "schema.error:f1"]
+    error_rows = [r for r in schema.ctx.trace.legacy_messages if r.phase == "schema.error:f1"]
     assert len(error_rows) == 1
-    assert error_rows[0]["payload"]["error"] == "no headers provided"
+    assert error_rows[0].payload["error"] == "no headers provided"
 
 
 def test_verify_present_and_absent_case_insensitive():
@@ -185,7 +173,7 @@ def test_judge_never_structurally_required_schema_classification_fields():
             captured.update(kw)
             return {"decisions": []}
 
-    j = StubJudge(session_id="s", llm=None, db=FakeDb())
+    j = StubJudge(make_ctx("Judge"))
     schema = {"columns": [{"name": "a", "_file_id": "f1"},
                           {"name": "b", "_file_id": "f1"}]}
     asyncio.run(j.run(schema=schema, instrument={}, lexicon={}, statute={}))

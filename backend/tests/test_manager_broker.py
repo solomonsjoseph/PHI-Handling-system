@@ -10,25 +10,7 @@ from __future__ import annotations
 import asyncio
 
 from phi_core.agents.manager import Manager
-
-
-class FakeAgentLog:
-    async def insert_one(self, *_args, **_kwargs):
-        return None
-
-
-class FakeSessions:
-    async def find_one(self, *_args, **_kwargs):
-        return None
-
-    async def update_one(self, *_args, **_kwargs):
-        return None
-
-
-class FakeDb:
-    def __init__(self):
-        self.sessions = FakeSessions()
-        self.agent_log = FakeAgentLog()
+from phi_core.control.testing import make_ctx
 
 
 class FakeSchema:
@@ -55,7 +37,7 @@ class FakeLexicon:
 
 
 def _manager() -> Manager:
-    return Manager(session_id="s", llm=None, db=FakeDb())
+    return Manager(make_ctx("Manager"))
 
 
 def test_ask_schema_without_attach_is_unavailable():

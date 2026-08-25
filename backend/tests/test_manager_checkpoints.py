@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
+from phi_core.agents.llm import LlmConfig
 from phi_core.agents.reasoning import (
     AUDITOR_CONFIDENCE_FLOOR,
     PseudonymRegistry,
@@ -15,6 +16,7 @@ from phi_core.agents.reasoning import (
     materialize_auditor_disagreements,
     plain_human_review_reasons,
 )
+from phi_core.control.store import MemoryControlStore
 from phi_core.crypto import decrypt_reversal_map, encrypt_reversal_map
 
 
@@ -109,7 +111,7 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
             self.agent_log = FakeAgentLog()
 
     class FakeAgent:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
             self.last_message_id = None
 
@@ -171,7 +173,8 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
         result = asyncio.run(orchestrator.run_pipeline(
             {"id": "session", "files": [
                 {"kind": "dataset", "file_id": "f1", "subtype": "csv", "stored_path": "/tmp/does-not-matter.csv"},
-            ]}, db, object(), emit, on_phase,
+            ]}, db, LlmConfig(provider="anthropic", model="test", max_tokens=100), emit, on_phase,
+            control_store=MemoryControlStore(),
         ))
     finally:
         for name, orig in originals.items():

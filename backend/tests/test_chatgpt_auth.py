@@ -155,24 +155,22 @@ async def test_poll_once_pending_then_connected_writes_auth_file(monkeypatch, tm
 
 def test_call_llm_chatgpt_fails_fast_without_auth_file(monkeypatch, tmp_path):
     monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tmp_path))
-    from phi_core.agents.llm import LlmConfig, call_llm
+    from phi_core.control import gateway
 
-    cfg = LlmConfig(provider="chatgpt", model="chatgpt/gpt-5.3-codex")
     t0 = time.time()
     with pytest.raises(RuntimeError, match="ChatGPT account not connected"):
-        call_llm("system", "user", cfg)
+        gateway._require_chatgpt_connected()
     elapsed = time.time() - t0
     assert elapsed < 1.0, f"guard should raise immediately, took {elapsed:.2f}s"
 
 
 def test_call_llm_with_web_search_chatgpt_fails_fast_without_auth_file(monkeypatch, tmp_path):
     monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tmp_path))
-    from phi_core.agents.llm import LlmConfig, call_llm_with_web_search
+    from phi_core.control import gateway
 
-    cfg = LlmConfig(provider="chatgpt", model="chatgpt/gpt-5.3-codex")
     t0 = time.time()
     with pytest.raises(RuntimeError, match="ChatGPT account not connected"):
-        call_llm_with_web_search("system", "user", cfg)
+        gateway._require_chatgpt_connected()
     elapsed = time.time() - t0
     assert elapsed < 1.0, f"guard should raise immediately, took {elapsed:.2f}s"
 

@@ -11,20 +11,9 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from phi_core.agents.llm import LlmConfig
 from phi_core.agents.reasoning import Executor
+from phi_core.control.testing import make_ctx
 from phi_core.publish_guard import scan_all_exports
-
-
-class _StubDB:
-    """Same shape as test_speed_and_ux.py's _StubDB, with agent_log added:
-    Executor._log awaits ``self.db.agent_log.insert_one(...)`` on every step."""
-
-    def __init__(self):
-        self.agent_log = self
-
-    async def insert_one(self, *_a, **_kw):
-        return None
 
 
 def test_narrative_redaction_extracts_and_redacts_real_text(tmp_path, monkeypatch):
@@ -34,9 +23,7 @@ def test_narrative_redaction_extracts_and_redacts_real_text(tmp_path, monkeypatc
         "Consent obtained from James Smith, call 415-555-1234, MRN-12345678.",
         encoding="utf-8",
     )
-    executor = Executor(
-        session_id="t1", llm=LlmConfig.from_dict({"model": "x"}), db=_StubDB(), emit=None,
-    )
+    executor = Executor(make_ctx("Executor"))
     out = asyncio.run(executor.run(
         files=[{
             "file_id": "f1", "original_name": "consent.txt", "stored_path": str(src),
@@ -69,9 +56,7 @@ def test_executor_dataset_output_survives_publish_guard(tmp_path, monkeypatch):
         {"file_id": "f2", "column": "age", "action": "cap_age_90", "hipaa_category": "C"},
         {"file_id": "f2", "column": "notes", "action": "scrub_text", "hipaa_category": "R"},
     ]
-    executor = Executor(
-        session_id="t2", llm=LlmConfig.from_dict({"model": "x"}), db=_StubDB(), emit=None,
-    )
+    executor = Executor(make_ctx("Executor"))
     out = asyncio.run(executor.run(
         files=[{
             "file_id": "f2", "original_name": "enrollment.csv", "stored_path": str(src),

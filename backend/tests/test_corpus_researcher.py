@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import json
 import os
-from unittest.mock import AsyncMock, patch
 
 import pytest
+from phi_core.control.testing import MemoryResearchCache, make_ctx
 
 
 def _has_key() -> bool:
@@ -22,7 +22,6 @@ async def test_researcher_refuses_ungrounded_reply(monkeypatch):
     """The researcher MUST refuse to return a scenario without source
     citations. Otherwise it would encourage hallucinated study data —
     the exact opposite of Sir's spec."""
-    from phi_core.agents.llm import LlmConfig
     from phi_corpus.researcher import CorpusResearcher
 
     ungrounded = {
@@ -35,20 +34,9 @@ async def test_researcher_refuses_ungrounded_reply(monkeypatch):
     async def _fake_call(prompt, phase, default=None, max_uses=3):
         return ungrounded, []
 
-    class _FakeDb:
-        agent_cache = None
-        agent_log = None
-
-    fake_db = _FakeDb()
-    cfg = LlmConfig(provider="anthropic", model="test", max_tokens=100)
-    agent = CorpusResearcher(session_id="t", llm=cfg, db=fake_db)
+    agent = CorpusResearcher(make_ctx("CorpusResearcher"))
     agent.call_json_with_web_search = _fake_call  # type: ignore
-    # Bypass mongo cache side effects with no-op stubs
-    async def _log(*a, **k): return None
-    agent._log = _log  # type: ignore
-    with patch("phi_corpus.researcher.cache_get", new=AsyncMock(return_value=None)), \
-         patch("phi_corpus.researcher.cache_put", new=AsyncMock(return_value=None)):
-        reply = await agent.research("cardiology")
+    reply = await agent.research("cardiology")
 
     assert "error" in reply
     assert "no web citations" in reply["error"]
@@ -58,7 +46,6 @@ async def test_researcher_refuses_ungrounded_reply(monkeypatch):
 @pytest.mark.asyncio
 async def test_researcher_accepts_reply_with_citations(monkeypatch):
     """A grounded reply with sources passes through unchanged."""
-    from phi_core.agents.llm import LlmConfig
     from phi_corpus.researcher import CorpusResearcher
 
     grounded = {
@@ -83,19 +70,9 @@ async def test_researcher_accepts_reply_with_citations(monkeypatch):
     async def _fake_call(prompt, phase, default=None, max_uses=3):
         return grounded, []
 
-    class _FakeDb:
-        agent_cache = None
-        agent_log = None
-
-    fake_db = _FakeDb()
-    cfg = LlmConfig(provider="anthropic", model="test", max_tokens=100)
-    agent = CorpusResearcher(session_id="t2", llm=cfg, db=fake_db)
+    agent = CorpusResearcher(make_ctx("CorpusResearcher"))
     agent.call_json_with_web_search = _fake_call  # type: ignore
-    async def _log(*a, **k): return None
-    agent._log = _log  # type: ignore
-    with patch("phi_corpus.researcher.cache_get", new=AsyncMock(return_value=None)), \
-         patch("phi_corpus.researcher.cache_put", new=AsyncMock(return_value=None)):
-        reply = await agent.research("diabetes UK biobank")
+    reply = await agent.research("diabetes UK biobank")
 
     assert "error" not in reply
     assert reply["scenario_id"] == "diabetes_uk_biobank_v1"
@@ -104,7 +81,6 @@ async def test_researcher_accepts_reply_with_citations(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_researcher_uses_cache_on_second_call(monkeypatch):
-    from phi_core.agents.llm import LlmConfig
     from phi_corpus.researcher import CorpusResearcher
 
     cached_payload = {
@@ -116,21 +92,11 @@ async def test_researcher_uses_cache_on_second_call(monkeypatch):
         calls.append("live")
         return {}, []
 
-    class _FakeDb:
-        agent_cache = None
-        agent_log = None
-
-    fake_db = _FakeDb()
-    cfg = LlmConfig(provider="anthropic", model="test", max_tokens=100)
-    agent = CorpusResearcher(session_id="t3", llm=cfg, db=fake_db)
+    cache = MemoryResearchCache()
+    cache.values[("corpus_scenario", "oncology")] = {"content": json.dumps(cached_payload)}
+    agent = CorpusResearcher(make_ctx("CorpusResearcher", cache=cache))
     agent.call_json_with_web_search = _fake_call  # type: ignore
-    async def _log(*a, **k): return None
-    agent._log = _log  # type: ignore
-    async def _cache_get(_db, _topic, _key):
-        return {"content": json.dumps(cached_payload)}
-    with patch("phi_corpus.researcher.cache_get", new=_cache_get), \
-         patch("phi_corpus.researcher.cache_put", new=AsyncMock(return_value=None)):
-        reply = await agent.research("oncology")
+    reply = await agent.research("oncology")
     assert reply == cached_payload
     assert calls == [], "web_search should NOT have been called on a cache hit"
 
@@ -145,18 +111,21 @@ async def test_researcher_live_returns_grounded_scenario():
     a well-known domain and assert the reply is grounded + shaped."""
     from motor.motor_asyncio import AsyncIOMotorClient
     from phi_core.agents.llm import LlmConfig
+    from phi_core.control.activation import ActivationFactory
     from phi_corpus.researcher import CorpusResearcher
 
     client = AsyncIOMotorClient(os.environ["MONGO_URL"])
     db = client[os.environ["DB_NAME"]]
     # Bust cache to force live search
-    await db.agent_cache.delete_many({"topic": "corpus_scenario"})
+    await db.web_cache.delete_many({"topic": "corpus_scenario"})
     cfg = LlmConfig(
         provider="anthropic",
         model="claude-sonnet-4-5-20250929",
         max_tokens=3000,
     )
-    agent = CorpusResearcher(session_id="live", llm=cfg, db=db)
+    factory = ActivationFactory(db, cfg)
+    ctx = await factory.activate(session_id="live", run_id="live", agent="CorpusResearcher")
+    agent = CorpusResearcher(ctx)
     reply = await agent.research("heart failure clinical outcomes")
     client.close()
 

@@ -5,21 +5,17 @@ from unittest.mock import AsyncMock
 
 import pytest
 from phi_core.agents.experts import Praxis
-from phi_core.agents.llm import LlmConfig
+from phi_core.control.testing import make_ctx
 
 
 def _praxis() -> Praxis:
-    return Praxis(session_id="test-session", llm=LlmConfig(), db=None)
+    return Praxis(make_ctx("Praxis"))
 
 
 @pytest.mark.asyncio
 async def test_method_for_c_returns_multiple_schema_complete_methods_and_names_category(monkeypatch):
-    import phi_core.agents.experts as experts
-
     agent = _praxis()
     agent._log = AsyncMock()
-    monkeypatch.setattr(experts, "cache_get", AsyncMock(return_value=None))
-    monkeypatch.setattr(experts, "cache_put", AsyncMock())
     searched = AsyncMock(return_value=({
         "category": "C",
         "methods": [
@@ -63,12 +59,8 @@ async def test_method_for_c_returns_multiple_schema_complete_methods_and_names_c
 @pytest.mark.asyncio
 @pytest.mark.parametrize("category", ["A", "D", "F", "G"])
 async def test_drop_only_categories_are_single_method_without_search(monkeypatch, category):
-    import phi_core.agents.experts as experts
-
     agent = _praxis()
     agent._log = AsyncMock()
-    monkeypatch.setattr(experts, "cache_get", AsyncMock(return_value=None))
-    monkeypatch.setattr(experts, "cache_put", AsyncMock())
     agent.call_json_with_web_search = AsyncMock()
 
     reply = await agent.method_for(category)
@@ -80,12 +72,8 @@ async def test_drop_only_categories_are_single_method_without_search(monkeypatch
 
 @pytest.mark.asyncio
 async def test_search_failure_returns_deterministic_b_method_wrapped(monkeypatch):
-    import phi_core.agents.experts as experts
-
     agent = _praxis()
     agent._log = AsyncMock()
-    monkeypatch.setattr(experts, "cache_get", AsyncMock(return_value=None))
-    monkeypatch.setattr(experts, "cache_put", AsyncMock())
     agent.call_json_with_web_search = AsyncMock(side_effect=RuntimeError("search unavailable"))
 
     reply = await agent.method_for("B")
@@ -96,8 +84,7 @@ async def test_search_failure_returns_deterministic_b_method_wrapped(monkeypatch
 @pytest.mark.asyncio
 async def test_judge_summary_lists_method_names_and_any_utility_preservation():
     from phi_core.agents.reasoning import Judge
-
-    judge = Judge(session_id="test-session", llm=LlmConfig(), db=None)
+    judge = Judge(make_ctx("Judge"))
     judge.call_json = AsyncMock(return_value={"decisions": []})
 
     await judge.run(

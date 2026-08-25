@@ -42,7 +42,7 @@ class DetectedSpan(BaseModel):
 
 class FileArtifact(BaseModel):
     file_id: str = Field(default_factory=_uid)
-    original_name: str
+    original_name_encrypted: str
     size_bytes: int
     sha256: str
     kind: Literal["dataset", "narrative", "metadata"]

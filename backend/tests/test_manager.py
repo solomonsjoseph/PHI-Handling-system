@@ -8,10 +8,15 @@ coroutines with ``asyncio.run(...)``, no live LLM key, no Mongo.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
+from collections import deque
 
 from phi_core.agents.base import _json_validator
+from phi_core.agents.llm import LlmConfig
 from phi_core.agents.manager import Manager, ManagerAdvice, ManagerDecision
+from phi_core.control.store import MemoryControlStore
+from phi_core.control.testing import FakeGateway, make_ctx
 
 # ---- shared fakes, following test_keep_verification_pipeline.py:13-26 -----
 
@@ -38,6 +43,18 @@ class FakeDb:
         self.agent_log = FakeAgentLog()
 
 
+class _RaisingGateway:
+    """Gateway whose every call raises, standing in for the old monkeypatched
+    ``call_llm`` that simulated a timeout."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def complete(self, req):
+        self.calls += 1
+        raise asyncio.TimeoutError()
+
+
 def _no_sleep(manager: Manager) -> None:
     manager.BACKOFF_S = {2: 0.0, 3: 0.0}
 
@@ -46,7 +63,7 @@ def _no_sleep(manager: Manager) -> None:
 
 
 def test_attempt_ceiling_escalates_after_max_attempts():
-    m = Manager(session_id="s", llm=None, db=FakeDb())
+    m = Manager(make_ctx("Manager"))
     _no_sleep(m)
 
     async def fake_decide(*, task, legal, default_action, payload):
@@ -68,7 +85,7 @@ def test_attempt_ceiling_escalates_after_max_attempts():
 
 
 def test_recovery_after_one_retry():
-    m = Manager(session_id="s", llm=None, db=FakeDb())
+    m = Manager(make_ctx("Manager"))
     _no_sleep(m)
 
     async def fake_decide(*, task, legal, default_action, payload):
@@ -94,10 +111,10 @@ def test_recovery_after_one_retry():
 
 
 def test_fail_closed_on_garbage_manager_reply(monkeypatch):
-    import phi_core.agents.base as base
-    monkeypatch.setattr(base, "call_llm", lambda system, user, llm: "not json")
-
-    m = Manager(session_id="s", llm=None, db=FakeDb())
+    # Manager's own decision call goes through its gateway; a syntactically
+    # bad reply must collapse to the default (fail-closed) action, exactly
+    # as the old monkeypatched call_llm returning "not json" proved.
+    m = Manager(make_ctx("Manager", gateway=FakeGateway(replies=deque(["not json"]))))
     _no_sleep(m)
 
     async def always_timeout(system_prompt, extended):
@@ -112,7 +129,7 @@ def test_fail_closed_on_garbage_manager_reply(monkeypatch):
 
 
 def test_tool_grant_uses_escalated_attempt_on_retry():
-    m = Manager(session_id="s", llm=None, db=FakeDb())
+    m = Manager(make_ctx("Manager"))
     _no_sleep(m)
 
     async def fake_decide(*, task, legal, default_action, payload):
@@ -150,7 +167,7 @@ def test_json_validator_off_task_counts_only():
 
 
 def test_off_task_reply_is_retried_and_record_carries_only_counts():
-    m = Manager(session_id="s", llm=None, db=FakeDb())
+    m = Manager(make_ctx("Manager"))
     _no_sleep(m)
 
     async def fake_decide(*, task, legal, default_action, payload):
@@ -193,7 +210,7 @@ def test_judge_declares_deliverable_contract():
             captured.update(kw)
             return {"decisions": []}
 
-    j = StubJudge(session_id="s", llm=None, db=FakeDb())
+    j = StubJudge(make_ctx("Judge"))
     asyncio.run(j.run(schema={"columns": [{}, {}, {}, {}]}, instrument={},
                       lexicon={}, statute={}))
 
@@ -211,7 +228,7 @@ def test_judge_min_items_zero_on_empty_study():
             captured.update(kw)
             return {"decisions": []}
 
-    j = StubJudge(session_id="s", llm=None, db=FakeDb())
+    j = StubJudge(make_ctx("Judge"))
     asyncio.run(j.run(schema={"columns": []}, instrument={}, lexicon={}, statute={}))
     assert captured["min_items"] == 0
 
@@ -229,7 +246,7 @@ def test_schema_declares_deliverable_contract():
             called["call_json"] = True
             return {"columns": []}
 
-    s = StubSchema(session_id="s", llm=None, db=FakeDb())
+    s = StubSchema(make_ctx("Schema"))
     dataset_files = [{"file_id": "f1", "original_name": "d.csv",
                       "columns": ["a", "b", "c"]}]
     result = asyncio.run(s.run(dataset_files=dataset_files))
@@ -243,7 +260,7 @@ def test_schema_declares_deliverable_contract():
 
 
 def test_lateness_recorded_without_retry(monkeypatch):
-    m = Manager(session_id="s", llm=None, db=FakeDb())
+    m = Manager(make_ctx("Manager"))
     monkeypatch.setattr(m, "BUDGET_S", {"Judge": -1.0})
 
     async def instant_success(system_prompt, extended):
@@ -262,7 +279,7 @@ def test_lateness_recorded_without_retry(monkeypatch):
 
 
 def test_adaptation_reuses_coaching_note_within_run():
-    m = Manager(session_id="s", llm=None, db=FakeDb())
+    m = Manager(make_ctx("Manager"))
     _no_sleep(m)
 
     payloads: list[dict] = []
@@ -304,7 +321,7 @@ def test_adaptation_reuses_coaching_note_within_run():
 
 
 def test_consult_fails_open_on_manager_error():
-    m = Manager(session_id="s", llm=None, db=FakeDb())
+    m = Manager(make_ctx("Manager"))
 
     async def raising_call_json(*a, **kw):
         raise RuntimeError("boom")
@@ -320,7 +337,7 @@ def test_consult_fails_open_on_manager_error():
 
 def test_escalate_to_human_review_persists_and_returns_documented_keys():
     db = FakeDb()
-    m = Manager(session_id="s", llm=None, db=db)
+    m = Manager(make_ctx("Manager"), db=db)
     closed: list[bool] = []
 
     async def close_last_phase():
@@ -347,48 +364,39 @@ def test_escalate_to_human_review_persists_and_returns_documented_keys():
 # ---- unsupervised parity ----------------------------------------------------
 
 
-def test_unsupervised_call_matches_prior_behavior(monkeypatch):
+def test_unsupervised_call_matches_prior_behavior():
     import phi_core.agents.base as base
 
     class MiniAgent(base.Agent):
-        NAME = "Mini"
+        NAME = "Judge"
         PROMPT = "sys"
 
-    calls: list[int] = []
-
-    def raising_call_llm(system, user, llm):
-        calls.append(1)
-        raise asyncio.TimeoutError()
-    monkeypatch.setattr(base, "call_llm", raising_call_llm)
-
-    a = MiniAgent(session_id="s", llm=None, db=FakeDb())
+    gateway = _RaisingGateway()
+    a = MiniAgent(make_ctx("Judge", gateway=gateway))
     reply = asyncio.run(a.call("hi", "phase1"))
 
     assert reply == ""
     assert a.call_failures == 1
-    assert len(calls) == 1
+    assert gateway.calls == 1
 
 
-def test_call_failures_counted_once_not_per_retry(monkeypatch):
+def test_call_failures_counted_once_not_per_retry():
     import phi_core.agents.base as base
 
     class MiniAgent(base.Agent):
-        NAME = "Mini"
+        NAME = "Judge"
         PROMPT = "sys"
 
-    def raising_call_llm(system, user, llm):
-        raise asyncio.TimeoutError()
-    monkeypatch.setattr(base, "call_llm", raising_call_llm)
-
-    db = FakeDb()
-    m = Manager(session_id="s", llm=None, db=db)
+    m = Manager(make_ctx("Manager"))
     _no_sleep(m)
 
     async def fake_decide(*, task, legal, default_action, payload):
         return ManagerDecision(action="retry", note=None)
     m._decide = fake_decide
 
-    a = MiniAgent(session_id="s", llm=None, db=db, manager=m)
+    gateway = _RaisingGateway()
+    ctx = dataclasses.replace(make_ctx("Judge", gateway=gateway), manager=m)
+    a = MiniAgent(ctx)
     reply = asyncio.run(a.call("hi", "phase1"))
 
     assert reply == ""
@@ -405,7 +413,7 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
     escalate_calls: list[dict] = []
 
     class FakeManager:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, *, roster, phase_plan):
@@ -425,21 +433,21 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
             return {}
 
     class FakeStatute:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakePraxis:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def method_for(self, _category):
             return {}
 
     class FakeJudge:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
             self.last_message_id = None
         async def run(self, **_kwargs):
@@ -448,7 +456,7 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
                                    "subject": "participant"}]}
 
     class FakeSentinel:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
 
         async def run(self, **_kwargs):
@@ -472,21 +480,24 @@ def test_orchestrator_delegates_escalation_to_manager(monkeypatch):
         phase_events.append((phase, payload))
 
     result = asyncio.run(orchestrator.run_pipeline(
-        {"id": "s", "files": []}, db, object(), emit, on_phase))
+        {"id": "s", "files": []}, db, LlmConfig(provider="anthropic", model="test", max_tokens=100),
+        emit, on_phase, control_store=MemoryControlStore()))
 
     assert result is SENTINEL_RESULT
     assert len(escalate_calls) == 1
     assert "sentinel_blocking_after_cap" in escalate_calls[0]["reasons"]
 
 
-# ---- constructor parity: Ledger / Herald accept `manager` ------------------
+# ---- constructor parity: Ledger / Herald accept a manager-bearing context --
 
 
 def test_ledger_and_herald_accept_manager_kwarg():
     from phi_core.agents.outward import Herald, Ledger
 
-    ledger = Ledger(session_id="s", llm=None, db=None, emit=None, manager=None)
-    herald = Herald(session_id="s", llm=None, db=None, emit=None, manager=None)
+    ledger = Ledger(make_ctx("Ledger"), make_ctx("Ledger.Compare"), make_ctx("Ledger.Aggregate"))
+    herald = Herald(make_ctx("Herald"), make_ctx("Herald.Abstract"), make_ctx("Herald.Sections"))
 
-    assert ledger._common["manager"] is None
-    assert herald._common["manager"] is None
+    assert ledger._compare_ctx.manager is None
+    assert ledger._aggregate_ctx.manager is None
+    assert herald._abstract_ctx.manager is None
+    assert herald._sections_ctx.manager is None

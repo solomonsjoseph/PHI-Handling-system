@@ -1,7 +1,9 @@
 import asyncio
 
 import pytest
+from phi_core.agents.llm import LlmConfig
 from phi_core.agents.reasoning import _HARD_RULE_TABLE, apply_site_cardinality_rule
+from phi_core.control.store import MemoryControlStore
 
 
 def _decide(**kw):
@@ -163,21 +165,21 @@ def _run_cardinality_pipeline(tmp_path, monkeypatch):
             self.agent_log = FakeAgentLog()
 
     class FakeStatute:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakePraxis:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def method_for(self, _category):
             return {}
 
     class FakeLexicon:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
@@ -188,12 +190,12 @@ def _run_cardinality_pipeline(tmp_path, monkeypatch):
             return {"fields": []}
 
     class FakeSchema(FakeLexicon):
-        def __init__(self, **_kwargs):
-            super().__init__(**_kwargs)
+        def __init__(self, *_a, **_kwargs):
+            super().__init__(*_a, **_kwargs)
             self._stats = {("dataset.csv", "treatment_facility_name"): {"distinct": 4, "rows": 40}}
 
     class FakeJudge:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
             self.last_message_id = None
 
@@ -209,7 +211,7 @@ def _run_cardinality_pipeline(tmp_path, monkeypatch):
             }]}
 
     class FakeSentinel:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             # Forces the pipeline into human review right after this
             # iteration's short-circuit, so the test never needs to mock
             # Executor/Auditor/Ledger/Herald -- the loop-ordering proof
@@ -245,9 +247,10 @@ def _run_cardinality_pipeline(tmp_path, monkeypatch):
             }],
         },
         db,
-        object(),
+        LlmConfig(provider="anthropic", model="test", max_tokens=100),
         emit,
         on_phase,
+        control_store=MemoryControlStore(),
     ))
     return result, phase_events
 

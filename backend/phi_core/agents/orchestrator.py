@@ -27,6 +27,10 @@ from typing import Any, Awaitable, Callable
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from phi_core.control.activation import ActivationFactory
+from phi_core.control.context import AgentContext
+from phi_core.control.store import ControlStore
+
 from ..paths import cleanup_session_unpacked
 from ..security import scrub_decision, scrub_persisted_text
 from .base import ITERATION_CAP, AgentMessage
@@ -99,6 +103,7 @@ async def run_pipeline(
     emit: Callable[[AgentMessage], Awaitable[None]],
     on_phase: PhaseCb,
     run_id: str | None = None,
+    control_store: "ControlStore | None" = None,
 ) -> dict[str, Any]:
     sid = session["id"]
     session_filter = {"id": sid}
@@ -152,14 +157,29 @@ async def run_pipeline(
     iteration_cap = int(session.get("iteration_cap") or ITERATION_CAP)
     iteration_cap = max(1, min(iteration_cap, ITERATION_CAP))
 
-    manager = Manager(session_id=sid, llm=llm_cfg, db=db, emit=emit)
+    factory = ActivationFactory(db, llm_cfg, store=control_store)
+    effective_run_id = run_id or session.get("_pipeline_run_id") or sid
+
+    _manager_box: dict[str, "Manager | None"] = {"value": None}
+
+    async def make_ctx(agent: str) -> AgentContext:
+        return await factory.activate(
+            session_id=sid,
+            run_id=effective_run_id,
+            agent=agent,
+            emit=emit,
+            manager=_manager_box["value"],
+            lease_owner=f"pipeline:{effective_run_id}",
+        )
+
+    manager = Manager(await make_ctx("Manager"), db=db)
+    _manager_box["value"] = manager
     await manager.run(
         roster=["Lexicon", "Schema", "Instrument", "Statute", "Praxis", "Judge",
                 "Sentinel", "Executor", "Auditor", "Scout", "Ledger", "Herald"],
         phase_plan=["specialists", "statute", "praxis", "judge_iter", "sentinel_iter",
                     "executor", "publish_guard", "auditor_scout", "ledger", "herald"],
     )
-    common = dict(session_id=sid, llm=llm_cfg, db=db, emit=emit, manager=manager)
 
     # 1+2+2b. Specialists, Statute, and Praxis kicked off IN PARALLEL.
     #
@@ -176,16 +196,20 @@ async def run_pipeline(
 
     hipaa_cats = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K",
                   "L", "M", "N", "O", "P", "Q", "R"]
-    praxis_agent = Praxis(**common)
+    async def _praxis_method(category: str) -> dict[str, Any]:
+        agent = Praxis(await make_ctx("Praxis"))
+        try:
+            return await agent.method_for(category)
+        except Exception as exc:
+            await agent._log("praxis.category_failed", "info",
+                              {"category": category, "error": f"{type(exc).__name__}: {exc}"})
+            raise
 
-    # Fire the independent long-runners immediately. asyncio.gather()
-    # eagerly schedules its awaitables, so simply calling it starts the
-    # web-search work; we don't need to wrap it in create_task().
     statute_task = asyncio.create_task(
-        Statute(**common).run(jurisdiction=session.get("jurisdiction", "us"))
+        Statute(await make_ctx("Statute")).run(jurisdiction=session.get("jurisdiction", "us"))
     )
     praxis_gather_task = asyncio.gather(
-        *[praxis_agent.method_for(c) for c in hipaa_cats],
+        *[_praxis_method(category) for category in hipaa_cats],
         return_exceptions=True,
     )
 
@@ -193,10 +217,10 @@ async def run_pipeline(
     # enriches its prompt from Lexicon's dictionary columns (Task 6 made
     # Schema deterministic) -- Lexicon, Schema and Instrument all launch
     # under one gather instead of Schema waiting on Lexicon.
-    lexicon_agent = Lexicon(**common) if dict_files else None
-    schema_agent = Schema(**common) if dataset_files else None
-    instrument_agent = Instrument(**common) if form_files else None
-    lex_task = lexicon_agent.run(dict_files=dict_files) if lexicon_agent else _empty({"columns": []})
+    lexicon_agent = Lexicon(await make_ctx("Lexicon")) if dict_files else None
+    schema_agent = Schema(await make_ctx("Schema")) if dataset_files else None
+    instrument_agent = Instrument(await make_ctx("Instrument")) if form_files else None
+    lex_task = lexicon_agent.run(dict_files=dict_files) if lexicon_agent else _empty({"columns": [], "notes": ""})
     schema_task = schema_agent.run(dataset_files=dataset_files) if schema_agent else _empty({"columns": []})
     inst_task = instrument_agent.run(form_files=form_files) if instrument_agent else _empty({"fields": []})
     lexicon, schema, instrument = await asyncio.gather(lex_task, schema_task, inst_task)
@@ -224,17 +248,12 @@ async def run_pipeline(
     praxis_methods: dict[str, Any] = {}
     for cat, res in zip(hipaa_cats, praxis_results, strict=True):
         if isinstance(res, Exception):
-            # Judge falls back to its own reasoning for any category missing
-            # here; logging makes that fallback visible in the audit trail
-            # instead of a silently incomplete praxis_methods dict.
-            await praxis_agent._log("praxis.category_failed", "info",
-                                     {"category": cat, "error": f"{type(res).__name__}: {res}"})
             continue
         praxis_methods[cat] = res
 
     # 3. Judge <-> Sentinel loop -- short-circuits on 0 blocking issues.
-    judge = Judge(**common)
-    sentinel = Sentinel(**common)
+    judge = Judge(await make_ctx("Judge"))
+    sentinel = Sentinel(await make_ctx("Sentinel"))
     prior_feedback = ""
     approved_decisions: list[dict[str, Any]] = []
     advisory_issues: list[dict[str, Any]] = []
@@ -513,7 +532,7 @@ async def run_pipeline(
     # 5. Executor
     await on_phase("executor", {"decision_count": len(approved_decisions)})
     try:
-        exec_out = await Executor(**common).run(files=files, decisions=approved_decisions)
+        exec_out = await Executor(await make_ctx("Executor")).run(files=files, decisions=approved_decisions)
     except Exception as exc:
         # Executor is deterministic and irreversible (writes exports to disk);
         # a crash here must never be papered over by an LLM's advice.
@@ -540,7 +559,7 @@ async def run_pipeline(
     # Scout has no dependency on Operator, Reviewer, Publish Guard, or
     # Auditor, so it starts here and runs in the background across all of
     # them; only Ledger/Herald actually need its result.
-    scout_agent = Scout(**common)
+    scout_agent = Scout(await make_ctx("Scout"))
     scout_task = asyncio.create_task(scout_agent.run())
 
     # 5a. Operator: deterministic self-verification of what Executor wrote,
@@ -551,8 +570,8 @@ async def run_pipeline(
     # function uses.
     await on_phase("operator", {"decision_count": len(approved_decisions)})
     try:
-        op_out = await Operator(**common).run(files=files, decisions=approved_decisions,
-                                              exports=exec_out["exports"])
+        op_out = await Operator(await make_ctx("Operator")).run(files=files, decisions=approved_decisions,
+                                                                 exports=exec_out["exports"])
     except Exception as exc:
         # Fail open into the existing failed-file machinery: a file Operator
         # cannot verify is dropped from exports exactly like an unreadable
@@ -577,7 +596,7 @@ async def run_pipeline(
     # starting with Publish Guard.
     await on_phase("reviewer", {"decision_count": len(approved_decisions)})
     try:
-        rv_out = await Reviewer(**common).run(
+        rv_out = await Reviewer(await make_ctx("Reviewer")).run(
             decisions=approved_decisions,
             operator_result={"failed_file_ids": op_failed_ids, "verdicts": op_out["verdicts"]},
             exports=exports,
@@ -654,7 +673,7 @@ async def run_pipeline(
     # Operator/Reviewer/Publish Guard). Ledger + Herald still need
     # Auditor's metrics + Scout's landscape so they wait on both here.
     await on_phase("auditor_scout", {})
-    auditor_agent = Auditor(**common)
+    auditor_agent = Auditor(await make_ctx("Auditor"))
     audit, scout, benchmark = await asyncio.gather(
         auditor_agent.run(decisions=approved_decisions, exports=exports, files=files,
                           statute=statute, praxis_methods=praxis_methods),
@@ -711,16 +730,22 @@ async def run_pipeline(
 
     # 7. Ledger (split into Compare + Aggregate under the hood).
     await on_phase("ledger", {})
-    ledger = await Ledger(**common).run(decisions=approved_decisions, audit=audit,
-                                        scout=scout, benchmark_result=benchmark)
+    ledger = await Ledger(
+        await make_ctx("Ledger"),
+        await make_ctx("Ledger.Compare"),
+        await make_ctx("Ledger.Aggregate"),
+    ).run(decisions=approved_decisions, audit=audit, scout=scout, benchmark_result=benchmark)
 
     await _check_cancel(db, sid, on_phase)
 
     # 8. Herald (split into Abstract + Sections under the hood so no LLM
     # call exceeds the 90 s hard timeout).
     await on_phase("herald", {})
-    herald = await Herald(**common).run(ledger=ledger, audit=audit,
-                                        target_venue=session.get("target_venue") or "JAMIA Open")
+    herald = await Herald(
+        await make_ctx("Herald"),
+        await make_ctx("Herald.Abstract"),
+        await make_ctx("Herald.Sections"),
+    ).run(ledger=ledger, audit=audit, target_venue=session.get("target_venue") or "JAMIA Open")
 
     await close_last_phase()
     manager_report = await manager.close_run(final_status)

@@ -66,7 +66,7 @@ from fastapi.staticfiles import StaticFiles
 from phi_core import chatgpt_auth
 from phi_core.agents import AgentMessage, LlmConfig
 from phi_core.agents import run_pipeline as run_agent_pipeline
-from phi_core.crypto import decrypt_api_key, encrypt_api_key
+from phi_core.crypto import decrypt_api_key, decrypt_display_name, encrypt_api_key, encrypt_display_name
 from phi_core.db import get_db
 from phi_core.intake import (
     ANY_OF,
@@ -627,7 +627,7 @@ async def session_intake(
         else:
             kind = "metadata"
         accepted.append(FileArtifact(
-            original_name=Path(e.relpath).name,
+            original_name_encrypted=encrypt_display_name(Path(e.relpath).name),
             size_bytes=e.size_bytes,
             sha256=e.sha256,
             kind=kind,
@@ -684,7 +684,7 @@ async def session_intake(
         ],
         "accepted_by_component": {
             comp: [
-                {"file_id": a.file_id, "name": a.original_name, "size": a.size_bytes, "sha256": a.sha256[:16]}
+                {"file_id": a.file_id, "name": a.file_id, "size": a.size_bytes, "sha256": a.sha256[:16]}
                 for a in accepted if a.component == comp
             ]
             for comp in COMPONENT_SUFFIXES
@@ -1145,10 +1145,14 @@ async def corpus_study_research(body: CorpusStudyResearchBody):
     for the requested study domain and persist it to the ``corpus_scenarios``
     Mongo collection so it survives restart and shows up in the catalog.
     """
+    from phi_core.control.activation import ActivationFactory
     from phi_corpus.researcher import CorpusResearcher
     db = get_db()
     cfg = await _current_llm_cfg()
-    agent = CorpusResearcher(session_id="corpus-researcher", llm=cfg, db=db)
+    factory = ActivationFactory(db, cfg)
+    run_id = uuid.uuid4().hex
+    ctx = await factory.activate(session_id="corpus-researcher", run_id=run_id, agent="CorpusResearcher")
+    agent = CorpusResearcher(ctx)
     reply = await agent.research(body.domain)
 
     if reply.get("error"):
@@ -1308,7 +1312,7 @@ async def corpus_study_run(body: CorpusStudyRunBody, principal: str = Depends(re
         else:
             kind = "metadata"
         accepted.append(FileArtifact(
-            original_name=Path(e.relpath).name,
+            original_name_encrypted=encrypt_display_name(Path(e.relpath).name),
             size_bytes=e.size_bytes, sha256=e.sha256,
             kind=kind, subtype=ext,
             stored_path=e.stored_path, component=e.component,
@@ -1360,7 +1364,7 @@ async def corpus_study_verify(sid: str, principal: str = Depends(resolve_princip
     # Map ground-truth file names to the pipeline's file_id so the
     # verifier can look up decisions correctly.
     name_map: dict[str, str] = {
-        f.get("original_name", ""): f.get("file_id", "")
+        f.get("file_id", ""): f.get("file_id", "")
         for f in doc.get("files") or []
     }
     report = _verify(
@@ -1527,18 +1531,23 @@ async def chatgpt_disconnect():
 async def _run_warmup(db, cfg) -> dict:
     """Run Statute + all 17 Praxis warmups. Shared by manual and scheduled paths."""
     from phi_core.agents.experts import Praxis, Statute
+    from phi_core.control.activation import ActivationFactory
 
     warmup_sid = f"warmup:{uuid.uuid4().hex[:8]}"
+    warmup_run_id = uuid.uuid4().hex
 
     async def _noop_emit(_msg):  # pragma: no cover - trivial
         return None
 
-    common = dict(session_id=warmup_sid, llm=cfg, db=db, emit=_noop_emit)
+    factory = ActivationFactory(db, cfg)
     hipaa_cats = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K",
                   "L", "M", "N", "O", "P", "Q", "R"]
 
-    praxis_agent = Praxis(**common)
-    statute_task = Statute(**common).run(jurisdiction="us")
+    async def _activate(agent: str):
+        return await factory.activate(session_id=warmup_sid, run_id=warmup_run_id, agent=agent, emit=_noop_emit)
+
+    praxis_agent = Praxis(await _activate("Praxis"))
+    statute_task = Statute(await _activate("Statute")).run(jurisdiction="us")
     praxis_task = asyncio.gather(
         *[praxis_agent.method_for(c) for c in hipaa_cats],
         return_exceptions=True,
@@ -1738,6 +1747,23 @@ async def _startup_maintenance():
         await db.agent_log.create_index("session_id")
         await db.agent_log.create_index("ts", expireAfterSeconds=RETENTION_DAYS * 86400)
 
+        # Control-plane durable-record indexes.  Collections are created lazily
+        # by Mongo while keeping every identity and CAS lookup indexed.
+        await db.workflow_runs.create_index("run_id", unique=True)
+        await db.workflow_runs.create_index([("session_id", 1), ("state", 1)])
+        await db.work_items.create_index("task_id", unique=True)
+        await db.work_items.create_index([("run_id", 1), ("idempotency_key", 1)], unique=True)
+        await db.work_items.create_index("effect_key", unique=True, sparse=True)
+        await db.work_items.create_index([("state", 1), ("next_eligible_at", 1)])
+        await db.work_items.create_index([("state", 1), ("lease_expires_at", 1)])
+        await db.trace_events.create_index([("run_id", 1), ("seq", 1)], unique=True)
+        await db.trace_events.create_index("event_id", unique=True)
+        await db.artifacts.create_index("artifact_id", unique=True)
+        await db.artifacts.create_index([("root", 1), ("rel_path", 1)], unique=True)
+        await db.artifacts.create_index([("state", 1), ("expires_at", 1)])
+        await db.human_review_events.create_index([("request_id", 1), ("client_event_id", 1)], unique=True)
+        await db.evidence_claims.create_index("claim_id", unique=True)
+
         # Reconcile orphaned runs: an in-process asyncio.create_task pipeline
         # dies silently on restart, leaving the session stuck outside a
         # settled status forever (/handle 409s on a non-terminal status).
@@ -1816,6 +1842,22 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
     session["_pipeline_run_id"] = run_id
     if cap is not None:
         session["iteration_cap"] = cap
+    from phi_core.control.opaque import OpaqueMap
+    from phi_core.control.runs import RunStore
+    from phi_core.control.store import MongoControlStore
+
+    run_store = MongoControlStore(db)
+    workflow_run = await RunStore(run_store).open_run(
+        session_id=sid,
+        run_id=run_id,
+        run_type="study",
+        correlation_id=run_id,
+    )
+    opaque = OpaqueMap(run_id, workflow_run.opaque_map)
+    for file_record in session.get("files") or []:
+        file_record["opaque_file_id"] = opaque.to_opaque("file", file_record["file_id"])
+    await db.sessions.update_one({"id": sid, "_pipeline_run_id": run_id}, {"$set": {"files": session.get("files") or []}})
+    await db.workflow_runs.update_one({"run_id": run_id}, {"$set": {"opaque_map": workflow_run.opaque_map}})
 
     async def emit_msg(msg: AgentMessage) -> None:
         # Persist to session progress in a compact form for the SSE consumer.
@@ -1854,7 +1896,7 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
                         f["columns"] = cols
                         f["row_count"] = rows
                     except Exception as e:
-                        await _emit(sid, ProgressEvent(phase="reading", message=f"header extract failed for {f['original_name']}: {e}"), run_id=run_id)
+                        await _emit(sid, ProgressEvent(phase="reading", message=f"header extract failed for {f['file_id']}: {e}"), run_id=run_id)
                 files_hydrated.append(f)
             session["files"] = files_hydrated
             await db.sessions.update_one(run_filter, {"$set": {"files": files_hydrated}})
@@ -2071,7 +2113,11 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     comment_results: dict[tuple[str, str], dict] = {}
     if comment_targets:
         cfg = await _current_llm_cfg()
-        judge = Judge(session_id=sid, llm=cfg, db=db, emit=None)
+        from phi_core.control.activation import ActivationFactory
+        judge_ctx = await ActivationFactory(db, cfg).activate(
+            session_id=sid, run_id=prior_run_id or sid, agent="Judge",
+        )
+        judge = Judge(judge_ctx)
         async def _resolve(d: dict) -> tuple[tuple[str, str], dict]:
             key = (d.get("file_id", ""), d.get("column", ""))
             reply = await judge.resolve_comment(
@@ -2303,7 +2349,10 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                 timing.setdefault("end_s", now - run_started)
                 timing.setdefault("duration_ms", (now - float(last_phase["t0"])) * 1000)
 
-            common = dict(session_id=sid, llm=cfg, db=db, emit=emit_msg)
+            from phi_core.control.activation import ActivationFactory
+            _factory = ActivationFactory(db, cfg)
+            async def _actx(agent: str):
+                return await _factory.activate(session_id=sid, run_id=resume_run_id, agent=agent, emit=emit_msg)
             resolved_decisions = [d for d in decisions if d.get("action") != "human_review"]
             scrubbed_decisions = [scrub_decision(d) for d in resolved_decisions]
             omit_by_file: dict[str, set[str]] = {}
@@ -2311,7 +2360,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                 omit_by_file.setdefault(entry["file_id"], set()).add(entry["column"])
             await timed_on_phase("executor", {"decision_count": len(scrubbed_decisions)})
 
-            exec_out = await Executor(**common).run(files=files, decisions=scrubbed_decisions, omit_by_file=omit_by_file)
+            exec_out = await Executor(await _actx("Executor")).run(files=files, decisions=scrubbed_decisions, omit_by_file=omit_by_file)
 
             # Reversal key: same mandatory deliverable as the first-pass
             # pipeline. pseudonym_salt(session_id) is deterministic, so a
@@ -2326,11 +2375,11 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             # Scout has no dependency on Operator, Reviewer, Publish Guard,
             # or Auditor, so it starts here and runs in the background
             # across all of them; only Ledger needs its result.
-            scout_agent = Scout(**common)
+            scout_agent = Scout(await _actx("Scout"))
             scout_task = asyncio.create_task(scout_agent.run())
 
             await timed_on_phase("operator", {"decision_count": len(scrubbed_decisions)})
-            op_out = await Operator(**common).run(files=files, decisions=scrubbed_decisions,
+            op_out = await Operator(await _actx("Operator")).run(files=files, decisions=scrubbed_decisions,
                                                   exports=exec_out["exports"], omit_by_file=omit_by_file)
             # Operator's own `failed_file_ids` only covers a file it could
             # not read or that never made it into `exports` at all. A
@@ -2348,7 +2397,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             # canonical for every remaining step below, starting with
             # Publish Guard.
             await timed_on_phase("reviewer", {"decision_count": len(scrubbed_decisions)})
-            rv_out = await Reviewer(**common).run(
+            rv_out = await Reviewer(await _actx("Reviewer")).run(
                 decisions=scrubbed_decisions,
                 operator_result={"failed_file_ids": op_failed_ids, "verdicts": op_out["verdicts"]},
                 exports=exports,
@@ -2401,7 +2450,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                 await _emit(sid, ProgressEvent(phase="blocked", message="publish guard blocked this run", percent=100.0), run_id=resume_run_id)
                 return
             await timed_on_phase("auditor_scout", {})
-            auditor_agent = Auditor(**common)
+            auditor_agent = Auditor(await _actx("Auditor"))
             audit, scout = await asyncio.gather(
                 auditor_agent.run(decisions=scrubbed_decisions, exports=exports, files=files,
                                   statute=session.get("agent_statute"), praxis_methods=session.get("agent_praxis")),
@@ -2477,11 +2526,14 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
                 return
             await timed_on_phase("ledger", {})
 
-            ledger = await Ledger(**common).run(decisions=scrubbed_decisions, audit=audit, scout=scout, benchmark_result=None)
+            ledger = await Ledger(
+                await _actx("Ledger"), await _actx("Ledger.Compare"), await _actx("Ledger.Aggregate"),
+            ).run(decisions=scrubbed_decisions, audit=audit, scout=scout, benchmark_result=None)
             await timed_on_phase("herald", {})
 
-            herald = await Herald(**common).run(ledger=ledger, audit=audit,
-                                                target_venue=session.get("target_venue") or "JAMIA Open")
+            herald = await Herald(
+                await _actx("Herald"), await _actx("Herald.Abstract"), await _actx("Herald.Sections"),
+            ).run(ledger=ledger, audit=audit, target_venue=session.get("target_venue") or "JAMIA Open")
             await close_last_phase()
             run_elapsed_s = round(time.perf_counter() - run_started, 3)
 
@@ -2614,7 +2666,7 @@ async def session_dataset_file(sid: str, file_id: str, principal: str = Depends(
             "downloaded_at": datetime.now(timezone.utc).isoformat(),
         }}},
     )
-    return FileResponse(path, filename=f.get("original_name") or path.name)
+    return FileResponse(path, filename=decrypt_display_name(f.get("original_name_encrypted", "")) or path.name)
 
 
 @app.get("/api/sessions/{sid}/results")

@@ -575,7 +575,7 @@ def build_bundle(session: dict[str, Any], opts: BundleOptions,
             kind = meta.get("kind", "narrative")
             folder = {"dataset": "datasets", "metadata": "dictionary",
                       "narrative": "forms"}.get(kind, "misc")
-            arcname = f"safe_to_share/{folder}/{meta.get('original_name', src.name)}"
+            arcname = f"safe_to_share/{folder}/{meta.get('file_id', '')}{src.suffix}"
             data = src.read_bytes()
             zf.writestr(arcname, data)
             file_hashes[arcname] = _sha256_of_bytes(data)

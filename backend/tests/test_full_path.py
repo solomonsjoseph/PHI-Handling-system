@@ -9,9 +9,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from phi_core.agents import base as agent_base
 from phi_core.agents.base import Agent
-from phi_core.agents.llm import LlmConfig
 from phi_core.agents.operator import Operator
 from phi_core.agents.reasoning import (
     Executor,
@@ -27,33 +25,12 @@ from phi_core.agents.reasoning import (
 )
 from phi_core.agents.reviewer import Reviewer
 from phi_core.bundle import BundleOptions, build_bundle
+from phi_core.control.testing import FakeGateway, make_ctx
 from phi_core.file_readers import column_value_stats, read_csv_columns
 from phi_core.intake import build_manifest
 from phi_core.publish_guard import scan_all_exports
 from phi_corpus.planters import plant
 from phi_corpus.verify import scan_exports_for_leaks
-
-
-class _AgentLog:
-    async def insert_one(self, _document: dict[str, Any]) -> None:
-        return None
-
-
-class _FakeDb:
-    def __init__(self) -> None:
-        self.agent_log = _AgentLog()
-
-
-class _ScriptedProvider:
-    """Pre-control-plane seam matching ``agents.base.call_llm``."""
-
-    def __init__(self, replies: list[str]) -> None:
-        self._replies = iter(replies)
-        self.requests: list[tuple[str, str]] = []
-
-    def __call__(self, system: str, user: str, _config: LlmConfig) -> str:
-        self.requests.append((system, user))
-        return next(self._replies)
 
 
 class _ScriptedJudge(Agent):
@@ -151,9 +128,9 @@ def test_planted_corpus_full_path_uses_real_safety_components(tmp_path, monkeypa
             decision["confidence"] = 0.10
             break
 
-    scripted_provider = _ScriptedProvider([json.dumps({"decisions": proposed})])
-    monkeypatch.setattr(agent_base, "call_llm", scripted_provider)
-    judge = _ScriptedJudge("full-path", LlmConfig(provider="fake", model="scripted"), _FakeDb())
+    gateway = FakeGateway()
+    gateway.replies.append(json.dumps({"decisions": proposed}))
+    judge = _ScriptedJudge(make_ctx("Judge", gateway=gateway))
     handled = asyncio.run(judge.run(header_only_input))
 
     planted_literals = {
@@ -163,8 +140,8 @@ def test_planted_corpus_full_path_uses_real_safety_components(tmp_path, monkeypa
         for literal in planted_cell["leak_literals"]
         if literal
     }
-    assert len(scripted_provider.requests) == 1
-    assert all(literal not in scripted_provider.requests[0][1] for literal in planted_literals)
+    assert len(gateway.requests) == 1
+    assert all(literal not in gateway.requests[0].user_prompt for literal in planted_literals)
 
     gated = _run_deterministic_gates(handled["decisions"], dataset_paths, stats)
     pending = [decision for decision in gated if decision["action"] == "human_review"]
@@ -194,10 +171,9 @@ def test_planted_corpus_full_path_uses_real_safety_components(tmp_path, monkeypa
     monkeypatch.setattr(reasoning, "EXPORT_DIR", export_dir)
 
     async def complete_local_workflow() -> tuple[dict[str, str], dict[str, Any], dict[str, Any]]:
-        db = _FakeDb()
-        exports = (await Executor("full-path", LlmConfig(), db).run(files, resumed))["exports"]
-        operator = await Operator("full-path", LlmConfig(), db).run(files, resumed, exports)
-        reviewer = await Reviewer("full-path", LlmConfig(), db).run(resumed, operator, exports)
+        exports = (await Executor(make_ctx("Executor")).run(files, resumed))["exports"]
+        operator = await Operator(make_ctx("Operator")).run(files, resumed, exports)
+        reviewer = await Reviewer(make_ctx("Reviewer")).run(resumed, operator, exports)
         return reviewer["exports"], operator, reviewer
 
     exports, operator_result, reviewer_result = asyncio.run(complete_local_workflow())
@@ -233,8 +209,7 @@ def test_planted_corpus_full_path_uses_real_safety_components(tmp_path, monkeypa
     with zipfile.ZipFile(io.BytesIO(bundle_bytes)) as bundle:
         attestation = json.loads(bundle.read("safe_to_share/attestation.json"))
         for file_id, export_path in exports.items():
-            original_name = next(file["original_name"] for file in files if file["file_id"] == file_id)
-            archive_name = f"safe_to_share/datasets/{original_name}"
+            archive_name = f"safe_to_share/datasets/{file_id}{Path(export_path).suffix}"
             served_bytes = Path(export_path).read_bytes()
             assert bundle.read(archive_name) == served_bytes
             assert attestation["files"][archive_name] == f"sha256:{hashlib.sha256(served_bytes).hexdigest()}"

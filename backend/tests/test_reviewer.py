@@ -9,21 +9,9 @@ import csv
 from pathlib import Path
 
 from phi_core.agents.reviewer import Reviewer
+from phi_core.control.testing import make_ctx
 from phi_corpus.benchmark import _reviewer_coverage, build_report
 from phi_corpus.planters import plant
-
-
-class FakeAgentLog:
-    def __init__(self):
-        self.inserted: list[dict] = []
-
-    async def insert_one(self, doc, *_args, **_kwargs):
-        self.inserted.append(doc)
-
-
-class FakeDb:
-    def __init__(self):
-        self.agent_log = FakeAgentLog()
 
 
 def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
@@ -63,7 +51,7 @@ def test_missing_operator_verdict_is_a_finding_and_blocks_the_file(tmp_path):
         "status": "clean",
     }
 
-    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    reviewer = Reviewer(make_ctx("Reviewer"))
     result = asyncio.run(reviewer.run(decisions, operator_result, exports))
 
     findings = [f for f in result["findings"] if f["kind"] == "missing_operator_verdict"]
@@ -93,7 +81,7 @@ def test_omit_by_file_column_still_present_is_a_finding(tmp_path):
     }
     omit_by_file = {"f1": {"ssn"}}
 
-    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    reviewer = Reviewer(make_ctx("Reviewer"))
     result = asyncio.run(reviewer.run(decisions, operator_result, exports, omit_by_file))
 
     findings = [f for f in result["findings"] if f["kind"] == "omit_column_leaked"]
@@ -120,7 +108,7 @@ def test_coverage_mismatch_when_zero_fail_verdicts_but_column_count_differs(tmp_
         "status": "clean",
     }
 
-    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    reviewer = Reviewer(make_ctx("Reviewer"))
     result = asyncio.run(reviewer.run(decisions, operator_result, exports))
 
     findings = [f for f in result["findings"] if f["kind"] == "coverage_mismatch"]
@@ -145,7 +133,7 @@ def test_coverage_mismatch_not_raised_when_operator_already_has_a_fail(tmp_path)
         "status": "issues",
     }
 
-    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    reviewer = Reviewer(make_ctx("Reviewer"))
     result = asyncio.run(reviewer.run(decisions, operator_result, exports))
 
     assert not any(f["kind"] == "coverage_mismatch" for f in result["findings"])
@@ -165,7 +153,7 @@ def test_full_coverage_clean_run(tmp_path):
         "status": "clean",
     }
 
-    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    reviewer = Reviewer(make_ctx("Reviewer"))
     result = asyncio.run(reviewer.run(decisions, operator_result, exports))
 
     assert result["findings"] == []
@@ -192,7 +180,7 @@ def test_input_exports_dict_is_never_mutated(tmp_path):
         "status": "clean",
     }
 
-    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    reviewer = Reviewer(make_ctx("Reviewer"))
     result = asyncio.run(reviewer.run(decisions, operator_result, exports))
 
     assert exports == original
@@ -212,7 +200,7 @@ def test_file_already_in_failed_file_ids_stays_excluded_and_is_issues(tmp_path):
     }
     exports: dict[str, str] = {}
 
-    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    reviewer = Reviewer(make_ctx("Reviewer"))
     result = asyncio.run(reviewer.run(decisions, operator_result, exports))
 
     assert result["status"] == "issues"
@@ -232,21 +220,20 @@ def test_agent_log_row_emitted_per_file_with_coverage_check_phase(tmp_path):
         "status": "clean",
     }
 
-    db = FakeDb()
-    reviewer = Reviewer(session_id="s", llm=None, db=db)
+    reviewer = Reviewer(make_ctx("Reviewer"))
     asyncio.run(reviewer.run(decisions, operator_result, exports))
 
-    rows = [d for d in db.agent_log.inserted if d["phase"] == "review.coverage_check"]
+    rows = [d for d in reviewer.ctx.trace.legacy_messages if d.phase == "review.coverage_check"]
     assert len(rows) == 1
-    payload = rows[0]["payload"]
+    payload = rows[0].payload
     assert payload["file_id"] == "f1"
     assert payload["columns"] == ["id"]
     assert payload["decisions_checked"] == 1
     assert payload["operator_verdicts_found"] == 1
     assert payload["missing"] == 0
     assert payload["verdict"] == "clean"
-    assert rows[0]["agent"] == "Reviewer"
-    assert rows[0]["status_text"]
+    assert rows[0].agent == "Reviewer"
+    assert rows[0].status_text
 
 
 def test_corrupt_export_for_a_non_failed_file_does_not_raise_and_skips_header_checks(tmp_path):
@@ -266,7 +253,7 @@ def test_corrupt_export_for_a_non_failed_file_does_not_raise_and_skips_header_ch
     }
     omit_by_file = {"f1": {"ssn"}}  # would trigger omit-leak if the header were readable
 
-    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    reviewer = Reviewer(make_ctx("Reviewer"))
     result = asyncio.run(reviewer.run(decisions, operator_result, exports, omit_by_file))
 
     kinds = {f["kind"] for f in result["findings"]}
@@ -288,7 +275,7 @@ def test_zero_decision_file_with_real_export_is_coverage_mismatch_unless_already
     decisions: list[dict] = []  # zero decisions for f1
 
     operator_result_not_failed = {"verdicts": [], "failed_file_ids": [], "status": "clean"}
-    reviewer = Reviewer(session_id="s", llm=None, db=FakeDb())
+    reviewer = Reviewer(make_ctx("Reviewer"))
     result = asyncio.run(reviewer.run(decisions, operator_result_not_failed, exports))
     findings = [f for f in result["findings"] if f["kind"] == "coverage_mismatch"]
     assert len(findings) == 1
@@ -297,7 +284,7 @@ def test_zero_decision_file_with_real_export_is_coverage_mismatch_unless_already
     assert "f1" not in result["exports"]
 
     operator_result_failed = {"verdicts": [], "failed_file_ids": ["f1"], "status": "issues"}
-    reviewer2 = Reviewer(session_id="s", llm=None, db=FakeDb())
+    reviewer2 = Reviewer(make_ctx("Reviewer"))
     result2 = asyncio.run(reviewer2.run(decisions, operator_result_failed, exports))
     assert not any(f["kind"] == "coverage_mismatch" for f in result2["findings"])
     assert result2["status"] == "issues"

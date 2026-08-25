@@ -295,16 +295,9 @@ def test_executor_publishes_withheld_metadata_at_its_scannable_path(tmp_path, mo
     import asyncio
 
     import phi_core.agents.reasoning as reasoning
-    from phi_core.agents.llm import LlmConfig
     from phi_core.agents.reasoning import Executor
+    from phi_core.control.testing import make_ctx
     from phi_core.publish_guard import scan_export_file
-
-    class _AgentLog:
-        async def insert_one(self, _message):
-            return None
-
-    class _Database:
-        agent_log = _AgentLog()
 
     src = tmp_path / "codebook.docx"
     src.write_text("Jane Q. Patient, MRN 4471129", encoding="utf-8")
@@ -312,7 +305,7 @@ def test_executor_publishes_withheld_metadata_at_its_scannable_path(tmp_path, mo
     export_dir.mkdir()
     monkeypatch.setattr(reasoning, "EXPORT_DIR", export_dir)
 
-    result = asyncio.run(Executor("session", LlmConfig(), _Database()).run(
+    result = asyncio.run(Executor(make_ctx("Executor")).run(
         [{
             "file_id": "dictionary",
             "stored_path": str(src),
@@ -322,6 +315,6 @@ def test_executor_publishes_withheld_metadata_at_its_scannable_path(tmp_path, mo
         [],
     ))
 
-    actual = export_dir / "dictionary__codebook.withheld.txt"
+    actual = export_dir / "dictionary__export.withheld.txt"
     assert result["exports"]["dictionary"] == str(actual)
     assert scan_export_file("dictionary", actual).status == "clean"

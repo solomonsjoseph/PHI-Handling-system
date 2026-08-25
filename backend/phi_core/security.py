@@ -299,7 +299,9 @@ async def require_api_token(
     """
     principals = token_principals()
     if not principals:
-        return
+        if os.environ.get("PHI_ENV", "production") == "dev":
+            return
+        raise HTTPException(401, "no API token configured")
     if x_api_token and any(hmac.compare_digest(x_api_token, tok) for tok in principals):
         return
     from .crypto import verify_principal_cookie

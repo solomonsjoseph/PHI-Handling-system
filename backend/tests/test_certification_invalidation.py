@@ -5,6 +5,57 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from phi_core.agents.llm import LlmConfig
+from phi_core.control.store import MemoryControlStore
+
+
+class _FakeCollection:
+    """Minimal in-memory stand-in for an ``AsyncIOMotorCollection``, enough
+    for ``MongoControlStore`` to read and write control-plane records
+    (``capability_grants``, ``work_items``, ``trace_events``, ...) without a
+    real Mongo connection."""
+
+    def __init__(self):
+        self.docs: list[dict] = []
+
+    async def insert_one(self, doc):
+        self.docs.append(dict(doc))
+
+    async def find_one(self, query):
+        for d in self.docs:
+            if all(d.get(k) == v for k, v in query.items()):
+                return dict(d)
+        return None
+
+    def find(self, query):
+        async def _cursor():
+            for d in self.docs:
+                if all(d.get(k) == v for k, v in query.items()):
+                    yield dict(d)
+        return _cursor()
+
+    async def replace_one(self, query, replacement):
+        for i, d in enumerate(self.docs):
+            if all(d.get(k) == v for k, v in query.items()):
+                self.docs[i] = dict(replacement)
+                return SimpleNamespace(matched_count=1)
+        return SimpleNamespace(matched_count=0)
+
+    async def update_one(self, query, update):
+        for d in self.docs:
+            if all(d.get(k) == v for k, v in query.items()):
+                d.update(update.get("$set", {}))
+                for key in update.get("$unset", {}):
+                    d.pop(key, None)
+                return SimpleNamespace(matched_count=1)
+        return SimpleNamespace(matched_count=0)
+
+    async def delete_one(self, query):
+        for i, d in enumerate(self.docs):
+            if all(d.get(k) == v for k, v in query.items()):
+                del self.docs[i]
+                return SimpleNamespace(deleted_count=1)
+        return SimpleNamespace(deleted_count=0)
 
 
 class _StubDB:
@@ -14,6 +65,20 @@ class _StubDB:
         self.agent_log = self
         self.updates: list[tuple[tuple, dict]] = []
         self.inserted: list[dict] = []
+        self._collections: dict[str, _FakeCollection] = {}
+
+    def __getitem__(self, name: str) -> _FakeCollection:
+        return self._collections.setdefault(name, _FakeCollection())
+
+    def __getattr__(self, name: str) -> _FakeCollection:
+        # Real Motor databases resolve db.<collection> the same as
+        # db["<collection>"]; only reached when normal attribute lookup
+        # (self.sessions, self.agent_log, ...) has already failed. Guard
+        # against dunder/private probes so framework introspection still
+        # gets a normal AttributeError.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self[name]
 
     async def find_one(self, *_args, **_kwargs):
         return self.doc
@@ -27,7 +92,6 @@ class _StubDB:
 
     async def insert_one(self, doc):
         self.inserted.append(doc)
-
 
 @pytest.mark.asyncio
 async def test_processing_session_refuses_stale_clean_export_without_override(monkeypatch, tmp_path):
@@ -270,7 +334,7 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
     })
 
     class EmptyAgent:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
             self.last_message_id = None
 
@@ -312,10 +376,11 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
     asyncio.run(orchestrator.run_pipeline(
         {"id": "sid", "files": []},
         db,
-        object(),
+        LlmConfig(provider="anthropic", model="test", max_tokens=100),
         emit,
         on_phase,
         run_id="old-claim",
+        control_store=MemoryControlStore(),
     ))
 
     assert db.doc == {
@@ -458,42 +523,42 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
     original_create_task = asyncio.create_task
 
     class FakeExecutor:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {"exports": {}}
 
     class FakeAuditor:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {"metrics": {}}
 
     class FakeScout:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakeLedger:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakeHerald:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     async def fake_cfg():
-        return SimpleNamespace(provider="test", model="test")
+        return SimpleNamespace(provider="anthropic", model="test")
 
     async def fake_emit(_sid, event, **_kwargs):
         emitted.append(event)

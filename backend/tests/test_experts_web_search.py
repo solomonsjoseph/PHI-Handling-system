@@ -25,7 +25,7 @@ def test_url_extraction_from_reply_text():
     """The citation extractor recovers URLs from LiteLLM's stringified
     web_search response (Anthropic's structured blocks are collapsed to
     plain text by LiteLLM)."""
-    from phi_core.agents.llm import _URL_RE
+    from phi_core.control.gateway import _URL_RE
     text = (
         "Based on the search, the current URL is "
         "https://www.hhs.gov/hipaa/index.html and the OCR guidance is "

@@ -1,6 +1,9 @@
 """Pipeline regression coverage for value-level keep verification."""
 import asyncio
 
+from phi_core.agents.llm import LlmConfig
+from phi_core.control.store import MemoryControlStore
+
 
 def test_keep_verification_routes_to_human_review_without_executing(tmp_path, monkeypatch):
     from phi_core.agents import orchestrator
@@ -30,21 +33,21 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
             self.agent_log = FakeAgentLog()
 
     class FakeStatute:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakePraxis:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def method_for(self, _category):
             return {}
 
     class FakeLexicon:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
@@ -58,7 +61,7 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
         pass
 
     class FakeJudge:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
             self.last_message_id = None
         async def run(self, **_kwargs):
@@ -70,14 +73,14 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
             }]}
 
     class FakeSentinel:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
 
         async def run(self, **_kwargs):
             return {"issues": []}
 
     class FakeExecutor:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
@@ -110,9 +113,10 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
             }],
         },
         db,
-        object(),
+        LlmConfig(provider="anthropic", model="test", max_tokens=100),
         emit,
         on_phase,
+        control_store=MemoryControlStore(),
     ))
 
     assert result["status"] == "awaiting_human_review"

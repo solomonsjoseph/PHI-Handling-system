@@ -1,7 +1,9 @@
 import asyncio
 
 import pytest
+from phi_core.agents.llm import LlmConfig
 from phi_core.agents.reasoning import BLOCKING_ISSUE_FLOOR, apply_blocking_floor
+from phi_core.control.store import MemoryControlStore
 
 
 def _decide(**kw):
@@ -80,21 +82,21 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
             self.agent_log = FakeAgentLog()
 
     class FakeStatute:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakePraxis:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def method_for(self, _category):
             return {}
 
     class FakeLexicon:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
@@ -114,7 +116,7 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
     judge_actions = ["keep", "pseudonymize", "hash", "keep", "pseudonymize"]
 
     class FakeJudge:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
             self.last_message_id = None
             self.calls = 0
@@ -133,7 +135,7 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
             }]}
 
     class FakeSentinel:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
 
         async def run(self, **_kwargs):
@@ -172,9 +174,10 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
             }],
         },
         db,
-        object(),
+        LlmConfig(provider="anthropic", model="test", max_tokens=100),
         emit,
         on_phase,
+        control_store=MemoryControlStore(),
     ))
     return result, phase_events
 

@@ -31,6 +31,10 @@ from ..file_readers import (
 from .base import Agent
 
 
+def _opaque_file_id(file_record: dict[str, Any]) -> str:
+    return str(file_record.get("opaque_file_id") or file_record.get("file_id") or "")
+
+
 class Lexicon(Agent):
     NAME = "Lexicon"
     # Lexicon never sees a whole dictionary in one call. Row extraction is
@@ -66,7 +70,7 @@ class Lexicon(Agent):
             header, rows = _dict_rows(path)
             if not header:
                 await self._log(f"lexicon.empty:{f['file_id']}", "info",
-                                {"file": f.get("original_name")})
+                                {"file": _opaque_file_id(f)})
                 per_file.append((f, []))
                 continue
             name_idx = _name_column_index(header)
@@ -111,7 +115,7 @@ class Lexicon(Agent):
             # accounted for entirely by the lexicon.blank_name event
             # above, never a silent drop.
             await self._log(f"lexicon.parsed:{f['file_id']}", "info",
-                            {"file": f.get("original_name"), "raw_row_count": len(rows),
+                            {"file": _opaque_file_id(f), "raw_row_count": len(rows),
                              "indexed_row_count": len(file_entries)})
             per_file.append((f, file_entries))
 
@@ -142,7 +146,7 @@ class Lexicon(Agent):
             chunk = entries[start:start + self._GIST_CHUNK_SIZE]
             batch = [{"name": e["name"], "row": e["raw_row"]} for e in chunk]
             reply = await self.call_json(
-                f"Filename: {f['original_name']}\n"
+                f"Filename: {_opaque_file_id(f)}\n"
                 f"Dictionary rows in this batch:\n{batch}\n"
                 'Respond with JSON only: {"gists": [{"name": str, "gist": str, '
                 '"phi_flag_hint": bool|null, "clinical_utility": "low|medium|high"}]}, one '
@@ -150,7 +154,7 @@ class Lexicon(Agent):
                 phase=f"lexicon.gist:{f['file_id']}:{start}",
                 default={"gists": []},
                 expect_key="gists", min_items=len(chunk),
-                status_text=f"Reading the dictionary file {f['original_name']}",
+                status_text=f"Reading the dictionary file {_opaque_file_id(f)}",
             )
             by_name = {
                 str(g["name"]).strip().lower(): g
@@ -272,7 +276,7 @@ class Schema(Agent):
             if not headers:
                 # Fail loud instead of hallucinating - orchestrator must have populated columns before us.
                 await self._log(f"schema.error:{file_id}", "info",
-                                {"error": "no headers provided", "file": f.get("original_name")})
+                                {"error": "no headers provided", "file": _opaque_file_id(f)})
                 continue
             self._headers[file_id] = [h.lower() for h in headers]
             await self._log(f"schema.headers:{file_id}", "info", {"header_count": len(headers)})
@@ -359,7 +363,7 @@ class Instrument(Agent):
         for f in form_files:
             file_id = f["file_id"]
             path = Path(f["stored_path"])
-            self._source_names[file_id] = f.get("original_name", path.name)
+            self._source_names[file_id] = _opaque_file_id(f)
 
             # Tier 1: true fillable (AcroForm) PDF -- real field names read
             # straight off the PDF, zero LLM call, zero fabrication risk.
@@ -389,11 +393,11 @@ class Instrument(Agent):
             self.scrub_count += n_removed
             await self._log(f"instrument.scrub:{file_id}", "info", {"identifiers_removed": n_removed})
             reply = await self.call_json(
-                f"Form: {f['original_name']}\nExtracted text:\n{scrubbed}\n"
+                f"Form: {_opaque_file_id(f)}\nExtracted text:\n{scrubbed}\n"
                 "Respond with JSON only.",
                 phase=f"instrument.read:{file_id}",
                 default={"fields": []},
-                status_text=f"Reading the form {f['original_name']}",
+                status_text=f"Reading the form {_opaque_file_id(f)}",
             )
             fields = reply.get("fields", [])
             self._fields[file_id] = fields

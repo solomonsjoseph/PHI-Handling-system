@@ -132,8 +132,9 @@ class Manager(Agent):
     NOTE_MAX_CHARS = 200
     LEXICON_QUERY_BUDGET = 8             # Lexicon.answer calls an LLM; cap queries/run
 
-    def __init__(self, *a, **kw):
-        super().__init__(*a, **kw)
+    def __init__(self, ctx, *, db=None):
+        super().__init__(ctx)
+        self._db = db
         self._t0 = time.perf_counter()
         self._phases: list[dict[str, Any]] = []
         self._interventions: list[dict[str, Any]] = []
@@ -337,7 +338,7 @@ class Manager(Agent):
         await self._log("manager.escalate", "info", {"reasons": reasons})
         await close_last_phase()
         report = await self.close_run("awaiting_human_review")
-        await self.db.sessions.update_one(session_filter, {"$set": {
+        await self._db.sessions.update_one(session_filter, {"$set": {
             "status": "awaiting_human_review",
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "phase_timings": phase_timings,

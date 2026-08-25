@@ -79,8 +79,8 @@ def test_default_bundle_contains_safe_to_share_only(tmp_path):
     assert "safe_to_share/README.md" in names
     assert "safe_to_share/attestation.json" in names
     assert "safe_to_share/attestation.txt" in names
-    assert "safe_to_share/datasets/enroll.csv" in names
-    assert "safe_to_share/dictionary/dict.csv" in names
+    assert "safe_to_share/datasets/eid.csv" in names
+    assert "safe_to_share/dictionary/did.csv" in names
     assert not any(n.startswith("publication/") for n in names)
 
 

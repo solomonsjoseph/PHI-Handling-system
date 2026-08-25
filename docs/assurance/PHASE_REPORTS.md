@@ -92,3 +92,50 @@
 ### 8. Remaining risk and deferred work, cross-referenced to `docs/assurance/RISK_REGISTER.md`.
 
 - Credentialed provider routing stays an isolated CI capability. Phase 2 replaces direct provider paths and begins policy enforcement. See `F-EGRESS-001`, `F-CAP-001`, and the Phase 2 row in `docs/assurance/RISK_REGISTER.md`.
+
+## Phase 2: core identity, then provider and tool policy
+
+### 1. Verified code-backed baseline relevant to this phase, with `path:line` anchors.
+
+- `backend/phi_core/agents/llm.py:20,113,180` was the only production `litellm.completion` boundary besides `chatgpt_auth.py:34`. `backend/phi_core/agents/base.py:140,145,150,220` logged a scrubbed prompt surrogate distinct from the raw prompt actually sent. `backend/phi_core/agents/base.py:115` defaulted `allow_web_search_escalation=True`. `backend/phi_core/agents/llm.py:134-153` had two silent plain-completion fallbacks for non-Anthropic search. Agents received a shared Motor database handle and `LlmConfig` via `**common` at `orchestrator.py:163,180,185-187,197-199,237-238,517,544,555,581,658,715,723` and a bare `Judge(session_id=..., llm=..., db=...)` in `server.py`.
+
+### 2. Files and symbols changed.
+
+- New package `backend/phi_core/control/` with `records.py`, `limits.py`, `store.py`, `policy.py`, `egress.py`, `opaque.py`, `gateway.py`, `context.py`, `runs.py`, `tasks.py`, `activation.py`, `testing.py`, and `__init__.py`.
+- `backend/phi_core/crypto.py`: `egress_digest_key`, `encrypt_display_name`/`decrypt_display_name`.
+- `backend/phi_core/agents/llm.py`, `base.py`, `orchestrator.py`, `manager.py`, `experts.py`, `specialists.py`, `reasoning.py`, `outward.py`, `__init__.py`: gateway migration, `AgentContext` construction, opaque filenames.
+- `backend/phi_core/bundle.py`: opaque archive member names.
+- `backend/phi_core/models.py`: `FileArtifact.original_name_encrypted` replaces `original_name`.
+- `backend/phi_core/security.py`: `require_api_token`'s boot exemption now matches `resolve_principal`'s `PHI_ENV=dev`-only exemption (D2/4d).
+- `backend/server.py`: opens a real `WorkflowRun` and `WorkItem` per activation via `RunStore`/`ActivationFactory`; opaque per-file identifiers; decrypted display name only for the owner-scoped download.
+- `docs/adr/0002-provider-gateway.md`.
+- Tests: `test_control_records_policy.py`, `test_control_gateway_egress.py`, and the eleven D8-named plus four additional legacy test files migrated from `db=`/`llm=` construction to `control.testing.make_ctx`.
+
+### 3. Threat or failure mode addressed, naming the `F-*` finding.
+
+- `F-EGRESS-001`: the exact sanitized payload is now what is digested and sent; the separately scrubbed log surrogate is deleted.
+- `F-CAP-001`: every activation receives a manifest-derived, deny-by-default `CapabilityGrant` instead of a shared database handle and unconditional web-search escalation.
+
+### 4. Data and authority boundaries before and after.
+
+- Before: any agent could reach `self.db` and any LiteLLM provider through two call sites with no persisted identity. After: agents hold only `AgentContext` (no database handle), every provider call carries a persisted `run_id`/`task_id`/`grant_id` and is revalidated against the grant's pinned provider/model/endpoint triple, `restricted_phi` is refused unconditionally for every manifest, and non-Anthropic `web_search` is denied rather than silently downgraded. Upload filenames are Fernet-encrypted at rest and reach provider prompts, persisted status text, and bundle archive names only as opaque tokens.
+
+### 5. Migration and rollback behaviour, cross-referenced to `docs/assurance/MIGRATION.md`.
+
+- No schema migration; new collections are additive. Rollback is reverting this phase's commit; no Phase 1 data is destructively altered. `FileArtifact.original_name_encrypted` replaces `original_name` in code, not in any persisted document from a prior run (this deployment has never persisted a session), so no backfill is required at this phase. Phase 9's `control/migrate.py` will cover any deployment that already has legacy rows.
+
+### 6. Tests added and the exact commands run.
+
+- `backend/tests/test_control_records_policy.py`, `backend/tests/test_control_gateway_egress.py`.
+- `ruff check backend`; `cd backend && pytest tests -q -rs`.
+
+### 7. Exact results, including every failure and every skip with its reason.
+
+- Ruff: clean. Backend suite: `583 passed, 8 skipped` in 81.16 seconds, no warnings. The eight skips are unchanged from Phase 1 (no live server, no Anthropic key for two tests, no matching live review session, unavailable OCR binaries for three tests, no matching live decision state).
+- One genuine regression was found and fixed during verification: `orchestrator.py`'s per-category Praxis exception handler referenced a `praxis_agent` variable that no longer existed after each category call became its own `Praxis(await make_ctx("Praxis"))` instance; fixed by logging the failure from the per-category agent instance itself before re-raising.
+- Two pre-existing tests (`test_default_bundle_contains_safe_to_share_only`, and the bundle extension fix covering `test_bundle_omits_unclean_and_unreported_exports`) asserted readable original filenames in bundle archive member names. Ruling: the plan's Phase 2 step 4c and D14 mandate opaque archive member names; the tests were updated to assert the opaque `file_id` name instead of reverting the behavior.
+
+### 8. Remaining risk and deferred work, cross-referenced to `docs/assurance/RISK_REGISTER.md`.
+
+- `Manager.escalate_to_human_review` still writes directly to a database handle rather than routing through a workflow authority; Phase 4-5 replace this with `SuperOrchestrator.request_human_review`. See `F-ORCH-001`.
+- Typed evidence, canonical decision gates, and artifact staging are not yet in place; Statute/Praxis still trust `reply["sources"]`. See `F-EVID-001`, `F-ART-001`, and the Phase 3 row in `docs/assurance/RISK_REGISTER.md`.

@@ -7,20 +7,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 
-class _FakeDb:
-    agent_log = None
-    web_cache = None
-
-
 def _agent():
     from phi_core.agents.experts import Statute
-    from phi_core.agents.llm import LlmConfig
+    from phi_core.control.testing import make_ctx
 
-    return Statute(
-        session_id="statute-test",
-        llm=LlmConfig(provider="anthropic", model="test", max_tokens=100),
-        db=_FakeDb(),
-    )
+    return Statute(make_ctx("Statute"))
 
 
 @pytest.mark.asyncio
@@ -31,8 +22,8 @@ async def test_adjacent_regimes_fall_back_without_blocking_when_search_fails():
     agent._log = AsyncMock()  # type: ignore[method-assign]
     agent.call_json_with_web_search = AsyncMock(side_effect=RuntimeError("offline"))  # type: ignore[method-assign]
 
-    with patch("phi_core.agents.experts.cache_get", new=AsyncMock(return_value=None)), \
-         patch("phi_core.agents.experts.cache_put", new=AsyncMock()) as cache_put:
+    with patch.object(agent.ctx.cache, "get", new=AsyncMock(return_value=None)), \
+         patch.object(agent.ctx.cache, "put", new=AsyncMock()) as cache_put:
         result = await agent._adjacent_regimes_for("us")
 
     regimes = result["adjacent_regimes"]
@@ -53,7 +44,7 @@ async def test_adjacent_regimes_fall_back_without_blocking_when_search_fails():
         assert by_name[name]["citation"]
     assert "non-exhaustive" in by_name["State law (non-exhaustive)"]["advisory"]
     cache_put.assert_awaited_once()
-    assert cache_put.await_args.args[1:3] == ("adjacent_regulations", "us")
+    assert cache_put.await_args.args[0:2] == ("adjacent_regulations", "us")
     assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
 
 
@@ -67,8 +58,8 @@ async def test_adjacent_regimes_reject_scalar_entries_from_web_reply():
         [],
     ))  # type: ignore[method-assign]
 
-    with patch("phi_core.agents.experts.cache_get", new=AsyncMock(return_value=None)), \
-         patch("phi_core.agents.experts.cache_put", new=AsyncMock()):
+    with patch.object(agent.ctx.cache, "get", new=AsyncMock(return_value=None)), \
+         patch.object(agent.ctx.cache, "put", new=AsyncMock()):
         result = await agent._adjacent_regimes_for("us")
 
     assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
@@ -85,8 +76,8 @@ async def test_adjacent_regimes_reject_untrusted_cached_entries():
     agent.call_json_with_web_search = AsyncMock()  # type: ignore[method-assign]
     cached = {"content": json.dumps({"adjacent_regimes": ["not a regime"] * 5})}
 
-    with patch("phi_core.agents.experts.cache_get", new=AsyncMock(return_value=cached)), \
-         patch("phi_core.agents.experts.cache_put", new=AsyncMock()) as cache_put:
+    with patch.object(agent.ctx.cache, "get", new=AsyncMock(return_value=cached)), \
+         patch.object(agent.ctx.cache, "put", new=AsyncMock()) as cache_put:
         result = await agent._adjacent_regimes_for("us")
 
     assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
@@ -105,8 +96,8 @@ async def test_adjacent_regimes_reject_cached_non_string_name():
     regimes[0]["name"] = ["not", "a", "string"]
     cached = {"content": json.dumps({"adjacent_regimes": regimes})}
 
-    with patch("phi_core.agents.experts.cache_get", new=AsyncMock(return_value=cached)), \
-         patch("phi_core.agents.experts.cache_put", new=AsyncMock()) as cache_put:
+    with patch.object(agent.ctx.cache, "get", new=AsyncMock(return_value=cached)), \
+         patch.object(agent.ctx.cache, "put", new=AsyncMock()) as cache_put:
         result = await agent._adjacent_regimes_for("us")
 
     assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
@@ -134,8 +125,8 @@ async def test_adjacent_regimes_reject_incomplete_or_noncanonical_dict_entries()
         agent = _agent()
         agent.call_json_with_web_search = AsyncMock(return_value=(payload, []))  # type: ignore[method-assign]
 
-        with patch("phi_core.agents.experts.cache_get", new=AsyncMock(return_value=None)), \
-             patch("phi_core.agents.experts.cache_put", new=AsyncMock()):
+        with patch.object(agent.ctx.cache, "get", new=AsyncMock(return_value=None)), \
+             patch.object(agent.ctx.cache, "put", new=AsyncMock()):
             result = await agent._adjacent_regimes_for("us")
 
         assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
@@ -146,8 +137,8 @@ async def test_non_us_jurisdiction_has_no_adjacent_research_call():
     agent = _agent()
     agent.call_json_with_web_search = AsyncMock()  # type: ignore[method-assign]
 
-    with patch("phi_core.agents.experts.cache_get", new=AsyncMock()) as cache_get, \
-         patch("phi_core.agents.experts.cache_put", new=AsyncMock()) as cache_put:
+    with patch.object(agent.ctx.cache, "get", new=AsyncMock()) as cache_get, \
+         patch.object(agent.ctx.cache, "put", new=AsyncMock()) as cache_put:
         result = await agent._adjacent_regimes_for("eu")
 
     assert result == {"adjacent_regimes": []}

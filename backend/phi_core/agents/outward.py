@@ -11,8 +11,9 @@ import asyncio
 import json
 from typing import Any
 
+from phi_core.control.context import AgentContext
+
 from .base import Agent
-from .cache import cache_get, cache_put
 
 
 class Scout(Agent):
@@ -28,7 +29,7 @@ class Scout(Agent):
     )
 
     async def run(self) -> dict[str, Any]:
-        cached = await cache_get(self.db, "competitor_landscape", "generic")
+        cached = await self.ctx.cache.get("competitor_landscape", "generic") if self.ctx.cache else None
         if cached:
             await self._log("scout.cache_hit", "info", {})
             return json.loads(cached["content"])
@@ -37,7 +38,8 @@ class Scout(Agent):
             phase="scout.compile", default={"systems": [], "summary": ""},
             status_text="Compiling the competitive landscape",
         )
-        await cache_put(self.db, "competitor_landscape", "generic", json.dumps(reply), source="llm")
+        if self.ctx.cache:
+            await self.ctx.cache.put("competitor_landscape", "generic", json.dumps(reply), source="llm")
         return reply
 
 
@@ -91,15 +93,18 @@ class LedgerAggregate(Agent):
                                              "recommendations": []},
                                     status_text="Rolling up benchmark metrics")
 
-
 class Ledger:
     """Combined Ledger driver. Runs Compare + Aggregate as two smaller LLM
     calls (parallel where dependency allows) and merges the outputs into
     the same shape the old monolithic Ledger returned."""
     NAME = "Ledger"
 
-    def __init__(self, session_id, llm, db, emit=None, manager=None) -> None:
-        self._common = dict(session_id=session_id, llm=llm, db=db, emit=emit, manager=manager)
+    def __init__(self, ctx: AgentContext, compare_ctx: AgentContext, aggregate_ctx: AgentContext) -> None:
+        if ctx.agent != self.NAME:
+            raise ValueError(f"agent context is for {ctx.agent!r}, not {self.NAME!r}")
+        self.ctx = ctx
+        self._compare_ctx = compare_ctx
+        self._aggregate_ctx = aggregate_ctx
 
     async def run(self, decisions: list[dict[str, Any]], audit: dict[str, Any],
                   scout: dict[str, Any], benchmark_result: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -108,12 +113,12 @@ class Ledger:
 
         # Ledger.Compare depends only on audit metrics + competitor list, so
         # it can run in parallel with a decision-count roll-up.
-        compare_task = LedgerCompare(**self._common).run(audit_metrics, competitors)
+        compare_task = LedgerCompare(self._compare_ctx).run(audit_metrics, competitors)
         counts = _count_actions(decisions)
         compare_out = await compare_task
 
         # Ledger.Aggregate needs Compare's output.
-        aggregate_out = await LedgerAggregate(**self._common).run(
+        aggregate_out = await LedgerAggregate(self._aggregate_ctx).run(
             decision_counts=counts, audit_metrics=audit_metrics,
             comparisons=compare_out.get("comparisons", []),
         )
@@ -206,13 +211,17 @@ class Herald:
     the publication bundle is never empty."""
     NAME = "Herald"
 
-    def __init__(self, session_id, llm, db, emit=None, manager=None) -> None:
-        self._common = dict(session_id=session_id, llm=llm, db=db, emit=emit, manager=manager)
+    def __init__(self, ctx: AgentContext, abstract_ctx: AgentContext, sections_ctx: AgentContext) -> None:
+        if ctx.agent != self.NAME:
+            raise ValueError(f"agent context is for {ctx.agent!r}, not {self.NAME!r}")
+        self.ctx = ctx
+        self._abstract_ctx = abstract_ctx
+        self._sections_ctx = sections_ctx
 
     async def run(self, ledger: dict[str, Any], audit: dict[str, Any],
                   target_venue: str = "JAMIA Open") -> dict[str, Any]:
-        abstract_agent = HeraldAbstract(**self._common)
-        sections_agent = HeraldSections(**self._common)
+        abstract_agent = HeraldAbstract(self._abstract_ctx)
+        sections_agent = HeraldSections(self._sections_ctx)
         abstract_out, sections_out = await asyncio.gather(
             abstract_agent.run(ledger, audit, target_venue),
             sections_agent.run(ledger, audit, target_venue),

@@ -1106,7 +1106,7 @@ class Executor(Agent):
 
         for f in files:
             src = Path(f["stored_path"])
-            dst = EXPORT_DIR / f"{f['file_id']}__{f['original_name']}"
+            dst = EXPORT_DIR / f"{f['file_id']}__export"
             if f["kind"] == "metadata":
                 # SEC-004 fail-closed: dictionary/mapping files can name PHI
                 # (column definitions, code labels) so we run the deterministic
@@ -1114,6 +1114,7 @@ class Executor(Agent):
                 # verbatim.
                 dst = _redact_metadata_file(src, dst)
             elif f["kind"] == "dataset":
+                dst = EXPORT_DIR / f"{f['file_id']}__export.{f['subtype']}"
                 omit_cols = omit_by_file.get(f["file_id"], set())
                 known_cols = set(f.get("columns") or [])
                 if omit_cols and not known_cols:
@@ -1142,7 +1143,7 @@ class Executor(Agent):
                                     {"file_id": f["file_id"], "error": type(e).__name__})
                     continue
             else:
-                dst = EXPORT_DIR / f"{f['file_id']}__{Path(f['original_name']).stem}.redacted.txt"
+                dst = EXPORT_DIR / f"{f['file_id']}__export.redacted.txt"
                 try:
                     text = read_narrative(src, f["subtype"])
                 except Exception as e:
@@ -1157,7 +1158,7 @@ class Executor(Agent):
                     await self._log("executor.narrative_empty", "info",
                                     {"file_id": f["file_id"]})
                     dst.write_text(
-                        f"[NO EXTRACTABLE TEXT] {f['original_name']}\n", encoding="utf-8")
+                        f"[NO EXTRACTABLE TEXT] {f['file_id']}\n", encoding="utf-8")
                     exports[f["file_id"]] = str(dst)
                     continue
                 spans = detect_text(text, detectors=["presidio", "rule"])
@@ -1303,7 +1304,7 @@ class Auditor(Agent):
                                "hipaa_category": d.get("phi_category") or d.get("hipaa_category") or d.get("category"),
                                "action_taken": a})
 
-        file_meta = [{"file_id": f["file_id"], "name": f["original_name"], "component": f.get("component")} for f in files]
+        file_meta = [{"file_id": f["file_id"], "name": f["file_id"], "component": f.get("component")} for f in files]
         prompt = (
             f"Per-column decisions to re-derive and check (no row values): {per_column}\n\n"
             f"File summary counts: {summary_by_file}\n\n"
@@ -1554,6 +1555,7 @@ def _redact_metadata_file(src: Path, dst: Path) -> Path:
     """
     ext = src.suffix.lower().lstrip(".")
     if ext in ("csv", "tsv"):
+        dst = dst.with_suffix(f".{ext}")
         delim = "\t" if ext == "tsv" else ","
         with src.open("r", encoding="utf-8", errors="replace", newline="") as fin, \
              dst.open("w", encoding="utf-8", newline="") as fout:
@@ -1564,6 +1566,7 @@ def _redact_metadata_file(src: Path, dst: Path) -> Path:
         return dst
     if ext == "xlsx":
         wb = _openpyxl.load_workbook(src)
+        dst = dst.with_suffix(".xlsx")
         for ws in wb.worksheets:
             for row in ws.iter_rows(min_row=1):
                 for cell in row:

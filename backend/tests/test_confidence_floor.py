@@ -1,7 +1,9 @@
 import asyncio
 
 import pytest
+from phi_core.agents.llm import LlmConfig
 from phi_core.agents.reasoning import CONFIDENCE_FLOOR, apply_confidence_floor
+from phi_core.control.store import MemoryControlStore
 
 
 def _decide(**kw):
@@ -64,21 +66,21 @@ def _run_confidence_floor_pipeline(tmp_path, monkeypatch, iteration_cap):
             self.agent_log = FakeAgentLog()
 
     class FakeStatute:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakePraxis:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def method_for(self, _category):
             return {}
 
     class FakeLexicon:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
@@ -92,7 +94,7 @@ def _run_confidence_floor_pipeline(tmp_path, monkeypatch, iteration_cap):
         pass
 
     class FakeJudge:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
             self.last_message_id = None
 
@@ -107,7 +109,7 @@ def _run_confidence_floor_pipeline(tmp_path, monkeypatch, iteration_cap):
             }]}
 
     class FakeSentinel:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
 
         async def run(self, **_kwargs):
@@ -139,9 +141,10 @@ def _run_confidence_floor_pipeline(tmp_path, monkeypatch, iteration_cap):
             }],
         },
         db,
-        object(),
+        LlmConfig(provider="anthropic", model="test", max_tokens=100),
         emit,
         on_phase,
+        control_store=MemoryControlStore(),
     ))
     return result, phase_events
 

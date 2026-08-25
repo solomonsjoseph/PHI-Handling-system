@@ -62,6 +62,10 @@ def _load_or_create_key() -> bytes:
 def _cipher() -> Fernet:
     return Fernet(_load_or_create_key())
 
+def egress_digest_key() -> bytes:
+    """Derive the dedicated key used to authenticate outbound payload digests."""
+    return hmac.new(_load_or_create_key(), b"egress-digest-v1", hashlib.sha256).digest()
+
 
 def encrypt_api_key(plaintext: str) -> str:
     """Return an encrypted, self-identifying token for the stored key.
@@ -88,6 +92,15 @@ def decrypt_api_key(stored: str) -> str:
         return _cipher().decrypt(stored[len(_ENC_PREFIX):].encode()).decode()
     except InvalidToken:
         raise KeyRotated("stored value cannot be decrypted under the current key") from None
+
+def encrypt_display_name(plaintext: str) -> str:
+    """Encrypt an upload name that may itself contain restricted content."""
+    return encrypt_api_key(plaintext)
+
+
+def decrypt_display_name(stored: str) -> str:
+    """Decrypt an owner-scoped upload name without a plaintext fallback."""
+    return decrypt_api_key(stored)
 
 
 def encrypt_reversal_map(payload: dict) -> str:

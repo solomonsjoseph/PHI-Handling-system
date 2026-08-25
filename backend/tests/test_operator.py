@@ -14,12 +14,15 @@ from pathlib import Path
 
 import pytest
 from phi_core.agents.batching import run_batched
+from phi_core.agents.llm import LlmConfig
 from phi_core.agents.operator import Operator
 from phi_core.agents.reasoning import (
     PseudonymRegistry,
     _scrub_text_cell,
     apply_column_actions_to_dataset,
 )
+from phi_core.control.store import MemoryControlStore
+from phi_core.control.testing import make_ctx
 
 
 def _fixed_check(batch: list[int]) -> list[dict]:
@@ -254,19 +257,6 @@ async def test_on_batch_fires_while_a_later_batch_is_still_blocked():
 # ---- Operator agent (Task 27) ----------------------------------------------
 
 
-class FakeAgentLog:
-    def __init__(self):
-        self.inserted: list[dict] = []
-
-    async def insert_one(self, doc, *_args, **_kwargs):
-        self.inserted.append(doc)
-
-
-class FakeDb:
-    def __init__(self):
-        self.agent_log = FakeAgentLog()
-
-
 def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -319,7 +309,7 @@ def test_all_action_types_pass_against_a_real_executor_export(tmp_path):
     files = [_dataset_file("f1", str(src))]
     exports = {"f1": str(dst)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     assert result["failed_file_ids"] == []
@@ -339,7 +329,7 @@ def test_cap_age_90_shape_violation_is_caught(tmp_path):
                   "phi_category": "C", "citation": "45 CFR 164.514(b)(2)(i)(C)"}]
     exports = {"f1": str(src)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     v = result["verdicts"][0]
@@ -360,7 +350,7 @@ def test_decision_for_nonexistent_column_is_flagged(tmp_path):
                   "phi_category": "G", "citation": "45 CFR 164.514(b)(2)(i)(G)"}]
     exports = {"f1": str(src)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     by_col = {v["column"]: v for v in result["verdicts"]}
@@ -379,7 +369,7 @@ def test_drop_column_left_populated_fails(tmp_path):
                   "phi_category": "G", "citation": "45 CFR 164.514(b)(2)(i)(G)"}]
     exports = {"f1": str(src)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     v = result["verdicts"][0]
@@ -410,7 +400,7 @@ def test_omit_by_file_column_expected_absent_passes(tmp_path):
     exports = {"f1": str(src)}
     omit_by_file = {"f1": {"notes"}}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports, omit_by_file))
 
     by_col = {v["column"]: v for v in result["verdicts"]}
@@ -428,7 +418,7 @@ def test_omit_by_file_column_present_when_expected_absent_fails(tmp_path):
     exports = {"f1": str(src)}
     omit_by_file = {"f1": {"notes"}}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports, omit_by_file))
 
     by_col = {v["column"]: v for v in result["verdicts"]}
@@ -448,7 +438,7 @@ def test_missing_export_file_fails_every_decision(tmp_path):
     ]
     exports: dict[str, str] = {}  # Executor never wrote f1
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     assert result["failed_file_ids"] == ["f1"]
@@ -467,7 +457,7 @@ def test_non_dataset_file_decisions_are_out_of_scope(tmp_path):
                   "phi_category": "NONE", "citation": ""}]
     exports = {"f1": str(tmp_path / "does_not_matter.csv")}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     assert result["verdicts"] == []
@@ -485,14 +475,13 @@ def test_agent_log_row_emitted_per_batch(tmp_path):
     decisions = [{"file_id": "f1", "column": c, "action": "keep",
                   "phi_category": "NONE", "citation": ""} for c in header]
     exports = {"f1": str(src)}
-    db = FakeDb()
 
-    op = Operator(session_id="s", llm=None, db=db)
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
-    batch_rows = [row for row in db.agent_log.inserted if row["phase"].startswith("operator.batch:")]
+    batch_rows = [row for row in op.ctx.trace.legacy_messages if row.phase.startswith("operator.batch:")]
     assert len(batch_rows) == 2  # 10 decisions at batch_size=8 -> batches of 8 and 2
-    by_phase = {row["phase"]: row["payload"] for row in batch_rows}
+    by_phase = {row.phase: row.payload for row in batch_rows}
     assert set(by_phase) == {"operator.batch:0", "operator.batch:1"}
     assert by_phase["operator.batch:0"] == {"pass": 8, "fail": 0, "count": 8}
     assert by_phase["operator.batch:1"] == {"pass": 2, "fail": 0, "count": 2}
@@ -511,7 +500,7 @@ def test_undecided_written_column_is_flagged(tmp_path):
                   "phi_category": "NONE", "citation": ""}]
     exports = {"f1": str(src)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     by_col = {v["column"]: v for v in result["verdicts"]}
@@ -539,7 +528,7 @@ def test_transform_shape_violations_are_caught(tmp_path, action, bad_value):
                   "phi_category": "C", "citation": "45 CFR 164.514(b)(2)(i)(C)"}]
     exports = {"f1": str(src)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     v = result["verdicts"][0]
@@ -560,7 +549,7 @@ def test_scrub_text_no_change_from_source_fails(tmp_path):
                   "phi_category": "A", "citation": "45 CFR 164.514(b)(2)(i)(A)"}]
     exports = {"f1": str(dst)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     by_col = {v["column"]: v for v in result["verdicts"]}
@@ -578,7 +567,7 @@ def test_scrub_text_missing_stored_path_fails_closed(tmp_path):
                   "phi_category": "A", "citation": "45 CFR 164.514(b)(2)(i)(A)"}]
     exports = {"f1": str(dst)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     v = result["verdicts"][0]
@@ -596,7 +585,7 @@ def test_scrub_text_unreadable_source_fails_closed(tmp_path):
                   "phi_category": "A", "citation": "45 CFR 164.514(b)(2)(i)(A)"}]
     exports = {"f1": str(dst)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     v = result["verdicts"][0]
@@ -621,7 +610,7 @@ def test_corrupt_written_file_isolated_from_sibling_files(tmp_path):
     ]
     exports = {"f1": str(good_src), "f2": str(tmp_path / "bad.weird")}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     assert result["failed_file_ids"] == ["f2"]
@@ -646,7 +635,7 @@ def test_unknown_file_id_decision_is_flagged(tmp_path):
     ]
     exports = {"f1": str(src)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     assert "ghost" in result["failed_file_ids"]
@@ -672,7 +661,7 @@ def test_scrub_text_column_with_nothing_to_scrub_passes(tmp_path):
                   "phi_category": "A", "citation": "45 CFR 164.514(b)(2)(i)(A)"}]
     exports = {"f1": str(dst)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     by_col = {v["column"]: v for v in result["verdicts"]}
@@ -691,7 +680,7 @@ def test_dataset_file_with_zero_decisions_still_gets_reverse_completeness(tmp_pa
     decisions: list[dict] = []  # Judge/Sentinel produced nothing for this file
     exports = {"f1": str(src)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     by_col = {v["column"]: v for v in result["verdicts"]}
@@ -716,7 +705,7 @@ def test_header_only_export_does_not_block_decisions(tmp_path):
     ]
     exports = {"f1": str(src)}
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     by_col = {v["column"]: v for v in result["verdicts"]}
@@ -735,7 +724,7 @@ def test_zero_decision_file_missing_from_exports_is_not_silently_invisible(tmp_p
     decisions: list[dict] = []  # no decision ever named this file
     exports: dict[str, str] = {}  # and Executor never wrote it either
 
-    op = Operator(session_id="s", llm=None, db=FakeDb())
+    op = Operator(make_ctx("Operator"))
     result = asyncio.run(op.run(files, decisions, exports))
 
     assert result["failed_file_ids"] == ["f1"]
@@ -786,21 +775,21 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
             self.agent_log = FakeAgentLog()
 
     class FakeStatute:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakePraxis:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def method_for(self, _category):
             return {}
 
     class FakeLexicon:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
@@ -814,7 +803,7 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
         pass
 
     class FakeJudge:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
             self.last_message_id = None
 
@@ -829,21 +818,21 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
             ]}
 
     class FakeSentinel:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
 
         async def run(self, **_kwargs):
             return {"issues": []}
 
     class FakeExecutor:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {"exports": {"f1": str(bad_export), "f2": str(good_export)}}
 
     class FakeAuditor:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def _log(self, *_args, **_kwargs):
@@ -853,21 +842,21 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
             return {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
 
     class FakeScout:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakeLedger:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakeHerald:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
@@ -904,9 +893,10 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
             ],
         },
         db,
-        object(),
+        LlmConfig(provider="anthropic", model="test", max_tokens=100),
         emit,
         on_phase,
+        control_store=MemoryControlStore(),
     ))
 
     assert "f1" not in result["exports"]
@@ -969,21 +959,21 @@ def test_run_pipeline_reviewer_only_finding_excludes_file_and_ends_partially_com
             self.agent_log = FakeAgentLog()
 
     class FakeStatute:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakePraxis:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def method_for(self, _category):
             return {}
 
     class FakeLexicon:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
@@ -997,7 +987,7 @@ def test_run_pipeline_reviewer_only_finding_excludes_file_and_ends_partially_com
         pass
 
     class FakeJudge:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
             self.last_message_id = None
 
@@ -1015,21 +1005,21 @@ def test_run_pipeline_reviewer_only_finding_excludes_file_and_ends_partially_com
             ]}
 
     class FakeSentinel:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             self.call_failures = 0
 
         async def run(self, **_kwargs):
             return {"issues": []}
 
     class FakeExecutor:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {"exports": {"f1": str(f1_export), "f2": str(f2_export)}}
 
     class FakeAuditor:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def _log(self, *_args, **_kwargs):
@@ -1039,21 +1029,21 @@ def test_run_pipeline_reviewer_only_finding_excludes_file_and_ends_partially_com
             return {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
 
     class FakeScout:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakeLedger:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
             return {}
 
     class FakeHerald:
-        def __init__(self, **_kwargs):
+        def __init__(self, *_a, **_kwargs):
             pass
 
         async def run(self, **_kwargs):
@@ -1090,9 +1080,10 @@ def test_run_pipeline_reviewer_only_finding_excludes_file_and_ends_partially_com
             ],
         },
         db,
-        object(),
+        LlmConfig(provider="anthropic", model="test", max_tokens=100),
         emit,
         on_phase,
+        control_store=MemoryControlStore(),
     ))
 
     # Operator itself reported this file clean: no fail verdict, not in

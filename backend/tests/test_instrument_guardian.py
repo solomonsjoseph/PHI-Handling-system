@@ -5,7 +5,7 @@ own verification calls for.
 Follows the dependency-free convention already used by
 test_schema_guardian.py / test_lexicon_librarian.py: plain
 ``def test_...()`` driving coroutines with ``asyncio.run(...)``, no live
-LLM key, no Mongo, agents built directly with ``llm=None`` and a fake db.
+LLM key, no Mongo, agents built directly with ``make_ctx``.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import phi_core.agents.specialists as specialists
 import pytest
 from phi_core import paths as paths_mod
 from phi_core.agents.specialists import Instrument
+from phi_core.control.testing import make_ctx
 from pypdf import PdfReader
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -28,19 +29,6 @@ GROUND_TRUTH = FIXTURES / "tb_collection_form_ground_truth.json"
 
 
 # ---- shared fakes ----------------------------------------------------------
-
-
-class FakeAgentLog:
-    def __init__(self):
-        self.inserted: list[dict] = []
-
-    async def insert_one(self, doc, *_args, **_kwargs):
-        self.inserted.append(doc)
-
-
-class FakeDb:
-    def __init__(self):
-        self.agent_log = FakeAgentLog()
 
 
 class RecordingInstrument(Instrument):
@@ -66,7 +54,7 @@ class NoLlmInstrument(Instrument):
 
 
 def _instrument(cls=RecordingInstrument, **kwargs) -> Instrument:
-    return cls(session_id="s1", llm=None, db=FakeDb(), **kwargs)
+    return cls(make_ctx("Instrument", session_id="s1"), **kwargs)
 
 
 def _form_file(file_id: str, path: Path, original_name: str | None = None) -> dict:
@@ -265,7 +253,10 @@ def test_report_written_from_in_memory_fields_with_no_phi_category(tmp_path, mon
     assert report_path.exists()
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload["file_id"] == "f1"
-    assert payload["source_filename"] == "tb_collection_form_acroform.pdf"
+    # source_filename is the opaque file id when the caller supplies one;
+    # form_files here carries no "opaque_file_id", so it falls back to the
+    # bare file_id rather than the human-readable original filename.
+    assert payload["source_filename"] == "f1"
     in_memory = inst._fields["f1"]
     assert len(payload["fields"]) == len(in_memory)
     # scrub_persisted_text is intentionally over-cautious about Title-Case

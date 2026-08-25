@@ -28,7 +28,6 @@ import json as _json
 from typing import Any
 
 from phi_core.agents.base import Agent
-from phi_core.agents.cache import cache_get, cache_put
 
 
 class CorpusResearcher(Agent):
@@ -84,7 +83,7 @@ class CorpusResearcher(Agent):
     async def research(self, domain: str) -> dict[str, Any]:
         """Return a Scenario-shaped JSON for the requested study domain."""
         cache_key = domain.strip().lower()
-        cached = await cache_get(self.db, "corpus_scenario", cache_key)
+        cached = await self.ctx.cache.get("corpus_scenario", cache_key) if self.ctx.cache else None
         if cached:
             await self._log(
                 f"researcher.cache_hit:{cache_key}", "info",
@@ -125,9 +124,10 @@ class CorpusResearcher(Agent):
             await self._log(f"researcher.error:{cache_key}", "info", {"error": str(e)})
             return {"error": f"{type(e).__name__}: {e}", "sources": []}
 
-        await cache_put(
-            self.db, "corpus_scenario", cache_key,
-            _json.dumps(reply),
-            source="web_search" if reply.get("sources") else "error",
-        )
+        if self.ctx.cache:
+            await self.ctx.cache.put(
+                "corpus_scenario", cache_key,
+                _json.dumps(reply),
+                source="web_search" if reply.get("sources") else "error",
+            )
         return reply
