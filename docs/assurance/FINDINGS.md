@@ -61,16 +61,16 @@
 - Acceptance tests: `backend/tests/test_control_superorchestrator.py`, `backend/tests/test_certification_invalidation.py`, planned `backend/tests/test_architecture_boundaries.py`, `backend/tests/test_control_bounds.py`
 - Status: open
 - Disposition: Phase 5 lands `SuperOrchestrator`, the D9 exclusive-authority class (fenced node transitions, budget/depth/fanout-checked child delegation, review request/consume, acceptance) and routes `session_handle`'s durable root task through it while retaining the route's prior atomic session claim. `session_human_review` and every other workflow entry path remain direct; `Manager.escalate_to_human_review` still writes human-review state directly from all four callers.
-- Residual risk: the remaining route migration must preserve each entry path's session claim/fence semantics; steps 4/5/7/8/9 (`escalate_to_human_review` deletion, Ledger/Herald as durable children, D5 enqueue/gateway enforcement, boundary tests, `control/adapters.py` deletion) remain open.
+- Residual risk: the remaining route migration must preserve each entry path's session claim/fence semantics; steps 4/5/7/8 (`escalate_to_human_review` deletion, Ledger/Herald as durable children, D5 enqueue/gateway enforcement, boundary tests) remain open.
 
 ## F-ADAPT-001
 
 - Owner: control-plane program
-- Code anchors: `backend/phi_core/control/adapters.py::legacy_decision_adapter,legacy_files_adapter`, `backend/phi_core/agents/orchestrator.py` (decide loop), `backend/server.py` (human-review re-gating)
-- Acceptance tests: none yet; closes when every caller of `run_decision_gates` passes the typed `list[dict]`/files projection directly and this module is deleted
-- Status: open
-- Disposition: Phase 5 step 9 deletes this module once its two remaining call sites adopt the typed contract directly. Neither call site has moved yet.
-- Residual risk: none while the module exists -- it is a pure normalization shim with no authority of its own; tracked so its removal is not silently dropped once the last caller moves.
+- Code anchors: former `backend/phi_core/control/adapters.py`; direct `run_decision_gates` callers in `backend/phi_core/agents/orchestrator.py` and `backend/server.py`
+- Acceptance tests: `backend/tests/test_manager.py`, `backend/tests/test_human_review_resume_execution.py`, `backend/tests/test_certification_invalidation.py`
+- Status: resolved
+- Disposition: Phase 5 step 9 deleted the adapter module and its dedicated shim tests. The two live callers now pass their existing typed decision lists and hydrated session-file projections directly to `run_decision_gates`; repository search confirms no adapter import or symbol remains.
+- Residual risk: none.
 
 ## F-HITL-001
 
