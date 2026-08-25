@@ -2480,14 +2480,18 @@ class HumanReviewSubmit(BaseModel):
     # reported number below the floor. There is no per-column decision to
     # resolve in that case, so approve/comment/defer cannot clear it.
     #
-    # Phase 4 step 4 deleted the bespoke override that used to read this
-    # field (`_run_tail`'s `confidence_override_applies` block), per the
-    # plan's explicit instruction: the resume tail now shares
-    # `orchestrator.execute_decisions` with the fresh-run path, which has
-    # no override concept. This field is kept only for request-shape
-    # compatibility; it is currently inert. D13 step 5 (Phase 6) restores
-    # a generalized version through `HumanReviewService`.
+    # D13 step 4/7: `audit_version` (below) must be supplied and must match
+    # the open `HumanReviewRequest.audit_version` whenever this is true --
+    # see the check in `session_human_review` -- so a confirmation always
+    # binds to the exact Auditor verdict the reviewer actually saw, never a
+    # stale one superseded by a later run.
     confirm_auditor_confidence: bool = False
+    # D13 step 4: a content hash of the Auditor verdict this confirmation
+    # answers, minted by the orchestrator at escalation time and echoed
+    # back by the client from the `HumanReviewRequest` it was given.
+    # Required (non-empty) exactly when `confirm_auditor_confidence` is
+    # true; ignored otherwise.
+    audit_version: str = ""
     # HHS §164.514(b)(2)(ii) "actual knowledge" attestation. Required only
     # when this submission resolves (approves/comments) at least one column;
     # a submission that only defers makes no actual-knowledge claim.
@@ -2523,7 +2527,7 @@ async def _build_review_event(
         client_event_id=body.client_event_id, principal=principal, kind=kind,
         body_hash=body_hash, resolutions=resolutions_typed,
         actual_knowledge_ack=body.actual_knowledge_ack, decision_version=decision_version,
-        result=result,
+        audit_version=body.audit_version, result=result,
     )
 
 
@@ -2590,15 +2594,38 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     session = await _owned_session(sid, principal)
     if reviewer_role(principal) is None:
         raise HTTPException(403, "principal is not an authorized reviewer (see REVIEWER_PRINCIPALS)")
-    has_dataset_files = any(f.get("kind") == "dataset" for f in (session.get("files") or []))
-    if any_resolution and has_dataset_files and not (session.get("dataset_file_downloads") or []):
-        raise HTTPException(
-            400,
-            "at least one dataset file must be downloaded via GET .../dataset-file/{file_id} "
-            "before resolving any column: the actual-knowledge attestation is only meaningful "
-            "if the reviewer has actually opened the original data.",
-        )
     prior_run_id = session.get("_pipeline_run_id")
+    control_store = MongoControlStore(db)
+    # D13 step 8: the run's current decision_version, when a durable
+    # `WorkflowRun` already exists for it (Phase 5 migrated this session's
+    # start/resume through `SuperOrchestrator`). A pre-migration session,
+    # or one whose run never opened a `WorkflowRun`, has none -- 0, same
+    # as `_next_decision_version`'s own no-store fallback below.
+    workflow_run_doc = (await control_store.get_one("workflow_runs", {"run_id": prior_run_id})
+                         if prior_run_id else None)
+    current_decision_version = int(workflow_run_doc.get("decision_version", 0)) if workflow_run_doc else 0
+    dataset_file_ids = {f.get("file_id") for f in (session.get("files") or []) if f.get("kind") == "dataset"}
+    if any_resolution and dataset_file_ids:
+        # D13 step 8: a download must be scoped to this exact principal,
+        # file, and decision_version -- not merely "some file was
+        # downloaded at some point" -- so a reviewer cannot satisfy the
+        # attestation for a column whose source file changed underneath
+        # them since they last opened it. Replaces the prior session-wide
+        # "at least one download exists" check.
+        downloads = session.get("dataset_file_downloads") or []
+        resolved_file_ids = {r.get("file_id", "") for r in by_key.values()
+                              if r.get("mode") != "defer" and r.get("file_id") in dataset_file_ids}
+        for file_id in sorted(resolved_file_ids):
+            if not any(d.get("downloaded_by") == principal and d.get("file_id") == file_id
+                       and int(d.get("decision_version", 0)) == current_decision_version
+                       for d in downloads):
+                raise HTTPException(
+                    400,
+                    f"dataset file {file_id!r} must be downloaded via GET .../dataset-file/{{file_id}} "
+                    "at the current decision version before resolving its column(s): the "
+                    "actual-knowledge attestation is only meaningful if the reviewer has "
+                    "actually opened the current original data.",
+                )
     review_filter = _owned_filter(sid, principal)
     review_filter["status"] = {"$in": ["awaiting_human_review", "partially_complete"]}
     if prior_run_id is None:
@@ -2619,17 +2646,36 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     # through unchanged -- `request_id` stays None and no idempotency
     # protection applies, same as this route's behavior before this check
     # existed.
-    control_store = MongoControlStore(db)
     request_id: str | None = None
+    open_request_doc: dict | None = None
     if prior_run_id:
         open_requests = await control_store.find_many(
             "human_review_requests", {"run_id": prior_run_id, "state": "open"}
         )
         if open_requests:
-            request_id = open_requests[0]["request_id"]
+            open_request_doc = open_requests[0]
+            request_id = open_request_doc["request_id"]
+    if body.confirm_auditor_confidence:
+        # D13 step 4/7: required field, and (when a durable request is
+        # open and actually carries a minted audit_version) must match it
+        # exactly -- a reviewer confirming against a since-superseded
+        # Auditor verdict is a stale confirmation, not a valid one.
+        if not body.audit_version:
+            raise HTTPException(
+                400,
+                "audit_version is required when confirm_auditor_confidence is true",
+            )
+        request_audit_version = (open_request_doc or {}).get("audit_version") or ""
+        if request_audit_version and body.audit_version != request_audit_version:
+            raise HTTPException(
+                409,
+                "audit_version does not match the open human-review request's audit "
+                "verdict; the Auditor's report has changed since this confirmation was "
+                "prepared -- reload and confirm against the current verdict",
+            )
     body_hash = hashlib.sha256(json.dumps(
         {"resolutions": body.resolutions, "confirm_auditor_confidence": body.confirm_auditor_confidence,
-         "actual_knowledge_ack": body.actual_knowledge_ack},
+         "audit_version": body.audit_version, "actual_knowledge_ack": body.actual_knowledge_ack},
         sort_keys=True, default=str,
     ).encode("utf-8")).hexdigest()
     if request_id is not None:
@@ -2768,10 +2814,13 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     # touches the grant/gateway/tools/trace fields, so building a full
     # `ActivationFactory` activation here would cost a real provider-policy
     # check and a `capability_grants`/`work_items` write for no reason this
-    # call site needs. No durable `store` either -- nothing yet opens a
-    # `WorkflowRun` for a resumed session (Phase 4/5's SuperOrchestrator),
-    # and `_next_decision_version` requires one; `decision_version` is 0
-    # here until that wiring lands, same as the orchestrator's final gate.
+    # call site needs. `store` is `control_store` when a durable
+    # `WorkflowRun` already exists for this run (Phase 5's
+    # `SuperOrchestrator.start_run` migration) so `decision_version` is the
+    # real, CAS-incremented one `dataset_file_downloads` scoping above
+    # compares against; `None` (decision_version stays 0) for a
+    # pre-migration session with no such record, same tolerant fallback
+    # `_next_decision_version` documents for its own no-store case.
     gates_ctx = AgentContext(
         session_id=sid, run_id=prior_run_id or sid, task_id=uuid.uuid4().hex,
         agent="Judge", attempt=1, grant=None, gateway=None, tools=None, trace=None,
@@ -2782,6 +2831,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         jurisdiction=session.get("jurisdiction", "us"),
         stage="human_review.regate",
         ctx=gates_ctx,
+        store=control_store if workflow_run_doc is not None else None,
     )
     for gate_result in gate_outcome.gate_results:
         await MongoControlStore(db).insert("gate_results", gate_result)
@@ -2998,9 +3048,11 @@ async def session_dataset_file(sid: str, file_id: str, principal: str = Depends(
 
     Available at any session status the caller owns: a reviewer may want
     to glance at the source file before, during, or after resolving the
-    flagged columns. Each download is recorded (principal + timestamp) so
-    the "I have opened and reviewed the original file" attestation has a
-    server-side fact behind it.
+    flagged columns. Each download is recorded (principal + timestamp +
+    the run's current decision_version, D13 step 8) so the "I have opened
+    and reviewed the current original file" attestation has a
+    server-side fact behind it, scoped to exactly the decision state the
+    reviewer actually saw.
     """
     db = get_db()
     session = await _owned_session(sid, principal, {"_id": 0})
@@ -3013,12 +3065,18 @@ async def session_dataset_file(sid: str, file_id: str, principal: str = Depends(
     path = Path(f["stored_path"])
     if not path.exists():
         raise HTTPException(404, "original file is no longer available (session settled and cleaned up)")
+    from phi_core.control.store import MongoControlStore
+    prior_run_id = session.get("_pipeline_run_id")
+    workflow_run_doc = (await MongoControlStore(db).get_one("workflow_runs", {"run_id": prior_run_id})
+                         if prior_run_id else None)
+    decision_version = int(workflow_run_doc.get("decision_version", 0)) if workflow_run_doc else 0
     await db.sessions.update_one(
         _owned_filter(sid, principal),
         {"$push": {"dataset_file_downloads": {
             "file_id": file_id,
             "downloaded_by": principal,
             "downloaded_at": datetime.now(timezone.utc).isoformat(),
+            "decision_version": decision_version,
         }}},
     )
     return FileResponse(path, filename=decrypt_display_name(f.get("original_name_encrypted", "")) or path.name)

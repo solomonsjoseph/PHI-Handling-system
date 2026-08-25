@@ -473,7 +473,7 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
             "suggested_action": "drop",
             "suggested_reason": "direct identifier",
         }],
-        "dataset_file_downloads": [{"file_id": "dataset"}],
+        "dataset_file_downloads": [{"file_id": "dataset", "downloaded_by": "reviewer", "decision_version": 0}],
     })
 
     async def fake_cfg():
@@ -529,7 +529,7 @@ async def test_a_successful_submission_persists_its_event_and_resolves_the_durab
             "suggested_action": "drop",
             "suggested_reason": "direct identifier",
         }],
-        "dataset_file_downloads": [{"file_id": "dataset"}],
+        "dataset_file_downloads": [{"file_id": "dataset", "downloaded_by": "reviewer", "decision_version": 0}],
     })
     request = HumanReviewRequest(run_id="run-idem", session_id="sid", workflow_version="wf/1",
                                  task_id="", node="human_review_decisions")
@@ -588,7 +588,7 @@ async def test_client_event_id_is_idempotent_while_the_request_stays_open(monkey
             "suggested_action": "drop",
             "suggested_reason": "direct identifier",
         }],
-        "dataset_file_downloads": [{"file_id": "dataset"}],
+        "dataset_file_downloads": [{"file_id": "dataset", "downloaded_by": "reviewer", "decision_version": 0}],
     })
     request = HumanReviewRequest(run_id="run-open", session_id="sid", workflow_version="wf/1",
                                  task_id="", node="human_review_decisions")
@@ -621,6 +621,189 @@ async def test_client_event_id_is_idempotent_while_the_request_stays_open(monkey
         await srv.session_human_review("sid", different_body, principal="reviewer")
     assert excinfo.value.status_code == 409
     assert len(db["human_review_events"].docs) == 1
+
+@pytest.mark.asyncio
+async def test_confirm_auditor_confidence_requires_audit_version(monkeypatch):
+    """D13 step 4: confirm_auditor_confidence=True without an audit_version
+    is rejected outright, not silently accepted as an unconfirmed no-op."""
+    import server as srv
+    from fastapi import HTTPException
+
+    db = _ConditionalStubDB({
+        "id": "sid", "owner": "reviewer", "intake_status": "ready",
+        "status": "awaiting_human_review", "_pipeline_run_id": "run-audit-1",
+        "files": [{"file_id": "dataset", "kind": "dataset", "stored_path": "/tmp/dataset.csv",
+                   "columns": ["research_flag"]}],
+        "agent_decisions": [{
+            "file_id": "dataset", "column": "research_flag", "action": "human_review",
+            "suggested_action": "drop", "suggested_reason": "direct identifier",
+        }],
+    })
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await srv.session_human_review(
+            "sid",
+            srv.HumanReviewSubmit(
+                client_event_id="ce-audit-noversion", confirm_auditor_confidence=True,
+                resolutions=[],
+            ),
+            principal="reviewer",
+        )
+    assert excinfo.value.status_code == 400
+    assert "audit_version" in excinfo.value.detail
+
+
+@pytest.mark.asyncio
+async def test_confirm_auditor_confidence_rejects_stale_audit_version(monkeypatch):
+    """D13 step 7: a confirmation naming an audit_version other than the
+    open request's own is a stale confirmation -- rejected, not accepted as
+    confirming whatever the current verdict happens to be."""
+    import server as srv
+    from fastapi import HTTPException
+    from phi_core.control.records import HumanReviewRequest
+
+    db = _ConditionalStubDB({
+        "id": "sid", "owner": "reviewer", "intake_status": "ready",
+        "status": "awaiting_human_review", "_pipeline_run_id": "run-audit-2",
+        "files": [{"file_id": "dataset", "kind": "dataset", "stored_path": "/tmp/dataset.csv",
+                   "columns": ["research_flag"]}],
+        "agent_decisions": [{
+            "file_id": "dataset", "column": "research_flag", "action": "human_review",
+            "suggested_action": "drop", "suggested_reason": "direct identifier",
+        }],
+    })
+    request = HumanReviewRequest(run_id="run-audit-2", session_id="sid", workflow_version="wf/1",
+                                  task_id="", node="human_review_audit", audit_version="verdict-v1")
+    db["human_review_requests"].docs.append(request.model_dump())
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await srv.session_human_review(
+            "sid",
+            srv.HumanReviewSubmit(
+                client_event_id="ce-audit-stale", confirm_auditor_confidence=True,
+                audit_version="verdict-v2-stale", resolutions=[],
+            ),
+            principal="reviewer",
+        )
+    assert excinfo.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_confirm_auditor_confidence_accepts_matching_audit_version(monkeypatch):
+    """The mirror of the stale case: a confirmation naming exactly the open
+    request's audit_version is accepted and recorded on the resulting
+    HumanReviewEvent."""
+    import server as srv
+    from phi_core.control.records import HumanReviewRequest
+
+    db = _ConditionalStubDB({
+        "id": "sid", "owner": "reviewer", "intake_status": "ready",
+        "status": "awaiting_human_review", "_pipeline_run_id": "run-audit-3",
+        "files": [{"file_id": "dataset", "kind": "dataset", "stored_path": "/tmp/dataset.csv",
+                   "columns": ["research_flag"]}],
+        "agent_decisions": [{
+            "file_id": "dataset", "column": "research_flag", "action": "human_review",
+            "suggested_action": "drop", "suggested_reason": "direct identifier",
+        }],
+    })
+    request = HumanReviewRequest(run_id="run-audit-3", session_id="sid", workflow_version="wf/1",
+                                  task_id="", node="human_review_audit", audit_version="verdict-v1")
+    db["human_review_requests"].docs.append(request.model_dump())
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+
+    result = await srv.session_human_review(
+        "sid",
+        srv.HumanReviewSubmit(
+            client_event_id="ce-audit-match", confirm_auditor_confidence=True,
+            audit_version="verdict-v1", resolutions=[],
+        ),
+        principal="reviewer",
+    )
+    assert result["status"] == "still_awaiting"
+    events = db["human_review_events"].docs
+    assert len(events) == 1
+    assert events[0]["kind"] == "audit_confidence_confirmation"
+    assert events[0]["audit_version"] == "verdict-v1"
+
+
+@pytest.mark.asyncio
+async def test_stale_download_at_a_different_decision_version_does_not_satisfy_the_gate(monkeypatch):
+    """D13 step 8: a download recorded against an older decision_version
+    does not satisfy the actual-knowledge gate for the current one -- the
+    reviewer must have opened the file as it exists now, not as it existed
+    before a prior decision mutation bumped the run's decision_version."""
+    import server as srv
+    from fastapi import HTTPException
+    from phi_core.control.records import WorkflowRun
+
+    db = _ConditionalStubDB({
+        "id": "sid", "owner": "reviewer", "intake_status": "ready",
+        "status": "awaiting_human_review", "_pipeline_run_id": "run-dl-1",
+        "files": [{"file_id": "dataset", "kind": "dataset", "stored_path": "/tmp/dataset.csv",
+                   "columns": ["subject_id"]}],
+        "agent_decisions": [{
+            "file_id": "dataset", "column": "subject_id", "action": "human_review",
+            "suggested_action": "drop", "suggested_reason": "direct identifier",
+        }],
+        "dataset_file_downloads": [{"file_id": "dataset", "downloaded_by": "reviewer", "decision_version": 0}],
+    })
+    run = WorkflowRun(run_id="run-dl-1", session_id="sid", state="awaiting_human_review",
+                       node="human_review_decisions", decision_version=1)
+    db["workflow_runs"].docs.append(run.model_dump())
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await srv.session_human_review(
+            "sid",
+            srv.HumanReviewSubmit(
+                client_event_id="ce-stale-dl", actual_knowledge_ack=True,
+                resolutions=[{"file_id": "dataset", "column": "subject_id", "mode": "approve"}],
+            ),
+            principal="reviewer",
+        )
+    assert excinfo.value.status_code == 400
+    assert "dataset" in excinfo.value.detail
+
+
+@pytest.mark.asyncio
+async def test_download_at_the_current_decision_version_satisfies_the_gate(monkeypatch):
+    """The mirror of the stale case: a download recorded at exactly the
+    run's current decision_version does satisfy the gate."""
+    import server as srv
+    from phi_core.control.records import WorkflowRun
+
+    db = _ConditionalStubDB({
+        "id": "sid", "owner": "reviewer", "intake_status": "ready",
+        "status": "awaiting_human_review", "_pipeline_run_id": "run-dl-2",
+        "files": [{"file_id": "dataset", "kind": "dataset", "stored_path": "/tmp/dataset.csv",
+                   "columns": ["subject_id"]}],
+        "agent_decisions": [{
+            "file_id": "dataset", "column": "subject_id", "action": "human_review",
+            "suggested_action": "drop", "suggested_reason": "direct identifier",
+        }],
+        "dataset_file_downloads": [{"file_id": "dataset", "downloaded_by": "reviewer", "decision_version": 1}],
+    })
+    run = WorkflowRun(run_id="run-dl-2", session_id="sid", state="awaiting_human_review",
+                       node="human_review_decisions", decision_version=1)
+    db["workflow_runs"].docs.append(run.model_dump())
+
+    async def fake_cfg():
+        return SimpleNamespace(provider="test", model="test")
+
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+    monkeypatch.setattr(srv, "_current_llm_cfg", fake_cfg)
+
+    result = await srv.session_human_review(
+        "sid",
+        srv.HumanReviewSubmit(
+            client_event_id="ce-current-dl", actual_knowledge_ack=True,
+            resolutions=[{"file_id": "dataset", "column": "subject_id", "mode": "approve"}],
+        ),
+        principal="reviewer",
+    )
+    assert result["status"] == "resuming"
 
 
 @pytest.mark.asyncio
@@ -695,7 +878,7 @@ async def test_comment_resolution_never_auto_applies_regardless_of_confidence(mo
             "suggested_action": "drop",
             "suggested_reason": "direct identifier",
         }],
-        "dataset_file_downloads": [{"file_id": "dataset"}],
+        "dataset_file_downloads": [{"file_id": "dataset", "downloaded_by": "reviewer", "decision_version": 0}],
     })
 
     class FakeActivationFactory:
@@ -820,7 +1003,7 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
             "suggested_action": "drop",
             "suggested_reason": "direct identifier",
         }],
-        "dataset_file_downloads": [{"file_id": "dataset"}],
+        "dataset_file_downloads": [{"file_id": "dataset", "downloaded_by": "reviewer", "decision_version": 0}],
     })
     emitted = []
 

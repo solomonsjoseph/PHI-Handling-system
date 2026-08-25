@@ -151,7 +151,7 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
         "agent_specialists": {"lexicon": {"columns": []}},
         "agent_statute": {},
         "agent_praxis": {},
-        "dataset_file_downloads": [{"file_id": "f1", "principal": "alice"}],
+        "dataset_file_downloads": [{"file_id": "f1", "downloaded_by": "alice", "decision_version": 0}],
     }
     db = _StubDB(session_doc)
     monkeypatch.setattr(srv, "get_db", lambda: db)
@@ -308,7 +308,7 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
         "agent_specialists": {"lexicon": {"columns": []}},
         "agent_statute": {},
         "agent_praxis": {},
-        "dataset_file_downloads": [{"file_id": "f1", "principal": "alice"}],
+        "dataset_file_downloads": [{"file_id": "f1", "downloaded_by": "alice", "decision_version": 0}],
     }
     db = _StubDB(session_doc)
     monkeypatch.setattr(srv, "get_db", lambda: db)

@@ -20,6 +20,8 @@ followed by a cancel check.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -122,6 +124,7 @@ async def _escalate_to_human_review(
     phase_timings: dict[str, Any], run_elapsed_s: float,
     approved_decisions: list[dict[str, Any]], sentinel_report: dict[str, Any] | None,
     manager: Manager, store: "ControlStore | None", run_id: str, node: str,
+    audit_version: str = "",
 ) -> dict[str, Any]:
     """The single path by which a run becomes 'awaiting_human_review' (D10).
 
@@ -138,6 +141,12 @@ async def _escalate_to_human_review(
     the tested, load-bearing contract every caller of this function
     depends on; the durable request is additive until every entry path
     reliably opens a run through ``SuperOrchestrator.start_run`` first.
+
+    ``audit_version`` (D13 step 4/7): non-empty only for an Auditor-verdict
+    escalation (``node="human_review_audit"`` with a real audit content
+    hash); the reviewer's later ``confirm_auditor_confidence`` submission
+    must echo it back, so a confirmation against a since-superseded audit
+    verdict is rejected rather than silently accepted.
     """
     # Mirrors what the deleted `Manager.escalate_to_human_review` set
     # internally, so `close_run`'s report still carries the same
@@ -161,9 +170,17 @@ async def _escalate_to_human_review(
         from phi_core.control.tasks import TaskService
         from phi_core.control.workflow import WorkflowError
 
+        # D13 step 7: the request's own decision_version is the run's
+        # current one (D11's CAS-incremented authority), not a hardcoded
+        # 0 -- the later delivery-gate match on (principal, file_id,
+        # decision_version) has nothing authoritative to compare against
+        # otherwise.
+        run_doc = await store.get_one("workflow_runs", {"run_id": run_id})
+        current_decision_version = int(run_doc.get("decision_version", 0)) if run_doc else 0
         try:
             await SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None))).request_human_review(
-                run_id=run_id, node=node, reason_codes=reasons, decision_version=0,
+                run_id=run_id, node=node, reason_codes=reasons, decision_version=current_decision_version,
+                audit_version=audit_version,
             )
         except WorkflowError as exc:
             if not str(exc).startswith("unknown run_id:"):
@@ -447,13 +464,22 @@ async def execute_decisions(
             "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids,
             "audit": audit, "agent_decisions": decisions,
         }})
+        # D13 step 4/7: a content hash of the actual verdict, not an
+        # incrementing counter -- any change to Auditor's issues/metrics
+        # for this run mints a new value, so a reviewer's later
+        # `confirm_auditor_confidence` submission can be checked against
+        # exactly the verdict they saw, not merely "some verdict existed".
+        audit_version = hashlib.sha256(
+            json.dumps(audit, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
         return await _escalate_to_human_review(
             db=db, session_filter=session_filter, reasons=reasons,
             reasons_plain=plain_human_review_reasons(reasons),
             close_last_phase=close_last_phase, phase_timings=phase_timings,
             run_elapsed_s=time.perf_counter() - run_started,
             approved_decisions=decisions, sentinel_report=sentinel_report,
-            manager=manager, store=store, run_id=run_id, node="human_review_audit")
+            manager=manager, store=store, run_id=run_id, node="human_review_audit",
+            audit_version=audit_version)
 
     await _check_cancel(db, sid, on_phase)
 
