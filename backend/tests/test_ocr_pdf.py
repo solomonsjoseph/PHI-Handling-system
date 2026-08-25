@@ -12,18 +12,18 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
-from phi_core.file_readers import read_pdf, OCR_TEXT_THRESHOLD
+from phi_core.file_readers import OCR_TEXT_THRESHOLD, read_pdf
 
 
 def _tesseract_available() -> bool:
     """Skip if the tesseract binary or pytesseract module isn't installed
     on this deployment."""
     try:
-        import pytesseract  # noqa: F401
-        import pdf2image  # noqa: F401
         # binary check
         from shutil import which
+
+        import pdf2image  # noqa: F401
+        import pytesseract  # noqa: F401
         if not which("tesseract") or not which("pdftoppm"):
             return False
         return True

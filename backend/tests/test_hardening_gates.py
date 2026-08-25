@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Ownership: a wrong-owner request 404s across every owner-scoped read route
 # named in the plan's V6 checklist.
@@ -124,8 +123,8 @@ async def test_resolve_principal_rejects_missing_credential_when_tokens_configur
 async def test_resolve_principal_accepts_valid_cookie_or_header(monkeypatch):
     monkeypatch.setenv("API_TOKENS", "alice:tok-a")
     monkeypatch.delenv("API_TOKEN", raising=False)
-    from phi_core.security import resolve_principal
     from phi_core.crypto import sign_principal_cookie
+    from phi_core.security import resolve_principal
 
     assert await resolve_principal(x_api_token="tok-a", phi_session=None) == "alice"
     cookie = sign_principal_cookie("alice")

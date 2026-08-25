@@ -40,7 +40,6 @@ from typing import Any
 
 from .jurisdictions import GuardPattern, get_pack
 
-
 MAX_FINDINGS_PER_FILE = 20
 
 

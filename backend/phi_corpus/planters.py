@@ -54,13 +54,12 @@ import zipfile
 from dataclasses import dataclass
 from typing import Any
 
-from .scenarios import SCENARIOS, Scenario, DatasetSpec, ColumnSpec
-from .scenarios import REDCAP_DICTIONARY_HEADERS, REDCAP_DICTIONARIES
-from .edge_cases import EDGE_CASES, EdgeCase
-from . import realism as _realism
-from .tiers import corpus_version as _corpus_version
-
 from phi_core.jurisdictions import get_pack as _get_pack
+
+from . import realism as _realism
+from .edge_cases import EDGE_CASES, EdgeCase
+from .scenarios import REDCAP_DICTIONARIES, REDCAP_DICTIONARY_HEADERS, SCENARIOS, ColumnSpec, DatasetSpec, Scenario
+from .tiers import corpus_version as _corpus_version
 
 _DENY_ZIP3: frozenset = _get_pack("us").restricted_zip3_prefixes
 
@@ -423,6 +422,13 @@ def _serialize_csv(header: list[str], matrix: list[list[PlantedCell]]) -> str:
     return buf.getvalue()
 
 
+def _write_deterministic_zip_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o600 << 16
+    archive.writestr(info, data)
+
+
 def _generate_dictionary(scn: Scenario) -> str:
     """Generate a per-scenario codebook CSV that the Lexicon agent reads.
 
@@ -508,10 +514,10 @@ def plant(
         for ds in scn.datasets:
             matrix = matrices[ds.filename]
             csv_text = _serialize_csv([c.name for c in ds.columns], matrix)
-            z.writestr(f"datasets/{ds.filename}", csv_text.encode(prof.encoding))
+            _write_deterministic_zip_entry(z, f"datasets/{ds.filename}", csv_text.encode(prof.encoding))
             for row in matrix:
                 planted.extend(row)
-        z.writestr("dictionary/columns.csv", dict_text.encode(prof.encoding))
+        _write_deterministic_zip_entry(z, "dictionary/columns.csv", dict_text.encode(prof.encoding))
 
     columns_meta = [
         {

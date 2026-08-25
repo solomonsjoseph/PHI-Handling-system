@@ -30,7 +30,6 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-
 from litellm.llms.chatgpt.common_utils import (
     CHATGPT_AUTH_BASE,
     CHATGPT_CLIENT_ID,

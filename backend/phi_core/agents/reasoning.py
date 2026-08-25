@@ -7,10 +7,17 @@ Auditor   - reviews Executor's work and produces the final compliance report.
 """
 from __future__ import annotations
 
+import csv as _csv
+import hashlib as _hashlib
+import hmac as _hmac
+import re as _re
 from pathlib import Path
 from typing import Any
 
+import openpyxl as _openpyxl
+
 from ..anonymizer import apply_to_text
+from ..crypto import pseudonym_salt
 from ..detectors import detect_text
 from ..file_readers import iter_dataset_rows, read_narrative
 from ..jurisdictions import get_pack
@@ -19,6 +26,7 @@ from ..publish_guard import should_fire
 from ..security import scrub_persisted_text
 from .base import Agent
 
+_detect_text = detect_text
 
 ACTION_TYPES = {
     "keep",           # non-PHI, preserve as-is
@@ -350,7 +358,7 @@ _HARD_RULE_TABLE: list[tuple[str, list[str], str, str]] = [
 # below), not disabling the check.
 
 
-import re as _re_module
+_re_module = _re
 
 _CATEGORY_LETTER_RE = _re_module.compile(r"\(([A-R])\)$")
 
@@ -1312,15 +1320,6 @@ class Auditor(Agent):
 
 
 # --- deterministic dataset transformer ------------------------------------
-
-import csv as _csv
-import openpyxl as _openpyxl
-import re as _re
-import hashlib as _hashlib
-import hmac as _hmac
-
-from ..detectors import detect_text as _detect_text
-from ..crypto import pseudonym_salt
 
 
 _RESTRICTED_ZIP3 = {"036","059","063","102","203","556","692","790","821","823","830","831","878","879","884","890","893"}

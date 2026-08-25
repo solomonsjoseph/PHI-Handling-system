@@ -95,7 +95,7 @@ def test_every_ladder_entry_plants_and_satisfies_intake_v3():
 
 
 def test_coverage_plants_every_required_violation():
-    from phi_corpus.tiers import coverage, ladder_for, REQUIRED_VIOLATIONS
+    from phi_corpus.tiers import REQUIRED_VIOLATIONS, coverage, ladder_for
 
     cov = coverage(ladder_for("all"))
     missing = [k for k in REQUIRED_VIOLATIONS if not cov.get(k)]
@@ -139,7 +139,7 @@ def test_canary_uniqueness_holds_for_every_entry():
 
 def test_every_planted_cell_is_scoreable():
     from phi_corpus.planters import plant
-    from phi_corpus.tiers import ladder_for, TIERS
+    from phi_corpus.tiers import TIERS, ladder_for
 
     for entry in ladder_for("all"):
         art = plant(entry.scenario_id, edge_case_tags=list(entry.edge_case_tags),
@@ -184,6 +184,7 @@ def test_corpus_version_reproduces_across_separate_interpreters():
 
 def test_mbi_values_match_the_documented_character_class():
     import re
+
     from phi_corpus.planters import plant
 
     pattern = re.compile(
@@ -213,6 +214,7 @@ def test_npi_values_pass_luhn_over_80840_prefix():
 
 def test_naaccr_dates_are_eight_digit_yyyymmdd():
     import re
+
     from phi_corpus.planters import plant
 
     art = plant("l2_naaccr_registry_v1", row_count=10, seed=1)
@@ -224,6 +226,7 @@ def test_naaccr_dates_are_eight_digit_yyyymmdd():
 
 def test_sdtm_dtc_values_match_iso_or_partial_shape():
     import re
+
     from phi_corpus.planters import plant
 
     pattern = re.compile(r"^(\d{4}(-\d{2}(-\d{2}(T\d{2}:\d{2})?)?)?|\d{4}---\d{2})?$")

@@ -1,5 +1,5 @@
 """phi_core.agents: multi-agent PHI handling pipeline."""
-from .base import Agent, AgentMessage, ITERATION_CAP
+from .base import ITERATION_CAP, Agent, AgentMessage
 from .llm import LlmConfig, call_llm, parse_json
 from .manager import Manager
 from .orchestrator import run_pipeline

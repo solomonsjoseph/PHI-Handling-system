@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
-from .base import Agent
 from ..security import scrub_persisted_text
+from .base import Agent
 
 
 @dataclass(frozen=True)

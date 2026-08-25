@@ -10,9 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 
-from phi_core.agents.base import Agent, _json_validator
+from phi_core.agents.base import _json_validator
 from phi_core.agents.manager import Manager, ManagerAdvice, ManagerDecision
-
 
 # ---- shared fakes, following test_keep_verification_pipeline.py:13-26 -----
 

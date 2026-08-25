@@ -5,9 +5,9 @@ concealment. Any future refactor that reintroduces a fail-open path or
 leaks the corpus answer key should fail these tests.
 """
 from __future__ import annotations
+
 import io
 import zipfile
-
 
 import pytest
 
@@ -75,8 +75,8 @@ class _StubDB:
 async def test_bundle_refuses_when_guard_missing(monkeypatch):
     """Legacy /finalize used to skip the guard entirely; the /bundle
     endpoint must still refuse (fail-closed) when guard_report is absent."""
-    from fastapi import HTTPException
     import server as srv
+    from fastapi import HTTPException
     doc = {"id": "sid", "status": "complete", "export_paths": {"a": "/tmp/x"}}
     monkeypatch.setattr(srv, "get_db", lambda: _StubDB(doc))
     with pytest.raises(HTTPException) as excinfo:
@@ -87,8 +87,8 @@ async def test_bundle_refuses_when_guard_missing(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_bundle_refuses_when_guard_blocked(monkeypatch):
-    from fastapi import HTTPException
     import server as srv
+    from fastapi import HTTPException
     doc = {"id": "sid", "status": "complete",
            "export_paths": {"a": "/tmp/x"},
            "guard_report": {"status": "blocked", "results": []}}

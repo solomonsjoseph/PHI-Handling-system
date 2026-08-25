@@ -65,7 +65,7 @@ def safe_join(base: Path, user_name: str | None, *, fallback: str = "upload.bin"
     try:
         common = os.path.commonpath([str(candidate), str(base_resolved)])
     except ValueError:
-        raise UnsafePath(f"filename resolves outside base: {user_name!r}")
+        raise UnsafePath(f"filename resolves outside base: {user_name!r}") from None
     if common != str(base_resolved) or candidate == base_resolved:
         raise UnsafePath(f"filename resolves outside base: {user_name!r}")
     return candidate

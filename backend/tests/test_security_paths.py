@@ -10,9 +10,7 @@ from pathlib import Path
 
 import pytest
 import requests
-
 from phi_core.paths import UnsafePath, safe_join, sanitise_filename
-
 
 BASE_URL = os.environ.get("PHI_TEST_BASE_URL", "http://localhost:8001")
 

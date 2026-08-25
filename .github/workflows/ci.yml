@@ -7,6 +7,18 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval \"db.adminCommand('ping')\""
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MONGO_URL: mongodb://localhost:27017
     steps:
       - uses: actions/checkout@v4
 
@@ -23,10 +35,56 @@ jobs:
         run: ruff check backend
 
       - name: Test
-        run: cd backend && pytest tests --ignore=tests/test_agent_pipeline.py -q
+        run: cd backend && pytest tests -q -rs
 
       - name: Dependency audit (non-blocking)
         run: pipx run pip-audit -r backend/requirements.txt || true
+
+  credentialed:
+    if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval \"db.adminCommand('ping')\""
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      MONGO_URL: mongodb://localhost:27017
+      PHI_ENV: dev
+      PHI_TEST_BASE_URL: http://127.0.0.1:8001
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      - name: Start backend
+        working-directory: backend
+        run: |
+          uvicorn server:app --host 127.0.0.1 --port 8001 > "$RUNNER_TEMP/backend.log" 2>&1 &
+          for _ in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8001/api/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/backend.log"
+          exit 1
+
+      - name: Test provider integrations
+        run: cd backend && pytest tests/test_agent_pipeline.py tests/test_experts_web_search.py tests/test_corpus_researcher.py -q -rs
 
   frontend:
     runs-on: ubuntu-latest
@@ -49,6 +107,10 @@ jobs:
           REACT_APP_BACKEND_URL: ""
           INLINE_RUNTIME_CHUNK: "false"
         run: npm run build
+
+      - name: Test
+        working-directory: frontend
+        run: npm test -- --watchAll=false
 
       - name: Dependency audit (non-blocking)
         working-directory: frontend

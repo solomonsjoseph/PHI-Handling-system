@@ -37,8 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
 os.environ.setdefault("DB_NAME", "phi_handling")
 
-from motor.motor_asyncio import AsyncIOMotorClient  # noqa: E402
-
+from motor.motor_asyncio import AsyncIOMotorClient
 
 BASE = "http://localhost:8001"
 TIMEOUT = 30

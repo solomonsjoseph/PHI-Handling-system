@@ -13,6 +13,7 @@ Unit tests (no network) verify:
 from __future__ import annotations
 
 import os
+
 import pytest
 
 
@@ -71,7 +72,7 @@ def test_statute_pack_fallback_shape():
 def test_live_web_search_returns_urls():
     """End-to-end live test: Anthropic's web_search_20250305 tool must
     execute server-side and return URLs in the response text."""
-    from phi_core.agents.llm import call_llm_with_web_search, LlmConfig
+    from phi_core.agents.llm import LlmConfig, call_llm_with_web_search
     cfg = LlmConfig(
         provider="anthropic",
         model="claude-sonnet-4-5-20250929",

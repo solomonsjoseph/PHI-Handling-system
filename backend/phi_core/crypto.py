@@ -10,6 +10,7 @@ Fernet tokens are URL-safe base64 strings; we prefix stored ciphertext with
 key that may still live in the settings collection.
 """
 from __future__ import annotations
+
 import base64
 import hashlib
 import hmac
@@ -18,10 +19,10 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey, Ed25519PublicKey,
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
 )
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-
 
 _ENC_PREFIX = "fernet:"
 _ENV_KEY = "APP_ENCRYPTION_KEY"
@@ -86,7 +87,7 @@ def decrypt_api_key(stored: str) -> str:
     try:
         return _cipher().decrypt(stored[len(_ENC_PREFIX):].encode()).decode()
     except InvalidToken:
-        raise KeyRotated("stored value cannot be decrypted under the current key")
+        raise KeyRotated("stored value cannot be decrypted under the current key") from None
 
 
 def encrypt_reversal_map(payload: dict) -> str:
@@ -115,7 +116,7 @@ def decrypt_reversal_map(stored: str) -> dict:
     try:
         return json.loads(_cipher().decrypt(stored[len(_ENC_PREFIX):].encode()).decode())
     except InvalidToken:
-        raise KeyRotated("stored value cannot be decrypted under the current key")
+        raise KeyRotated("stored value cannot be decrypted under the current key") from None
 
 
 def pseudonym_salt(session_id: str) -> str:

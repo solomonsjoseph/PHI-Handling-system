@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-
 from types import SimpleNamespace
 
 import pytest
@@ -81,9 +80,9 @@ async def test_processing_session_refuses_force_without_recording_override(monke
 @pytest.mark.asyncio
 async def test_processing_session_refuses_stale_clean_bundle(monkeypatch):
     """A prior aggregate clean report cannot certify a bundle during a rerun."""
-    from fastapi import HTTPException
     import phi_core.bundle as bundle
     import server as srv
+    from fastapi import HTTPException
 
     db = _StubDB({
         "id": "sid",
@@ -176,8 +175,8 @@ class _ConditionalStubDB(_StubDB):
 @pytest.mark.asyncio
 async def test_handle_claim_revokes_old_exports_before_worker_runs(monkeypatch, tmp_path):
     """Accepted reruns revoke clean and force download rights before scheduling."""
-    from fastapi import HTTPException
     import server as srv
+    from fastapi import HTTPException
 
     export = tmp_path / "old.csv"
     export.write_text("old export", encoding="utf-8")
@@ -222,8 +221,8 @@ async def test_handle_claim_revokes_old_exports_before_worker_runs(monkeypatch, 
 @pytest.mark.asyncio
 async def test_overlapping_handles_claim_only_one_worker(monkeypatch):
     """The conditional launch claim rejects an active conflicting request."""
-    from fastapi import HTTPException
     import server as srv
+    from fastapi import HTTPException
 
     db = _ConditionalStubDB({
         "id": "sid",
@@ -379,8 +378,8 @@ async def test_completed_clean_export_retains_normal_download(monkeypatch, tmp_p
 @pytest.mark.asyncio
 async def test_human_review_tail_claims_awaiting_session_before_scheduling(monkeypatch):
     """Only one token-claimed human-review tail may publish its completion."""
-    from fastapi import HTTPException
     import server as srv
+    from fastapi import HTTPException
 
     db = _ConditionalStubDB({
         "id": "sid",
@@ -540,8 +539,8 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
 @pytest.mark.asyncio
 async def test_stale_unresolved_human_review_cannot_overwrite_claimed_tail(monkeypatch):
     """An unresolved stale review cannot overwrite a newer tail's decisions."""
-    from fastapi import HTTPException
     import server as srv
+    from fastapi import HTTPException
 
     decisions = [{
         "file_id": "dataset",

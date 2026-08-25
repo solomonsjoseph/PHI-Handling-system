@@ -10,11 +10,11 @@ import os
 import pytest
 import requests
 from fastapi import HTTPException
-
 from phi_core.security import (
-    allowed_providers, validate_llm_base_url, validate_llm_provider,
+    allowed_providers,
+    validate_llm_base_url,
+    validate_llm_provider,
 )
-
 
 BASE_URL = os.environ.get("PHI_TEST_BASE_URL", "http://localhost:8001")
 

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import openpyxl
 import pytest
-
 from phi_core.file_readers import column_value_stats, read_table_rows
 
 

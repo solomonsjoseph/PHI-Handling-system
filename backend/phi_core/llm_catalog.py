@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # UI order and labels for Settings / Wizard. Backend ids stay stable.
 UI_PROVIDERS: list[tuple[str, str]] = [
     ("openrouter", "Open Router"),

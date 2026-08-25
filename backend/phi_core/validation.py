@@ -25,7 +25,6 @@ from typing import Any
 
 from phi_core.agents.reasoning import _HARD_RULE_TABLE
 
-
 CORPUS_PATH = Path(__file__).resolve().parent.parent / "tests" / "corpora" / "hipaa_categories.json"
 
 
@@ -137,7 +136,7 @@ def run_validation(corpus: dict[str, Any] | None = None) -> AccuracyReport:
 
     letters = sorted({p.expected_letter for p in preds if p.expected_letter} |
                      {p.predicted_letter for p in preds if p.predicted_letter})
-    per_cat = [asdict(_score_category(l, preds)) for l in letters]
+    per_cat = [asdict(_score_category(letter, preds)) for letter in letters]
 
     return AccuracyReport(
         total=total,

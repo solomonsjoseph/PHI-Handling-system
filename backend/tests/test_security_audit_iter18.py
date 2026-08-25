@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # ---- SEC-003: scrubber breadth ----------------------------------------
 
 

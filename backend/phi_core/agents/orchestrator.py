@@ -27,16 +27,17 @@ from typing import Any, Awaitable, Callable
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from .base import AgentMessage, ITERATION_CAP
+from ..paths import cleanup_session_unpacked
+from ..security import scrub_decision, scrub_persisted_text
+from .base import ITERATION_CAP, AgentMessage
 from .experts import Praxis, Statute
 from .llm import LlmConfig
 from .manager import Manager
 from .operator import Operator
-from .reviewer import Reviewer
 from .outward import Herald, Ledger, Scout
 from .reasoning import (
+    BLOCKING_ISSUE_FLOOR,
     Auditor,
-    auditor_escalation_reason,
     Executor,
     Judge,
     Sentinel,
@@ -47,16 +48,14 @@ from .reasoning import (
     apply_sentinel_escalations,
     apply_sentinel_hard_rules,
     apply_site_cardinality_rule,
-    BLOCKING_ISSUE_FLOOR,
+    auditor_escalation_reason,
     materialize_auditor_disagreements,
     plain_human_review_reasons,
     validate_decisions,
     verify_keep_decisions,
 )
-from ..paths import cleanup_session_unpacked
-from ..security import scrub_decision, scrub_persisted_text
+from .reviewer import Reviewer
 from .specialists import Instrument, Lexicon, Schema
-
 
 PhaseCb = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -145,7 +144,7 @@ async def run_pipeline(
 
     # Alias so all existing calls to `on_phase(...)` inside this function
     # go through the timer. External callers still see the original cb.
-    on_phase = timed_on_phase  # noqa: F811  # rebinding is intentional
+    on_phase = timed_on_phase  # rebinding is intentional
 
     # Sir Q "Sentinel Iteration Cap Tuner": allow per-run rigor. Fast=1,
     # Balanced=2, Thorough=3. Falls back to the module default when the
@@ -223,7 +222,7 @@ async def run_pipeline(
     statute = await statute_task
     praxis_results = await praxis_gather_task
     praxis_methods: dict[str, Any] = {}
-    for cat, res in zip(hipaa_cats, praxis_results):
+    for cat, res in zip(hipaa_cats, praxis_results, strict=True):
         if isinstance(res, Exception):
             # Judge falls back to its own reasoning for any category missing
             # here; logging makes that fallback visible in the audit trail

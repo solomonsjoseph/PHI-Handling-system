@@ -1,14 +1,13 @@
 """Publish Guard tests — the boundary between 'input PHI data' and
 'output ready to share publicly'."""
 import builtins
-
-import pytest
-
 from pathlib import Path
 
+import pytest
 from phi_core.publish_guard import (
     MAX_FINDINGS_PER_FILE,
-    scan_all_exports, scan_export_file,
+    scan_all_exports,
+    scan_export_file,
 )
 
 

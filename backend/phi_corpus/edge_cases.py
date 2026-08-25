@@ -18,12 +18,12 @@ The current pipeline weak-spots we want to torture:
 """
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from typing import Callable
-import random
 
-from . import scenarios as _S
 from . import realism as _realism
+from . import scenarios as _S
 
 
 @dataclass(frozen=True)

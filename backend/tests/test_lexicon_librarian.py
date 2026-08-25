@@ -13,7 +13,6 @@ from pathlib import Path
 
 import phi_core.agents.specialists as specialists
 
-
 # ---- shared fakes, following test_manager.py:20-39 -------------------------
 
 

@@ -723,11 +723,28 @@ export default function SessionDetail() {
     traceFetchPendingRef.current = false;
     setTrace([]);
     refresh();
-    const es = new EventSource(streamUrl(sid));
-    es.onmessage = () => refresh();
-    es.onerror = () => es.close();
-    esRef.current = es;
-    return () => es.close();
+    let es = null;
+    let reconnectTimer = null;
+    let disposed = false;
+    const connectStream = () => {
+      reconnectTimer = null;
+      if (disposed) return;
+      const stream = new EventSource(streamUrl(sid));
+      stream.onmessage = () => refresh();
+      stream.onerror = () => {
+        stream.close();
+        if (es !== stream || disposed || reconnectTimer !== null) return;
+        reconnectTimer = window.setTimeout(connectStream, 1000);
+      };
+      es = stream;
+      esRef.current = stream;
+    };
+    connectStream();
+    return () => {
+      disposed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      es?.close();
+    };
     // Only re-open the stream when the session id changes; `refresh` closes
     // over `sid` and `setState` setters which are stable across renders.
     // eslint-disable-next-line react-hooks/exhaustive-deps

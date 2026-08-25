@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pytest
 
-
 # ---- Sentinel severity -------------------------------------------------
 
 
@@ -70,7 +69,7 @@ class _StubDB:
 
 @pytest.mark.asyncio
 async def test_check_cancel_raises_when_flag_set():
-    from phi_core.agents.orchestrator import _check_cancel, PipelineCancelled
+    from phi_core.agents.orchestrator import PipelineCancelled, _check_cancel
     db = _StubDB({"id": "s1", "cancel_requested": True})
     with pytest.raises(PipelineCancelled):
         await _check_cancel(db, "s1", _noop)
@@ -101,7 +100,7 @@ async def test_cancel_endpoint_registered_and_token_gated():
 
 
 def test_ledger_split_classes_present():
-    from phi_core.agents.outward import Ledger, LedgerCompare, LedgerAggregate
+    from phi_core.agents.outward import Ledger, LedgerAggregate, LedgerCompare
     assert Ledger.NAME == "Ledger"
     assert LedgerCompare.NAME == "Ledger.Compare"
     assert LedgerAggregate.NAME == "Ledger.Aggregate"
@@ -159,6 +158,7 @@ def test_praxis_agent_wired_into_orchestrator():
     method (eg. SANT) then provide the necessary information'. Praxis
     must be imported and invoked in the orchestrator before Judge."""
     import inspect
+
     from phi_core.agents import orchestrator
     src = inspect.getsource(orchestrator)
     assert "Praxis(" in src, "Praxis not instantiated in orchestrator"
@@ -175,6 +175,7 @@ def test_judge_prompt_asks_for_false_positive_check():
     issue then it corrects'. Judge's prompt must include the FP-check
     instruction when prior_feedback is present."""
     import inspect
+
     from phi_core.agents.reasoning import Judge
     src = inspect.getsource(Judge.run)
     assert "false positive" in src.lower(), (
@@ -188,6 +189,7 @@ def test_orchestrator_emits_praxis_phase():
     call so the live agent-trace panel renders a 'Praxis' row and the
     operator can see the PHI-methods lookup happening."""
     import inspect
+
     from phi_core.agents import orchestrator
     src = inspect.getsource(orchestrator)
     assert 'on_phase("praxis"' in src, "orchestrator must emit a 'praxis' phase event"

@@ -6,10 +6,8 @@ import json
 import zipfile
 
 import pytest
-
 from phi_core.bundle import BundleOptions, build_bundle
 from phi_core.coverage_matrix import COVERAGE, TOOLS, coverage_counts
-
 
 # ---------- coverage matrix ------------------------------------------------
 
@@ -187,8 +185,9 @@ def test_bundle_empty_exports_still_produces_attestation(tmp_path):
 
 def _generate_signing_key_b64() -> str:
     import base64
+
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption
+    from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
     k = Ed25519PrivateKey.generate()
     der = k.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())
     return base64.b64encode(der).decode()
@@ -206,6 +205,7 @@ def test_bundle_attestation_signature_verifies_against_shipped_pubkey(tmp_path, 
     assert att["signed"] is True
 
     import base64
+
     from cryptography.hazmat.primitives.serialization import load_pem_public_key
     pub = load_pem_public_key(pubkey_pem)
     pub.verify(base64.b64decode(sig_b64), att_json)  # raises on failure
@@ -223,6 +223,7 @@ def test_bundle_attestation_signature_fails_after_tamper(tmp_path, monkeypatch):
     tampered = att_json[:-1] + (b"0" if att_json[-1:] != b"0" else b"1")
 
     import base64
+
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.serialization import load_pem_public_key
     pub = load_pem_public_key(pubkey_pem)

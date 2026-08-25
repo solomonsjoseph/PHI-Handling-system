@@ -56,11 +56,18 @@ def package_dir(package_id: str) -> Path:
     return path
 
 
+def _write_deterministic_zip_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o600 << 16
+    archive.writestr(info, data)
+
+
 def build_intake_zip(package_id: str) -> bytes:
     """Pack ``dataset.csv`` + ``dictionary.csv`` into a manifest-v3 ZIP."""
     root = package_dir(package_id)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("datasets/dataset.csv", (root / "dataset.csv").read_bytes())
-        zf.writestr("dictionary/dictionary.csv", (root / "dictionary.csv").read_bytes())
+        _write_deterministic_zip_entry(zf, "datasets/dataset.csv", (root / "dataset.csv").read_bytes())
+        _write_deterministic_zip_entry(zf, "dictionary/dictionary.csv", (root / "dictionary.csv").read_bytes())
     return buf.getvalue()

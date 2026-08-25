@@ -35,7 +35,7 @@ def test_catalog_covers_ui_provider_families():
 
 
 def test_default_model_for_each_ui_provider():
-    from phi_core.llm_catalog import UI_PROVIDERS, default_model_for, CATALOG
+    from phi_core.llm_catalog import CATALOG, UI_PROVIDERS, default_model_for
     ids = {m["id"] for m in CATALOG}
     for fam, _ in UI_PROVIDERS:
         mid = default_model_for(fam)

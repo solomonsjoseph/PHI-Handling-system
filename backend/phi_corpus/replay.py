@@ -18,18 +18,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+# Private by convention in phi_core; imported here (not promoted) because
+# the point of the replay is to exercise the code under test, and
+# promoting it to a public name would be an edit to phi_core, which this
+# workstream does not make.
 from phi_core.agents.reasoning import (
     PseudonymRegistry,
+    _redact_metadata_file,
     apply_column_actions_to_dataset,
     apply_sentinel_hard_rules,
     validate_decisions,
     verify_keep_decisions,
 )
-# Private by convention in phi_core; imported here (not promoted) because
-# the point of the replay is to exercise the code under test, and
-# promoting it to a public name would be an edit to phi_core, which this
-# workstream does not make.
-from phi_core.agents.reasoning import _redact_metadata_file
 from phi_core.publish_guard import scan_all_exports
 
 from .planters import CorpusArtifact

@@ -13,7 +13,6 @@ import threading
 from pathlib import Path
 
 import pytest
-
 from phi_core.agents.batching import run_batched
 from phi_core.agents.operator import Operator
 from phi_core.agents.reasoning import (

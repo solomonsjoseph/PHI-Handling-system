@@ -8,7 +8,6 @@ from phi_core.agents.reasoning import (
 )
 from phi_core.intake import unpack_zip
 
-
 # ---------- SEC-004 -------------------------------------------------------
 
 def test_metadata_csv_is_redacted_not_copied(tmp_path: Path):

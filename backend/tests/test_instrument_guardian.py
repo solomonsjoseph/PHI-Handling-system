@@ -14,12 +14,11 @@ import json
 from pathlib import Path
 from shutil import which
 
-import pytest
-from pypdf import PdfReader
-
 import phi_core.agents.specialists as specialists
-from phi_core.agents.specialists import Instrument
+import pytest
 from phi_core import paths as paths_mod
+from phi_core.agents.specialists import Instrument
+from pypdf import PdfReader
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FLAT_PDF = FIXTURES / "tb_collection_form.pdf"
@@ -180,8 +179,8 @@ def test_scanned_form_routes_through_shared_read_pdf_and_scrubs_before_prompt(mo
 
 def _ocr_stack_available() -> bool:
     try:
-        import pytesseract  # noqa: F401
         import pdf2image  # noqa: F401
+        import pytesseract  # noqa: F401
     except Exception:
         return False
     return bool(which("tesseract") and which("pdftoppm"))
@@ -190,7 +189,7 @@ def _ocr_stack_available() -> bool:
 @pytest.mark.skipif(not _ocr_stack_available(),
                     reason="tesseract / pdf2image / poppler not available in this environment")
 def test_scanned_fixture_ocr_extracts_the_baked_in_text():
-    from phi_core.file_readers import read_pdf, OCR_TEXT_THRESHOLD
+    from phi_core.file_readers import OCR_TEXT_THRESHOLD, read_pdf
 
     extracted = read_pdf(SCANNED_PDF)
     assert len(extracted.strip()) >= OCR_TEXT_THRESHOLD
@@ -274,7 +273,7 @@ def test_report_written_from_in_memory_fields_with_no_phi_category(tmp_path, mon
     # so labels may be redacted; collected_variable is a snake_case
     # identifier the name detector never touches, and a plain
     # single-word label (no PHI shape) round-trips verbatim.
-    for written, original in zip(payload["fields"], in_memory):
+    for written, original in zip(payload["fields"], in_memory, strict=True):
         assert written["collected_variable"] == original["collected_variable"]
     written_by_var = {f["collected_variable"]: f["label"] for f in payload["fields"]}
     assert written_by_var["city"] == "City:"

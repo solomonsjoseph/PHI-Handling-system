@@ -12,7 +12,6 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-
 DOCX_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:body>
@@ -82,9 +81,10 @@ def test_read_docx_tables_rejects_oversize_document_xml(tmp_path):
     compressed archive. The reader must refuse it rather than allocate
     unbounded RAM in ET.parse. Return "" so Lexicon just sees no
     dictionary text; no crash, no OOM."""
+    import zipfile as _zip
+
     from phi_core.agents.specialists import _read_docx_tables
     from phi_core.docx_safe import DOCX_XML_MAX_BYTES
-    import zipfile as _zip
     p = tmp_path / "bomb.docx"
     with _zip.ZipFile(p, "w", _zip.ZIP_DEFLATED) as z:
         # Compressible payload > cap
@@ -103,8 +103,9 @@ def test_read_docx_tables_refuses_dtd_via_defusedxml(tmp_path):
     declaration. Blocks billion-laughs / quadratic-blowup entity
     expansion even on hosts with older libexpat that lack the built-in
     amplification protection."""
-    from phi_core.agents.specialists import _read_docx_tables
     import zipfile as _zip
+
+    from phi_core.agents.specialists import _read_docx_tables
     p = tmp_path / "dtd.docx"
     with _zip.ZipFile(p, "w") as z:
         z.writestr("word/document.xml", (
@@ -124,9 +125,10 @@ def test_narrative_read_docx_rejects_oversize_document_xml(tmp_path):
     the same size cap as the dictionary reader. Both readers now share
     `phi_core.docx_safe.DOCX_XML_MAX_BYTES` so a future adjustment applies
     to both paths at once (iter_23 shared-helper refactor)."""
-    from phi_core.file_readers import read_docx
-    from phi_core.docx_safe import DOCX_XML_MAX_BYTES
     import zipfile as _zip
+
+    from phi_core.docx_safe import DOCX_XML_MAX_BYTES
+    from phi_core.file_readers import read_docx
     p = tmp_path / "bomb.docx"
     with _zip.ZipFile(p, "w", _zip.ZIP_DEFLATED) as z:
         big = (b"<?xml version='1.0'?>"
@@ -141,8 +143,9 @@ def test_docx_safe_helper_is_single_source_of_truth():
     """iter_23: both docx readers must consult `phi_core.docx_safe` so
     the bomb + DTD defence cannot drift again."""
     import inspect
-    from phi_core.file_readers import read_docx
+
     from phi_core.agents.specialists import _read_docx_tables
+    from phi_core.file_readers import read_docx
     assert "docx_safe" in inspect.getsource(read_docx)
     assert "docx_safe" in inspect.getsource(_read_docx_tables)
 
@@ -291,10 +294,10 @@ def test_executor_publishes_withheld_metadata_at_its_scannable_path(tmp_path, mo
     """Executor exports the actual withheld marker path for unsupported metadata."""
     import asyncio
 
+    import phi_core.agents.reasoning as reasoning
     from phi_core.agents.llm import LlmConfig
     from phi_core.agents.reasoning import Executor
     from phi_core.publish_guard import scan_export_file
-    import phi_core.agents.reasoning as reasoning
 
     class _AgentLog:
         async def insert_one(self, _message):

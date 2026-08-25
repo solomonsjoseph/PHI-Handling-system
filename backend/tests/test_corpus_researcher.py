@@ -22,8 +22,8 @@ async def test_researcher_refuses_ungrounded_reply(monkeypatch):
     """The researcher MUST refuse to return a scenario without source
     citations. Otherwise it would encourage hallucinated study data —
     the exact opposite of Sir's spec."""
-    from phi_corpus.researcher import CorpusResearcher
     from phi_core.agents.llm import LlmConfig
+    from phi_corpus.researcher import CorpusResearcher
 
     ungrounded = {
         "scenario_id": "cardiology_v1",
@@ -58,8 +58,8 @@ async def test_researcher_refuses_ungrounded_reply(monkeypatch):
 @pytest.mark.asyncio
 async def test_researcher_accepts_reply_with_citations(monkeypatch):
     """A grounded reply with sources passes through unchanged."""
-    from phi_corpus.researcher import CorpusResearcher
     from phi_core.agents.llm import LlmConfig
+    from phi_corpus.researcher import CorpusResearcher
 
     grounded = {
         "scenario_id": "diabetes_uk_biobank_v1",
@@ -104,8 +104,8 @@ async def test_researcher_accepts_reply_with_citations(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_researcher_uses_cache_on_second_call(monkeypatch):
-    from phi_corpus.researcher import CorpusResearcher
     from phi_core.agents.llm import LlmConfig
+    from phi_corpus.researcher import CorpusResearcher
 
     cached_payload = {
         "scenario_id": "onco_v1", "label": "Onco", "sources": [{"url": "u"}],
@@ -143,9 +143,9 @@ async def test_researcher_uses_cache_on_second_call(monkeypatch):
 async def test_researcher_live_returns_grounded_scenario():
     """Full stack: run the researcher against Claude native web_search on
     a well-known domain and assert the reply is grounded + shaped."""
-    from phi_corpus.researcher import CorpusResearcher
-    from phi_core.agents.llm import LlmConfig
     from motor.motor_asyncio import AsyncIOMotorClient
+    from phi_core.agents.llm import LlmConfig
+    from phi_corpus.researcher import CorpusResearcher
 
     client = AsyncIOMotorClient(os.environ["MONGO_URL"])
     db = client[os.environ["DB_NAME"]]

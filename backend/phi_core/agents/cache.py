@@ -4,11 +4,10 @@ Cache lives in Mongo `web_cache` collection keyed by (topic, jurisdiction).
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
-
 
 REFRESH_DAYS = 7
 

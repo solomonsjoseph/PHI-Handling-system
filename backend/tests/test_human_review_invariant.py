@@ -3,6 +3,7 @@
 Every human decision must carry reviewer id + comment + timestamp. The
 endpoint refuses when reviewer is missing.
 """
+import asyncio
 import os
 import re
 import uuid
@@ -10,7 +11,6 @@ from types import SimpleNamespace
 
 import pytest
 import requests
-
 from phi_core.agents.reasoning import (
     _ACTION_PLAIN,
     _CATEGORY_PLAIN,
@@ -145,6 +145,51 @@ def test_human_review_captures_session_review_when_provided():
     # 200 means the tail started; response contains status field
     assert rr.status_code == 200, rr.text
     assert rr.json().get("status") in ("resuming", "still_awaiting")
+
+
+def test_human_review_captures_session_review_offline(monkeypatch):
+    """An in-memory awaiting-review session records reviewer audit fields."""
+    import server
+
+    session = {
+        "id": "session-1",
+        "owner": "reviewer-1",
+        "status": "awaiting_human_review",
+        "agent_decisions": [{"file_id": "file-1", "column": "review_target", "action": "human_review"}],
+    }
+
+    class MemorySessions:
+        async def find_one(self, query, projection=None):
+            if query == {"id": session["id"], "owner": session["owner"]}:
+                return session
+            return None
+
+        async def update_one(self, query, update):
+            assert query["id"] == session["id"]
+            assert query["owner"] == session["owner"]
+            assert query["status"] == {"$in": ["awaiting_human_review", "partially_complete"]}
+            session.update(update["$set"])
+            return SimpleNamespace(matched_count=1)
+
+    monkeypatch.setattr(server, "get_db", lambda: SimpleNamespace(sessions=MemorySessions()))
+    result = asyncio.run(
+        server.session_human_review(
+            session["id"],
+            server.HumanReviewSubmit(
+                resolutions=[{"file_id": "file-1", "column": "review_target", "mode": "defer"}],
+                comment="Needs more review.",
+                actual_knowledge_ack=True,
+            ),
+            session["owner"],
+        )
+    )
+
+    assert result == {"status": "still_awaiting", "unresolved": 1}
+    review = session["session_review"][-1]
+    assert review["reviewer"] == session["owner"]
+    assert review["comment"] == "Needs more review."
+    assert review["reviewed_at"]
+    assert review["deferred_columns"] == [{"file_id": "file-1", "column": "review_target"}]
 
 
 # --- Task 23: reviewer prompts speak plain English on every escalation
@@ -410,7 +455,7 @@ def test_escalation_reason_phrases_distinguish_all_six_routes(tmp_path, monkeypa
     ]
     phrases = [_escalation_reason_phrase(d) for d in decisions]
     assert len(set(phrases)) == 6, f"escalation routes are not distinguishable: {phrases}"
-    for decision, phrase in zip(decisions, phrases):
+    for decision, phrase in zip(decisions, phrases, strict=True):
         prompt = annotate_pending_review([decision])[0]["reviewer_prompt"]
         _assert_plain_english(prompt)
         assert phrase in prompt

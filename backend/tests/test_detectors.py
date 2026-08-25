@@ -7,7 +7,6 @@ Luhn NPI validator accepts/rejects the expected checksums.
 from __future__ import annotations
 
 import pytest
-
 from phi_core.detectors import luhn, rule_detect
 
 PROBES = {

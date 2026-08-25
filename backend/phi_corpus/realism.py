@@ -18,7 +18,6 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-
 MISSING_CODES: tuple[str, ...] = ("", "UNK", "NA", "N/A", ".", "-99")
 DATE_STYLES: tuple[str, ...] = ("iso", "us_slash", "eu_slash", "dmon", "long", "us_short")
 

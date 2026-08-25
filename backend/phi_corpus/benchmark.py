@@ -27,9 +27,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from phi_core.coverage_matrix import COVERAGE, TOOLS, coverage_counts as _coverage_counts
-from .verify import _PHI_ACTIONS, mask as _mask
+from phi_core.coverage_matrix import COVERAGE, TOOLS
+from phi_core.coverage_matrix import coverage_counts as _coverage_counts
 
+from .verify import _PHI_ACTIONS
+from .verify import mask as _mask
 
 # ---------------------------------------------------------------------
 # 3.1 Method vocabulary table -- source of truth for the report's "how".
@@ -429,7 +431,7 @@ def build_report(
         calibration[label]["count"] += 1
         if c["verdict"] == "correct":
             calibration[label]["correct"] += 1
-    for label, bucket in calibration.items():
+    for _label, bucket in calibration.items():
         bucket["accuracy"] = round(bucket["correct"] / bucket["count"], 4) if bucket["count"] else 1.0
 
     context_hygiene = _context_hygiene(agent_log_list, ground_truth, prompt_scrub_counts) if agent_log is not None else None
@@ -725,14 +727,21 @@ def write(report: dict[str, Any], out_dir: Path) -> dict[str, str]:
     return paths
 
 
+def _write_deterministic_zip_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o600 << 16
+    archive.writestr(info, data)
+
+
 def bundle_zip(report: dict[str, Any]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("benchmark/benchmark_report.md", to_markdown(report))
-        z.writestr("benchmark/benchmark_report.json", to_json(report))
-        z.writestr("benchmark/per_column.csv", per_column_csv(report))
+        _write_deterministic_zip_entry(z, "benchmark/benchmark_report.md", to_markdown(report).encode())
+        _write_deterministic_zip_entry(z, "benchmark/benchmark_report.json", to_json(report).encode())
+        _write_deterministic_zip_entry(z, "benchmark/per_column.csv", per_column_csv(report))
         for name, png_bytes in render_figures(report).items():
-            z.writestr(f"benchmark/{name}", png_bytes)
+            _write_deterministic_zip_entry(z, f"benchmark/{name}", png_bytes)
     return buf.getvalue()
 
 
@@ -817,9 +826,9 @@ def _cli(argv: list[str] | None = None) -> int:
     p.add_argument("--out", required=True)
     args = p.parse_args(argv)
 
+    from . import verify as _verify
     from .planters import plant
     from .replay import replay as _replay
-    from . import verify as _verify
 
     edge_case_tags = [t for t in args.edge_cases.split(",") if t]
     artifact = plant(

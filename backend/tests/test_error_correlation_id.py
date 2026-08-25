@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 
 class _FakeUpdateResult:
     matched_count = 1

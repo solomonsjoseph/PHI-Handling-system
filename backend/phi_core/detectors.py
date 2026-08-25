@@ -15,13 +15,18 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable
-
+from typing import TYPE_CHECKING, Iterable
 
 from .models import DetectedSpan
 
+if TYPE_CHECKING:
+    from presidio_analyzer import AnalyzerEngine
+
 
 AUTH_SAFE_HARBOR = "45 CFR 164.514(b)(2)(i)"
+MIN_PRESIDIO_CONFIDENCE = 0.3
+
+
 
 
 @lru_cache(maxsize=1)
@@ -127,7 +132,7 @@ def rule_detect(text: str) -> list[DetectedSpan]:
 def presidio_detect(text: str, language: str = "en") -> list[DetectedSpan]:
     if not text.strip():
         return []
-    results = _analyzer().analyze(text=text, language=language)
+    results = _analyzer().analyze(text=text, language=language, score_threshold=MIN_PRESIDIO_CONFIDENCE)
     out: list[DetectedSpan] = []
     for r in results:
         hipaa, ent = _presidio_to_hipaa(r.entity_type)

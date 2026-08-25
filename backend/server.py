@@ -49,33 +49,52 @@ Everything else (/, /static/...) is the built frontend SPA, mounted last
 from __future__ import annotations
 
 import asyncio
-import uuid
 import json
 import logging
 import os
 import time
-from datetime import datetime, timezone, timedelta
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 from dotenv import load_dotenv
-
-load_dotenv()
-
-_log = logging.getLogger("phi_console")
-
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
-
+from fastapi.staticfiles import StaticFiles
+from phi_core import chatgpt_auth
+from phi_core.agents import AgentMessage, LlmConfig
+from phi_core.agents import run_pipeline as run_agent_pipeline
 from phi_core.crypto import decrypt_api_key, encrypt_api_key
 from phi_core.db import get_db
 from phi_core.intake import (
-    COMPONENT_SUFFIXES, MANDATORY, ANY_OF, build_manifest,
+    ANY_OF,
+    COMPONENT_SUFFIXES,
+    MANDATORY,
+    build_manifest,
 )
 from phi_core.jurisdictions import get_pack
 from phi_core.models import FileArtifact, ProgressEvent, Session
-from phi_core.paths import UnsafePath, UPLOAD_DIR, cleanup_session_unpacked, safe_join, CHATGPT_TOKEN_DIR
+from phi_core.paths import CHATGPT_TOKEN_DIR, UPLOAD_DIR, cleanup_session_unpacked, safe_join
+from phi_core.security import (
+    allowed_providers,
+    require_api_token,
+    resolve_principal,
+    resolve_principal_soft,
+    scrub_decision,
+    token_principals,
+    validate_llm_base_url,
+    validate_llm_provider,
+)
+from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+if TYPE_CHECKING:
+    from typing import Any
+
+
+load_dotenv()
 
 # Redirect litellm's ChatGPT-provider Authenticator to the pinned token
 # directory (backend/phi_core/paths.py) rather than the per-user home
@@ -83,12 +102,10 @@ from phi_core.paths import UnsafePath, UPLOAD_DIR, cleanup_session_unpacked, saf
 # constructs an Authenticator, so it is set at import time here rather
 # than in an on_event("startup") hook.
 os.environ.setdefault("CHATGPT_TOKEN_DIR", str(CHATGPT_TOKEN_DIR))
-from phi_core.security import (
-    allowed_providers, require_api_token, resolve_principal, resolve_principal_soft,
-    scrub_decision, token_principals, validate_llm_base_url, validate_llm_provider,
-)
-from phi_core.agents import AgentMessage, LlmConfig, run_pipeline as run_agent_pipeline
-from phi_core import chatgpt_auth
+
+_log = logging.getLogger("phi_console")
+
+_INTAKE_ZIP_FILE = File(...)
 
 
 def _refuse_to_boot_insecure() -> None:
@@ -357,8 +374,9 @@ async def _fail_session_correlated(db, sid: str, run_filter: dict, e: Exception,
 
 @app.get("/api/health")
 async def health():
-    from phi_core.crypto import signing_public_key_pem
     import shutil as _shutil
+
+    from phi_core.crypto import signing_public_key_pem
 
     mongo_ok = False
     try:
@@ -430,9 +448,10 @@ class AuthSessionBody(BaseModel):
 
 @app.post("/api/auth/session", dependencies=[Depends(rate_limited("auth_session", 10, 900))])
 async def auth_session(body: AuthSessionBody):
-    from phi_core.security import token_principals
-    from phi_core.crypto import sign_principal_cookie
     import hmac as _hmac
+
+    from phi_core.crypto import sign_principal_cookie
+    from phi_core.security import token_principals
     principals = token_principals()
     principal = None
     for tok, name in principals.items():
@@ -497,7 +516,8 @@ def _scrub_session_document(doc: dict) -> dict:
     have echoed into agent notes. Uses recursive `scrub_nested` so PHI
     hiding in nested dicts/lists is caught too.
     """
-    from phi_core.security import scrub_nested as _scrub_nested, scrub_persisted_text as _scrub_text
+    from phi_core.security import scrub_nested as _scrub_nested
+    from phi_core.security import scrub_persisted_text as _scrub_text
     if not doc:
         return doc
     if isinstance(doc.get("error"), str) and doc["error"]:
@@ -566,7 +586,9 @@ async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
 
 
 @app.post("/api/sessions/{sid}/intake", dependencies=[Depends(rate_limited("session_intake", 20, 3600))])
-async def session_intake(sid: str, file: UploadFile = File(...), principal: str = Depends(resolve_principal)):
+async def session_intake(
+    sid: str, file: UploadFile = _INTAKE_ZIP_FILE, principal: str = Depends(resolve_principal)
+):
     """Default entry: upload a ZIP with intake-manifest/v3 structure.
 
     ZIP must contain top-level `datasets/`, `forms/`, and one of
@@ -939,7 +961,6 @@ async def session_export(sid: str, file_id: str, force: bool = False,
 
 # --- LLM settings (BYO-key) ----------------------------------------------
 
-from typing import Literal
 
 
 class LlmSettings(BaseModel):
@@ -1030,8 +1051,8 @@ async def get_llm_settings():
     if doc.get("api_key"):
         try:
             decrypt_api_key(doc["api_key"])
-        except KeyRotated:
-            raise HTTPException(409, "provider key cannot be decrypted; re-enter it in Settings")
+        except KeyRotated as exc:
+            raise HTTPException(409, "provider key cannot be decrypted; re-enter it in Settings") from exc
         doc["api_key_set"] = True
         doc["api_key"] = ""
     return doc | _providers_payload()
@@ -1063,8 +1084,8 @@ async def corpus_study_data_zip(package_id: str):
     from phi_corpus.study_data import build_intake_zip
     try:
         zip_bytes = build_intake_zip(package_id)
-    except FileNotFoundError:
-        raise HTTPException(404, f"unknown study-data package: {package_id}")
+    except FileNotFoundError as exc:
+        raise HTTPException(404, f"unknown study-data package: {package_id}") from exc
     return Response(
         content=zip_bytes,
         media_type="application/zip",
@@ -1084,8 +1105,8 @@ async def corpus_study_data_zip(package_id: str):
 
 @app.get("/api/corpus/study/catalog", dependencies=[Depends(require_api_token)])
 async def corpus_study_catalog():
-    from phi_corpus.scenarios import list_scenarios
     from phi_corpus.edge_cases import EDGE_CASES, HIPAA_MAX_EDGE_CASE_TAGS
+    from phi_corpus.scenarios import list_scenarios
     db = get_db()
     # Discovered scenarios (from CorpusResearcher) live alongside the
     # hand-curated library so the catalog reflects both.
@@ -1244,8 +1265,8 @@ async def corpus_study_run(body: CorpusStudyRunBody, principal: str = Depends(re
     manifest. Client polls ``GET /api/sessions/{sid}`` and, once
     ``status='complete'``, calls ``GET /api/corpus/study/verify/{sid}``.
     """
-    from phi_corpus.planters import plant
     from phi_core.intake import build_manifest
+    from phi_corpus.planters import plant
 
     art = plant(
         scenario_id=body.scenario_id,
@@ -1524,10 +1545,10 @@ async def _run_warmup(db, cfg) -> dict:
     )
     statute_res, praxis_res = await asyncio.gather(statute_task, praxis_task)
 
-    praxis_ok = [c for c, r in zip(hipaa_cats, praxis_res)
+    praxis_ok = [c for c, r in zip(hipaa_cats, praxis_res, strict=True)
                  if not isinstance(r, Exception)]
     praxis_err = [{"category": c, "error": type(r).__name__}
-                  for c, r in zip(hipaa_cats, praxis_res)
+                  for c, r in zip(hipaa_cats, praxis_res, strict=True)
                   if isinstance(r, Exception)]
     return {
         "ok": True,
@@ -1558,8 +1579,8 @@ async def settings_warmup():
     cfg = await _current_llm_cfg()
     try:
         return await asyncio.wait_for(_run_warmup(db, cfg), timeout=240.0)
-    except asyncio.TimeoutError:
-        raise HTTPException(504, "warmup exceeded 240s ceiling")
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(504, "warmup exceeded 240s ceiling") from exc
 
 
 class AutoWarmupCfg(BaseModel):
@@ -1815,7 +1836,7 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
         run_filter = {"id": sid, "_pipeline_run_id": run_id}
         try:
             # Populate dataset headers (LLM never sees rows). Persist onto session before pipeline runs.
-            from phi_core.file_readers import read_csv_columns, read_xlsx_columns, read_parquet_columns
+            from phi_core.file_readers import read_csv_columns, read_parquet_columns, read_xlsx_columns
             files_hydrated = []
             for f in session.get("files", []):
                 if f.get("kind") == "dataset" and not f.get("columns"):
@@ -1977,13 +1998,21 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     actual-knowledge attestation, scoped to the columns resolved this
     round -- never to columns this same submission defers.
     """
-    from phi_core.agents.reasoning import (
-        ACTION_TYPES, Auditor, auditor_escalation_reason, Executor, Judge, annotate_pending_review,
-        apply_sentinel_hard_rules, materialize_auditor_disagreements, plain_human_review_reasons,
-        validate_decisions, verify_keep_decisions,
-    )
-    from phi_core.agents.outward import Scout, Ledger, Herald
     from phi_core.agents.operator import Operator
+    from phi_core.agents.outward import Herald, Ledger, Scout
+    from phi_core.agents.reasoning import (
+        ACTION_TYPES,
+        Auditor,
+        Executor,
+        Judge,
+        annotate_pending_review,
+        apply_sentinel_hard_rules,
+        auditor_escalation_reason,
+        materialize_auditor_disagreements,
+        plain_human_review_reasons,
+        validate_decisions,
+        verify_keep_decisions,
+    )
     from phi_core.agents.reviewer import Reviewer
     from phi_core.paths import cleanup_session_unpacked
     from phi_core.security import scrub_persisted_text
@@ -2527,8 +2556,8 @@ async def session_agent_trace(sid: str, limit: int = 200, after: str | None = No
     if after:
         try:
             query["ts"] = {"$gt": datetime.fromisoformat(after)}
-        except ValueError:
-            raise HTTPException(400, f"invalid cursor: {after!r} is not an ISO-8601 timestamp")
+        except ValueError as exc:
+            raise HTTPException(400, f"invalid cursor: {after!r} is not an ISO-8601 timestamp") from exc
     limit = max(1, min(int(limit), 2000))
     cursor = db.agent_log.find(query, {"_id": 0}).sort("ts", 1).limit(limit)
     msgs: list[dict] = []
@@ -2619,8 +2648,6 @@ async def version():
 # be the very last statement in the module -- a mount at "/" shadows any
 # route registered after it. Guarded so a source checkout without a built
 # frontend still starts and still serves /api.
-from fastapi.staticfiles import StaticFiles
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 class _SPAStaticFiles(StaticFiles):

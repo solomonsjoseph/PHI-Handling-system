@@ -17,7 +17,6 @@ from pathlib import Path
 import pytest
 import requests
 from fastapi import HTTPException
-
 from phi_core.intake import unpack_zip
 from phi_core.security import (
     PROVIDER_HOSTS,
@@ -25,7 +24,6 @@ from phi_core.security import (
     scrub_persisted_text,
     validate_llm_base_url,
 )
-
 
 BASE_URL = os.environ.get("PHI_TEST_BASE_URL", "http://localhost:8001")
 
@@ -220,6 +218,8 @@ def test_results_scrubs_reasons():
                     checked += 1
     if checked == 0:
         pytest.skip("no decisions with reason/citation available")
+
+
     """No obvious PHI substrings should appear in decision reasons/citations."""
     import re as _re
     phone = _re.compile(r"\b\d{3}[\s\-.]\d{3}[\s\-.]\d{4}\b")
@@ -244,3 +244,25 @@ def test_results_scrubs_reasons():
                     checked += 1
     if checked == 0:
         pytest.skip("no decisions with reason/citation available")
+
+
+def test_results_scrubs_reasons_offline():
+    """An in-memory session cannot expose PHI through decision metadata."""
+    import re as _re
+
+    from server import _scrub_session_document
+
+    scrubbed = _scrub_session_document({
+        "agent_decisions": [{
+            "reason": "Call James Smith at 415-555-1234.",
+            "citation": "james@example.edu, SSN 111-22-3333",
+        }],
+    })
+    decision = scrubbed["agent_decisions"][0]
+    phone = _re.compile(r"\b\d{3}[\s\-.]\d{3}[\s\-.]\d{4}\b")
+    ssn = _re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+    email = _re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[A-Za-z]{2,}\b")
+    for field in ("reason", "citation"):
+        assert not phone.search(decision[field]), decision[field]
+        assert not ssn.search(decision[field]), decision[field]
+        assert not email.search(decision[field]), decision[field]

@@ -17,7 +17,6 @@ from typing import Any
 
 import openpyxl
 
-from .base import Agent
 from ..anonymizer import scrub_for_prompt
 from ..file_readers import (
     column_value_stats,
@@ -29,6 +28,7 @@ from ..file_readers import (
     read_table_rows,
     read_xlsx_columns,
 )
+from .base import Agent
 
 
 class Lexicon(Agent):
@@ -78,7 +78,7 @@ class Lexicon(Agent):
                     continue
                 name = row[name_idx].strip()
                 raw_row = ", ".join(
-                    f"{h.strip()}: {v}" for h, v in zip(header, row) if (h or "").strip()
+                    f"{h.strip()}: {v}" for h, v in zip(header, row, strict=True) if (h or "").strip()
                 )
                 # Dictionary rows are short label-like phrases with little
                 # surrounding narrative context -- the same case
@@ -331,7 +331,7 @@ class Schema(Agent):
         key = column.lower()
         if file_id is not None:
             return self._stats.get((file_id, key), {})
-        for (fid, name), stats in self._stats.items():
+        for (_fid, name), stats in self._stats.items():
             if name == key:
                 return stats
         return {}
@@ -483,6 +483,7 @@ def _read_docx_tables(path: Path) -> str:
     of iter_22 SEC-001).
     """
     from defusedxml import ElementTree as _DET
+
     from ..docx_safe import safe_read_docx_xml
 
     raw = safe_read_docx_xml(path)

@@ -57,3 +57,38 @@
 - Phase 1 must install and configure an async test runner, prevent silent coroutine passes, fix lint and corpus determinism, make the pytest invocation import-safe, and add required deterministic and frontend tests. See `F-TEST-001` and the Phase 1 row in `docs/assurance/RISK_REGISTER.md`.
 - Four product and legal choices remain open with fail-safe interim behavior. See `F-POLICY-001` through `F-POLICY-004` in `docs/assurance/FINDINGS.md`.
 - Runtime architecture risks remain unchanged. See `F-EGRESS-001` through `F-LEARN-001` and their phase mappings in `docs/assurance/RISK_REGISTER.md`.
+
+## Phase 1: repair the verification foundation
+
+### 1. Verified code-backed baseline relevant to this phase, with `path:line` anchors.
+
+- `backend/requirements-dev.txt:10-14` now pins `pytest-asyncio==1.4.0`, whose metadata accepts pytest 9.1.1. `backend/pytest.ini:1-4` makes collection strict and adds the backend import root. `backend/phi_core/detectors.py:27,135` rejects Presidio results below 0.3 after a reproduced 0.05-confidence `IN_PAN` false positive redacted "assessment".
+
+### 2. Files and symbols changed.
+
+- Verification configuration, Ruff configuration, CI workflow, corpus archive writer, detector threshold, tests, frontend review tests, and `docs/adr/0008-pytest-9-coroutine-enforcement.md`.
+
+### 3. Threat or failure mode addressed, naming the `F-*` finding.
+
+- `F-TEST-001`: inert async tests, non-reproducible test imports, lint drift, corpus ZIP timestamp nondeterminism, missing full-path and frontend coverage. The Presidio low-score false positive was corrected at its detection boundary without weakening rule detection.
+
+### 4. Data and authority boundaries before and after.
+
+- No provider, workflow, artifact, or reviewer authority changed. Strict test execution and the full-path test make existing boundaries observable. The frontend reconnect only replaces a failed EventSource and does not alter review authority.
+
+### 5. Migration and rollback behaviour, cross-referenced to `docs/assurance/MIGRATION.md`.
+
+- No migration. Revert this phase commit to restore the prior verification setup. The pytest 9 warning-class incompatibility and import-root decision are recorded in `docs/adr/0008-pytest-9-coroutine-enforcement.md`.
+
+### 6. Tests added and the exact commands run.
+
+- Added `backend/tests/test_full_path.py`, offline counterparts in the existing live-state test modules, and `frontend/src/pages/__tests__/SessionDetail.review.test.jsx` plus `SessionDetail.stream.test.jsx`.
+- `pip index versions pytest-asyncio`; `ruff check backend`; the 20-iteration `plant(...).zip_bytes` equality command; focused offline and full-path pytest commands; `npm ci --ignore-scripts`; `npm run build`; `npm test -- --watchAll=false`; `pytest tests -q -rs`.
+
+### 7. Exact results, including every failure and every skip with its reason.
+
+- Ruff passes. The deterministic corpus check completed all 20 iterations without output. Focused offline review tests passed 30 with two documented live-state skips. The full-path test passed. Frontend build passed and its two suites, five tests passed. Backend suite passed: 573 passed, 8 skipped, 4 warnings in 93.42 seconds. Skips: no configured live server, no Anthropic API key (two tests), no matching live review session, unavailable OCR binaries (three tests), and no matching live decision state.
+
+### 8. Remaining risk and deferred work, cross-referenced to `docs/assurance/RISK_REGISTER.md`.
+
+- Credentialed provider routing stays an isolated CI capability. Phase 2 replaces direct provider paths and begins policy enforcement. See `F-EGRESS-001`, `F-CAP-001`, and the Phase 2 row in `docs/assurance/RISK_REGISTER.md`.

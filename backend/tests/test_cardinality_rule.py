@@ -1,7 +1,6 @@
 import asyncio
 
 import pytest
-
 from phi_core.agents.reasoning import _HARD_RULE_TABLE, apply_site_cardinality_rule
 
 

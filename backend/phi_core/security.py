@@ -26,7 +26,6 @@ from urllib.parse import urlparse
 
 from fastapi import Cookie, Header, HTTPException
 
-
 ALLOWED_PROVIDERS_DEFAULT = {"anthropic", "openai", "gemini", "openrouter", "chatgpt"}
 # Kept behind an explicit env flag because openai_compatible allows a user-
 # controlled base_url which is the SSRF vector called out in SEC-003.

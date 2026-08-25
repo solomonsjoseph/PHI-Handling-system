@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from .tiers import LadderEntry, corpus_version, REQUIRED_VIOLATIONS
+from .tiers import REQUIRED_VIOLATIONS, LadderEntry, corpus_version
 
 
 @dataclass
@@ -61,7 +61,7 @@ def _run_one(args: tuple[LadderEntry, str, str]) -> dict[str, Any]:
             "elapsed_s": round(time.time() - t0, 3),
             "report": report,
         }
-    except Exception as e:  # noqa: BLE001 -- deliberately broad, see docstring
+    except Exception as e:
         return {
             "tier": entry.tier, "scenario_id": entry.scenario_id, "seed": entry.seed,
             "elapsed_s": round(time.time() - t0, 3),
@@ -211,7 +211,7 @@ async def run_online(entries: Sequence[LadderEntry], *, base_url: str, token: st
                     if resolution:
                         out["human_review_resolution"] = resolution
                     return out
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 return {"tier": entry.tier, "scenario_id": entry.scenario_id, "seed": entry.seed,
                         "elapsed_s": round(time.time() - t_entry, 3),
                         "error": f"{type(e).__name__}: {e}"}

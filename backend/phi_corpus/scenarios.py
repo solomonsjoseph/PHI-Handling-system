@@ -14,13 +14,13 @@ mined from ClinicalTrials.gov / PubMed.
 """
 from __future__ import annotations
 
+import random
+import string
 from dataclasses import dataclass
-from typing import Callable, Any
+from typing import Any, Callable
 
 from phi_core.detectors import luhn
 from phi_core.jurisdictions import get_pack as _get_pack
-
-from . import realism as _realism
 
 # Single source of truth for the 17 HIPAA-restricted ZIP3 prefixes, shared
 # by every generator below and by planters.expected_for's oracle (which
@@ -34,8 +34,6 @@ _RESTRICTED_ZIP3: tuple[str, ...] = tuple(sorted(_get_pack("us").restricted_zip3
 # value into the CSV verbatim and records it in the ground-truth sidecar
 # so the verifier can check it was removed / transformed correctly.
 
-import random
-import string
 
 
 def gen_name(rng: random.Random) -> str:

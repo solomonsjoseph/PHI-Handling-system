@@ -15,11 +15,11 @@ from uuid import uuid4
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel, Field
 
-from .llm import LlmConfig, call_llm, call_llm_with_web_search, parse_json
 from ..anonymizer import scrub_for_prompt
+from .llm import LlmConfig, call_llm, call_llm_with_web_search, parse_json
 
 if TYPE_CHECKING:                       # runtime import would be circular:
-    from .manager import Manager        # manager.py imports Agent from here
+    from .manager import Manager  # manager.py imports Agent from here
 
 
 PLAIN_TIMEOUT_S = 90.0

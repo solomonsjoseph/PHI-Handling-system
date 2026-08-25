@@ -240,8 +240,8 @@ def test_explicit_human_approval_of_keep_is_not_re_demoted(tmp_path):
 def test_model_comment_inferred_keep_is_still_scanned():
     """The exemption is narrow: a model's guess at interpreting a comment
     is not a person's direct confirmation, so it gets no special pass."""
+
     from phi_core.agents.reasoning import verify_keep_decisions
-    import io
 
     unscanned = [{"file_id": "f1", "column": "state", "action": "keep",
                  "provenance": "human_comment_inferred", "confidence": 0.6}]

@@ -10,7 +10,8 @@ Bar: overall F1 >= 0.95, method-appropriateness >= 0.98, zero unclassified.
 import json
 
 from phi_core.validation import (
-    CORPUS_PATH, run_validation,
+    CORPUS_PATH,
+    run_validation,
 )
 
 

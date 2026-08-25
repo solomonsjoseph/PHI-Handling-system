@@ -6,7 +6,6 @@ import io
 import json
 import zipfile
 
-
 # ---- Planter tests ----------------------------------------------------
 
 
@@ -54,6 +53,7 @@ def test_planter_no_pdf_generation_module():
     """Regression: `phi_corpus.forms` was fully deleted per Sir's directive.
     Importing it must fail; nothing in the corpus package may reference it."""
     import importlib
+
     import pytest as _pytest
     with _pytest.raises(ModuleNotFoundError):
         importlib.import_module("phi_corpus.forms")
@@ -93,8 +93,8 @@ def test_planter_age_over_89_edge_actually_plants_ages_over_89():
 def test_planter_restricted_zip3_edge_uses_a_denylist_prefix():
     """Every planted ZIP under the restricted_zip3 edge case must start
     with one of the 17 HIPAA-restricted 3-digit prefixes."""
-    from phi_corpus.planters import plant
     from phi_core.jurisdictions import get_pack
+    from phi_corpus.planters import plant
     art = plant(scenario_id="oncology_v1", edge_case_tags=["restricted_zip3"],
                 row_count=5, seed=11)
     zip_cells = [p for p in art.ground_truth["planted"] if p["column"] == "zip"]
@@ -262,9 +262,10 @@ def test_verifier_scores_max_adversarial_ground_truth_shape():
 
 
 def test_cli_summary_only_lists_scenarios_and_edge_cases(tmp_path):
-    from phi_corpus.generate import _cli
-    import io
     import contextlib
+    import io
+
+    from phi_corpus.generate import _cli
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):

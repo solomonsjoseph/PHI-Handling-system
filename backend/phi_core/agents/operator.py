@@ -199,7 +199,7 @@ def _verify_record(record: dict[str, Any], view: dict[str, Any] | None) -> dict[
         # Row-aligned comparison against the original, only where the
         # source cell actually had something to scrub. Change-detection
         # only: no value from either side is ever placed in the verdict.
-        relevant = [(s, w) for s, w in zip(source_cells, cells) if s != ""]
+        relevant = [(s, w) for s, w in zip(source_cells, cells, strict=True) if s != ""]
         changed = any(s != w for s, w in relevant)
         # A column can legitimately have nothing to scrub: every relevant
         # cell coming through unchanged from source is correct, not a

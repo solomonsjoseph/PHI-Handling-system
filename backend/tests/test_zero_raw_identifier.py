@@ -11,8 +11,8 @@ even runs (specialists.py:44, :123); the runtime half of the claim is
 """
 from __future__ import annotations
 
-import zipfile
 import io
+import zipfile
 
 from phi_core.anonymizer import scrub_for_prompt
 from phi_corpus.planters import plant

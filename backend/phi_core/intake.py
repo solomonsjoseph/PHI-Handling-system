@@ -33,7 +33,6 @@ from typing import Literal
 
 import openpyxl
 
-
 COMPONENT_SUFFIXES: dict[str, set[str]] = {
     "datasets":   {".csv", ".xlsx"},
     "forms":      {".pdf"},

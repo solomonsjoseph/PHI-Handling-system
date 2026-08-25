@@ -10,9 +10,9 @@ Covers:
 """
 from __future__ import annotations
 
+import csv
 import io
 import os
-import csv
 import time
 import zipfile
 from pathlib import Path

@@ -28,7 +28,6 @@ from typing import Any
 
 from .coverage_matrix import COVERAGE, TOOLS, coverage_counts
 
-
 BUNDLE_VERSION = "1.0.0"
 
 
@@ -138,7 +137,7 @@ def _render_coverage_counts_bar() -> bytes:
     ax.spines["right"].set_visible(False)
     ax.tick_params(axis="both", colors="#12141A")
 
-    for bar, v in zip(bars, values):
+    for bar, v in zip(bars, values, strict=True):
         ax.text(v + 0.3, bar.get_y() + bar.get_height() / 2, f"{v}",
                 va="center", fontsize=10, color="#12141A")
 
@@ -640,7 +639,8 @@ def build_bundle(session: dict[str, Any], opts: BundleOptions,
             # Benchmark: real per-column figures when this is a corpus run;
             # otherwise a one-line note, since the benchmark needs planted
             # ground truth to grade against.
-            from phi_corpus.benchmark import report_from_session, write as _write_benchmark
+            from phi_corpus.benchmark import report_from_session
+            from phi_corpus.benchmark import write as _write_benchmark
             bench_report = report_from_session(session, agent_log)
             if bench_report is not None:
                 import tempfile as _tempfile

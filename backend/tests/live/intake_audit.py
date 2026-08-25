@@ -12,18 +12,14 @@ Categories tested:
 """
 from __future__ import annotations
 
-import io
-import os
-import subprocess
 import sys
 import zipfile
 from pathlib import Path
 
 import openpyxl
 import requests
-from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
-
+from reportlab.pdfgen import canvas
 
 API = "http://localhost:8001"
 ROOT = Path("/tmp/intake_tests")
@@ -353,7 +349,7 @@ def H1(_):
     _results.append((
         "H1_re_intake_replaces_prior", PASS if ok else FAIL,
         f"{r1.get('status')} -> {r2.get('status')}",
-        "ok" if ok else f"unexpected outcome",
+        "ok" if ok else "unexpected outcome",
     ))
 
 H1(None)

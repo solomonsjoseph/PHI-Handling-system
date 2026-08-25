@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 
 import pytest
-
-from phi_corpus.planters import plant
 from phi_corpus.benchmark import (
-    ACTION_SPECS, build_report, to_json, to_markdown, per_column_csv, render_figures,
+    ACTION_SPECS,
     _context_hygiene,
+    build_report,
+    per_column_csv,
+    render_figures,
+    to_json,
+    to_markdown,
 )
+from phi_corpus.planters import plant
 
 
 def _stub_verify_report(leak_hits=None, precision=1.0, recall=1.0, f1=1.0, accuracy=1.0,
@@ -36,7 +40,6 @@ def test_build_report_columns_match_ground_truth_and_mark_correct():
     art = plant(scenario_id="oncology_v1", row_count=12, seed=7)
     gt = art.ground_truth
     columns = gt["columns"]
-    file_name = columns[0]["file_name"]
 
     decisions = [
         {

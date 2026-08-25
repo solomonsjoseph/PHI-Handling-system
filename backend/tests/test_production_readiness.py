@@ -69,7 +69,6 @@ async def test_owner_mismatch_returns_404_not_403():
         async def find_one(self, query, *_a, **_kw):
             return None  # no document matches this owner filter
 
-    import server as _srv_mod
     _srv_mod_get_db_backup = srv.get_db
     srv.get_db = lambda: _StubDB()
     try:
@@ -126,7 +125,8 @@ async def test_auth_session_rejects_unknown_token(monkeypatch):
 
 def test_data_dirs_created_with_0700_permissions():
     import stat
-    from phi_core.paths import UPLOAD_DIR, EXPORT_DIR
+
+    from phi_core.paths import EXPORT_DIR, UPLOAD_DIR
     for d in (UPLOAD_DIR, EXPORT_DIR):
         mode = stat.S_IMODE(d.stat().st_mode)
         assert mode == 0o700, f"{d} has mode {oct(mode)}, expected 0o700"
@@ -274,9 +274,10 @@ async def test_health_reports_mongo_down_as_503(monkeypatch):
 
 def test_attestation_signing_functions_exist_and_round_trip(monkeypatch):
     import base64
+
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption, load_pem_public_key
-    from phi_core.crypto import signing_public_key_pem, sign_bytes
+    from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, load_pem_public_key
+    from phi_core.crypto import sign_bytes, signing_public_key_pem
 
     k = Ed25519PrivateKey.generate()
     der = k.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())

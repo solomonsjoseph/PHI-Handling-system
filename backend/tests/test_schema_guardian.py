@@ -12,7 +12,6 @@ from pathlib import Path
 
 import openpyxl
 import pytest
-
 from phi_core.agents.specialists import Schema
 
 

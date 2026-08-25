@@ -12,7 +12,6 @@ import zipfile
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # 1. Unknown action from a model
 # ---------------------------------------------------------------------------
@@ -22,7 +21,10 @@ def test_unknown_action_from_model_routes_to_human_review_not_export(tmp_path):
     never reach the Executor, and the raw identifier must never appear in
     an export produced from that decision list."""
     from phi_core.agents.reasoning import (
-        validate_decisions, _apply_action, apply_column_actions_to_dataset, PseudonymRegistry,
+        PseudonymRegistry,
+        _apply_action,
+        apply_column_actions_to_dataset,
+        validate_decisions,
     )
 
     decisions = [{
@@ -154,6 +156,7 @@ def test_prompt_injection_in_dictionary_text_cannot_survive_to_export():
     values) must demote them before anything is written to disk."""
     import tempfile
     from pathlib import Path
+
     from phi_core.agents.reasoning import apply_sentinel_hard_rules, verify_keep_decisions
     from phi_core.anonymizer import scrub_for_prompt
 

@@ -4,9 +4,8 @@ the escaped value as correctly preserved."""
 from __future__ import annotations
 
 import csv
-from pathlib import Path
 
-from phi_core.agents.reasoning import apply_column_actions_to_dataset, PseudonymRegistry
+from phi_core.agents.reasoning import PseudonymRegistry, apply_column_actions_to_dataset
 from phi_corpus.verify import score_cells
 
 
@@ -32,7 +31,6 @@ def test_formula_shaped_keep_value_escaped_on_write_and_still_scored_preserved(t
         "planted": [
             {
                 "file_name": "src.csv",
-                "row": 1,
                 "column": "notes_formula",
                 "value": "=cmd()",
                 "hipaa_category": "NONE",

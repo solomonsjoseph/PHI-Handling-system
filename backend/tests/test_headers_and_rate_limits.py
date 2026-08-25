@@ -18,7 +18,7 @@ def _closure_map(fn):
     """Map a closure function's free variable names to their bound values."""
     names = fn.__code__.co_freevars
     cells = fn.__closure__ or ()
-    return dict(zip(names, (c.cell_contents for c in cells)))
+    return dict(zip(names, (c.cell_contents for c in cells), strict=True))
 
 
 def _fake_request(*, token: str | None = None, cookie: str | None = None, host: str = "203.0.113.1"):
@@ -137,7 +137,6 @@ def test_security_headers_present_on_every_response():
 
 
 def test_hsts_only_set_outside_dev(monkeypatch):
-    import importlib
     import server as srv
 
     async def _call_next(request):

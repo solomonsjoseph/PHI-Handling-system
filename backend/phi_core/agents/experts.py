@@ -22,9 +22,9 @@ import asyncio
 import json as _json
 from typing import Any
 
+from ..jurisdictions import get_pack
 from .base import Agent
 from .cache import cache_get, cache_put
-from ..jurisdictions import get_pack
 
 
 class Statute(Agent):

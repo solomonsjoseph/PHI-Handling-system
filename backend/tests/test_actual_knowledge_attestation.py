@@ -14,11 +14,11 @@ awaiting_human_review session exists on the deployment.
 """
 from __future__ import annotations
 
+import io
 import json
 import zipfile
-import io
 
-from phi_core.bundle import build_bundle, BundleOptions, _attestation_payload
+from phi_core.bundle import BundleOptions, _attestation_payload, build_bundle
 
 
 def _mock_session(ack: bool) -> dict:
