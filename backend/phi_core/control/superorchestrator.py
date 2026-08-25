@@ -66,6 +66,11 @@ WORKFLOW_VERSION = "wf/1"
 # always a valid RunState too -- advance() relies on this rather than
 # maintaining a second node->state translation table.
 
+# WorkItem states cancel_subtree/reconcile_leases already treat as
+# terminal (mirrors tasks.py's own _TERMINAL_STATES). A live sibling or
+# run-wide task count only counts non-terminal work.
+_TERMINAL_TASK_STATES = frozenset({"succeeded", "failed", "cancelled", "rejected", "superseded"})
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -268,15 +273,20 @@ class SuperOrchestrator:
         input_ref: dict[str, Any],
         budget: ResourceBudget,
     ) -> WorkItem:
-        """Validate depth, fanout, and budget against the parent's grant,
+        """Validate depth, fanout, run-wide task count, run-wide and
+        per-parent parallelism, and budget against the parent's grant,
         then delegate to ``TaskService.enqueue``.
 
         Fails closed (``CapabilityDenied``) on: an unknown parent task or
         grant; a ``task_type`` the parent's manifest does not list under
         ``allowed_child_task_types``; a depth or live-sibling count past
-        the manifest's (or the global D5) ceiling; or a proposed
-        ``budget`` that asks for more than the target agent's own
-        manifest, bounded by the global limits, already authorizes.
+        the manifest's (or the global D5) ceiling; the run reaching
+        ``limits.MAX_TASKS_PER_RUN`` total tasks ever created; the run or
+        the immediate parent reaching its non-terminal task ceiling
+        (``limits.MAX_PARALLEL_TASKS_PER_RUN``/``MAX_PARALLEL_TASKS_PER_PARENT``);
+        or a proposed ``budget`` that asks for more than the target
+        agent's own manifest, bounded by the global limits, already
+        authorizes.
         """
         parent = await self._load_task(parent_task_id)
         if parent.run_id != run_id:
@@ -286,8 +296,29 @@ class SuperOrchestrator:
             raise CapabilityDenied(f"parent task {parent_task_id!r} has no capability grant")
         grant = CapabilityGrant.model_validate(grant_document)
         siblings = await self._store.find_many("work_items", {"parent_task_id": parent_task_id})
-        live_siblings = [s for s in siblings if s.get("state") not in ("cancelled", "rejected", "superseded")]
-        self._tasks.policy.check_child(grant, task_type, depth=parent.depth + 1, children=len(live_siblings))
+        # check_child's fanout ceiling counts total children ever created
+        # (D5: "Ledger and Herald each need 2"), excluding only explicitly
+        # voided ones -- unchanged from its original definition.
+        fanout_siblings = [s for s in siblings if s.get("state") not in ("cancelled", "rejected", "superseded")]
+        self._tasks.policy.check_child(grant, task_type, depth=parent.depth + 1, children=len(fanout_siblings))
+        live_siblings = [s for s in siblings if s.get("state") not in _TERMINAL_TASK_STATES]
+        if len(live_siblings) >= limits.MAX_PARALLEL_TASKS_PER_PARENT:
+            raise CapabilityDenied(
+                f"parent {parent_task_id!r} already has {len(live_siblings)} live children "
+                f"(MAX_PARALLEL_TASKS_PER_PARENT={limits.MAX_PARALLEL_TASKS_PER_PARENT})"
+            )
+        run_tasks = await self._store.find_many("work_items", {"run_id": run_id})
+        if len(run_tasks) >= limits.MAX_TASKS_PER_RUN:
+            raise CapabilityDenied(
+                f"run_id={run_id!r} already created {len(run_tasks)} tasks "
+                f"(MAX_TASKS_PER_RUN={limits.MAX_TASKS_PER_RUN})"
+            )
+        live_run_tasks = [t for t in run_tasks if t.get("state") not in _TERMINAL_TASK_STATES]
+        if len(live_run_tasks) >= limits.MAX_PARALLEL_TASKS_PER_RUN:
+            raise CapabilityDenied(
+                f"run_id={run_id!r} already has {len(live_run_tasks)} live tasks "
+                f"(MAX_PARALLEL_TASKS_PER_RUN={limits.MAX_PARALLEL_TASKS_PER_RUN})"
+            )
         worker = _worker_for_task_type(task_type)
         ceiling = _bounded_budget(MANIFESTS[worker].budget)
         if _budget_widens(budget, ceiling):
