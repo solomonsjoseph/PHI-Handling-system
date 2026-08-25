@@ -239,7 +239,7 @@ Steps 1-7 of the plan's ten-step Phase 4 are landed and verified, plus step 2's 
 
 ## Phase 5 (in progress): Super Orchestrator and bounded delegation
 
-Step 1 of the plan's nine-step Phase 5 is landed and verified; steps 2-9 are not started. Two steps text-described as Phase 5 work were found already landed by an earlier phase during this checkpoint's investigation and needed no new code: `ArtifactService.certify_publication`/`PublicationPointer` (step 3, already production-called from `server.py:1197`, already tested in `test_control_artifacts.py`) and `control/policy.py::TEAMS` (part of step 6, already defined with the exact five requirement labels). This entry checkpoints the verified infrastructure before the larger route-migration work.
+Phase 5 steps 1 and 3 are landed and verified; step 2 has its first production entry-path slice (`session_handle`), step 6 is complete, and steps 4, 5, 7-9 remain open. `ArtifactService.certify_publication`/`PublicationPointer` (step 3) was already production-called from `server.py:1197` and tested in `test_control_artifacts.py`; `control/policy.py::TEAMS` (step 6) already had the exact five required groups, and this phase added ADR 0007 plus an exact-partition test. This entry checkpoints the verified work before the remaining route and delegation migrations.
 
 ### 1. Verified code-backed baseline relevant to this phase, with `path:line` anchors.
 
@@ -274,8 +274,8 @@ Step 1 of the plan's nine-step Phase 5 is landed and verified; steps 2-9 are not
 
 ### 8. Remaining risk and deferred work, cross-referenced to `docs/assurance/RISK_REGISTER.md`.
 
-- Step 2 (route every entry path -- `session_handle`, `session_human_review`, `session_cancel`, `session_delete`, `session_intake`, `corpus_study_generate/run/research`, `settings_warmup`/`_run_warmup`/`_warmup_scheduler_loop`, `_startup_maintenance`'s recovery path -- through `SuperOrchestrator`) is not started. `start_run` mints its own `run_id` (D9's signature takes none); `session_handle`'s existing CAS-claim-then-open-run ordering, where the session claim is today's only concurrency guard, needs to be resolved before that route can move.
+- Step 2 is partial. `session_handle` retains its existing atomic session claim, passes that claimed `run_id` to `SuperOrchestrator.start_run`, and no longer calls `RunStore.open_run` or `TaskService.enqueue` directly; the orchestrator creates the matching `WorkflowRun` and durable `pipeline_run` root with `input_ref={"run_type": "study"}`. `session_human_review` cannot simply call `start_run`: it must resume the original workflow at `human_review_decisions`, not create a second `"charter"` run. That move depends on step 4. `session_cancel`, `session_delete`, `session_intake`, corpus paths, warmup, and startup recovery remain direct.
 - Step 4 (delete `Manager.escalate_to_human_review`, repoint its four `orchestrator.py` callers to `SuperOrchestrator.request_human_review`) is not started.
 - Step 5 (Ledger/Herald as durable `create_child_work` children) is not started; it needs a `MANIFESTS` change (a non-empty `allowed_child_task_types`) that does not exist yet -- confirmed every current manifest entry has `allowed_child_task_types=frozenset()`, so any `create_child_work` call in production would currently refuse.
-- Step 6's remainder (`docs/adr/0007-agent-teams.md`, the per-team ceiling assertion) is open; `TEAMS` itself is already landed.
-- Steps 7 (`test_control_bounds.py`), 8 (`test_architecture_boundaries.py`), and 9 (delete `control/adapters.py`, close `F-ADAPT-001`) are not started. See `F-ORCH-001`, `F-DUR-001`, `F-ADAPT-001`, and the Phase 5 row in `docs/assurance/RISK_REGISTER.md`.
+- Step 6 is complete: `TEAMS` has ADR 0007 and `test_control_bounds.py`'s exact-partition contract.
+- Steps 7 (the remaining D5 resource-ceiling tests), 8 (`test_architecture_boundaries.py`), and 9 (delete `control/adapters.py`, close `F-ADAPT-001`) are not started. See `F-ORCH-001`, `F-DUR-001`, `F-ADAPT-001`, and the Phase 5 row in `docs/assurance/RISK_REGISTER.md`.

@@ -2,13 +2,13 @@
 
 ## Status
 
-Accepted (partial): `control/superorchestrator.py::SuperOrchestrator` exists, is fully tested against `MemoryControlStore`, and is additive infrastructure with no caller in production traffic yet. Phase 5 step 2 (routing every entry path through it) is not started; see Consequences.
+Accepted (partial): `control/superorchestrator.py::SuperOrchestrator` exists, is tested against `MemoryControlStore`, and owns the production `session_handle` root-task submission. Phase 5 step 2 remains incomplete: human-review, cancellation, deletion, intake, corpus, warmup, and recovery entry paths do not use it yet.
 
 ## Context
 
-`control/workflow.py`'s D9 node table and `TRANSITIONS` map (Phase 4) were fully built and tested, but nothing in production ever called `next_node`: `workflow_runs.node` was stamped `"charter"` at creation (`control/runs.py::RunStore.open_run`) and never advanced. `session_handle` calls `RunStore.open_run` then `TaskService.enqueue` directly; `Manager.escalate_to_human_review` still writes human-review state directly; nothing certifies a publication generation except a lazy, download-triggered path in `server.py::_open_published_artifact` whose own docstring names this exact gap ("Nothing yet calls `ArtifactService.certify_publication` on the pipeline's behalf -- that becomes Phase 5's `SuperOrchestrator.authorize_publication`").
+`control/workflow.py`'s D9 node table and `TRANSITIONS` map (Phase 4) were fully built and tested, but nothing in production ever called `next_node`: `workflow_runs.node` was stamped `"charter"` at creation and never advanced. `session_handle` atomically claims its session, then calls `SuperOrchestrator.start_run` with that claim's fresh `run_id`; the orchestrator creates the matching `WorkflowRun` and durable `pipeline_run` root task. `session_human_review` still directly enqueues `pipeline_resume`; `Manager.escalate_to_human_review` still writes human-review state directly. Publication still has a lazy download-triggered path in `server.py::_open_published_artifact`.
 
-Two pieces of Phase 5's plan text had already been landed by an earlier phase and needed no new work: `ArtifactService.certify_publication`/`PublicationPointer` (already production-called from `server.py:1197`, already fully tested in `test_control_artifacts.py`), and `control/policy.py::TEAMS` (already defined with the exact five requirement labels). `docs/adr/0007-agent-teams.md` for that mapping's own decision record, and the `test_control_bounds.py` per-team ceiling assertion, remain open.
+Two pieces of Phase 5's plan text had already been landed by an earlier phase and needed no new code: `ArtifactService.certify_publication`/`PublicationPointer` (already production-called from `server.py:1197`, already tested in `test_control_artifacts.py`) and `control/policy.py::TEAMS` (already defined with the exact five requirement labels). This phase adds `docs/adr/0007-agent-teams.md` and `test_control_bounds.py`'s exact-partition assertion; D5's individual resource-ceiling tests remain open.
 
 ## Decision
 
@@ -26,9 +26,9 @@ D9's published method signatures list bare identifiers only, but three methods n
 
 ## Consequences
 
-- Additive and inert in production today, exactly like Phase 4's first checkpoint: nothing calls `SuperOrchestrator` from a live route yet. `RunStore.open_run` still exists and is still called directly by `session_handle`; `Manager.escalate_to_human_review` still exists and is still called from all four of its `orchestrator.py` sites; every `create_child_work` call in production would currently raise `CapabilityDenied`, since no manifest's `allowed_child_task_types` is non-empty yet (confirmed: every entry in `MANIFESTS` today has `allowed_child_task_types=frozenset()`).
-- Phase 5 step 2 (routing `session_handle`, `session_human_review`, `session_cancel`, `session_delete`, `session_intake`, `corpus_study_generate/run/research`, `settings_warmup`/`_run_warmup`/`_warmup_scheduler_loop`, and `_startup_maintenance`'s recovery path through this class) is not started. `start_run`'s exact wiring order relative to `session_handle`'s existing CAS-claim-then-open-run sequence (today the session claim is the concurrency guard; `start_run` mints its own `run_id` rather than accepting a pre-agreed one) needs to be resolved before that route can move.
+- `session_handle` is the first production entry path through this class. Its session-document CAS remains the sole admission/idempotency boundary; it passes its freshly minted run id into `start_run`, so the claim, `WorkflowRun`, and root `pipeline_run` `WorkItem` share one identity. `start_run` is the sole `TaskService.enqueue` caller for that root task. The pre-existing session status/error response contract and route-level concurrency cap are unchanged.
+- Phase 5 step 2 remains partial. `session_human_review` cannot safely use `start_run` yet: it must resume the original persisted workflow run at `human_review_decisions`, not create a second `"charter"` run. That move depends on step 4 making review requests/events authoritative. `session_cancel`, `session_delete`, `session_intake`, corpus paths, warmup, and startup recovery also remain direct.
 - Step 4 (delete `Manager.escalate_to_human_review`, repoint its four `orchestrator.py` callers to `SuperOrchestrator.request_human_review`) is not started.
 - Step 5 (Ledger/Herald as durable `create_child_work` children) needs both the wiring and a `MANIFESTS` change (a non-empty `allowed_child_task_types` for whichever manifest owns the call site) that does not exist yet.
-- Step 6's remaining piece (`docs/adr/0007-agent-teams.md`, the per-team ceiling test) is open; `TEAMS` itself is not.
-- Steps 7 (`test_control_bounds.py`), 8 (`test_architecture_boundaries.py`), and 9 (delete `control/adapters.py`, close `F-ADAPT-001`) are not started.
+- Step 6 is complete: `TEAMS` has its exact-contract test and ADR 0007.
+- Steps 7 (the remaining D5 resource-ceiling tests), 8 (`test_architecture_boundaries.py`), and 9 (delete `control/adapters.py`, close `F-ADAPT-001`) are not started.

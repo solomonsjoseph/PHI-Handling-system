@@ -57,11 +57,11 @@
 ## F-ORCH-001
 
 - Owner: control-plane program
-- Code anchors: `backend/phi_core/agents/orchestrator.py:96-766`, `backend/server.py:1814-1890,2246-2508`, `backend/phi_core/agents/manager.py:311-336`, `backend/phi_core/control/superorchestrator.py::SuperOrchestrator`
-- Acceptance tests: `backend/tests/test_control_superorchestrator.py`, planned `backend/tests/test_architecture_boundaries.py`, `backend/tests/test_control_bounds.py`
+- Code anchors: `backend/phi_core/agents/orchestrator.py:96-766`, `backend/server.py::session_handle,session_human_review`, `backend/phi_core/agents/manager.py:311-336`, `backend/phi_core/control/superorchestrator.py::SuperOrchestrator`
+- Acceptance tests: `backend/tests/test_control_superorchestrator.py`, `backend/tests/test_certification_invalidation.py`, planned `backend/tests/test_architecture_boundaries.py`, `backend/tests/test_control_bounds.py`
 - Status: open
-- Disposition: Phase 5 step 1 lands `SuperOrchestrator`, the D9 exclusive-authority class (fenced node transitions, budget/depth/fanout-checked child delegation, review request/consume, acceptance) -- fully tested against `MemoryControlStore`, but not yet called from a production route. No entry route routes through it yet; `Manager.escalate_to_human_review` still writes human-review state directly from all four of its callers.
-- Residual risk: every future entry route must retain the command boundary, and steps 2/4/5/7/8/9 (route migration, `escalate_to_human_review` deletion, Ledger/Herald as durable children, D5 enqueue/gateway enforcement, the boundary tests, `control/adapters.py` deletion) remain open.
+- Disposition: Phase 5 lands `SuperOrchestrator`, the D9 exclusive-authority class (fenced node transitions, budget/depth/fanout-checked child delegation, review request/consume, acceptance) and routes `session_handle`'s durable root task through it while retaining the route's prior atomic session claim. `session_human_review` and every other workflow entry path remain direct; `Manager.escalate_to_human_review` still writes human-review state directly from all four callers.
+- Residual risk: the remaining route migration must preserve each entry path's session claim/fence semantics; steps 4/5/7/8/9 (`escalate_to_human_review` deletion, Ledger/Herald as durable children, D5 enqueue/gateway enforcement, boundary tests, `control/adapters.py` deletion) remain open.
 
 ## F-ADAPT-001
 
