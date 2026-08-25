@@ -212,6 +212,9 @@ class SuperOrchestrator:
         )
         if not matched:
             raise WorkflowError(f"lost the race requesting cancellation for run_id={run_id!r}")
+        for task in await self._store.find_many("work_items", {"run_id": run_id}):
+            if task.get("parent_task_id") == "":
+                await self._tasks.cancel_subtree(run_id=run_id, task_id=task["task_id"], reason=reason)
         return updated
 
     # ---- advance --------------------------------------------------------

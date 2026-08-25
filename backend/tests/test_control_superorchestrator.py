@@ -127,12 +127,13 @@ async def test_start_run_refuses_a_negative_iteration_cap() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_run_sets_the_flag_and_is_idempotent() -> None:
-    orch, _tasks, _store = _rig()
+    orch, _tasks, store = _rig()
     run = await _started_run(orch)
 
     first = await orch.cancel_run(session_id=SESSION_ID, run_id=run.run_id, principal="operator-1", reason="stop")
     assert first.cancel_requested is True
-
+    root_tasks = await store.find_many("work_items", {"run_id": run.run_id})
+    assert [task["state"] for task in root_tasks] == ["cancelled"]
     second = await orch.cancel_run(session_id=SESSION_ID, run_id=run.run_id, principal="operator-1", reason="stop again")
     assert second.cancel_requested is True
     assert second.cancel_requested_at == first.cancel_requested_at  # no second write

@@ -150,6 +150,17 @@ def test_cleanup_session_unpacked_removes_only_unpacked_subdir(tmp_path, monkeyp
 @pytest.mark.asyncio
 async def test_session_delete_removes_document_files_and_agent_log(tmp_path, monkeypatch):
     import server as srv
+    from phi_core.control import superorchestrator as super_module
+
+    cancel_calls: list[dict] = []
+
+    class FakeSuperOrchestrator:
+        def __init__(self, *_args):
+            pass
+
+        async def cancel_run(self, **kwargs):
+            cancel_calls.append(kwargs)
+
 
     sid = "a" * 32  # a real session id is always a bare uuid4().hex token
     export = tmp_path / "export.csv"
@@ -162,7 +173,12 @@ async def test_session_delete_removes_document_files_and_agent_log(tmp_path, mon
         def __init__(self):
             self.deleted = []
         async def find_one(self, query, *_a, **_kw):
-            return {"id": sid, "owner": "alice", "export_paths": {"a": str(export)}}
+            return {
+                "id": sid,
+                "owner": "alice",
+                "export_paths": {"a": str(export)},
+                "_pipeline_run_id": "a" * 32,
+            }
         async def delete_many(self, query):
             self.deleted.append(("agent_log", query))
         async def delete_one(self, query):
@@ -196,6 +212,7 @@ async def test_session_delete_removes_document_files_and_agent_log(tmp_path, mon
             return _EmptyControlCollection()
 
     db = _StubDB()
+    monkeypatch.setattr(super_module, "SuperOrchestrator", FakeSuperOrchestrator)
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
     resp = await srv.session_delete(sid, principal="alice")
@@ -203,6 +220,12 @@ async def test_session_delete_removes_document_files_and_agent_log(tmp_path, mon
     assert not export.exists()
     assert not session_dir.exists()
     assert ("sessions", {"id": sid, "owner": "alice"}) in db.sessions.deleted
+    assert cancel_calls == [{
+        "session_id": sid,
+        "run_id": "a" * 32,
+        "principal": "alice",
+        "reason": "session deleted",
+    }]
 
 
 @pytest.mark.asyncio

@@ -876,24 +876,43 @@ async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
 
     Coordinates with active work: the session is tombstoned before
     anything is deleted, so ``ArtifactService.stage`` refuses for this
-    session from this point forward -- a worker still finishing a run
-    that was never told to stop cannot recreate an artifact for a
-    session already marked for erasure. Recursive task cancellation via
-    ``TaskService.cancel_subtree`` has no effect yet: no production route
-    enqueues pipeline work through ``TaskService`` (Phase 4 steps 4/5,
-    not yet done), so there is no ``WorkItem`` tree to cancel. Once that
-    migration lands, the tombstone-then-cancel-then-erase order here
-    already matches the plan's required sequence.
+    session from this point forward. When the session has a durable
+    ``WorkflowRun``, ``SuperOrchestrator.cancel_run`` then fences its root
+    task and every durable descendant through ``TaskService.cancel_subtree``
+    before artifact erasure. A pre-Phase-5 session can have only the legacy
+    ``_pipeline_run_id`` token, no durable run record; tombstoning remains
+    its compatible anti-resurrection boundary and its cancellation request
+    cannot be reconstructed after the fact.
     """
     import shutil
 
     from phi_core.control.artifacts import ArtifactService, erase_session_artifacts, tombstone_session
+    from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.store import MongoControlStore
+    from phi_core.control.superorchestrator import SuperOrchestrator
+    from phi_core.control.tasks import TaskService
+    from phi_core.control.workflow import WorkflowError
 
     db = get_db()
     doc = await _owned_session(sid, principal, {"_id": 0, "export_paths": 1, "_pipeline_run_id": 1})
     control_store = MongoControlStore(db)
     await tombstone_session(control_store, sid)
+    if run_id := doc.get("_pipeline_run_id"):
+        try:
+            await SuperOrchestrator(
+                control_store, TaskService(control_store, CapabilityPolicy(None))
+            ).cancel_run(
+                session_id=sid,
+                run_id=run_id,
+                principal=principal,
+                reason="session deleted",
+            )
+        except WorkflowError as exc:
+            # A session from before Phase 5 can have the legacy run token
+            # without a durable WorkflowRun. It has already been tombstoned,
+            # so no worker can stage a replacement artifact for it.
+            if not str(exc).startswith("unknown run_id:"):
+                raise
     run_id = doc.get("_pipeline_run_id") or sid
     await ArtifactService(control_store, session_id=sid, run_id=run_id).erase_session_records(sid)
     erase_session_artifacts(sid)
