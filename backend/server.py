@@ -2355,9 +2355,8 @@ async def session_cancel(sid: str, principal: str = Depends(resolve_principal)):
     ``base.Agent``) but no further calls are issued. Idempotent.
     """
     db = get_db()
-    doc = await _owned_session(sid, principal, {"status": 1})
+    doc = await _owned_session(sid, principal, {"status": 1, "_pipeline_run_id": 1})
     # partially_complete and awaiting_human_review are both "paused,
-    # awaiting a human-review submission" states -- every other status
     # comparison in this module (review_filter, _LIVE_STATUSES) treats them
     # as equivalent. Only the two of them stay cancellable here; a
     # cancel-requested flag on either is a no-op today (the resume tail
@@ -2373,12 +2372,36 @@ async def session_cancel(sid: str, principal: str = Depends(resolve_principal)):
             "cancel_requested_at": datetime.now(timezone.utc).isoformat(),
         }},
     )
+    run_id = doc.get("_pipeline_run_id")
+    if run_id:
+        from phi_core.control.policy import CapabilityPolicy
+        from phi_core.control.store import MongoControlStore
+        from phi_core.control.superorchestrator import SuperOrchestrator
+        from phi_core.control.tasks import TaskService
+        from phi_core.control.workflow import WorkflowError
+
+        control_store = MongoControlStore(db)
+        try:
+            await SuperOrchestrator(
+                control_store, TaskService(control_store, CapabilityPolicy(None))
+            ).cancel_run(
+                session_id=sid,
+                run_id=run_id,
+                principal=principal,
+                reason="operator requested cancel via /api/sessions/{sid}/cancel",
+            )
+        except WorkflowError as exc:
+            # Pre-Phase-5 sessions have a legacy `_pipeline_run_id` but no
+            # durable WorkflowRun to cancel. The session flag above remains
+            # their compatible cancellation signal; any other transition
+            # failure remains an error rather than being hidden.
+            if not str(exc).startswith("unknown run_id:"):
+                raise
     await _emit(sid, ProgressEvent(
         phase="cancel_requested",
         message="Cancel requested by operator; pipeline will exit at next phase boundary.",
     ))
     return {"status": "cancel_requested", "already_settled": False}
-
 
 class HumanReviewSubmit(BaseModel):
     # Each resolution: {file_id, column, mode: "approve"|"comment"|"defer", comment?: str}.

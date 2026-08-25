@@ -508,6 +508,41 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
 
 
 @pytest.mark.asyncio
+async def test_cancel_submits_the_existing_run_to_super_orchestrator(monkeypatch):
+    import server as srv
+    from phi_core.control import superorchestrator as super_module
+
+    db = _ConditionalStubDB({
+        "id": "sid",
+        "owner": "reviewer",
+        "status": "classifying",
+        "_pipeline_run_id": "a" * 32,
+    })
+    calls: list[dict] = []
+
+    class FakeSuperOrchestrator:
+        def __init__(self, *_args):
+            pass
+
+        async def cancel_run(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+    monkeypatch.setattr(super_module, "SuperOrchestrator", FakeSuperOrchestrator)
+
+    response = await srv.session_cancel("sid", principal="reviewer")
+
+    assert response == {"status": "cancel_requested", "already_settled": False}
+    assert db.doc["cancel_requested"] is True
+    assert calls == [{
+        "session_id": "sid",
+        "run_id": "a" * 32,
+        "principal": "reviewer",
+        "reason": "operator requested cancel via /api/sessions/{sid}/cancel",
+    }]
+
+
+@pytest.mark.asyncio
 async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatch):
     """A resumed tail emits phase events and exposes its measured timings."""
     import server as srv
