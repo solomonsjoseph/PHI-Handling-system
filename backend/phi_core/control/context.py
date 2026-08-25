@@ -36,6 +36,12 @@ class EvidenceWriter(Protocol):
     async def source(self, **fields: Any) -> str: ...
 
 
+class TaskCompleter(Protocol):
+    async def complete(self, result: dict[str, Any]) -> None: ...
+
+    async def fail(self, error_category: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class AgentContext:
     session_id: str
@@ -52,6 +58,11 @@ class AgentContext:
     evidence: EvidenceWriter | None = None
     emit: Callable[["AgentMessage"], Awaitable[None]] | None = None
     manager: "Manager | None" = None
+    # Every `Agent` subclass's `run()` is completed against this on return
+    # (see `Agent.__init_subclass__`) -- `None` for a context with no
+    # backing `WorkItem` to complete (most unit tests build one via
+    # `control.testing.make_ctx` without wiring a real `TaskService`).
+    tasks: TaskCompleter | None = None
 
 
 class StoreResearchCache:
@@ -149,3 +160,29 @@ class StoreTraceWriter:
             gateway_decision=str(fields.pop("gateway_decision", "")),
         )
         await self._store.insert("trace_events", event)
+
+
+class StoreTaskCompleter:
+    """Completes (or fails) exactly one ``WorkItem`` -- the one this
+    context's owning ``Agent.run()`` was activated to do -- against the
+    lease it was claimed under. A stale lease (superseded by a later
+    claim, heartbeat, or a concurrent completion) is a silent no-op:
+    ``TaskService.complete``/``fail`` return ``outcome="fenced"`` rather
+    than raising, and an agent finishing its own work after losing that
+    race has nothing left to record."""
+
+    def __init__(self, task_service: Any, *, task_id: str, lease_owner: str, fence: int) -> None:
+        self._tasks = task_service
+        self._task_id = task_id
+        self._lease_owner = lease_owner
+        self._fence = fence
+
+    async def complete(self, result: dict[str, Any]) -> None:
+        await self._tasks.complete(
+            task_id=self._task_id, lease_owner=self._lease_owner, fence=self._fence, output_ref=result,
+        )
+
+    async def fail(self, error_category: str) -> None:
+        await self._tasks.fail(
+            task_id=self._task_id, lease_owner=self._lease_owner, fence=self._fence, error_category=error_category,
+        )

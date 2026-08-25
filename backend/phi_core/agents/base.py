@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -70,6 +71,44 @@ class Agent:
 
     NAME: str = "agent"
     PROMPT: str = ""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Wrap a leaf subclass's own ``run`` so its ``WorkItem`` is
+        completed (or failed) the moment it returns, against whatever
+        ``ctx.tasks`` the activation that built it supplied. Every
+        production entry path (`ActivationFactory`) wires a real one;
+        ``ctx.tasks is None`` -- most unit tests, built via
+        ``control.testing.make_ctx`` -- is a silent no-op, unchanged from
+        before this hook existed.
+
+        Exists because `Agent.run`'s signature varies per subclass
+        (``Ledger``/``Herald`` are not `Agent` subclasses and never had a
+        single template method to hook); wrapping here, once, is the only
+        way every subclass's completion stays correct without touching
+        each of their `run` bodies individually. An exception other than
+        cancellation is recorded as a failed task and always re-raised
+        unchanged -- this hook only ever adds bookkeeping around the
+        original call, never changes its outcome."""
+        super().__init_subclass__(**kwargs)
+        original_run = cls.__dict__.get("run")
+        if original_run is None:
+            return
+
+        @functools.wraps(original_run)
+        async def _completing_run(self: "Agent", *args: Any, **run_kwargs: Any) -> Any:
+            try:
+                result = await original_run(self, *args, **run_kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if self.ctx.tasks is not None:
+                    await self.ctx.tasks.fail(f"agent_crashed:{type(exc).__name__}")
+                raise
+            if self.ctx.tasks is not None:
+                await self.ctx.tasks.complete(result if isinstance(result, dict) else {})
+            return result
+
+        cls.run = _completing_run
 
     def __init__(self, ctx: AgentContext):
         if ctx.agent != self.NAME:

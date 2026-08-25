@@ -80,6 +80,7 @@ def _manifest(
     providers: frozenset[str] | None = None,
     tools: Mapping[str, int] | None = None,
     max_attempts: int | None = None,
+    allowed_child_task_types: frozenset[str] | None = None,
 ) -> AgentManifest:
     if output_schema not in OUTPUT_SCHEMAS:
         raise RuntimeError(f"unknown output schema {output_schema!r}")
@@ -102,7 +103,7 @@ def _manifest(
         reads=frozenset(),
         writes=frozenset(),
         budget=ResourceBudget(**budget_values),
-        allowed_child_task_types=frozenset(),
+        allowed_child_task_types=allowed_child_task_types or frozenset(),
         max_depth=3,
         max_children=8,
     )
@@ -120,10 +121,12 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
         "Executor": _manifest("Executor", purpose="Apply deterministic decisions.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),
         "Auditor": _manifest("Auditor", purpose="Audit staged output metadata.", input_class="restricted_metadata", output_schema="audit_report"),
         "Scout": _manifest("Scout", purpose="Research reporting context.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS, max_attempts=1),
-        "Ledger": _manifest("Ledger", purpose="Build a reporting ledger.", input_class="internal", output_schema="report"),
+        "Ledger": _manifest("Ledger", purpose="Build a reporting ledger.", input_class="internal", output_schema="report",
+                             allowed_child_task_types=frozenset({"ledger_compare", "ledger_aggregate"})),
         "Ledger.Compare": _manifest("Ledger.Compare", purpose="Compare reporting inputs.", input_class="internal", output_schema="report"),
         "Ledger.Aggregate": _manifest("Ledger.Aggregate", purpose="Aggregate reporting inputs.", input_class="internal", output_schema="report"),
-        "Herald": _manifest("Herald", purpose="Prepare a report.", input_class="internal", output_schema="report"),
+        "Herald": _manifest("Herald", purpose="Prepare a report.", input_class="internal", output_schema="report",
+                             allowed_child_task_types=frozenset({"herald_abstract", "herald_sections"})),
         "Herald.Abstract": _manifest("Herald.Abstract", purpose="Prepare a report abstract.", input_class="internal", output_schema="report"),
         "Herald.Sections": _manifest("Herald.Sections", purpose="Prepare report sections.", input_class="internal", output_schema="report"),
         "Manager": _manifest("Manager", purpose="Supervise bounded calls.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),

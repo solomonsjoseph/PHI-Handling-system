@@ -185,6 +185,8 @@ async def execute_decisions(
     praxis_methods: dict[str, Any],
     dictionary_by_column: dict[str, str],
     make_ctx: Callable[[str], Awaitable[AgentContext]],
+    make_child_ctx: Callable[[str, str], Awaitable[AgentContext]],
+    complete_and_accept: Callable[[AgentContext, dict[str, Any]], Awaitable[bool]],
     manager: Manager,
     on_phase: PhaseCb,
     close_last_phase: Callable[[], Awaitable[None]],
@@ -455,23 +457,31 @@ async def execute_decisions(
 
     await _check_cancel(db, sid, on_phase)
 
-    # Ledger (split into Compare + Aggregate under the hood).
+    # Ledger (split into Compare + Aggregate under the hood). D5 plan step
+    # 5: Compare/Aggregate are durable child work under Ledger's own task,
+    # not a bare root enqueue, with SuperOrchestrator.accept_result as the
+    # sole authority accepting each subagent's material result.
     await on_phase("ledger", {})
+    ledger_ctx = await make_ctx("Ledger")
     ledger = await Ledger(
-        await make_ctx("Ledger"),
-        await make_ctx("Ledger.Compare"),
-        await make_ctx("Ledger.Aggregate"),
+        ledger_ctx,
+        await make_child_ctx("Ledger.Compare", ledger_ctx.task_id),
+        await make_child_ctx("Ledger.Aggregate", ledger_ctx.task_id),
+        complete_and_accept=complete_and_accept,
     ).run(decisions=decisions, audit=audit, scout=scout, benchmark_result=benchmark)
 
     await _check_cancel(db, sid, on_phase)
 
     # Herald (split into Abstract + Sections under the hood so no LLM
-    # call exceeds the 90 s hard timeout).
+    # call exceeds the 90 s hard timeout). Same durable-child-work
+    # treatment as Ledger above.
     await on_phase("herald", {})
+    herald_ctx = await make_ctx("Herald")
     herald = await Herald(
-        await make_ctx("Herald"),
-        await make_ctx("Herald.Abstract"),
-        await make_ctx("Herald.Sections"),
+        herald_ctx,
+        await make_child_ctx("Herald.Abstract", herald_ctx.task_id),
+        await make_child_ctx("Herald.Sections", herald_ctx.task_id),
+        complete_and_accept=complete_and_accept,
     ).run(ledger=ledger, audit=audit, target_venue=session.get("target_venue") or "JAMIA Open")
 
     await close_last_phase()
@@ -592,6 +602,24 @@ async def run_pipeline(
             lease_owner=f"pipeline:{effective_run_id}",
         )
 
+    async def make_child_ctx(agent: str, parent_task_id: str) -> AgentContext:
+        """D5 plan step 5: Ledger.Compare/Aggregate and Herald.Abstract/
+        Sections are the pipeline's only genuine sub-agent delegation --
+        every other activation is a direct child of the root Pipeline
+        task. Durable child work, not a bare root enqueue."""
+        return await factory.activate_child(
+            session_id=sid,
+            run_id=effective_run_id,
+            parent_task_id=parent_task_id,
+            agent=agent,
+            emit=emit,
+            manager=_manager_box["value"],
+            lease_owner=f"pipeline:{effective_run_id}",
+        )
+
+    async def complete_and_accept(ctx: AgentContext, result: dict[str, Any]) -> bool:
+        return await factory.complete_and_accept(ctx, result)
+
     manager = Manager(await make_ctx("Manager"), db=db)
     _manager_box["value"] = manager
     await manager.run(
@@ -617,13 +645,23 @@ async def run_pipeline(
     hipaa_cats = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K",
                   "L", "M", "N", "O", "P", "Q", "R"]
     async def _praxis_method(category: str) -> dict[str, Any]:
-        agent = Praxis(await make_ctx("Praxis"))
+        # Praxis is called per-category via `method_for`, never `run` --
+        # `Agent.__init_subclass__`'s completion wrap only ever sees `run`,
+        # so this path completes/fails its own task explicitly, matching
+        # what that wrap does for every other agent.
+        ctx = await make_ctx("Praxis")
+        agent = Praxis(ctx)
         try:
-            return await agent.method_for(category)
+            result = await agent.method_for(category)
         except Exception as exc:
             await agent._log("praxis.category_failed", "info",
                               {"category": category, "error": f"{type(exc).__name__}: {exc}"})
+            if ctx.tasks is not None:
+                await ctx.tasks.fail(f"agent_crashed:{type(exc).__name__}")
             raise
+        if ctx.tasks is not None:
+            await ctx.tasks.complete(result if isinstance(result, dict) else {})
+        return result
 
     statute_task = asyncio.create_task(
         Statute(await make_ctx("Statute")).run(jurisdiction=session.get("jurisdiction", "us"))
@@ -993,7 +1031,8 @@ async def run_pipeline(
         files=files, decisions=approved_decisions,
         statute=statute, praxis_methods=praxis_methods,
         dictionary_by_column=dictionary_by_column,
-        make_ctx=make_ctx, manager=manager, on_phase=on_phase,
+        make_ctx=make_ctx, make_child_ctx=make_child_ctx, complete_and_accept=complete_and_accept,
+        manager=manager, on_phase=on_phase,
         close_last_phase=close_last_phase, phase_timings=_phase_timings,
         run_started=_run_started, sentinel_report=s,
         extra_completion_fields={"advisory_issues": advisory_issues, "iteration_cap": iteration_cap},

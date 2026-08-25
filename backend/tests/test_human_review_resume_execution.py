@@ -157,62 +157,81 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
 
+    async def _complete(ctx, result):
+        if ctx is not None and ctx.tasks is not None:
+            await ctx.tasks.complete(result)
+
     class FakeExecutor:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, *_a, **_kw):
+            self._ctx = ctx
 
         async def run(self, files, decisions, omit_by_file=None):
             dst = tmp_path / "f1_export.csv"
             dst.write_text("field\nx\ny\n", encoding="utf-8")
-            return {"exports": {"f1": str(dst)}}
+            result = {"exports": {"f1": str(dst)}}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeOperator:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, *_a, **_kw):
+            self._ctx = ctx
 
         async def run(self, files, decisions, exports, omit_by_file=None):
-            return {"failed_file_ids": [], "verdicts": []}
+            result = {"failed_file_ids": [], "verdicts": []}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeReviewer:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, *_a, **_kw):
+            self._ctx = ctx
 
         async def run(self, decisions, operator_result, exports, omit_by_file=None):
-            return {"exports": exports, "findings": []}
+            result = {"exports": exports, "findings": []}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeAuditor:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, *_a, **_kw):
+            self._ctx = ctx
 
         async def _log(self, *_a, **_kw):
             return None
 
         async def run(self, **_kw):
-            return {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+            result = {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeScout:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, *_a, **_kw):
+            self._ctx = ctx
 
         async def _log(self, *_a, **_kw):
             return None
 
         async def run(self, **_kw):
+            await _complete(self._ctx, {})
             return {}
 
     class FakeLedger:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, compare_ctx=None, aggregate_ctx=None, **_kw):
+            self._ctxs = [c for c in (ctx, compare_ctx, aggregate_ctx) if c is not None]
 
         async def run(self, **_kw):
-            return {"summary": "ledger"}
+            result = {"summary": "ledger"}
+            for c in self._ctxs:
+                await _complete(c, result)
+            return result
 
     class FakeHerald:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, abstract_ctx=None, sections_ctx=None, **_kw):
+            self._ctxs = [c for c in (ctx, abstract_ctx, sections_ctx) if c is not None]
 
         async def run(self, **_kw):
-            return {"abstract": "herald"}
+            result = {"abstract": "herald"}
+            for c in self._ctxs:
+                await _complete(c, result)
+            return result
 
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
     monkeypatch.setattr(orchestrator, "Operator", FakeOperator)
@@ -296,62 +315,79 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
 
     executor_calls: list[dict] = []
 
+    async def _complete(ctx, result):
+        if ctx is not None and ctx.tasks is not None:
+            await ctx.tasks.complete(result)
+
     class FakeExecutor:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, *_a, **_kw):
+            self._ctx = ctx
 
         async def run(self, files, decisions, omit_by_file=None):
             executor_calls.append({"decisions": decisions, "omit_by_file": omit_by_file})
             dst = tmp_path / "f1_export.csv"
             dst.write_text("a\nx\ny\n", encoding="utf-8")
-            return {"exports": {"f1": str(dst)}}
+            result = {"exports": {"f1": str(dst)}}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeOperator:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, *_a, **_kw):
+            self._ctx = ctx
 
         async def run(self, files, decisions, exports, omit_by_file=None):
-            return {"failed_file_ids": [], "verdicts": []}
+            result = {"failed_file_ids": [], "verdicts": []}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeReviewer:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, *_a, **_kw):
+            self._ctx = ctx
 
         async def run(self, decisions, operator_result, exports, omit_by_file=None):
-            return {"exports": exports, "findings": []}
+            result = {"exports": exports, "findings": []}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeAuditor:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, *_a, **_kw):
+            self._ctx = ctx
 
         async def _log(self, *_a, **_kw):
             return None
 
         async def run(self, **_kw):
-            return {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+            result = {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeScout:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, *_a, **_kw):
+            self._ctx = ctx
 
         async def _log(self, *_a, **_kw):
             return None
 
         async def run(self, **_kw):
+            await _complete(self._ctx, {})
             return {}
 
     class FakeLedger:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, compare_ctx=None, aggregate_ctx=None, **_kw):
+            self._ctxs = [c for c in (ctx, compare_ctx, aggregate_ctx) if c is not None]
 
         async def run(self, **_kw):
+            for c in self._ctxs:
+                await _complete(c, {})
             return {}
 
     class FakeHerald:
-        def __init__(self, *_a, **_kw):
-            pass
+        def __init__(self, ctx=None, abstract_ctx=None, sections_ctx=None, **_kw):
+            self._ctxs = [c for c in (ctx, abstract_ctx, sections_ctx) if c is not None]
 
         async def run(self, **_kw):
+            for c in self._ctxs:
+                await _complete(c, {})
             return {}
 
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)

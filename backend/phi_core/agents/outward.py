@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from phi_core.control import evidence as _evidence
 from phi_core.control.context import AgentContext
@@ -171,12 +171,21 @@ class Ledger:
     the same shape the old monolithic Ledger returned."""
     NAME = "Ledger"
 
-    def __init__(self, ctx: AgentContext, compare_ctx: AgentContext, aggregate_ctx: AgentContext) -> None:
+    def __init__(self, ctx: AgentContext, compare_ctx: AgentContext, aggregate_ctx: AgentContext, *,
+                 complete_and_accept: Callable[[AgentContext, dict[str, Any]], Awaitable[bool]] | None = None,
+                 ) -> None:
         if ctx.agent != self.NAME:
             raise ValueError(f"agent context is for {ctx.agent!r}, not {self.NAME!r}")
         self.ctx = ctx
         self._compare_ctx = compare_ctx
         self._aggregate_ctx = aggregate_ctx
+        # D5 plan step 5: when the caller created these as durable child
+        # work under this run's SuperOrchestrator, their material result
+        # is only accepted -- not merely trusted because the call
+        # returned -- through this hook. None when no durable run exists
+        # yet (e.g. a pre-migration session), matching every other
+        # best-effort durable-record path in this pipeline.
+        self._complete_and_accept = complete_and_accept
 
     async def run(self, decisions: list[dict[str, Any]], audit: dict[str, Any],
                   scout: dict[str, Any], benchmark_result: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -188,12 +197,16 @@ class Ledger:
         compare_task = LedgerCompare(self._compare_ctx).run(audit_metrics, competitors)
         counts = _count_actions(decisions)
         compare_out = await compare_task
+        if self._complete_and_accept is not None:
+            await self._complete_and_accept(self._compare_ctx, compare_out)
 
         # Ledger.Aggregate needs Compare's output.
         aggregate_out = await LedgerAggregate(self._aggregate_ctx).run(
             decision_counts=counts, audit_metrics=audit_metrics,
             comparisons=compare_out.get("comparisons", []),
         )
+        if self._complete_and_accept is not None:
+            await self._complete_and_accept(self._aggregate_ctx, aggregate_out)
 
         # Merge into the legacy Ledger schema.
         return {
@@ -283,12 +296,15 @@ class Herald:
     the publication bundle is never empty."""
     NAME = "Herald"
 
-    def __init__(self, ctx: AgentContext, abstract_ctx: AgentContext, sections_ctx: AgentContext) -> None:
+    def __init__(self, ctx: AgentContext, abstract_ctx: AgentContext, sections_ctx: AgentContext, *,
+                 complete_and_accept: Callable[[AgentContext, dict[str, Any]], Awaitable[bool]] | None = None,
+                 ) -> None:
         if ctx.agent != self.NAME:
             raise ValueError(f"agent context is for {ctx.agent!r}, not {self.NAME!r}")
         self.ctx = ctx
         self._abstract_ctx = abstract_ctx
         self._sections_ctx = sections_ctx
+        self._complete_and_accept = complete_and_accept  # see Ledger's docstring for this hook's purpose
 
     async def run(self, ledger: dict[str, Any], audit: dict[str, Any],
                   target_venue: str = "JAMIA Open") -> dict[str, Any]:
@@ -307,10 +323,14 @@ class Herald:
             await abstract_agent._log("herald.abstract_crashed", "info",
                                        {"error": f"{type(abstract_out).__name__}: {abstract_out}"})
             abstract_out = {"title": "", "abstract": "", "methods": None, "references": []}
+        elif self._complete_and_accept is not None:
+            await self._complete_and_accept(self._abstract_ctx, abstract_out)
         if isinstance(sections_out, Exception):
             await sections_agent._log("herald.sections_crashed", "info",
                                        {"error": f"{type(sections_out).__name__}: {sections_out}"})
             sections_out = {"sections": [], "alt_venues": []}
+        elif self._complete_and_accept is not None:
+            await self._complete_and_accept(self._sections_ctx, sections_out)
 
         methods = abstract_out.get("methods") or {"heading": "Methods", "body": ""}
         sections = [methods] + (sections_out.get("sections") or [])

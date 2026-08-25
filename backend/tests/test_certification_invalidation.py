@@ -824,59 +824,76 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
     })
     emitted = []
 
+    async def _complete(ctx, result):
+        if ctx is not None and ctx.tasks is not None:
+            await ctx.tasks.complete(result)
+
     class FakeExecutor:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
 
         async def run(self, **_kwargs):
-            return {"exports": {}}
+            result = {"exports": {}}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeAuditor:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
 
         async def _log(self, *_a, **_kw):
             return None
 
         async def run(self, **_kwargs):
-            return {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+            result = {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeOperator:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
 
         async def run(self, **_kwargs):
-            return {"failed_file_ids": [], "verdicts": []}
+            result = {"failed_file_ids": [], "verdicts": []}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeReviewer:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
 
         async def run(self, exports, **_kwargs):
-            return {"exports": exports, "findings": []}
+            result = {"exports": exports, "findings": []}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeScout:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
 
         async def _log(self, *_a, **_kw):
             return None
 
         async def run(self, **_kwargs):
+            await _complete(self._ctx, {})
             return {}
 
     class FakeLedger:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, compare_ctx=None, aggregate_ctx=None, **_kwargs):
+            self._ctxs = [c for c in (ctx, compare_ctx, aggregate_ctx) if c is not None]
 
         async def run(self, **_kwargs):
+            for c in self._ctxs:
+                await _complete(c, {})
             return {}
 
     class FakeHerald:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, abstract_ctx=None, sections_ctx=None, **_kwargs):
+            self._ctxs = [c for c in (ctx, abstract_ctx, sections_ctx) if c is not None]
 
         async def run(self, **_kwargs):
+            for c in self._ctxs:
+                await _complete(c, {})
             return {}
 
     async def fake_cfg():

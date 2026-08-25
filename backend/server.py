@@ -615,6 +615,15 @@ async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
             manager=manager_box["value"],
         )
 
+    async def _child_actx(agent: str, parent_task_id: str):
+        return await _factory.activate_child(
+            session_id=sid, run_id=run_id, parent_task_id=parent_task_id, agent=agent,
+            emit=emit_msg, manager=manager_box["value"],
+        )
+
+    async def _complete_and_accept(ctx, result: dict) -> bool:
+        return await _factory.complete_and_accept(ctx, result)
+
     async def _run_resume() -> dict[str, Any]:
         manager = Manager(await _actx("Manager"), db=db)
         manager_box["value"] = manager
@@ -633,7 +642,8 @@ async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
             files=files, decisions=scrubbed_decisions,
             statute=session.get("agent_statute"), praxis_methods=session.get("agent_praxis"),
             dictionary_by_column=dictionary_by_column,
-            make_ctx=_actx, manager=manager, on_phase=timed_on_phase,
+            make_ctx=_actx, make_child_ctx=_child_actx, complete_and_accept=_complete_and_accept,
+            manager=manager, on_phase=timed_on_phase,
             close_last_phase=close_last_phase, phase_timings=phase_timings,
             run_started=run_started, omit_by_file=omit_by_file,
             extra_completion_fields={

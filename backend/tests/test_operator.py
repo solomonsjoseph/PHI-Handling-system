@@ -880,41 +880,52 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
             self.sessions = FakeSessions()
             self.agent_log = FakeAgentLog()
 
+    async def _complete(ctx, result):
+        if ctx is not None and ctx.tasks is not None:
+            await ctx.tasks.complete(result)
+
     class FakeStatute:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
 
         async def run(self, **_kwargs):
+            await _complete(self._ctx, {})
             return {}
 
     class FakePraxis:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
 
         async def method_for(self, _category):
+            await _complete(self._ctx, {})
             return {}
 
     class FakeLexicon:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
 
         async def run(self, **_kwargs):
-            return {"columns": []}
+            result = {"columns": []}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeInstrument(FakeLexicon):
         async def run(self, **_kwargs):
-            return {"fields": []}
+            result = {"fields": []}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeSchema(FakeLexicon):
         pass
 
     class FakeJudge:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
             self.call_failures = 0
             self.last_message_id = None
 
         async def run(self, **_kwargs):
-            return {"decisions": [
+            result = {"decisions": [
                 {"file_id": "f1", "column": "age", "action": "cap_age_90",
                  "phi_category": "C", "citation": "45 CFR 164.514(b)(2)(i)(C)",
                  "confidence": 0.95, "reason": "Judge decision"},
@@ -922,50 +933,64 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
                  "phi_category": "C", "citation": "45 CFR 164.514(b)(2)(i)(C)",
                  "confidence": 0.95, "reason": "Judge decision"},
             ]}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeSentinel:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
             self.call_failures = 0
 
         async def run(self, **_kwargs):
-            return {"issues": []}
+            result = {"issues": []}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeExecutor:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
 
         async def run(self, **_kwargs):
-            return {"exports": {"f1": str(bad_export), "f2": str(good_export)}}
+            result = {"exports": {"f1": str(bad_export), "f2": str(good_export)}}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeAuditor:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
 
         async def _log(self, *_args, **_kwargs):
             return None
 
         async def run(self, **_kwargs):
-            return {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+            result = {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+            await _complete(self._ctx, result)
+            return result
 
     class FakeScout:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self._ctx = ctx
 
         async def run(self, **_kwargs):
+            await _complete(self._ctx, {})
             return {}
 
     class FakeLedger:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, compare_ctx=None, aggregate_ctx=None, **_kwargs):
+            self._ctxs = [c for c in (ctx, compare_ctx, aggregate_ctx) if c is not None]
 
         async def run(self, **_kwargs):
+            for c in self._ctxs:
+                await _complete(c, {})
             return {}
 
     class FakeHerald:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, abstract_ctx=None, sections_ctx=None, **_kwargs):
+            self._ctxs = [c for c in (ctx, abstract_ctx, sections_ctx) if c is not None]
 
         async def run(self, **_kwargs):
+            for c in self._ctxs:
+                await _complete(c, {})
             return {}
 
     monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
