@@ -224,6 +224,7 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
 
     body = srv.HumanReviewSubmit(
         resolutions=[{"file_id": "f1", "column": "field", "mode": "approve"}],
+        client_event_id="ce-approve-a",
         comment="",
         actual_knowledge_ack=True,
     )
@@ -366,6 +367,7 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
             {"file_id": "f1", "column": "a", "mode": "approve"},
             {"file_id": "f1", "column": "b", "mode": "defer"},
         ],
+        client_event_id="ce-approve-b",
         comment="",
         actual_knowledge_ack=True,
     )

@@ -2434,7 +2434,13 @@ class HumanReviewSubmit(BaseModel):
     # applies the server's own suggested_action / pending_confirmation.action
     # for that column, never a value the client could smuggle in unvalidated.
     resolutions: list[dict]
-    reviewer: str = ""        # unused; identity is the authenticated principal
+    # D13 step 4: a client-generated idempotency key. Required so a retried
+    # or double-clicked submission can be recognized and answered from the
+    # stored result rather than reprocessed -- see the idempotency check in
+    # session_human_review below. The old `reviewer` field is removed: it
+    # was already inert (identity is always the authenticated principal,
+    # never a client-supplied value) and this endpoint never read it.
+    client_event_id: str
     comment: str = ""         # optional submission-level note for the audit trail
     # Auditor's confidence-floor gate (design doc "second human review") can
     # fire with zero actionable per-column issues -- just a bare self-
@@ -2453,6 +2459,39 @@ class HumanReviewSubmit(BaseModel):
     # when this submission resolves (approves/comments) at least one column;
     # a submission that only defers makes no actual-knowledge claim.
     actual_knowledge_ack: bool = False
+
+
+async def _build_review_event(
+    control_store, *, request_id: str | None, run_id: str | None, session_id: str,
+    principal: str, body: "HumanReviewSubmit", body_hash: str, decision_version: int, result: dict,
+):
+    """D13 steps 5/9: construct (never insert -- the caller decides how)
+    one `HumanReviewEvent` for this submission. Returns None when
+    `request_id` is None -- no durable `HumanReviewRequest` exists for
+    this run (a pre-D9-migration session), so there is nothing to bind
+    this event to; the session document remains the sole record, exactly
+    as before this check existed."""
+    if request_id is None:
+        return None
+    from phi_core.control.records import HumanReviewEvent, ResolutionEntry
+
+    resolutions_typed = [
+        ResolutionEntry(file_id=r.get("file_id", ""), column=r.get("column", ""),
+                        mode=r.get("mode", "defer"), comment=(r.get("comment") or ""))
+        for r in body.resolutions
+    ]
+    kind = ("audit_confidence_confirmation" if body.confirm_auditor_confidence
+            else "defer" if all(r.get("mode") == "defer" for r in body.resolutions)
+            else "resolution")
+    prior_events = await control_store.find_many("human_review_events", {"request_id": request_id})
+    return HumanReviewEvent(
+        request_id=request_id, run_id=run_id or "", session_id=session_id,
+        workflow_version="wf/1", task_id="", seq=len(prior_events) + 1,
+        client_event_id=body.client_event_id, principal=principal, kind=kind,
+        body_hash=body_hash, resolutions=resolutions_typed,
+        actual_knowledge_ack=body.actual_knowledge_ack, decision_version=decision_version,
+        result=result,
+    )
 
 
 @app.post("/api/sessions/{sid}/human-review")
@@ -2533,6 +2572,41 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         review_filter["_pipeline_run_id"] = {"$exists": False}
     else:
         review_filter["_pipeline_run_id"] = prior_run_id
+
+    # D13 step 5 (partial) and step 3 (idempotency only, not the full
+    # work-item fence/lease_owner comparison D13 specifies -- there is no
+    # WorkItem yet at this point in the flow, so there is nothing to fence
+    # against; tracked as a gap, not silently claimed done). When a durable
+    # `HumanReviewRequest` is open for this run, an already-processed
+    # `client_event_id` is answered from its stored result instead of
+    # reprocessing it (no repeated provider call for a retried or
+    # double-clicked submission); a different body under the same key is
+    # 409. Additive: a pre-D9-migration session with no durable request at
+    # all, or a resubmission after the request has already resolved, falls
+    # through unchanged -- `request_id` stays None and no idempotency
+    # protection applies, same as this route's behavior before this check
+    # existed.
+    control_store = MongoControlStore(db)
+    request_id: str | None = None
+    if prior_run_id:
+        open_requests = await control_store.find_many(
+            "human_review_requests", {"run_id": prior_run_id, "state": "open"}
+        )
+        if open_requests:
+            request_id = open_requests[0]["request_id"]
+    body_hash = hashlib.sha256(json.dumps(
+        {"resolutions": body.resolutions, "confirm_auditor_confidence": body.confirm_auditor_confidence,
+         "actual_knowledge_ack": body.actual_knowledge_ack},
+        sort_keys=True, default=str,
+    ).encode("utf-8")).hexdigest()
+    if request_id is not None:
+        existing_event = await control_store.get_one(
+            "human_review_events", {"request_id": request_id, "client_event_id": body.client_event_id}
+        )
+        if existing_event is not None:
+            if existing_event.get("body_hash") != body_hash:
+                raise HTTPException(409, "client_event_id was already used with a different submission body")
+            return existing_event.get("result") or {"status": "duplicate_submission_replayed"}
 
     decisions = list(session.get("agent_decisions", []))
     dictionary_by_column = {c.get("name"): c.get("description", "")
@@ -2742,7 +2816,19 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             }},
         )
         if getattr(update, "matched_count", 0):
-            return {"status": "still_awaiting", "unresolved": len(pending_review)}
+            result = {"status": "still_awaiting", "unresolved": len(pending_review)}
+            review_event = await _build_review_event(
+                control_store, request_id=request_id, run_id=prior_run_id, session_id=sid,
+                principal=principal, body=body, body_hash=body_hash,
+                decision_version=gate_outcome.decision_version, result=result,
+            )
+            if review_event is not None:
+                # The request stays open (nothing terminal happened this
+                # round): record the submission directly rather than
+                # through consume_review_event, which would prematurely
+                # resolve the request.
+                await control_store.insert("human_review_events", review_event)
+            return result
         current = await db.sessions.find_one(_owned_filter(sid, principal), {"status": 1})
         if not current:
             raise HTTPException(404, "session not found")
@@ -2791,11 +2877,30 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
+    from phi_core.control.workflow import WorkflowError
 
-    control_store = MongoControlStore(db)
-    await SuperOrchestrator(
-        control_store, TaskService(control_store, CapabilityPolicy(cfg))
-    ).start_run(
+    result = {"status": "resuming"}
+    review_event = await _build_review_event(
+        control_store, request_id=request_id, run_id=resume_run_id, session_id=sid,
+        principal=principal, body=body, body_hash=body_hash,
+        decision_version=gate_outcome.decision_version, result=result,
+    )
+    orchestrator_service = SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(cfg)))
+    if review_event is not None:
+        # D13's actual resolution authority: consume_review_event both
+        # persists this event and resolves the durable request (do not
+        # also insert it directly here -- that would double-write the
+        # (request_id, client_event_id)-unique collection). Best-effort:
+        # the session document (updated just above) remains this
+        # synchronous path's load-bearing state machine, so a WorkflowRun
+        # state mismatch (e.g. a pre-migration run this call is opening
+        # for the first time) must not fail an otherwise-successful
+        # human-review resume.
+        try:
+            await orchestrator_service.consume_review_event(run_id=resume_run_id, event=review_event)
+        except WorkflowError:
+            pass
+    await orchestrator_service.start_run(
         session_id=sid,
         principal=principal,
         run_type="study",
@@ -2803,7 +2908,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         run_id=resume_run_id,
         root_task_type="pipeline_resume",
     )
-    return {"status": "resuming"}
+    return result
 
 
 @app.get("/api/sessions/{sid}/agent-trace")

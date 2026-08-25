@@ -97,7 +97,7 @@ async def test_unknown_client_resolution_action_rejected_with_422_leaves_session
 
     body = srv.HumanReviewSubmit(
         resolutions=[{"file_id": "f1", "column": "notes", "mode": "passthrough"}],
-        reviewer="ignored-not-trusted-for-identity",
+        client_event_id="ce-1",
         comment="attempted a mode outside the executable vocabulary",
         actual_knowledge_ack=True,
     )

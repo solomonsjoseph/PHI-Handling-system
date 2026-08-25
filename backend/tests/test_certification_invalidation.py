@@ -485,7 +485,7 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
     response = await srv.session_human_review(
         "sid",
         srv.HumanReviewSubmit(
-            reviewer="reviewer",
+            client_event_id="ce-tail-claim",
             actual_knowledge_ack=True,
             resolutions=[{
                 "file_id": "dataset",
@@ -505,6 +505,123 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
     with pytest.raises(HTTPException) as excinfo:
         await srv.session_handle("sid", principal="reviewer")
     assert excinfo.value.status_code == 409
+
+@pytest.mark.asyncio
+async def test_a_successful_submission_persists_its_event_and_resolves_the_durable_request(monkeypatch):
+    """D13 steps 5/9: a durable open HumanReviewRequest for this run gets a
+    HumanReviewEvent recording the final result, and is marked resolved via
+    SuperOrchestrator.consume_review_event once the submission actually
+    resolves the pipeline (not merely defers)."""
+    import server as srv
+    from phi_core.control.records import HumanReviewRequest, WorkflowRun
+
+    db = _ConditionalStubDB({
+        "id": "sid",
+        "owner": "reviewer",
+        "intake_status": "ready",
+        "status": "awaiting_human_review",
+        "_pipeline_run_id": "run-idem",
+        "files": [{"file_id": "dataset", "kind": "dataset", "stored_path": "/tmp/dataset.csv", "columns": ["subject_id"]}],
+        "agent_decisions": [{
+            "file_id": "dataset",
+            "column": "subject_id",
+            "action": "human_review",
+            "suggested_action": "drop",
+            "suggested_reason": "direct identifier",
+        }],
+        "dataset_file_downloads": [{"file_id": "dataset"}],
+    })
+    request = HumanReviewRequest(run_id="run-idem", session_id="sid", workflow_version="wf/1",
+                                 task_id="", node="human_review_decisions")
+    db["human_review_requests"].docs.append(request.model_dump())
+    run = WorkflowRun(run_id="run-idem", session_id="sid", state="awaiting_human_review",
+                      node="human_review_decisions")
+    db["workflow_runs"].docs.append(run.model_dump())
+
+    async def fake_cfg():
+        return SimpleNamespace(provider="test", model="test")
+
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+    monkeypatch.setattr(srv, "_current_llm_cfg", fake_cfg)
+
+    result = await srv.session_human_review(
+        "sid",
+        srv.HumanReviewSubmit(
+            client_event_id="ce-resolve-1", actual_knowledge_ack=True,
+            resolutions=[{"file_id": "dataset", "column": "subject_id", "mode": "approve"}],
+        ),
+        principal="reviewer",
+    )
+
+    assert result == {"status": "resuming"}
+    events = db["human_review_events"].docs
+    assert len(events) == 1
+    assert events[0]["request_id"] == request.request_id
+    assert events[0]["client_event_id"] == "ce-resolve-1"
+    assert events[0]["result"] == {"status": "resuming"}
+    assert db["human_review_requests"].docs[0]["state"] == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_client_event_id_is_idempotent_while_the_request_stays_open(monkeypatch):
+    """D13 step 3: while a durable HumanReviewRequest is still open (a
+    defer-only round resolves nothing, so it stays open across
+    submissions), a resubmission under the same client_event_id and body
+    is answered from the stored result rather than reprocessed; the same
+    key with a different body is 409, not silently accepted as a second
+    event."""
+    import server as srv
+    from fastapi import HTTPException
+    from phi_core.control.records import HumanReviewRequest
+
+    db = _ConditionalStubDB({
+        "id": "sid",
+        "owner": "reviewer",
+        "intake_status": "ready",
+        "status": "awaiting_human_review",
+        "_pipeline_run_id": "run-open",
+        "files": [{"file_id": "dataset", "kind": "dataset", "stored_path": "/tmp/dataset.csv", "columns": ["research_flag"]}],
+        "agent_decisions": [{
+            "file_id": "dataset",
+            "column": "research_flag",
+            "action": "human_review",
+            "suggested_action": "drop",
+            "suggested_reason": "direct identifier",
+        }],
+        "dataset_file_downloads": [{"file_id": "dataset"}],
+    })
+    request = HumanReviewRequest(run_id="run-open", session_id="sid", workflow_version="wf/1",
+                                 task_id="", node="human_review_decisions")
+    db["human_review_requests"].docs.append(request.model_dump())
+
+    def _defer_body():
+        return srv.HumanReviewSubmit(
+            client_event_id="ce-defer-idem", actual_knowledge_ack=False,
+            resolutions=[{"file_id": "dataset", "column": "research_flag", "mode": "defer"}],
+        )
+
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+
+    first = await srv.session_human_review("sid", _defer_body(), principal="reviewer")
+    assert first == {"status": "still_awaiting", "unresolved": 1}
+    assert len(db["human_review_events"].docs) == 1
+    assert db["human_review_requests"].docs[0]["state"] == "open"
+
+    # Same key, same body: answered from the stored result, not reprocessed.
+    replay = await srv.session_human_review("sid", _defer_body(), principal="reviewer")
+    assert replay == {"status": "still_awaiting", "unresolved": 1}
+    assert len(db["human_review_events"].docs) == 1
+
+    # Same key, different body: rejected, not silently accepted as a new event.
+    different_body = srv.HumanReviewSubmit(
+        client_event_id="ce-defer-idem", actual_knowledge_ack=True,
+        resolutions=[{"file_id": "dataset", "column": "subject_id", "mode": "approve"}],
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        await srv.session_human_review("sid", different_body, principal="reviewer")
+    assert excinfo.value.status_code == 409
+    assert len(db["human_review_events"].docs) == 1
+
 
 @pytest.mark.asyncio
 async def test_comment_resolution_never_auto_applies_regardless_of_confidence(monkeypatch):
@@ -563,7 +680,7 @@ async def test_comment_resolution_never_auto_applies_regardless_of_confidence(mo
     response = await srv.session_human_review(
         "sid",
         srv.HumanReviewSubmit(
-            reviewer="reviewer",
+            client_event_id="ce-comment-round",
             actual_knowledge_ack=True,
             resolutions=[{
                 "file_id": "dataset",
@@ -588,7 +705,7 @@ async def test_comment_resolution_never_auto_applies_regardless_of_confidence(mo
     response2 = await srv.session_human_review(
         "sid",
         srv.HumanReviewSubmit(
-            reviewer="reviewer",
+            client_event_id="ce-approve-round",
             actual_knowledge_ack=True,
             resolutions=[{"file_id": "dataset", "column": "research_flag", "mode": "approve"}],
         ),
@@ -738,7 +855,7 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
     assert (await srv.session_human_review(
         "sid",
         srv.HumanReviewSubmit(
-            reviewer="reviewer",
+            client_event_id="ce-cancel-check",
             actual_knowledge_ack=True,
             resolutions=[{
                 "file_id": "dataset",
@@ -789,7 +906,7 @@ async def test_stale_unresolved_human_review_cannot_overwrite_claimed_tail(monke
         await srv.session_human_review(
             "sid",
             srv.HumanReviewSubmit(
-                reviewer="reviewer",
+                client_event_id="ce-stale-tail",
                 actual_knowledge_ack=True,
                 resolutions=[],
             ),

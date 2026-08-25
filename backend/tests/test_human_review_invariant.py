@@ -197,6 +197,7 @@ def test_human_review_captures_session_review_offline(monkeypatch):
             session["id"],
             server.HumanReviewSubmit(
                 resolutions=[{"file_id": "file-1", "column": "review_target", "mode": "defer"}],
+                client_event_id="ce-defer-1",
                 comment="Needs more review.",
                 actual_knowledge_ack=True,
             ),

@@ -126,7 +126,7 @@ test('requires explicit confirmation before a pending comment interpretation can
       '/api/sessions/session-1/human-review',
       expect.objectContaining({
         resolutions: [{ file_id: 'dataset-1', column: 'patient_identifier', mode: 'approve', comment: '' }],
-        reviewer: 'reviewer-1',
+        client_event_id: expect.any(String),
       }),
     );
   });

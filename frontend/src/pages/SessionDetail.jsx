@@ -820,7 +820,7 @@ export default function SessionDetail() {
     setBusy(true);
     try {
       const r = await axios.post(`${API}/sessions/${sid}/human-review`, {
-        resolutions: items, reviewer: reviewer.trim(), comment: reviewComment,
+        resolutions: items, client_event_id: crypto.randomUUID(), comment: reviewComment,
         actual_knowledge_ack: anyResolution,
       });
       toast.success(`Review submitted (${r.data.status})`);
