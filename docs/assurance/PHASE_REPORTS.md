@@ -191,3 +191,44 @@
 - `decision_version` is stamped `0` on every `GateResult`: nothing yet opens a `WorkflowRun` for a session, so `_next_decision_version`'s CAS increment has no durable counter to key off. Phase 4/5's `SuperOrchestrator`/`RunStore.open_run` wiring closes this gap.
 - Publish Guard and `bundle.py` still read a raw, suffix-bearing filesystem path (Executor's hard-link alias) rather than the artifact registry directly; tracked in `docs/adr/0004-artifact-registry.md`.
 - `Manager.escalate_to_human_review` still writes directly to a database handle rather than routing through a workflow authority. See `F-ORCH-001` and the Phase 4 row in `docs/assurance/RISK_REGISTER.md`.
+
+## Phase 4 (in progress): durable task service, workflow node table, worker loop
+
+Steps 1-3 of the plan's ten-step Phase 4 are landed and verified; steps 4-10 (resume wired onto the node table with `_run_tail` deleted, recursive cancellation, rerun admission validation, session-deletion coordination, lease reconciliation replacing the orphan sweep, the remaining fences, and the boundary kill tests) are not yet started. This entry checkpoints the verified infrastructure before that larger, higher-risk migration.
+
+### 1. Verified code-backed baseline relevant to this phase, with `path:line` anchors.
+
+- `server.py`'s `session_handle` (`~1882-2053`) and `session_human_review`'s `_run_tail` (`~2470-2738`) each launch a bare `asyncio.create_task(worker())` closure with no persisted lease or fence; a process restart mid-run is recovered only by the 900-second `_startup_maintenance` orphan sweep. `control/tasks.py` had no `TaskService`; `control/workflow.py` did not exist.
+
+### 2. Files and symbols changed.
+
+- New: `backend/phi_core/control/tasks.py::TaskService` (`enqueue`, `claim`, `heartbeat`, `complete`, `fail`, `cancel_subtree`, `reconcile_leases`), `backend/phi_core/control/workflow.py` (D9 node table, `TRANSITIONS`, `next_node`, `Checkpoint`, `resume_node`), `backend/phi_core/control/worker.py` (`Worker`, `drain_outbox`, lease reconciler).
+- `backend/server.py`: `_startup_maintenance` starts the three new background loops; no route changed.
+- `backend/phi_core/publish_guard.py`: `_is_opaque_generated_token` exemption (see finding below); unrelated to the durability work but found and fixed during this checkpoint's full-suite verification.
+- `docs/adr/0001-workflow-engine.md`, `docs/adr/0003-task-and-lease-model.md`.
+- Tests: `test_control_tasks.py`, `test_control_workflow.py`, `test_control_worker.py`.
+
+### 3. Threat or failure mode addressed, naming the `F-*` finding.
+
+- `F-DUR-001` (partial): the CAS/fence primitives a durable, restart-safe task lifecycle needs now exist and are independently tested (concurrent-claim race, stale-fence rejection, lease-expiry reconciliation). No production route uses them yet, so the finding is not closed.
+
+### 4. Data and authority boundaries before and after.
+
+- Unchanged in production: `session_handle`/`session_human_review` still run pipeline work exactly as before. The new `TaskService`/`Worker`/`workflow.py` are additive infrastructure with no caller in this phase's traffic path.
+
+### 5. Migration and rollback behaviour, cross-referenced to `docs/assurance/MIGRATION.md`.
+
+- No schema migration; `work_items` CAS fields and the three new background loops are additive and inert (the loops start with an empty `OUTBOX_HANDLERS` registry and nothing enqueues a `work_items` row of a type any handler recognizes). Rollback is reverting this commit.
+
+### 6. Tests added and the exact commands run.
+
+- `test_control_tasks.py`, `test_control_workflow.py`, `test_control_worker.py`, plus a `test_publish_guard.py` regression test for the flake fix below. `ruff check backend`; `cd backend && pytest tests -q -rs`; `pytest tests/test_full_path.py -q` repeated 25 times against a fresh `DATA_DIR` to confirm the flake is gone.
+
+### 7. Exact results, including every failure and every skip with its reason.
+
+- Ruff: clean. Backend suite: `717 passed, 8 skipped` in 117 seconds. Skips unchanged from prior phases.
+- A genuine, reproducible flake was found during full-suite verification and is unrelated to this phase's own durability work: `test_full_path.py::test_planted_corpus_full_path_uses_real_safety_components` failed roughly one run in three. Root cause: `PseudonymRegistry.get`/`.digest` (`reasoning.py`) emit short, one-way hex tokens (`P` + 8 hex chars, or 16 bare hex chars) derived from a random per-study salt; Presidio's PERSON NER occasionally misclassified one of these as a name, and since the token's exact content varies run to run, the false positive was non-deterministic. Fixed by exempting a cell whose entire stripped content matches either token shape from `publish_guard.py`'s per-cell name scan (`_scan_csv_names`, `_scan_xlsx`) before it reaches Presidio: the shape is generated entirely by this codebase's own one-way cryptographic output and can never contain a real name, so skipping it is not a detection weakening. Verified with 25 consecutive clean runs after the fix (0 failures, versus roughly 5 failures in the prior 15-run sample) and two dedicated regression tests (`test_scan_names_exempts_pseudonymize_and_hash_token_shapes`, `test_is_opaque_generated_token_matches_registry_shapes_only`).
+
+### 8. Remaining risk and deferred work, cross-referenced to `docs/assurance/RISK_REGISTER.md`.
+
+- Phase 4 steps 4-10 remain: `_run_tail` still duplicates the initial pipeline path; recursive cancellation, rerun admission validation, session-deletion coordination, the orphan-sweep-to-lease-reconciliation swap, `HumanReviewService`/`TraceEventStore`/`ArtifactService.certify_publication` fencing, and the boundary kill tests are all still open. See `F-DUR-001`, `F-ORCH-001`, and the Phase 4 row in `docs/assurance/RISK_REGISTER.md`.

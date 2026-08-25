@@ -691,6 +691,40 @@ def test_scan_names_does_not_fire_on_ordinary_clinical_text():
     assert findings == []
 
 
+def test_scan_names_exempts_pseudonymize_and_hash_token_shapes(tmp_path: Path):
+    """`PseudonymRegistry.get`/`.digest` (reasoning.py) emit exactly two
+    shapes: `P` + 8 lowercase hex chars, or 16 bare lowercase hex chars.
+    Presidio's NER occasionally misclassified one of these (a real,
+    reproduced flake: ~1/3 of runs on a planted corpus fixture) as a
+    PERSON name, since the token's random-salt-derived content varies
+    run to run and some values happen to cross the confidence threshold.
+    A cell that IS one of these token shapes is skipped entirely --
+    it can never contain a real name, being one-way cryptographic
+    output -- so this must never fire regardless of Presidio's verdict."""
+    from phi_core.publish_guard import _is_opaque_generated_token
+    for token in ("Pffe7e4a6", "P00000000", "0123456789abcdef", "abcdef0123456789"):
+        assert _is_opaque_generated_token(token) is True, token
+    p = _write_csv(tmp_path, "pseudonymized.csv", [
+        ["usubjid", "notes"],
+        ["Pffe7e4a6", "routine visit"],
+        ["P00000000", "seen by Dr. Robert Chen"],  # notes column still scanned normally
+    ])
+    r = scan_export_file("f1", p)
+    assert r.status == "blocked"  # the free-text name in `notes` still fires
+    assert len(r.findings) == 1
+    assert r.findings[0]["pattern_id"] == "PRESIDIO_PERSON_NAME"
+
+
+def test_is_opaque_generated_token_matches_registry_shapes_only():
+    from phi_core.publish_guard import _is_opaque_generated_token
+    assert _is_opaque_generated_token("Pffe7e4a6") is True
+    assert _is_opaque_generated_token("0123456789abcdef") is True
+    assert _is_opaque_generated_token(" Pffe7e4a6 ") is True  # whitespace-stripped
+    assert _is_opaque_generated_token("Robert Chen") is False
+    assert _is_opaque_generated_token("Patel") is False
+    assert _is_opaque_generated_token("P1234") is False  # too short to be the real shape
+
+
 def test_xlsx_export_blocks_on_planted_name(tmp_path: Path):
     """The name scan is wired into the XLSX branch too, not only CSV."""
     import uuid

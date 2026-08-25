@@ -1837,8 +1837,10 @@ async def _purge_settled_sessions_loop():
 @app.on_event("startup")
 async def _startup_maintenance():
     """Idempotent boot-time maintenance: indexes, orphaned-run reconciliation,
-    and the retention purge loop. Never raises -- a down Mongo at boot
-    should not crash the process; the health check already reports that."""
+    the retention purge loop, and the durable control-plane loops (worker
+    claim-and-lease dispatch, outbox relay, lease reconciler). Never raises --
+    a down Mongo at boot should not crash the process; the health check
+    already reports that."""
     try:
         db = get_db()
         await db.sessions.create_index("id", unique=True)
@@ -1875,6 +1877,26 @@ async def _startup_maintenance():
     except Exception:  # pragma: no cover - infrastructure dependent
         pass
     asyncio.create_task(_purge_settled_sessions_loop())
+
+    # Durable control-plane loops (D2/D3/D9): the claim-and-lease worker,
+    # the outbox relay, and the lease reconciler. Constructing these needs
+    # no Mongo round trip (MongoControlStore wraps the lazy Motor client), so
+    # they start unconditionally here, the same way the purge loop above
+    # does, even when the index/reconciliation block above failed against a
+    # down Mongo at boot. Each loop only logs and continues on its own
+    # iteration failures -- see phi_core/control/worker.py.
+    from phi_core.control.policy import CapabilityPolicy
+    from phi_core.control.store import MongoControlStore
+    from phi_core.control.tasks import TaskService
+    from phi_core.control.worker import Worker, drain_outbox_forever, reconcile_forever
+
+    control_store = MongoControlStore(get_db())
+    control_tasks = TaskService(control_store, CapabilityPolicy(None))
+    asyncio.create_task(
+        Worker(control_store, control_tasks, worker_id=f"worker:{uuid.uuid4().hex[:12]}").run_forever()
+    )
+    asyncio.create_task(drain_outbox_forever(control_store))
+    asyncio.create_task(reconcile_forever(control_tasks))
 
 
 # --- Agent-driven PHI handling -------------------------------------------

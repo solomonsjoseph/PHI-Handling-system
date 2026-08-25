@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -321,6 +322,24 @@ def _scan_csv_text(
     return findings
 
 
+# Executor's own `hash`/`pseudonymize` actions (`reasoning.py::PseudonymRegistry.digest`/
+# `.get`) emit exactly these two shapes: 16 lowercase hex characters (``hash``)
+# or ``P`` followed by 8 lowercase hex characters (``pseudonymize``). Both are
+# one-way, keyed, cryptographic output that can never reproduce or contain the
+# original value -- Presidio's probabilistic NER occasionally misclassifies a
+# few of these as a PERSON name (non-deterministic across otherwise-identical
+# runs, since the token itself is derived from a random per-study salt), which
+# would make an already-redacted, provably-safe export block for no PHI reason.
+# A cell whose *entire* stripped content is one of these shapes is skipped
+# before the name scan; this never exempts real free text, which is never a
+# bare lowercase hex token with no separators.
+_OPAQUE_GENERATED_TOKEN_RE = re.compile(r"^P?[0-9a-f]{8,16}$")
+
+
+def _is_opaque_generated_token(cell: str) -> bool:
+    return bool(_OPAQUE_GENERATED_TOKEN_RE.match(cell.strip()))
+
+
 def _scan_csv_names(text: str, jurisdiction: str) -> list[Finding]:
     """Run :func:`scan_names` per cell rather than over the whole line or
     file: a name detector's context window can otherwise bleed across
@@ -334,7 +353,7 @@ def _scan_csv_names(text: str, jurisdiction: str) -> list[Finding]:
         if lineno == 1:
             continue
         for cell in row:
-            if not cell or not cell.strip():
+            if not cell or not cell.strip() or _is_opaque_generated_token(cell):
                 continue
             for f in scan_names(cell, jurisdiction):
                 f.line = lineno
@@ -400,7 +419,7 @@ def _scan_xlsx(
                     # Per-cell name scan, same rationale as `_scan_csv_names`:
                     # avoid bleeding a name detector's context across an
                     # entire tab-joined row.
-                    if cell.strip():
+                    if cell.strip() and not _is_opaque_generated_token(cell):
                         for f in scan_names(cell, jurisdiction):
                             f.line = lineno
                             findings.append(f)
