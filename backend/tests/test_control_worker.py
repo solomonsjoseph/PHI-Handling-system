@@ -408,6 +408,11 @@ async def test_reconcile_forever_survives_a_reconcile_leases_failure_on_the_firs
 
 @pytest.mark.asyncio
 async def test_startup_maintenance_starts_all_three_control_loops_exactly_once(monkeypatch) -> None:
+    """Phase 4 step 2/4: `_startup_maintenance` starts
+    `_MAX_CONCURRENT_PIPELINES` `Worker` instances, not one -- a single
+    worker claims and executes strictly one task at a time, so matching
+    the route-level `_admit_pipeline_run` concurrency cap needs that many
+    workers polling the same `work_items` collection."""
     import phi_core.control.worker as worker_module
     import server
 
@@ -444,10 +449,11 @@ async def test_startup_maintenance_starts_all_three_control_loops_exactly_once(m
     await server._startup_maintenance()
     await asyncio.sleep(0)  # let the newly-scheduled tasks run their one-shot bodies
 
-    assert calls == {"worker": 1, "outbox": 1, "reconcile": 1}
-    # Exactly four background tasks: the pre-existing purge loop plus the
-    # three new control-plane loops -- none of them started more than once.
-    assert len(created_tasks) == 4
+    worker_count = server._MAX_CONCURRENT_PIPELINES
+    assert calls == {"worker": worker_count, "outbox": 1, "reconcile": 1}
+    # The pre-existing purge loop, `worker_count` `Worker` instances, the
+    # outbox relay, and the lease reconciler -- none started more than once.
+    assert len(created_tasks) == 1 + worker_count + 2
 
     for created_task in created_tasks:
         created_task.cancel()

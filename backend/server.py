@@ -411,6 +411,267 @@ async def _validate_rerun_inputs(files: list[dict]) -> list[str]:
     return stale
 
 
+async def _handle_pipeline_run(store, work_item) -> dict[str, Any]:
+    """Phase 4 step 2/4: the ``pipeline_run`` ``TaskService`` handler.
+
+    Runs a fresh pipeline for ``work_item.session_id``/``work_item.run_id``,
+    claimed and dispatched by one of the ``Worker`` instances
+    ``_startup_maintenance`` starts. Replaces ``session_handle``'s former
+    per-request ``asyncio.create_task(worker())`` closure: the route now
+    only validates, claims the session, and enqueues; this function is
+    where the actual work -- and every outcome the session document must
+    end up recording -- happens. ``store`` (the ``ControlStore``) is
+    unused here; the session document lives in the plain Motor ``db``.
+    """
+    sid = work_item.session_id
+    run_id = work_item.run_id
+    run_filter = {"id": sid, "_pipeline_run_id": run_id}
+    db = get_db()
+    session = await db.sessions.find_one(run_filter)
+    if session is None:
+        # The claim that enqueued this task has since been superseded
+        # (a later run claimed the session, or it was deleted/tombstoned)
+        # -- nothing to do, and nothing to fail; not this task's session
+        # anymore.
+        return {"status": "superseded"}
+    cfg = await _current_llm_cfg()
+
+    async def emit_msg(msg: AgentMessage) -> None:
+        ev = ProgressEvent(
+            phase=f"agent:{msg.agent}:{msg.direction}",
+            message=f"{msg.agent} {msg.phase}",
+            payload={"agent": msg.agent, "phase_key": msg.phase, "direction": msg.direction,
+                     "duration_ms": msg.duration_ms, "status_text": msg.status_text,
+                     "parent_id": msg.parent_id, "id": msg.id},
+        )
+        await _emit(sid, ev, run_id=run_id)
+
+    async def on_phase(phase: str, payload: dict):
+        await _emit(sid, ProgressEvent(phase=f"agent_phase:{phase}", message=phase, payload=payload), run_id=run_id)
+
+    try:
+        # Populate dataset headers (LLM never sees rows). Persist onto session before pipeline runs.
+        from phi_core.file_readers import read_csv_columns, read_parquet_columns, read_xlsx_columns
+        files_hydrated = []
+        for f in session.get("files", []):
+            if f.get("kind") == "dataset" and not f.get("columns"):
+                p = Path(f["stored_path"])
+                ext = f.get("subtype", "").lower()
+                try:
+                    if ext in ("csv", "tsv"):
+                        cols, rows = read_csv_columns(p)
+                    elif ext in ("xlsx", "xls"):
+                        cols, rows = read_xlsx_columns(p)
+                    elif ext == "parquet":
+                        cols, rows = read_parquet_columns(p)
+                    else:
+                        cols, rows = [], 0
+                    f["columns"] = cols
+                    f["row_count"] = rows
+                except Exception as e:
+                    await _emit(sid, ProgressEvent(phase="reading", message=f"header extract failed for {f['file_id']}: {e}"), run_id=run_id)
+            files_hydrated.append(f)
+        session["files"] = files_hydrated
+        await db.sessions.update_one(run_filter, {"$set": {"files": files_hydrated}})
+
+        # 4.21: refuse an oversized study rather than sending an
+        # unbounded Judge prompt / decision list.
+        _enforce_column_cap(files_hydrated)
+
+        # HANG PROTECTION: hard 15-minute wall-clock ceiling. If the
+        # pipeline burns beyond this the worker is cancelled with a
+        # clear "timeout" reason -- no orphaned tasks, no infinite
+        # loading screens. 15 min is 5x the observed 190 s happy path
+        # and 2x the worst historical case (~340 s + Herald 90 s x2).
+        result = await asyncio.wait_for(
+            run_agent_pipeline(session, db, cfg, emit_msg, on_phase, run_id=run_id),
+            timeout=900,
+        )
+        await _emit(sid, ProgressEvent(phase="complete", message=f"Pipeline done: {result.get('status')}", percent=100.0), run_id=run_id)
+        return {"status": result.get("status")}
+    except asyncio.TimeoutError:
+        await db.sessions.update_one(
+            run_filter,
+            {"$set": {"status": "failed",
+                      "error": "pipeline exceeded 15-minute wall-clock ceiling"}},
+        )
+        cleanup_session_unpacked(sid)
+        await _emit(sid, ProgressEvent(
+            phase="failed",
+            message="Pipeline hit the 15-minute wall-clock ceiling. "
+                    "This usually means an LLM call is stuck; try again "
+                    "or switch model in Settings.",
+            payload={"reason": "wall_clock_ceiling_exceeded"},
+        ), run_id=run_id)
+        return {"status": "failed", "reason": "wall_clock_ceiling_exceeded"}
+    except Exception as e:
+        from phi_core.agents.orchestrator import PipelineCancelled
+        if isinstance(e, PipelineCancelled):
+            await db.sessions.update_one(
+                run_filter,
+                {"$set": {"status": "cancelled",
+                          "cancelled_at": datetime.now(timezone.utc).isoformat()}},
+            )
+            cleanup_session_unpacked(sid)
+            await _emit(sid, ProgressEvent(
+                phase="cancelled",
+                message="Pipeline cancelled by operator.",
+                payload={"reason": "operator_cancel"},
+            ), run_id=run_id)
+            return {"status": "cancelled"}
+        await _fail_session_correlated(db, sid, run_filter, e, run_id=run_id)
+        return {"status": "failed"}
+    finally:
+        _release_pipeline_run()
+        await _emit(sid, ProgressEvent(phase="__end__", message="stream end"), run_id=run_id)
+
+
+async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
+    """Phase 4 step 2/4: the ``pipeline_resume`` ``TaskService`` handler.
+
+    Runs ``phi_core.agents.orchestrator.execute_decisions`` -- the same
+    D9 ``execute`` node a fresh run reaches, per ``docs/adr/0001-
+    workflow-engine.md`` -- for a resumed human-review round. Every
+    decision, ``pending_review``, and ``session_review`` field this needs
+    was already persisted onto the session document by
+    ``session_human_review`` before enqueuing this task; nothing is
+    threaded through ``work_item.input_ref``.
+    """
+    from phi_core.agents import orchestrator
+    from phi_core.agents.manager import Manager
+    from phi_core.control.activation import ActivationFactory
+
+    sid = work_item.session_id
+    run_id = work_item.run_id
+    run_filter = {"id": sid, "_pipeline_run_id": run_id}
+    db = get_db()
+    session = await db.sessions.find_one(run_filter)
+    if session is None:
+        return {"status": "superseded"}
+    cfg = await _current_llm_cfg()
+    decisions = session.get("agent_decisions") or []
+    pending_review = session.get("pending_review") or []
+    session_review_history = session.get("session_review") or []
+    dictionary_by_column = {c.get("name"): c.get("description", "")
+                            for c in (session.get("agent_specialists") or {}).get("lexicon", {}).get("columns", [])
+                            if c.get("name")}
+    files = session.get("files", [])
+
+    async def emit_msg(msg: AgentMessage) -> None:
+        ev = ProgressEvent(
+            phase=f"agent:{msg.agent}:{msg.direction}",
+            message=f"{msg.agent} {msg.phase}",
+            payload={"agent": msg.agent, "phase_key": msg.phase, "direction": msg.direction,
+                     "duration_ms": msg.duration_ms, "status_text": msg.status_text,
+                     "parent_id": msg.parent_id, "id": msg.id},
+        )
+        await _emit(sid, ev, run_id=run_id)
+
+    async def on_phase(phase: str, payload: dict):
+        await _emit(sid, ProgressEvent(phase=f"agent_phase:{phase}", message=phase, payload=payload), run_id=run_id)
+
+    phase_timings: dict[str, dict[str, float]] = {}
+    last_phase: dict[str, str | float | None] = {"key": None, "t0": 0.0}
+    run_started = time.perf_counter()
+    manager_box: dict[str, "Manager | None"] = {"value": None}
+
+    async def timed_on_phase(phase: str, payload: dict) -> None:
+        now = time.perf_counter()
+        previous = last_phase["key"]
+        if previous and previous != phase:
+            timing = phase_timings.setdefault(
+                str(previous), {"start_s": float(last_phase["t0"]) - run_started},
+            )
+            timing["end_s"] = now - run_started
+            timing["duration_ms"] = (now - float(last_phase["t0"])) * 1000
+        phase_timings.setdefault(phase, {"start_s": now - run_started})
+        last_phase["key"] = phase
+        last_phase["t0"] = now
+        if manager_box["value"] is not None:
+            await manager_box["value"].note_phase(phase, now - run_started)
+        await on_phase(phase, payload)
+
+    async def close_last_phase() -> None:
+        previous = last_phase["key"]
+        if not previous:
+            return
+        now = time.perf_counter()
+        timing = phase_timings.setdefault(
+            str(previous), {"start_s": float(last_phase["t0"]) - run_started},
+        )
+        timing.setdefault("end_s", now - run_started)
+        timing.setdefault("duration_ms", (now - float(last_phase["t0"])) * 1000)
+
+    _factory = ActivationFactory(db, cfg)
+
+    async def _actx(agent: str):
+        return await _factory.activate(
+            session_id=sid, run_id=run_id, agent=agent, emit=emit_msg,
+            manager=manager_box["value"],
+        )
+
+    async def _run_resume() -> dict[str, Any]:
+        manager = Manager(await _actx("Manager"), db=db)
+        manager_box["value"] = manager
+        await manager.run(
+            roster=["Executor", "Operator", "Reviewer", "Auditor", "Scout", "Ledger", "Herald"],
+            phase_plan=["executor", "operator", "reviewer", "publish_guard",
+                        "auditor_scout", "ledger", "herald"],
+        )
+        resolved_decisions = [d for d in decisions if d.get("action") != "human_review"]
+        scrubbed_decisions = [scrub_decision(d) for d in resolved_decisions]
+        omit_by_file: dict[str, set[str]] = {}
+        for entry in pending_review:
+            omit_by_file.setdefault(entry["file_id"], set()).add(entry["column"])
+        return await orchestrator.execute_decisions(
+            db=db, sid=sid, session=session, session_filter=run_filter,
+            files=files, decisions=scrubbed_decisions,
+            statute=session.get("agent_statute"), praxis_methods=session.get("agent_praxis"),
+            dictionary_by_column=dictionary_by_column,
+            make_ctx=_actx, manager=manager, on_phase=timed_on_phase,
+            close_last_phase=close_last_phase, phase_timings=phase_timings,
+            run_started=run_started, omit_by_file=omit_by_file,
+            extra_completion_fields={
+                "session_review": session_review_history,
+                "pending_review": pending_review,
+                "human_review_required": bool(pending_review),
+            },
+        )
+
+    try:
+        result = await asyncio.wait_for(_run_resume(), timeout=900)
+        await _emit(sid, ProgressEvent(
+            phase="complete", message=f"Resume done: {result.get('status')}", percent=100.0,
+        ), run_id=run_id)
+        return {"status": result.get("status")}
+    except asyncio.TimeoutError:
+        await db.sessions.update_one(run_filter, {"$set": {
+            "status": "failed",
+            "error": "resume worker exceeded 15-minute wall-clock ceiling",
+        }})
+        cleanup_session_unpacked(sid)
+        await _emit(sid, ProgressEvent(phase="failed", message="Resume hit the 15-minute wall-clock ceiling."), run_id=run_id)
+        return {"status": "failed", "reason": "wall_clock_ceiling_exceeded"}
+    except Exception as e:
+        from phi_core.agents.orchestrator import PipelineCancelled
+        if isinstance(e, PipelineCancelled):
+            await db.sessions.update_one(run_filter, {"$set": {
+                "status": "cancelled",
+                "cancelled_at": datetime.now(timezone.utc).isoformat(),
+            }})
+            cleanup_session_unpacked(sid)
+            await _emit(sid, ProgressEvent(
+                phase="cancelled", message="Resume cancelled by operator.",
+                payload={"reason": "operator_cancel"},
+            ), run_id=run_id)
+            return {"status": "cancelled"}
+        await _fail_session_correlated(db, sid, run_filter, e, run_id=run_id)
+        return {"status": "failed"}
+    finally:
+        _release_pipeline_run()
+        await _emit(sid, ProgressEvent(phase="__end__", message="stream end"), run_id=run_id)
+
+
 # --- Health ----------------------------------------------------------------
 
 @app.get("/api/health")
@@ -1955,9 +2216,24 @@ async def _startup_maintenance():
 
     control_store = MongoControlStore(get_db())
     control_tasks = TaskService(control_store, CapabilityPolicy(None))
-    asyncio.create_task(
-        Worker(control_store, control_tasks, worker_id=f"worker:{uuid.uuid4().hex[:12]}").run_forever()
-    )
+    # Phase 4 step 2/4: `_MAX_CONCURRENT_PIPELINES` `Worker` instances, not
+    # one -- a single worker claims and executes tasks strictly one at a
+    # time, so matching the concurrency the route-level `_admit_pipeline_run`
+    # cap already promises (and the immediate 429 it returns past that cap)
+    # requires exactly that many workers polling the same `work_items`
+    # collection. `TaskService.claim`'s CAS makes two workers racing the
+    # same task safe regardless of worker count.
+    pipeline_handlers = {
+        "pipeline_run": _handle_pipeline_run,
+        "pipeline_resume": _handle_pipeline_resume,
+    }
+    for _ in range(_MAX_CONCURRENT_PIPELINES):
+        asyncio.create_task(
+            Worker(
+                control_store, control_tasks, worker_id=f"worker:{uuid.uuid4().hex[:12]}",
+                handlers=pipeline_handlers,
+            ).run_forever()
+        )
     asyncio.create_task(drain_outbox_forever(control_store))
     asyncio.create_task(reconcile_forever(control_tasks))
 
@@ -2056,98 +2332,18 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
     await db.sessions.update_one({"id": sid, "_pipeline_run_id": run_id}, {"$set": {"files": session.get("files") or []}})
     await db.workflow_runs.update_one({"run_id": run_id}, {"$set": {"opaque_map": workflow_run.opaque_map}})
 
-    async def emit_msg(msg: AgentMessage) -> None:
-        # Persist to session progress in a compact form for the SSE consumer.
-        ev = ProgressEvent(
-            phase=f"agent:{msg.agent}:{msg.direction}",
-            message=f"{msg.agent} {msg.phase}",
-            payload={"agent": msg.agent, "phase_key": msg.phase, "direction": msg.direction,
-                     "duration_ms": msg.duration_ms, "status_text": msg.status_text,
-                     "parent_id": msg.parent_id, "id": msg.id},
-        )
-        await _emit(sid, ev, run_id=run_id)
+    # Phase 4 step 2/4: submit and return. `_handle_pipeline_run` (one of
+    # the `Worker` instances `_startup_maintenance` started) claims and
+    # executes this task; every SSE progress event, timeout, cancellation,
+    # and completion write it produces is identical to what this route's
+    # own `asyncio.create_task(worker())` closure used to do inline.
+    from phi_core.control.policy import CapabilityPolicy
+    from phi_core.control.tasks import TaskService
 
-    async def on_phase(phase: str, payload: dict):
-        await _emit(sid, ProgressEvent(phase=f"agent_phase:{phase}", message=phase, payload=payload), run_id=run_id)
-
-
-    async def worker():
-        run_filter = {"id": sid, "_pipeline_run_id": run_id}
-        try:
-            # Populate dataset headers (LLM never sees rows). Persist onto session before pipeline runs.
-            from phi_core.file_readers import read_csv_columns, read_parquet_columns, read_xlsx_columns
-            files_hydrated = []
-            for f in session.get("files", []):
-                if f.get("kind") == "dataset" and not f.get("columns"):
-                    p = Path(f["stored_path"])
-                    ext = f.get("subtype", "").lower()
-                    try:
-                        if ext in ("csv", "tsv"):
-                            cols, rows = read_csv_columns(p)
-                        elif ext in ("xlsx", "xls"):
-                            cols, rows = read_xlsx_columns(p)
-                        elif ext == "parquet":
-                            cols, rows = read_parquet_columns(p)
-                        else:
-                            cols, rows = [], 0
-                        f["columns"] = cols
-                        f["row_count"] = rows
-                    except Exception as e:
-                        await _emit(sid, ProgressEvent(phase="reading", message=f"header extract failed for {f['file_id']}: {e}"), run_id=run_id)
-                files_hydrated.append(f)
-            session["files"] = files_hydrated
-            await db.sessions.update_one(run_filter, {"$set": {"files": files_hydrated}})
-
-            # 4.21: refuse an oversized study rather than sending an
-            # unbounded Judge prompt / decision list.
-            _enforce_column_cap(files_hydrated)
-
-            # HANG PROTECTION: hard 15-minute wall-clock ceiling. If the
-            # pipeline burns beyond this the worker is cancelled with a
-            # clear "timeout" reason -- no orphaned tasks, no infinite
-            # loading screens. 15 min is 5x the observed 190 s happy path
-            # and 2x the worst historical case (~340 s + Herald 90 s x2).
-            result = await asyncio.wait_for(
-                run_agent_pipeline(session, db, cfg, emit_msg, on_phase, run_id=run_id),
-                timeout=900,
-            )
-            await _emit(sid, ProgressEvent(phase="complete", message=f"Pipeline done: {result.get('status')}", percent=100.0), run_id=run_id)
-        except asyncio.TimeoutError:
-            await db.sessions.update_one(
-                run_filter,
-                {"$set": {"status": "failed",
-                          "error": "pipeline exceeded 15-minute wall-clock ceiling"}},
-            )
-            cleanup_session_unpacked(sid)
-            await _emit(sid, ProgressEvent(
-                phase="failed",
-                message="Pipeline hit the 15-minute wall-clock ceiling. "
-                        "This usually means an LLM call is stuck; try again "
-                        "or switch model in Settings.",
-                payload={"reason": "wall_clock_ceiling_exceeded"},
-            ), run_id=run_id)
-        except Exception as e:
-            # Import here to keep this endpoint's cold-start light.
-            from phi_core.agents.orchestrator import PipelineCancelled
-            if isinstance(e, PipelineCancelled):
-                await db.sessions.update_one(
-                    run_filter,
-                    {"$set": {"status": "cancelled",
-                              "cancelled_at": datetime.now(timezone.utc).isoformat()}},
-                )
-                cleanup_session_unpacked(sid)
-                await _emit(sid, ProgressEvent(
-                    phase="cancelled",
-                    message="Pipeline cancelled by operator.",
-                    payload={"reason": "operator_cancel"},
-                ), run_id=run_id)
-            else:
-                await _fail_session_correlated(db, sid, run_filter, e, run_id=run_id)
-        finally:
-            _release_pipeline_run()
-            await _emit(sid, ProgressEvent(phase="__end__", message="stream end"), run_id=run_id)
-
-    asyncio.create_task(worker())
+    await TaskService(MongoControlStore(db), CapabilityPolicy(cfg)).enqueue(
+        run_id=run_id, session_id=sid, worker="Pipeline", task_type="pipeline_run",
+        correlation_id=run_id,
+    )
     return {"status": "started", "llm": {"provider": cfg.provider, "model": cfg.model}}
 
 
@@ -2250,7 +2446,6 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     from phi_core.control.context import AgentContext
     from phi_core.control.gates import DecisionGateFailure, run_decision_gates
     from phi_core.control.store import MongoControlStore
-    from phi_core.paths import cleanup_session_unpacked
     from phi_core.security import scrub_persisted_text
 
     reviewer = principal
@@ -2513,7 +2708,6 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             f"human-review update conflicts with active session (status={current.get('status') or 'missing'})",
         )
 
-    files = session.get("files", [])
     cfg = await _current_llm_cfg()
     if not _admit_pipeline_run():
         raise HTTPException(
@@ -2528,6 +2722,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             "status": "anonymizing",
             "agent_decisions": decisions,
             "pending_review": pending_review,
+            "session_review": session_review_history,
             "keep_demotions": keep_demotions,
             "human_review_required": bool(pending_review),
             "_pipeline_run_id": resume_run_id,
@@ -2542,131 +2737,21 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             409,
             f"human-review resume conflicts with active session (status={current.get('status') or 'missing'})",
         )
-    run_filter = {"id": sid, "_pipeline_run_id": resume_run_id}
 
-    async def emit_msg(msg: AgentMessage) -> None:
-        ev = ProgressEvent(
-            phase=f"agent:{msg.agent}:{msg.direction}",
-            message=f"{msg.agent} {msg.phase}",
-            payload={"agent": msg.agent, "phase_key": msg.phase, "direction": msg.direction,
-                     "duration_ms": msg.duration_ms, "status_text": msg.status_text,
-                     "parent_id": msg.parent_id, "id": msg.id},
-        )
-        await _emit(sid, ev, run_id=resume_run_id)
+    # Phase 4 step 2/4: submit and return. `_handle_pipeline_resume` (one
+    # of the `Worker` instances `_startup_maintenance` started) claims and
+    # runs the shared `execute_decisions` tail; every SSE progress event,
+    # timeout, cancellation, and completion write it produces is identical
+    # to what this route's own inline closure used to do. Every field the
+    # handler needs (`agent_decisions`, `pending_review`, `session_review`)
+    # was already persisted onto the session document by the claim above.
+    from phi_core.control.policy import CapabilityPolicy
+    from phi_core.control.tasks import TaskService
 
-    async def on_phase(phase: str, payload: dict):
-        await _emit(sid, ProgressEvent(phase=f"agent_phase:{phase}", message=phase, payload=payload), run_id=resume_run_id)
-
-    async def worker():
-        # D9 resume: the same `execute_decisions` tail
-        # (`phi_core.agents.orchestrator`) a fresh run reaches from
-        # `gate_decisions`'s `proceed` outcome is reached here from
-        # `human_review_decisions`'s `resolved` outcome -- one shared
-        # implementation, not a second copy kept in sync by hand
-        # (Phase 4 step 4; see `docs/adr/0001-workflow-engine.md`).
-        from phi_core.agents import orchestrator
-        from phi_core.agents.manager import Manager
-        from phi_core.control.activation import ActivationFactory
-
-        phase_timings: dict[str, dict[str, float]] = {}
-        last_phase: dict[str, str | float | None] = {"key": None, "t0": 0.0}
-        run_started = time.perf_counter()
-        manager_box: dict[str, "Manager | None"] = {"value": None}
-
-        async def timed_on_phase(phase: str, payload: dict) -> None:
-            now = time.perf_counter()
-            previous = last_phase["key"]
-            if previous and previous != phase:
-                timing = phase_timings.setdefault(
-                    str(previous), {"start_s": float(last_phase["t0"]) - run_started},
-                )
-                timing["end_s"] = now - run_started
-                timing["duration_ms"] = (now - float(last_phase["t0"])) * 1000
-            phase_timings.setdefault(phase, {"start_s": now - run_started})
-            last_phase["key"] = phase
-            last_phase["t0"] = now
-            if manager_box["value"] is not None:
-                await manager_box["value"].note_phase(phase, now - run_started)
-            await on_phase(phase, payload)
-
-        async def close_last_phase() -> None:
-            previous = last_phase["key"]
-            if not previous:
-                return
-            now = time.perf_counter()
-            timing = phase_timings.setdefault(
-                str(previous), {"start_s": float(last_phase["t0"]) - run_started},
-            )
-            timing.setdefault("end_s", now - run_started)
-            timing.setdefault("duration_ms", (now - float(last_phase["t0"])) * 1000)
-
-        _factory = ActivationFactory(db, cfg)
-
-        async def _actx(agent: str):
-            return await _factory.activate(
-                session_id=sid, run_id=resume_run_id, agent=agent, emit=emit_msg,
-                manager=manager_box["value"],
-            )
-
-        async def _run_resume() -> dict[str, Any]:
-            manager = Manager(await _actx("Manager"), db=db)
-            manager_box["value"] = manager
-            await manager.run(
-                roster=["Executor", "Operator", "Reviewer", "Auditor", "Scout", "Ledger", "Herald"],
-                phase_plan=["executor", "operator", "reviewer", "publish_guard",
-                            "auditor_scout", "ledger", "herald"],
-            )
-            resolved_decisions = [d for d in decisions if d.get("action") != "human_review"]
-            scrubbed_decisions = [scrub_decision(d) for d in resolved_decisions]
-            omit_by_file: dict[str, set[str]] = {}
-            for entry in pending_review:
-                omit_by_file.setdefault(entry["file_id"], set()).add(entry["column"])
-            return await orchestrator.execute_decisions(
-                db=db, sid=sid, session=session, session_filter=run_filter,
-                files=files, decisions=scrubbed_decisions,
-                statute=session.get("agent_statute"), praxis_methods=session.get("agent_praxis"),
-                dictionary_by_column=dictionary_by_column,
-                make_ctx=_actx, manager=manager, on_phase=timed_on_phase,
-                close_last_phase=close_last_phase, phase_timings=phase_timings,
-                run_started=run_started, omit_by_file=omit_by_file,
-                extra_completion_fields={
-                    "session_review": session_review_history,
-                    "pending_review": pending_review,
-                    "human_review_required": bool(pending_review),
-                },
-            )
-
-        try:
-            result = await asyncio.wait_for(_run_resume(), timeout=900)
-            await _emit(sid, ProgressEvent(
-                phase="complete", message=f"Resume done: {result.get('status')}", percent=100.0,
-            ), run_id=resume_run_id)
-        except asyncio.TimeoutError:
-            await db.sessions.update_one(run_filter, {"$set": {
-                "status": "failed",
-                "error": "resume worker exceeded 15-minute wall-clock ceiling",
-            }})
-            cleanup_session_unpacked(sid)
-            await _emit(sid, ProgressEvent(phase="failed", message="Resume hit the 15-minute wall-clock ceiling."), run_id=resume_run_id)
-        except Exception as e:
-            from phi_core.agents.orchestrator import PipelineCancelled
-            if isinstance(e, PipelineCancelled):
-                await db.sessions.update_one(run_filter, {"$set": {
-                    "status": "cancelled",
-                    "cancelled_at": datetime.now(timezone.utc).isoformat(),
-                }})
-                cleanup_session_unpacked(sid)
-                await _emit(sid, ProgressEvent(
-                    phase="cancelled", message="Resume cancelled by operator.",
-                    payload={"reason": "operator_cancel"},
-                ), run_id=resume_run_id)
-            else:
-                await _fail_session_correlated(db, sid, run_filter, e, run_id=resume_run_id)
-        finally:
-            _release_pipeline_run()
-            await _emit(sid, ProgressEvent(phase="__end__", message="stream end"), run_id=resume_run_id)
-
-    asyncio.create_task(worker())
+    await TaskService(MongoControlStore(db), CapabilityPolicy(cfg)).enqueue(
+        run_id=resume_run_id, session_id=sid, worker="Pipeline", task_type="pipeline_resume",
+        correlation_id=resume_run_id,
+    )
     return {"status": "resuming"}
 
 

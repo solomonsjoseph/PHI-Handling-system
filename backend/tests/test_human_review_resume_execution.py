@@ -8,7 +8,6 @@ actually awaited to completion anywhere until this file.
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -129,6 +128,8 @@ def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> str:
 async def test_session_human_review_resume_worker_runs_execute_decisions_to_completion(tmp_path, monkeypatch):
     import server as srv
     from phi_core.agents import orchestrator
+    from phi_core.control.records import WorkItem
+    from phi_core.control.store import MongoControlStore
 
     src = tmp_path / "dm.csv"
     sha = _write_csv(src, ["id", "field"], [["1", "x"], ["2", "y"]])
@@ -155,18 +156,6 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
     db = _StubDB(session_doc)
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
-    captured_tasks: list = []
-    real_create_task = asyncio.create_task
-
-    def _capture_create_task(coro, *a, **kw):
-        captured_tasks.append(coro)
-        # Return a real, already-cancelled-safe task the caller can ignore;
-        # the test drives `coro` itself directly below.
-        async def _noop():
-            return None
-        return real_create_task(_noop(), *a, **kw)
-
-    monkeypatch.setattr(srv.asyncio, "create_task", _capture_create_task)
 
     class FakeExecutor:
         def __init__(self, *_a, **_kw):
@@ -240,11 +229,13 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
     )
     resp = await srv.session_human_review("a" * 32, body, "alice")
     assert resp == {"status": "resuming"}
-    assert len(captured_tasks) == 1
+    assert len(db["work_items"].docs) == 1
 
-    # Drive the captured worker() coroutine to completion directly --
-    # `asyncio.create_task` was intercepted above so the real one never ran.
-    await asyncio.wait_for(captured_tasks[0], timeout=30)
+    # `session_human_review` only enqueues now (Phase 4 step 2/4); drive
+    # the enqueued `pipeline_resume` task directly through the same
+    # handler a `Worker` instance would claim and dispatch to.
+    work_item = WorkItem.model_validate(db["work_items"].docs[0])
+    await srv._handle_pipeline_resume(MongoControlStore(db), work_item)
 
     # The final state proves the shared `execute_decisions` tail actually
     # ran: Ledger/Herald outputs landed, status reflects a clean run with
@@ -273,6 +264,8 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
     this extraction shared `omit_by_file` through `execute_decisions`."""
     import server as srv
     from phi_core.agents import orchestrator
+    from phi_core.control.records import WorkItem
+    from phi_core.control.store import MongoControlStore
 
     src = tmp_path / "dm.csv"
     sha = _write_csv(src, ["a", "b"], [["1", "x"], ["2", "y"]])
@@ -299,17 +292,6 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
     }
     db = _StubDB(session_doc)
     monkeypatch.setattr(srv, "get_db", lambda: db)
-
-    captured_tasks: list = []
-    real_create_task = asyncio.create_task
-
-    def _capture_create_task(coro, *a, **kw):
-        captured_tasks.append(coro)
-        async def _noop():
-            return None
-        return real_create_task(_noop(), *a, **kw)
-
-    monkeypatch.setattr(srv.asyncio, "create_task", _capture_create_task)
 
     executor_calls: list[dict] = []
 
@@ -389,7 +371,9 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
     )
     resp = await srv.session_human_review("b" * 32, body, "alice")
     assert resp == {"status": "resuming"}
-    await asyncio.wait_for(captured_tasks[0], timeout=30)
+    assert len(db["work_items"].docs) == 1
+    work_item = WorkItem.model_validate(db["work_items"].docs[0])
+    await srv._handle_pipeline_resume(MongoControlStore(db), work_item)
 
     assert len(executor_calls) == 1
     # Only the resolved column reaches Executor; the deferred one is

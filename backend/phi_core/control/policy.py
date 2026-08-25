@@ -121,6 +121,33 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
         "Operator": _manifest("Operator", purpose="Verify deterministic transformations.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),
         "Reviewer": _manifest("Reviewer", purpose="Review export coverage.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),
         "CorpusResearcher": _manifest("CorpusResearcher", purpose="Research corpus sources.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
+        # The top-level `TaskService`-enqueued unit `session_handle`/
+        # `session_human_review` submit (Phase 4 step 2/4): itself makes no
+        # provider call and activates no grant of its own beyond bookkeeping
+        # -- every real agent activation inside `run_agent_pipeline`/
+        # `execute_decisions` opens its own separate `make_ctx`-issued
+        # grant. `task_types` needs both literals since one manifest
+        # covers a fresh run and a human-review resume alike.
+        "Pipeline": AgentManifest(
+            agent="Pipeline",
+            manifest_version=_MANIFEST_VERSION,
+            purpose="Own the top-level pipeline_run/pipeline_resume TaskService unit.",
+            task_types=frozenset({"pipeline_run", "pipeline_resume"}),
+            accepted_input_classes=frozenset({"public", "internal"}),
+            data_class_ceiling="internal",
+            output_schema="no_provider_output",
+            allowed_tools={},
+            network_domains=frozenset(),
+            allowed_providers=frozenset(),
+            allowed_models=frozenset(),
+            scope=_SESSION_RUN_SCOPE,
+            reads=frozenset(),
+            writes=frozenset(),
+            budget=ResourceBudget(**{**_MANIFEST_MAX_BUDGET.model_dump(), "wall_seconds": 900.0}),
+            allowed_child_task_types=frozenset(),
+            max_depth=3,
+            max_children=8,
+        ),
     }
 )
 

@@ -257,24 +257,19 @@ async def test_handle_claim_revokes_old_exports_before_worker_runs(monkeypatch, 
             "results": [{"file_id": "dataset", "status": "clean"}],
         },
     })
-    scheduled = []
 
     async def fake_cfg():
         return SimpleNamespace(provider="test", model="test")
 
-    def hold_worker(coro):
-        scheduled.append(coro)
-        coro.close()
-
     monkeypatch.setattr(srv, "get_db", lambda: db)
     monkeypatch.setattr(srv, "_current_llm_cfg", fake_cfg)
-    monkeypatch.setattr(srv.asyncio, "create_task", hold_worker)
 
     assert (await srv.session_handle("sid", principal="reviewer"))["status"] == "started"
     assert db.doc["status"] == "classifying"
     assert "guard_report" not in db.doc
     assert "export_paths" not in db.doc
-    assert len(scheduled) == 1
+    assert len(db["work_items"].docs) == 1
+    assert db["work_items"].docs[0]["task_type"] == "pipeline_run"
 
     assert (await srv.session_export("sid", "dataset", principal="reviewer")).status_code == 403
     with pytest.raises(HTTPException) as excinfo:
@@ -295,18 +290,12 @@ async def test_overlapping_handles_claim_only_one_worker(monkeypatch):
         "status": "complete",
         "files": [],
     })
-    scheduled = []
 
     async def fake_cfg():
         return SimpleNamespace(provider="test", model="test")
 
-    def hold_worker(coro):
-        scheduled.append(coro)
-        coro.close()
-
     monkeypatch.setattr(srv, "get_db", lambda: db)
     monkeypatch.setattr(srv, "_current_llm_cfg", fake_cfg)
-    monkeypatch.setattr(srv.asyncio, "create_task", hold_worker)
 
     first, second = await asyncio.gather(
         srv.session_handle("sid", principal="reviewer"),
@@ -319,7 +308,7 @@ async def test_overlapping_handles_claim_only_one_worker(monkeypatch):
     assert responses == [{"status": "started", "llm": {"provider": "test", "model": "test"}}]
     assert len(conflicts) == 1
     assert conflicts[0].status_code == 409
-    assert len(scheduled) == 1
+    assert len(db["work_items"].docs) == 1
 
 
 def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
@@ -485,18 +474,12 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
         }],
         "dataset_file_downloads": [{"file_id": "dataset"}],
     })
-    scheduled = []
 
     async def fake_cfg():
         return SimpleNamespace(provider="test", model="test")
 
-    def hold_worker(coro):
-        scheduled.append(coro)
-        coro.close()
-
     monkeypatch.setattr(srv, "get_db", lambda: db)
     monkeypatch.setattr(srv, "_current_llm_cfg", fake_cfg)
-    monkeypatch.setattr(srv.asyncio, "create_task", hold_worker)
 
     response = await srv.session_human_review(
         "sid",
@@ -515,7 +498,7 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
     assert response == {"status": "resuming"}
     assert db.doc["status"] == "anonymizing"
     assert db.doc["_pipeline_run_id"] != "classification-claim"
-    assert len(scheduled) == 1
+    assert len(db["work_items"].docs) == 1
     with pytest.raises(HTTPException) as excinfo:
         await srv.session_handle("sid", principal="reviewer")
     assert excinfo.value.status_code == 409
@@ -526,7 +509,9 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
     """A resumed tail emits phase events and exposes its measured timings."""
     import server as srv
     from phi_core import paths
-    from phi_core.agents import outward, reasoning
+    from phi_core.agents import orchestrator
+    from phi_core.control.records import WorkItem
+    from phi_core.control.store import MongoControlStore
 
     db = _ConditionalStubDB({
         "id": "sid",
@@ -544,8 +529,6 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
         "dataset_file_downloads": [{"file_id": "dataset"}],
     })
     emitted = []
-    scheduled = []
-    original_create_task = asyncio.create_task
 
     class FakeExecutor:
         def __init__(self, *_a, **_kwargs):
@@ -558,12 +541,32 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
         def __init__(self, *_a, **_kwargs):
             pass
 
+        async def _log(self, *_a, **_kw):
+            return None
+
         async def run(self, **_kwargs):
-            return {"metrics": {}}
+            return {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+
+    class FakeOperator:
+        def __init__(self, *_a, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return {"failed_file_ids": [], "verdicts": []}
+
+    class FakeReviewer:
+        def __init__(self, *_a, **_kwargs):
+            pass
+
+        async def run(self, exports, **_kwargs):
+            return {"exports": exports, "findings": []}
 
     class FakeScout:
         def __init__(self, *_a, **_kwargs):
             pass
+
+        async def _log(self, *_a, **_kw):
+            return None
 
         async def run(self, **_kwargs):
             return {}
@@ -588,20 +591,16 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
     async def fake_emit(_sid, event, **_kwargs):
         emitted.append(event)
 
-    def schedule(coro):
-        task = original_create_task(coro)
-        scheduled.append(task)
-        return task
-
     monkeypatch.setattr(srv, "get_db", lambda: db)
     monkeypatch.setattr(srv, "_current_llm_cfg", fake_cfg)
     monkeypatch.setattr(srv, "_emit", fake_emit)
-    monkeypatch.setattr(srv.asyncio, "create_task", schedule)
-    monkeypatch.setattr(reasoning, "Executor", FakeExecutor)
-    monkeypatch.setattr(reasoning, "Auditor", FakeAuditor)
-    monkeypatch.setattr(outward, "Scout", FakeScout)
-    monkeypatch.setattr(outward, "Ledger", FakeLedger)
-    monkeypatch.setattr(outward, "Herald", FakeHerald)
+    monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
+    monkeypatch.setattr(orchestrator, "Operator", FakeOperator)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
+    monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
+    monkeypatch.setattr(orchestrator, "Scout", FakeScout)
+    monkeypatch.setattr(orchestrator, "Ledger", FakeLedger)
+    monkeypatch.setattr(orchestrator, "Herald", FakeHerald)
     monkeypatch.setattr(paths, "cleanup_session_unpacked", lambda _sid: None)
 
     assert (await srv.session_human_review(
@@ -617,7 +616,13 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
         ),
         principal="reviewer",
     )) == {"status": "resuming"}
-    await scheduled[0]
+
+    # `session_human_review` only enqueues now (Phase 4 step 2/4); drive
+    # the enqueued `pipeline_resume` task directly through the same
+    # handler a `Worker` instance would claim and dispatch to.
+    assert len(db["work_items"].docs) == 1
+    work_item = WorkItem.model_validate(db["work_items"].docs[0])
+    await srv._handle_pipeline_resume(MongoControlStore(db), work_item)
 
     results = await srv.session_results("sid", principal="reviewer")
 
@@ -625,6 +630,7 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
     assert results["run_elapsed_s"] >= 0
     assert "executor" in results["phase_timings"]
     assert any(event.phase == "agent_phase:executor" for event in emitted)
+
 
 @pytest.mark.asyncio
 async def test_stale_unresolved_human_review_cannot_overwrite_claimed_tail(monkeypatch):
