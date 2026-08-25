@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import openpyxl as _openpyxl
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..anonymizer import apply_to_text
 from ..crypto import pseudonym_salt
@@ -41,6 +42,36 @@ ACTION_TYPES = {
 }
 
 SUBJECT_TYPES = {"participant", "staff", "specimen", "site", "study"}
+
+
+class JudgeDecision(BaseModel):
+    """One column entry of Judge's proposal. Loosely typed on purpose:
+    ``action``/``subject``/``phi_category`` are validated against their
+    real vocabularies by ``validate_decisions`` (D11's first gate), which
+    fails closed to ``human_review`` per-field rather than rejecting the
+    whole entry -- this model's job is the boundary one level up, catching
+    a fundamentally wrong *shape* (a non-string column, a confidence that
+    isn't a number, an entry that isn't an object at all) before anything
+    downstream ever sees it. ``extra='allow'`` preserves fields Judge's
+    prompt does not fix (``justification`` from a Sentinel-feedback
+    correction round) rather than silently dropping them.
+    """
+    model_config = ConfigDict(extra="allow")
+    file_id: str
+    column: str
+    phi_category: str | None = None
+    subject: str = ""
+    action: str = "human_review"
+    reason: str = ""
+    confidence: float = 0.0
+    citation: str = ""
+
+
+class JudgeProposal(BaseModel):
+    """The typed record ``Judge.run`` returns and ``run_decision_gates``
+    consumes -- the proposal, not the raw model reply. See ``Judge.run``
+    for how a malformed per-entry reply is handled."""
+    decisions: list[JudgeDecision] = []
 
 
 _VALID_PHI_CATEGORIES = {chr(c) for c in range(ord("A"), ord("R") + 1)} | {"NONE", "QUASI", None, ""}
@@ -962,11 +993,39 @@ class Judge(Agent):
         # count instead of guessing a single global constant.
         num_columns = len(schema.get("columns") or [])
         judge_max_tokens = max(2000, 200 + 150 * num_columns)
-        return await self.call_json(
+        raw = await self.call_json(
             prompt, phase="judge.decide", default={"decisions": []},
             max_tokens=judge_max_tokens,
             expect_key="decisions", min_items=len(schema.get("columns") or []),
             status_text="Deciding how to handle every flagged column")
+        return self._as_proposal(raw)
+
+    @staticmethod
+    def _as_proposal(raw: Any) -> dict[str, Any]:
+        """Validate a raw Judge reply into a `JudgeProposal` and return it
+        as the same `{"decisions": [...]}` shape every caller already
+        expects -- the typed record, not the untrusted dict, is what
+        actually flows into `run_decision_gates` from here on. A per-entry
+        shape failure (not a vocabulary failure -- `validate_decisions`
+        still owns that) fails closed to `human_review` when the entry at
+        least names a real `(file_id, column)`; when it does not, there is
+        nothing safe to construct and the entry is dropped, letting
+        `assert_exact_coverage` catch the resulting gap the same way it
+        catches any other missing decision."""
+        entries = raw.get("decisions") if isinstance(raw, dict) else None
+        decisions: list[dict[str, Any]] = []
+        for entry in entries or []:
+            try:
+                decisions.append(JudgeDecision.model_validate(entry).model_dump())
+            except ValidationError:
+                fid = entry.get("file_id") if isinstance(entry, dict) else None
+                col = entry.get("column") if isinstance(entry, dict) else None
+                if isinstance(fid, str) and fid and isinstance(col, str) and col:
+                    decisions.append({
+                        "file_id": fid, "column": col, "action": "human_review",
+                        "reason": "judge_output_malformed", "confidence": 0.0,
+                    })
+        return JudgeProposal(decisions=decisions).model_dump()
 
     async def resolve_comment(self, column: str, description: str, suggested_action: str | None,
                               suggested_reason: str | None, comment: str) -> dict[str, Any]:
