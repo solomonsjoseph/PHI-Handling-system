@@ -401,6 +401,48 @@ class PublicationPointer(ControlRecord):
     fence: int = 0
 
 
+
+class LearningProposal(ControlRecord):
+    """D16: a proposed change to a prompt, manifest, or threshold.
+    ``redacted_input_digest`` is a content hash of whatever evidence
+    motivated the proposal -- never the evidence itself -- so a proposal
+    record can be inspected without reconstructing restricted content."""
+
+    proposal_id: str = Field(default_factory=_id)
+    kind: str
+    target: str
+    baseline_version: str
+    proposed_version: str
+    redacted_input_digest: str
+    rationale: str = ""
+    created_at: str = Field(default_factory=_now)
+    created_by_task_id: str = ""
+    state: Literal["proposed", "evaluated", "approved", "rejected", "activated", "superseded"] = "proposed"
+
+
+class LearningEvaluation(ControlRecord):
+    evaluation_id: str = Field(default_factory=_id)
+    proposal_id: str
+    fixture_set: str
+    adversarial: bool = False
+    metrics: dict[str, float] = Field(default_factory=dict)
+    passed: bool = False
+    evaluated_at: str = Field(default_factory=_now)
+
+
+class LearningActivation(ControlRecord):
+    activation_id: str = Field(default_factory=_id)
+    proposal_id: str
+    version: str
+    approved_by: str
+    approved_at: str = Field(default_factory=_now)
+    rollout: Literal["shadow", "canary", "full"] = "shadow"
+    monitor_status: Literal["pending", "passing", "tripped"] = "pending"
+    activated_at: str = ""
+    rolled_back_at: str = ""
+    rollback_reason: str = ""
+
+
 class TraceEvent(ControlRecord):
     event_id: str = Field(default_factory=_id)
     run_id: str
@@ -411,6 +453,19 @@ class TraceEvent(ControlRecord):
     depth: int = 0
     attempt: int = 0
     span_id: str = ""
+    # Phase 7 (D15 agent_log migration): the AgentMessage-shaped fields
+    # `session_agent_trace`/`session_bundle`/`corpus_study_benchmark` need
+    # to reconstruct the "Agent trace" panel's full prompt/reply display
+    # without a separate, unaudited `agent_log` collection. `parent_msg_id`
+    # is deliberately distinct from `parent_task_id`: it links one logical
+    # call's own request/reply/info chain (set by `Agent._log`'s caller),
+    # not the WorkItem hierarchy, and can point at a message emitted by
+    # the same task_id (Praxis's 17 per-category calls all share one
+    # task_id but chain through distinct parent_msg_id values).
+    phase: str = ""
+    direction: str = ""
+    parent_msg_id: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
     agent: str = ""
     agent_version: str = ""
     workflow_version: str = ""

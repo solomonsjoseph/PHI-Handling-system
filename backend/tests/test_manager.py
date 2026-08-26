@@ -679,3 +679,20 @@ def test_ledger_and_herald_accept_manager_kwarg():
     assert ledger._aggregate_ctx.manager is None
     assert herald._abstract_ctx.manager is None
     assert herald._sections_ctx.manager is None
+
+
+# ---- D16: Manager coaching is ephemeral, never durably re-hydrated --------
+
+
+def test_manager_coaching_state_is_never_seeded_from_a_durable_store():
+    """D16 step 2: `_notes_that_worked` starts empty every time regardless
+    of what `db` holds -- a fresh in-memory dict per `Manager` instance,
+    never loaded from Mongo/a prior run's persisted closeout report. Two
+    independent `Manager`s built against the same `db` share nothing."""
+    db = FakeDb()
+    first = Manager(make_ctx("Manager"), db=db)
+    first._notes_that_worked["timeout"] = "be terser"
+
+    second = Manager(make_ctx("Manager"), db=db)
+
+    assert second._notes_that_worked == {}

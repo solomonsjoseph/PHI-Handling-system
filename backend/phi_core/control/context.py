@@ -15,8 +15,6 @@ if TYPE_CHECKING:
 class TraceWriter(Protocol):
     async def emit(self, **fields: Any) -> None: ...
 
-    async def legacy_log(self, message: "AgentMessage") -> None: ...
-
 
 class ResearchCache(Protocol):
     async def get(self, topic: str, jurisdiction: str = "us") -> dict[str, Any] | None: ...
@@ -66,7 +64,17 @@ class AgentContext:
 
 
 class StoreResearchCache:
-    """Cache facade backed by ``ControlStore`` rather than a raw database handle."""
+    """Cache facade backed by ``ControlStore`` rather than a raw database
+    handle (D16). Every entry is stamped with the ``POLICY_VERSION`` that
+    was active when it was written; ``get`` treats a stale-policy or
+    unparseable entry as a miss rather than serving content written under
+    a policy that may no longer apply. ``evidence_state`` records whether
+    the cached content is tool-backed (``UNVERIFIED`` -- this layer does
+    not itself re-verify tool citations, so it never claims ``VERIFIED``)
+    or untooled (``UNKNOWN``), derived from ``source`` rather than
+    trusting a caller-supplied claim."""
+
+    _TOOL_BACKED_SOURCES = frozenset({"web_search"})
 
     def __init__(self, store: Any) -> None:
         self._store = store
@@ -74,36 +82,59 @@ class StoreResearchCache:
     async def get(self, topic: str, jurisdiction: str = "us") -> dict[str, Any] | None:
         from datetime import datetime, timedelta, timezone
 
-        from phi_core.agents.cache import REFRESH_DAYS
+        from .limits import WEB_CACHE_REFRESH_DAYS
+        from .policy import POLICY_VERSION
 
         doc = await self._store.get_one("web_cache", {"topic": topic, "jurisdiction": jurisdiction})
         if not doc:
             return None
-        fetched = datetime.fromisoformat(doc["fetched_at"])
-        if datetime.now(timezone.utc) - fetched > timedelta(days=REFRESH_DAYS):
+        if doc.get("policy_version") != POLICY_VERSION:
+            return None
+        fetched_raw = doc.get("fetched_at")
+        if isinstance(fetched_raw, datetime):
+            fetched = fetched_raw if fetched_raw.tzinfo else fetched_raw.replace(tzinfo=timezone.utc)
+        elif isinstance(fetched_raw, str):
+            try:
+                fetched = datetime.fromisoformat(fetched_raw)
+            except ValueError:
+                return None
+        else:
+            return None
+        if datetime.now(timezone.utc) - fetched > timedelta(days=WEB_CACHE_REFRESH_DAYS):
             return None
         return doc
 
     async def put(self, topic: str, jurisdiction: str, content: str, source: str, schema_version: int = 1) -> None:
         from datetime import datetime, timezone
 
+        from .policy import POLICY_VERSION
+
         document = {
             "topic": topic,
             "jurisdiction": jurisdiction,
             "content": content,
             "source": source,
+            "evidence_state": "UNVERIFIED" if source in self._TOOL_BACKED_SOURCES else "UNKNOWN",
+            "policy_version": POLICY_VERSION,
             "schema_version": schema_version,
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            # A native datetime (BSON Date once persisted), not an
+            # isoformat string: `server.py::_startup_maintenance`'s
+            # `expireAfterSeconds` TTL index only ever fires on a real
+            # Date field -- a string field is silently never eligible.
+            "fetched_at": datetime.now(timezone.utc),
         }
         if not await self._store.replace_one("web_cache", {"topic": topic, "jurisdiction": jurisdiction}, document):
             await self._store.insert("web_cache", document)
 
 
 class StoreTraceWriter:
-    """Phase-2 trace facade while legacy ``agent_log`` remains readable.
+    """The task-facing ``TraceWriter``: every field an agent call passes
+    to ``emit`` is forwarded straight to :class:`~.events.TraceEventStore`,
+    which owns ``seq`` allocation, hash chaining, and the fence check.
 
     Built on ``ControlStore`` so the same implementation works against
-    ``MongoControlStore`` in production and ``MemoryControlStore`` in tests.
+    ``MongoControlStore`` in production and ``MemoryControlStore`` in
+    tests.
     """
 
     def __init__(self, store: Any, *, run_id: str, session_id: str) -> None:
@@ -111,30 +142,20 @@ class StoreTraceWriter:
         self._run_id = run_id
         self._session_id = session_id
 
-    async def legacy_log(self, message: "AgentMessage") -> None:
-        await self._store.insert("agent_log", message.model_dump())
-
     async def emit(self, **fields: Any) -> None:
-        for _ in range(8):
-            current = await self._store.get_one("workflow_runs", {"run_id": self._run_id})
-            if current is None:
-                seq = 0
-                break
-            seq = int(current.get("event_seq", 0)) + 1
-            updated = dict(current)
-            updated["event_seq"] = seq
-            if await self._store.compare_and_set(
-                "workflow_runs", {"run_id": self._run_id}, {"event_seq": current.get("event_seq", 0)}, updated
-            ):
-                break
-        else:
-            seq = int(current.get("event_seq", 0)) + 1 if current else 0
+        from .events import TraceEventStore
+
         event = TraceEvent(
+            event_id=str(fields.pop("event_id", "")) or TraceEvent.model_fields["event_id"].default_factory(),
             run_id=self._run_id,
-            seq=seq,
+            seq=0,
             session_id=self._session_id,
             task_id=str(fields.pop("task_id", "")),
             parent_task_id=str(fields.pop("parent_task_id", "")),
+            parent_msg_id=str(fields.pop("parent_msg_id", "")),
+            phase=str(fields.pop("phase", "")),
+            direction=str(fields.pop("direction", "")),
+            payload=dict(fields.pop("payload", {})),
             depth=int(fields.pop("depth", 0)),
             attempt=int(fields.pop("attempt", 0)),
             agent=str(fields.pop("agent", "")),
@@ -159,7 +180,10 @@ class StoreTraceWriter:
             egress_digest=str(fields.pop("egress_digest", "")),
             gateway_decision=str(fields.pop("gateway_decision", "")),
         )
-        await self._store.insert("trace_events", event)
+        fence = fields.pop("fence", None)
+        await TraceEventStore(self._store, run_id=self._run_id, session_id=self._session_id).append(
+            event, fence=fence,
+        )
 
 
 class StoreTaskCompleter:

@@ -65,3 +65,7 @@ MAX_CHATGPT_LOGINS = _int_env("MAX_CHATGPT_LOGINS", 32)
 MAX_SESSION_PROGRESS_EVENTS = _int_env("MAX_SESSION_PROGRESS_EVENTS", 500)
 MAX_OUTBOX_ENTRIES_PER_DOC = _int_env("MAX_OUTBOX_ENTRIES_PER_DOC", 32)
 MAX_CHECKPOINT_PAYLOAD_REFS = _int_env("MAX_CHECKPOINT_PAYLOAD_REFS", 16)
+# D16: also the real Mongo TTL index lifetime on `web_cache.fetched_at`
+# (`server.py::_startup_maintenance`), not just the application-level
+# staleness check `StoreResearchCache.get` performs before that.
+WEB_CACHE_REFRESH_DAYS = _int_env("WEB_CACHE_REFRESH_DAYS", 7)

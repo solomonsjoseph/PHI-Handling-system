@@ -16,6 +16,9 @@ from phi_core.control.records import (
     GateResult,
     HumanReviewEvent,
     HumanReviewRequest,
+    LearningActivation,
+    LearningEvaluation,
+    LearningProposal,
     OutboxEntry,
     PublicationPointer,
     ResolutionEntry,
@@ -48,7 +51,10 @@ _RECORD_FIELDS = {
     ResolutionEntry: {"schema_version", "file_id", "column", "mode", "comment"},
     HumanReviewEvent: {"schema_version", "event_id", "request_id", "run_id", "session_id", "workflow_version", "task_id", "seq", "client_event_id", "principal", "submitted_at", "kind", "body_hash", "resolutions", "actual_knowledge_ack", "delivered_files", "decision_version", "audit_version", "result"},
     PublicationPointer: {"schema_version", "pointer_id", "session_id", "run_id", "generation", "artifact_ids", "gate_result_ids", "certified_at", "certified_by_task_id", "fence"},
-    TraceEvent: {"schema_version", "event_id", "run_id", "seq", "session_id", "task_id", "parent_task_id", "depth", "attempt", "span_id", "agent", "agent_version", "workflow_version", "prompt_version", "policy_version", "rule_version", "manifest_version", "provider", "model", "endpoint", "provider_request_id", "usage", "cost_usd", "latency_ms", "tool_requested", "tool_policy_decision", "tool_executed", "tool_result_status", "input_class", "output_class", "evidence_ids", "gate_ids", "review_ids", "artifact_ids", "outcome", "retry_category", "error_correlation_id", "status_text", "egress_digest", "gateway_decision", "fence", "prev_hash", "hash", "ts"},
+    TraceEvent: {"schema_version", "event_id", "run_id", "seq", "session_id", "task_id", "parent_task_id", "depth", "attempt", "span_id", "phase", "direction", "parent_msg_id", "payload", "agent", "agent_version", "workflow_version", "prompt_version", "policy_version", "rule_version", "manifest_version", "provider", "model", "endpoint", "provider_request_id", "usage", "cost_usd", "latency_ms", "tool_requested", "tool_policy_decision", "tool_executed", "tool_result_status", "input_class", "output_class", "evidence_ids", "gate_ids", "review_ids", "artifact_ids", "outcome", "retry_category", "error_correlation_id", "status_text", "egress_digest", "gateway_decision", "fence", "prev_hash", "hash", "ts"},
+    LearningProposal: {"schema_version", "proposal_id", "kind", "target", "baseline_version", "proposed_version", "redacted_input_digest", "rationale", "created_at", "created_by_task_id", "state"},
+    LearningEvaluation: {"schema_version", "evaluation_id", "proposal_id", "fixture_set", "adversarial", "metrics", "passed", "evaluated_at"},
+    LearningActivation: {"schema_version", "activation_id", "proposal_id", "version", "approved_by", "approved_at", "rollout", "monitor_status", "activated_at", "rolled_back_at", "rollback_reason"},
 }
 
 
