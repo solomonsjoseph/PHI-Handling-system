@@ -185,7 +185,7 @@ space, which is `/tmp` here.
 
 The repo holds four things and nothing else: codebase (`backend/`, `frontend/`),
 documentation (`memory/`, `authorities/`, `docs/file_formats/`, `README.md`,
-`CLAUDE.md`, `LICENSE`), config (`.claude/`, `.emergent/`, `.gitignore`,
+`CLAUDE.md`, `LICENSE`), config (`.claude/`, `.gitignore`,
 `design_guidelines.json`, frontend lint config), and test inputs that a test
 actually reads (`backend/tests/`). A file that fits none of those four does not
 belong in the repo.
