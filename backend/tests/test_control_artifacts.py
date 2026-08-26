@@ -291,3 +291,135 @@ def test_erase_session_artifacts_refuses_an_unsafe_session_id() -> None:
     with pytest.raises(ArtifactError) as exc:
         erase_session_artifacts("../../etc")
     assert exc.value.reason == "unsafe_session_id"
+
+
+# ---- reconcile (Phase 7 step 3) --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconcile_deletes_rejected_and_superseded_records_and_their_bytes() -> None:
+    from phi_core.control.artifacts import reconcile
+
+    service, store = _service()
+    rejected_id, tmp_path = await service.stage("dataset_export", "r.csv", "restricted_metadata", "short")
+    tmp_path.write_bytes(b"rejected bytes")
+    rejected = await service.finalize(rejected_id)
+    await store.compare_and_set(
+        "artifacts", {"artifact_id": rejected_id}, {"state": "staged"},
+        rejected.model_copy(update={"state": "rejected"}),
+    )
+    superseded_id, tmp_path2 = await service.stage("dataset_export", "s.csv", "restricted_metadata", "short")
+    tmp_path2.write_bytes(b"superseded bytes")
+    superseded = await service.finalize(superseded_id)
+    await store.compare_and_set(
+        "artifacts", {"artifact_id": superseded_id}, {"state": "staged"},
+        superseded.model_copy(update={"state": "superseded"}),
+    )
+
+    counts = await reconcile(store)
+
+    assert counts == {"deleted": 2, "failed": 0, "skipped_hold": 0}
+    assert await store.get_one("artifacts", {"artifact_id": rejected_id}) is None
+    assert await store.get_one("artifacts", {"artifact_id": superseded_id}) is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_deletes_a_stale_provisional_artifact_and_its_tmp_file() -> None:
+    from phi_core.control.artifacts import reconcile
+
+    service, store = _service()
+    artifact_id, tmp_path = await service.stage("dataset_export", "r.csv", "restricted_metadata", "short")
+    tmp_path.write_bytes(b"never finalized")
+    doc = await store.get_one("artifacts", {"artifact_id": artifact_id})
+    from phi_core.control.records import ArtifactRecord
+    backdated = ArtifactRecord.model_validate(doc).model_copy(update={"created_at": "2000-01-01T00:00:00+00:00"})
+    await store.replace_one("artifacts", {"artifact_id": artifact_id}, backdated)
+
+    counts = await reconcile(store, stale_provisional_hours=1.0)
+
+    assert counts["deleted"] == 1
+    assert await store.get_one("artifacts", {"artifact_id": artifact_id}) is None
+    assert not tmp_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_a_fresh_provisional_artifact() -> None:
+    from phi_core.control.artifacts import reconcile
+
+    service, store = _service()
+    artifact_id, tmp_path = await service.stage("dataset_export", "r.csv", "restricted_metadata", "short")
+    tmp_path.write_bytes(b"still being written")
+
+    counts = await reconcile(store, stale_provisional_hours=24.0)
+
+    assert counts == {"deleted": 0, "failed": 0, "skipped_hold": 0}
+    assert await store.get_one("artifacts", {"artifact_id": artifact_id}) is not None
+    assert tmp_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_cleans_a_dangling_record_whose_file_is_already_gone() -> None:
+    from phi_core.control.artifacts import reconcile
+
+    service, store = _service()
+    artifact_id, tmp_path = await service.stage("dataset_export", "r.csv", "restricted_metadata", "short")
+    tmp_path.write_bytes(b"bytes")
+    await service.finalize(artifact_id)
+    final_path = tmp_path.parent.parent / service.session_id / service.run_id / artifact_id
+    final_path.unlink()  # simulate an external deletion the registry never learned about
+
+    counts = await reconcile(store)
+
+    assert counts["deleted"] == 1
+    assert await store.get_one("artifacts", {"artifact_id": artifact_id}) is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_never_deletes_a_live_staged_artifact_whose_file_still_exists() -> None:
+    from phi_core.control.artifacts import reconcile
+
+    service, store = _service()
+    artifact_id, tmp_path = await service.stage("dataset_export", "r.csv", "restricted_metadata", "short")
+    tmp_path.write_bytes(b"live bytes")
+    await service.finalize(artifact_id)
+
+    counts = await reconcile(store)
+
+    assert counts == {"deleted": 0, "failed": 0, "skipped_hold": 0}
+    assert (await store.get_one("artifacts", {"artifact_id": artifact_id}))["state"] == "staged"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_never_touches_a_record_under_hold() -> None:
+    from phi_core.control.artifacts import reconcile
+
+    service, store = _service()
+    artifact_id, tmp_path = await service.stage("dataset_export", "r.csv", "restricted_metadata", "short")
+    tmp_path.write_bytes(b"held bytes")
+    finalized = await service.finalize(artifact_id)
+    held = finalized.model_copy(update={"state": "rejected", "hold": "legal-hold-1"})
+    await store.compare_and_set("artifacts", {"artifact_id": artifact_id}, {"state": "staged"}, held)
+
+    counts = await reconcile(store)
+
+    assert counts == {"deleted": 0, "failed": 0, "skipped_hold": 1}
+    assert await store.get_one("artifacts", {"artifact_id": artifact_id}) is not None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_retries_a_previously_failed_deletion() -> None:
+    from phi_core.control.artifacts import reconcile
+
+    service, store = _service()
+    artifact_id, tmp_path = await service.stage("dataset_export", "r.csv", "restricted_metadata", "short")
+    tmp_path.write_bytes(b"bytes")
+    finalized = await service.finalize(artifact_id)
+    stuck = finalized.model_copy(update={
+        "state": "deletion_pending", "delete_attempts": 1, "delete_error": "simulated prior failure",
+    })
+    await store.compare_and_set("artifacts", {"artifact_id": artifact_id}, {"state": "staged"}, stuck)
+
+    counts = await reconcile(store)
+
+    assert counts == {"deleted": 1, "failed": 0, "skipped_hold": 0}
+    assert await store.get_one("artifacts", {"artifact_id": artifact_id}) is None

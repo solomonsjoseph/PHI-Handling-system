@@ -154,8 +154,8 @@ async def test_auth_session_rejects_unknown_token(monkeypatch):
 def test_data_dirs_created_with_0700_permissions():
     import stat
 
-    from phi_core.paths import EXPORT_DIR, UPLOAD_DIR
-    for d in (UPLOAD_DIR, EXPORT_DIR):
+    from phi_core.paths import CACHE_DIR, EVIDENCE_DIR, PUBLISHED_DIR, REVERSAL_DIR, STAGING_DIR, UPLOAD_DIR
+    for d in (UPLOAD_DIR, STAGING_DIR, EVIDENCE_DIR, REVERSAL_DIR, PUBLISHED_DIR, CACHE_DIR):
         mode = stat.S_IMODE(d.stat().st_mode)
         assert mode == 0o700, f"{d} has mode {oct(mode)}, expected 0o700"
 
@@ -235,6 +235,7 @@ async def test_session_delete_removes_document_files_and_agent_log(tmp_path, mon
         def __init__(self):
             self.sessions = _StubCollection()
             self.agent_log = self.sessions
+            self.trace_events = self.sessions
 
         def __getitem__(self, _name: str) -> _EmptyControlCollection:
             return _EmptyControlCollection()
@@ -257,6 +258,92 @@ async def test_session_delete_removes_document_files_and_agent_log(tmp_path, mon
 
 
 @pytest.mark.asyncio
+async def test_session_delete_records_erasure_pending_on_a_filesystem_failure(tmp_path, monkeypatch):
+    """A failed filesystem deletion never silently reports success: the
+    session document survives as `erasure_pending` with the exact error
+    and an attempt count, rather than being deleted with bytes still on
+    disk or the failure being swallowed."""
+    import server as srv
+    from phi_core.control import artifacts as artifacts_module
+    from phi_core.control import superorchestrator as super_module
+
+    class FakeSuperOrchestrator:
+        def __init__(self, *_args):
+            pass
+
+        async def cancel_run(self, **kwargs):
+            pass
+
+    sid = "beef" * 8
+    session_dir = srv.UPLOAD_DIR / sid
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "marker.txt").write_text("x", encoding="utf-8")
+
+    class _StubCollection:
+        def __init__(self):
+            self.updates: list[dict] = []
+
+        async def find_one(self, query, *_a, **_kw):
+            return {"id": sid, "owner": "alice", "export_paths": {}, "_pipeline_run_id": sid, "erasure_attempts": 0}
+
+        async def update_one(self, query, update):
+            self.updates.append(update["$set"])
+
+        async def delete_many(self, query):
+            raise AssertionError("must not delete agent_log/trace_events before erasure is confirmed")
+
+        async def delete_one(self, query):
+            raise AssertionError("must not delete the session document before erasure is confirmed")
+
+    class _EmptyControlCollection:
+        async def insert_one(self, document):
+            from types import SimpleNamespace
+            return SimpleNamespace(inserted_id="fake-id")
+
+        async def find_one(self, query, *_a, **_kw):
+            return None
+
+        def find(self, query):
+            async def _empty_cursor():
+                return
+                yield  # pragma: no cover - makes this an async generator
+            return _empty_cursor()
+
+        async def delete_one(self, query):
+            from types import SimpleNamespace
+            return SimpleNamespace(deleted_count=0)
+
+    class _StubDB:
+        def __init__(self):
+            self.sessions = _StubCollection()
+            self.agent_log = self.sessions
+            self.trace_events = self.sessions
+
+        def __getitem__(self, _name: str) -> _EmptyControlCollection:
+            return _EmptyControlCollection()
+
+    def _failing_erase(_session_id: str) -> dict[str, str]:
+        return {"staging": "simulated permission denied"}
+
+    db = _StubDB()
+    monkeypatch.setattr(super_module, "SuperOrchestrator", FakeSuperOrchestrator)
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+    monkeypatch.setattr(artifacts_module, "erase_session_artifacts", _failing_erase)
+
+    resp = await srv.session_delete(sid, principal="alice")
+
+    assert resp == {"deleted": False, "erasure_pending": True}
+    assert len(db.sessions.updates) == 1
+    update = db.sessions.updates[0]
+    assert update["status"] == "erasure_pending"
+    assert "simulated permission denied" in update["erasure_error"]
+    assert update["erasure_attempts"] == 1
+    # The uploaded directory (not part of the simulated failure) is still
+    # erased -- only the failed root is retried, not every already-done step.
+    assert not session_dir.exists()
+
+
+@pytest.mark.asyncio
 async def test_retention_purge_removes_expired_partially_complete_session(tmp_path, monkeypatch):
     """Expired partial reviews lose their PHI files on the normal retention window."""
     import asyncio
@@ -264,15 +351,16 @@ async def test_retention_purge_removes_expired_partially_complete_session(tmp_pa
 
     import server as srv
 
+    sid = "beef" * 8  # a real session id is always a bare uuid4().hex token
     upload_dir = tmp_path / "uploads"
-    session_dir = upload_dir / "sess-expired-partial"
+    session_dir = upload_dir / sid
     session_dir.mkdir(parents=True)
     (session_dir / "source.csv").write_text("raw PHI", encoding="utf-8")
     export = tmp_path / "exports" / "handled.csv"
     export.parent.mkdir()
     export.write_text("handled data", encoding="utf-8")
     expired_session = {
-        "id": "sess-expired-partial",
+        "id": sid,
         "status": "partially_complete",
         "updated_at": (datetime.now(timezone.utc) - timedelta(days=srv.RETENTION_DAYS + 1)).isoformat(),
         "export_paths": {"dataset": str(export)},
@@ -309,6 +397,7 @@ async def test_retention_purge_removes_expired_partially_complete_session(tmp_pa
         def __init__(self):
             self.sessions = _Sessions()
             self.agent_log = _AgentLog()
+            self.trace_events = _AgentLog()
 
     async def stop_after_one_pass(_seconds):
         raise asyncio.CancelledError
@@ -323,8 +412,108 @@ async def test_retention_purge_removes_expired_partially_complete_session(tmp_pa
 
     assert not session_dir.exists()
     assert not export.exists()
-    assert db.agent_log.deleted == [{"session_id": "sess-expired-partial"}]
-    assert db.sessions.deleted == [{"id": "sess-expired-partial"}]
+    assert db.agent_log.deleted == [{"session_id": sid}]
+    assert db.sessions.deleted == [{"id": sid}]
+
+
+def _review_retention_stub_db(*, sid: str, updated_at: str, hold: str = ""):
+    """A minimal stub DB exercising exactly step 2 of
+    ``_purge_settled_sessions_loop`` (F-POLICY-002): an
+    ``awaiting_human_review`` session past ``REVIEW_RETENTION_DAYS``."""
+    session = {"id": sid, "status": "awaiting_human_review", "updated_at": updated_at,
+               "_pipeline_run_id": "run-" + sid}
+
+    class _Sessions:
+        def __init__(self):
+            self.updates: list[dict] = []
+
+        def find(self, query, *_a, **_kw):
+            async def matching():
+                if query.get("status") == "awaiting_human_review" and session["updated_at"] < query["updated_at"]["$lt"]:
+                    yield session
+            return matching()
+
+        async def update_one(self, query, update):
+            self.updates.append(update["$set"])
+            session.update(update["$set"])
+
+    class _WorkflowRuns:
+        async def find_one(self, query, *_a, **_kw):
+            if query.get("run_id") == session["_pipeline_run_id"]:
+                return {"hold": hold}
+            return None
+
+    class _StubDB:
+        def __init__(self):
+            self.sessions = _Sessions()
+            self.workflow_runs = _WorkflowRuns()
+
+    return _StubDB(), session
+
+
+@pytest.mark.asyncio
+async def test_awaiting_review_cannot_retain_raw_phi_beyond_review_retention_days(tmp_path, monkeypatch):
+    """F-POLICY-002: a paused human review with no hold loses its raw PHI
+    once REVIEW_RETENTION_DAYS elapses, and the session moves to the
+    terminal `expired_awaiting_review` status rather than being silently
+    left `awaiting_human_review` forever."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    import server as srv
+
+    sid = "cafe" * 8
+    upload_dir = tmp_path / "uploads"
+    session_dir = upload_dir / sid
+    session_dir.mkdir(parents=True)
+    (session_dir / "source.csv").write_text("raw PHI", encoding="utf-8")
+    stale = (datetime.now(timezone.utc) - timedelta(days=srv.REVIEW_RETENTION_DAYS + 1)).isoformat()
+    db, _session = _review_retention_stub_db(sid=sid, updated_at=stale)
+
+    async def stop_after_one_pass(_seconds):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(srv, "UPLOAD_DIR", upload_dir)
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+    monkeypatch.setattr(srv.asyncio, "sleep", stop_after_one_pass)
+
+    with pytest.raises(asyncio.CancelledError):
+        await srv._purge_settled_sessions_loop()
+
+    assert not session_dir.exists()
+    assert db.sessions.updates == [{"status": "expired_awaiting_review", "updated_at": _session["updated_at"]}]
+
+
+@pytest.mark.asyncio
+async def test_awaiting_review_retains_raw_phi_while_the_run_is_held(tmp_path, monkeypatch):
+    """D14: a legal/administrative hold on the run suspends the
+    awaiting-review retention timer entirely -- no erasure, no status
+    change, regardless of how stale `updated_at` is."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    import server as srv
+
+    sid = "d00d" * 8
+    upload_dir = tmp_path / "uploads"
+    session_dir = upload_dir / sid
+    session_dir.mkdir(parents=True)
+    (session_dir / "source.csv").write_text("raw PHI", encoding="utf-8")
+    ancient = (datetime.now(timezone.utc) - timedelta(days=srv.REVIEW_RETENTION_DAYS * 10)).isoformat()
+    db, _session = _review_retention_stub_db(sid=sid, updated_at=ancient, hold="litigation-hold-1")
+
+    async def stop_after_one_pass(_seconds):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(srv, "UPLOAD_DIR", upload_dir)
+    monkeypatch.setattr(srv, "get_db", lambda: db)
+    monkeypatch.setattr(srv.asyncio, "sleep", stop_after_one_pass)
+
+    with pytest.raises(asyncio.CancelledError):
+        await srv._purge_settled_sessions_loop()
+
+    assert session_dir.exists()
+    assert db.sessions.updates == []
 
 @pytest.mark.asyncio
 async def test_health_reports_mongo_down_as_503(monkeypatch):
