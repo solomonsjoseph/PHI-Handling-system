@@ -292,6 +292,7 @@ class ArtifactService:
             return None
         pointers = [PublicationPointer.model_validate(doc) for doc in docs]
         return max(pointers, key=lambda pointer: pointer.generation)
+
     async def reject_export(
         self,
         *,
@@ -482,6 +483,8 @@ class ArtifactService:
             if await self._store.delete_one("publication_pointers", {"pointer_id": pointer["pointer_id"]}):
                 removed += 1
         return removed
+
+
 async def register_guard_rejections(
     artifact_service: ArtifactService,
     *,
@@ -530,7 +533,6 @@ def _artifact_disk_path(record: ArtifactRecord) -> Any:
     return run_scoped_dir(_root_dir(record.root), record.session_id, record.run_id) / record.artifact_id
 
 
-
 def _is_expired(record: ArtifactRecord) -> bool:
     if not record.expires_at:
         return False
@@ -541,6 +543,7 @@ def _is_expired(record: ArtifactRecord) -> bool:
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     return expires_at <= datetime.now(timezone.utc)
+
 
 async def _reconcile_one(store: ControlStore, record: ArtifactRecord) -> bool:
     """Mark ``record`` ``deletion_pending``, confirm its bytes are gone,
