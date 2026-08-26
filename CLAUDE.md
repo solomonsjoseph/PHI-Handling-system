@@ -2,7 +2,14 @@
 
 **Address:** Sir. **Style:** no emojis, no em-dashes, cite authorities, minimal filler.
 
-## Project
+This repository holds two codebases sharing one git history from a common fork point: the
+`backend`/`frontend` PHI Console service (this document's first half), and the standalone
+`phi_engine` pipeline package (this document's second half, "phi_engine pipeline"). Both
+statements below are true of this tree; read the half that matches the code you are touching.
+
+## PHI Console (backend / frontend)
+
+### Project
 
 PHI Console. A study team drops in a ZIP (datasets + at least one of forms /
 data_dictionary / mappings), a 15-agent pipeline (12 original agents plus Manager,
@@ -25,7 +32,7 @@ clears expansion.
 See `/app/memory/VISION.md` for the north-star, `/app/memory/GOAL.md` for the
 operational spec, `/app/memory/PRD.md` for the delivery log.
 
-## Structure
+### Structure
 
 ```
 /app
@@ -75,7 +82,7 @@ operational spec, `/app/memory/PRD.md` for the delivery log.
   data/exports/                    handled outputs
 ```
 
-## The 15 agents
+### The 15 agents
 
 **Supervisor (spans the whole run):**
 - **Manager** — supervises execution health only (attempt counts, error kinds, elapsed seconds), never content: retries, extends a timeout, grants the web-search tool, or escalates to human review, with coaching notes reused across the run. Also owns the deterministic guardian query broker (`attach_schema`/`ask_schema`, `attach_instrument`/`ask_instrument`, `attach_lexicon`/`ask_lexicon`) so Judge/Sentinel can ask a specialist a targeted question instead of relying only on the broadcast summary.
@@ -107,7 +114,7 @@ operational spec, `/app/memory/PRD.md` for the delivery log.
 
 Every agent input/output/duration persists to Mongo `agent_log`. Every phase transition persists to `session.phase_timings` for wallclock analysis.
 
-## Key API endpoints
+### Key API endpoints
 
 - `POST /api/auth/session`, `POST /api/auth/logout`, `GET /api/auth/whoami` -- cookie auth (SEC 4.3).
 - `POST /api/sessions` -- create session (jurisdiction).
@@ -130,7 +137,7 @@ Every agent input/output/duration persists to Mongo `agent_log`. Every phase tra
 - `POST /api/settings/warmup` -- pre-run Statute + all 17 Praxis categories to prime cache (API; not on Settings UI).
 - `GET  /api/health` -- mongo/llm/tesseract/signing-key readiness. `GET /api/version` -- service banner.
 
-## Recent (Feb 2026)
+### Recent (Feb 2026)
 
 - **Pipeline speedup:** Statute + Praxis launch in parallel with Specialists at t=0. On cold Praxis cache (biggest single wallclock cost), 10+ web searches overlap with file parsing rather than serialising after it.
 - **Live wallclock:** `session.phase_timings` (start_s, end_s, duration_ms per phase) + `run_elapsed_s` persisted at pipeline exit. Rendered under the progress bar and inline on the current phase.
@@ -140,7 +147,7 @@ Every agent input/output/duration persists to Mongo `agent_log`. Every phase tra
 - **Agent trace meta:** every expanded row shows `role · what · why · how` for the 13 agents (Lexicon, Schema, Instrument, Statute, Praxis, Judge, Sentinel, Executor, Publish Guard, Auditor, Scout, Ledger, Herald).
 - **PipelineProgressBar:** phase %, current-phase label + blurb, elapsed seconds, expandable per-phase timing table.
 
-## Non-negotiables
+### Non-negotiables
 
 1. Datasets never expose row values to the LLM. Static agent-input checks planned; currently reviewed manually.
 2. Every span carries a 45 CFR 164.514 authority citation.
@@ -156,7 +163,7 @@ Every agent input/output/duration persists to Mongo `agent_log`. Every phase tra
 8. Nothing a command can regenerate is ever committed. Generated output is
    git-ignored and swept after every task. See "Generated artifacts and cleanup".
 
-## Generated artifacts and cleanup
+### Generated artifacts and cleanup
 
 The generator is worth keeping. Its output is not. Anything a command can
 recreate is git-ignored, is never committed, and is deleted once the work it
@@ -190,7 +197,7 @@ documentation (`memory/`, `authorities/`, `docs/file_formats/`, `README.md`,
 actually reads (`backend/tests/`). A file that fits none of those four does not
 belong in the repo.
 
-### Garbage collection after every task
+#### Garbage collection after every task
 
 Every task ends with a sweep, so the tree holds the work that was done and
 nothing that was used to produce it:
@@ -209,14 +216,14 @@ only with `--all`, which is the `make distclean` case.
 Run the sweep when no pipeline is in flight: it removes session directories under
 `data/uploads/` and `data/exports/`.
 
-## Environment
+### Environment
 
 Backend on :8001, frontend on :3000, both supervisor-managed with hot reload.
 Kubernetes ingress routes `/api/*` to :8001. Frontend uses
 `process.env.REACT_APP_BACKEND_URL`; backend uses `os.environ["MONGO_URL"]`
 and `os.environ["DB_NAME"]`. Never edit these two.
 
-## Portability -- runs anywhere
+### Portability -- runs anywhere
 
 The console is deliberately not locked to any hosting platform. Copy
 `backend/.env.example` to `backend/.env` and fill in whichever LLM
@@ -232,7 +239,7 @@ Direct provider keys are the only supported path -- there is no universal-key
 proxy. Statute + Praxis (web-search agents) work end-to-end with a plain
 `ANTHROPIC_API_KEY` via LiteLLM's native `web_search_20250305` tool.
 
-## Run / redeploy
+### Run / redeploy
 
 ```
 sudo supervisorctl restart backend frontend
@@ -242,3 +249,174 @@ A plain Anthropic key (or any BYO key configured through `/settings`) powers
 Statute, Praxis, and every LLM agent. Web-search-capable models (Claude
 Sonnet 4.5 default) are required for Statute + Praxis first-fetch;
 deterministic fallbacks kick in otherwise.
+
+## phi_engine pipeline (agent handoff document)
+
+This section tells an agent everything it needs to know to work on the
+`phi_engine` package. Read it in full before touching any file under
+`phi_engine/`, `tests/`, `harness/`, or `authorities/`.
+
+### Scope
+
+USA/HIPAA only. Pinned de-identification rules exist solely for USA
+(`phi_engine/security/phi_review.py` `_PINNED_RULE_SPECS`), grounded in
+`authorities/01_hipaa_164_514_full.md` (45 CFR 164.514 primary text) and
+`authorities/AUTHORITY_MATRIX.md` (identifier-category mapping). Extending
+to another jurisdiction needs its own pinned rule-spec entries grounded in
+that jurisdiction's own authority document set.
+
+This repository does not certify HIPAA or any other regulatory compliance.
+
+### What phi_engine is
+
+A standalone PHI intake, classification, scrubbing, review, and publish
+pipeline (`phi_engine`), runnable via `python -m phi_engine`. It is a
+portable package: point it at any project's own data with `PHI_WORKSPACE`
+and zero code changes.
+
+### Invariants an agent must never break
+
+- **Source immutability.** `phi_engine/pipeline/intake.py::intake_add`
+  links files into `<workspace>/intake/<study>/` via `os.symlink` only --
+  never `shutil.copy*`. Intake never opens a source file for write and
+  never deletes a source file.
+- **Symlink-only intake.** Every entry under `<workspace>/intake/<study>/`
+  is either a symlink or the `intake_manifest.json` bookkeeping file.
+- **Never move/modify/copy source data.** The organizer
+  (`phi_engine/pipeline/organize.py::organize`) reads normalized dataset
+  content only through intake symlinks and writes derived artifacts under
+  `<workspace>/organized/<study>/` -- never back into the source tree
+  passed to `intake_add`. It also performs a direct metadata-only read of
+  an optional forms manifest from the external source root, separate from
+  the row-data path.
+- **Fail-closed review routing.** Any raw variable/dataset that cannot be
+  normalized (unrecognized suffix, broken intake symlink, unreadable
+  `.xls`, unparseable `.pdf`) lands in the review bucket with a record
+  retaining filename, link name, reason, and diagnostic metadata -- never
+  row values, never silently dropped, never silently parsed as garbage.
+- **Residual guard before publish, with a disclosed fallback gap.** The
+  published `llm_source/datasets/` tree passes
+  `phi_engine/security/phi_guard_gate.py::run_phi_guard_gate` (Presidio AND
+  a legacy regex scanner) when the gate runs cleanly. On a guard exception
+  (`phi_engine/pipeline/run.py`'s residual-guard `except Exception:`
+  block), the pipeline currently falls back to the legacy regex scanner
+  ALONE and can still publish on that scanner's result -- a known,
+  disclosed weak-fallback path, not yet closed (see
+  `docs/PRIVACY_GATEWAY_RECOMMENDATION.md` §"Weak points wrapped or
+  replaced"). Do not describe this as an unconditional two-scanner
+  guarantee.
+- **LLM egress controls; read-path wrapper not yet a production
+  chokepoint.** Header classification prompts (`llm_detector.py`) are
+  headers-only -- never a row value. `LLMClient.complete` runs
+  `phi_gate_check` (`phi_engine/security/phi_gate.py`) on the outbound
+  prompt before provider dispatch and raises `PHIEgressBlockedError` on a
+  match. `guard_llm_output` screens serialized tool output through the PHI
+  gate and IS called from `llm_detector.py` and
+  `phi_engine/tools/regulation_fetcher.py` provider-response paths; the
+  generic `llm_safe_tool` decorator has ZERO production `@llm_safe_tool`
+  usages, so arbitrary tool returns are not routed through it.
+  `llm_tool_guard.py`'s `validate_llm_read_path` is defined and exported
+  but currently has NO production caller anywhere in `phi_engine` --
+  available, not yet wired as an enforced read-side chokepoint. Audit
+  stores beyond `phi_gate`/log-hygiene blocking-path logs -- the
+  organizer review-bucket record (`organize.py`, explicitly
+  `chmod(0o600)`) and `phi_scrub_report.json` -- retain filenames, link
+  names, header/field names, reasons, counts, and diagnostic metadata:
+  sensitive metadata, not row values, but not "category tags only"
+  either. `llm_uncertain.jsonl` (`llm_detector.py::_write_review_queue`)
+  retains the same class of metadata (including the raw column header)
+  but is written via plain `Path.open("a")` with NO explicit chmod --
+  do not claim it is 0600-guaranteed; an empirical tempfile check
+  produced mode 0644 / parent 0755.
+- **Human review feedback loop.** A `keep`/`drop`/`override <action>`
+  decision (`python -m phi_engine review --study S decide ...`) is
+  persisted and applied on the NEXT `run` -- not merely logged.
+
+### Intake contract (intake-manifest/v3)
+
+- **Required package.** A source root MUST provide `datasets/` (always
+  required), plus at least one of `forms/` or `dictionary_mapping/` (an
+  alternative group, not both mandatory). Missing/empty required
+  components -- or a shortfall in the alternative group -- are blocking
+  review items.
+- **Closed accepted-format matrix** (`intake_preflight._COMPONENT_SUFFIXES`):
+  `datasets/` = `.csv`/`.xls`/`.xlsx` (dataset `.xlsx` must be single-sheet);
+  `forms/` = `.pdf` only (annotated and non-annotated are not distinguished,
+  no `annotated_pdfs` alias); `dictionary_mapping/` =
+  `.csv`/`.xlsx`. `.json`/`.jsonl` are NOT accepted datasets. Any
+  unsupported suffix, invalid/multi-sheet workbook, or cross-component
+  hardlink becomes an `_unclassified` review item. Nested subdirectories and
+  duplicate content are preserved as distinct entries.
+- **Source symlink rejection.** The whole source subtree is opened
+  `O_NOFOLLOW`; a symlink anywhere yields `source-symlink-not-allowed` and is
+  never followed.
+- **Study naming.** `--study` (source `user`) is required for every
+  subcommand except `intake`. Omitted at intake: local-only, support-content
+  -only AI naming (source `ai`, loopback/attested/digest-pinned client, never
+  `config.get_llm_client()`) is permitted ONLY by the positive attestation
+  `--support-confirmed-no-phi`; otherwise a random `study-<8hex>` name
+  (source `generated`) is assigned and reused/promoted for the same source.
+  There is no negative "may contain PHI" flag.
+- **Manifest.** `intake-manifest/v3` keys `schema`/`study`/
+  `study_name_source`/`status`/`source_root`/`entries`/`review_items`/
+  `errors`/`removals`; statuses `ready`/`review_required`/`failed` map to
+  exit `0`/`8`/`2`. Clean cutover: a missing/malformed/v2 manifest fails with
+  a fixed public code, no legacy reader or shim.
+- **Redacted output.** `intake` prints only `{"study", "status", "linked",
+  "review", "errors", "manifest"}` to stdout, never entry paths, review/error
+  detail, or raw exceptions.
+- **Organize is component-authoritative.** The organizer routes each entry by
+  the `component` intake assigned, never by re-guessing from path/suffix;
+  `_unclassified` is never parsed. `run_pipeline` generates no source-of-truth
+  tree automatically; standalone SoT is available only to callers that
+  explicitly maintain the legacy annotated-PDF layout.
+
+### Authority grounding
+
+Every classification/action claim in code comments or documentation should
+trace to `authorities/01_hipaa_164_514_full.md` or
+`authorities/AUTHORITY_MATRIX.md`. Do not add jurisdiction, identifier
+category, or benchmark claims without a grounding authority citation or a
+`file:line` reference into surviving `phi_engine`/`harness` code.
+
+### Runtime paths
+
+- `phi_engine/cli/main.py` -- `python -m phi_engine {intake,organize,run,review,status}`
+  entry point; module docstring is the source of truth for exact CLI syntax.
+- `phi_engine/pipeline/{intake,organize,run,review,dependencies}.py` -- pipeline stages.
+- `phi_engine/security/{phi_review,phi_scrub,phi_guard_gate,phi_gate,llm_tool_guard,presidio_gate,kanon_gate}.py` -- classification, scrub, and guard controls.
+- `phi_engine/config/config.py`, `phi_engine/config/config.yaml`, `phi_engine/config/_defaults/` -- static configuration; per-study config is synthesized fresh each run (`phi_engine/pipeline/synthesize_config.py`) and is not source of truth.
+- `harness/make_stress_fixtures.py`, `harness/make_privacy_gateway_fixtures.py` -- deterministic fixture builders used by the stress and privacy-gateway test suites.
+- `harness/spec_check.py` -- post-run invariant checker (`intake_symlink_invariant`, `llm_boundary_canary`, `source_immutability`).
+- `harness/validate_privacy_research.py` -- validates `research/privacy_gateway/{evidence_ledger,candidate_registry,dispositions,search_log}` against `docs/PRIVACY_GATEWAY_RESEARCH.md`.
+
+### Verification commands
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider \
+  tests/test_phi_engine_integration.py \
+  tests/test_stress_standalone.py \
+  tests/test_phase3_run_pipeline_integration.py \
+  tests/test_phase3_run_review_integration.py \
+  tests/test_pipeline_lock.py \
+  tests/test_phi_llm_safety.py \
+  tests/test_llm_egress_gate.py \
+  tests/test_validate_privacy_research.py
+
+PYTHONDONTWRITEBYTECODE=1 python -m harness.validate_privacy_research
+
+PYTHONDONTWRITEBYTECODE=1 python -m phi_engine --help
+PYTHONDONTWRITEBYTECODE=1 python -c "from phi_engine.security.presidio_gate import analyze_text; assert analyze_text('SSN 123-45-6789')"
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
+```
+
+Before claiming any change complete: run the relevant command(s) above and
+report the actual observed output. Never claim a test passed without
+running it.
+
+### Working conventions
+
+- No em-dashes, no emojis in generated files (repository convention).
+- Never commit real PHI. Never commit AWS/API or LLM provider credentials.
+- Every classification/action rule change must cite its authority source.
+- Commit messages follow Conventional Commits.

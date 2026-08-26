@@ -13,7 +13,7 @@
   - **(b)(2)(ii)** "No actual knowledge" requirement
 - **(c)** Implementation specifications: Re-identification
 - **(d)** Minimum necessary requirements
-- **(e)** **Limited Data Set** (LDS) — THIRD de-identification tier I had missed
+- **(e)** **Limited Data Set** (LDS) — a restricted PHI data set, distinct from the de-identification methods in (b)
 - **(f)** Fundraising communications
 - **(g)** Uses and disclosures for underwriting
 - **(h)** Verification requirements
@@ -52,7 +52,7 @@ Text says: initial three digits of ZIP OK if current Census data shows (1) geogr
 Per HHS/OCR 2012 guidance, the set of restricted ZIP3 codes (those changed to "000") currently is:
 **036, 059, 063, 102, 203, 556, 692, 790, 821, 823, 830, 831, 878, 879, 884, 890, 893**
 
-This set is Census-dependent and may change with new decennial data. Our corpus pins to this list with a note.
+This set is Census-dependent and may change with new decennial data. `authorities/AUTHORITY_MATRIX.md` pins to this list with a note.
 
 ## The "no actual knowledge" safety net — paragraph (b)(2)(ii)
 
@@ -60,7 +60,7 @@ This set is Census-dependent and may change with new decennial data. Our corpus 
 
 CRITICAL: Safe Harbor is NOT just removing the 18. It is removing the 18 PLUS satisfying the actual-knowledge test. If the CE knows combination-based re-identification is possible (rare disease + small geography + date range), Safe Harbor fails even with all 18 removed.
 
-This is the legal hook for the corpus's DPDPA-strict and quasi-identifier layers — similar issues arise under HIPAA via (b)(2)(ii).
+This is the legal hook for combination-based re-identification risk generally — the pipeline's classification layer must treat quasi-identifier combinations (rare disease + small geography + date range) as a residual risk even after all 18 Safe Harbor categories are removed.
 
 ## Re-identification codes — paragraph (c)
 
@@ -69,11 +69,19 @@ Permitted IF:
 - (c)(2) Security: CE does not use/disclose the code for any other purpose AND does not disclose the re-identification mechanism
 
 Implications for the pipeline's pseudonymization layer:
-- Hashing with a secret salt is permitted
-- Sequential record numbers are permitted (unrelated to patient)
-- Hashing of DOB+SSN is NOT permitted (derived from individual)
-- Mapping tables must be secured and separately held
-- Mechanism disclosure is forbidden
+- A code that is truly independent of the individual (sequential record
+  numbers, randomly assigned IDs unrelated to the patient) is permitted
+  under (c).
+- A cryptographic hash of the individual's OWN identifier value, even with
+  a secret salt/key, is NOT automatically a permitted (c) re-identification
+  code: NIST IR 8053 states HIPAA specifically allows properly salted
+  one-way hashes for pseudonymization only as part of the Expert
+  Determination method (b)(1), requiring expert certification -- not
+  merely by virtue of using a secret key. A keyed hash of the raw
+  identifier remains "derived from ... information about the individual"
+  in the ordinary sense of (c)(1).
+- Mapping tables/keys must be secured and separately held; mechanism
+  disclosure is forbidden under (c)(2) regardless of which method is used.
 
 ## Minimum necessary — paragraph (d)
 
@@ -85,7 +93,7 @@ Applies to requests and disclosures. Entity must:
 
 Implication: the envelope must enforce "entire medical record" blocking and document the minimum-necessary justification at runtime.
 
-## Limited Data Set (LDS) — paragraph (e) — MISSED IN PRIOR CORPUS
+## Limited Data Set (LDS) — paragraph (e)
 
 An LDS is PHI that EXCLUDES the following 16 direct identifiers:
 1. Names
@@ -112,10 +120,12 @@ NOT excluded from LDS (therefore permitted):
 
 **LDS is STILL PHI.** Requires a Data Use Agreement (DUA) per (e)(4). Can only be used for research, public health, or health care operations per (e)(3).
 
-This is a third de-identification tier. The corpus needs:
-- LDS-valid examples (town+state+ZIP+date OK, names removed)
-- LDS-invalid examples (names retained despite otherwise-LDS format)
-- LDS-with-quasi-id cases (LDS valid but Sweeney-vulnerable — the (b)(2)(ii) actual-knowledge trap)
+This is a restricted PHI category, not a de-identification tier and not
+itself a de-identification method. Implication for the pipeline: an
+LDS-scoped output MAY retain dates and general geography (town/city,
+state, ZIP) while still removing the 16 excluded direct identifiers above;
+it must remain tagged as PHI requiring a Data Use Agreement, never as
+de-identified output.
 
 ## Fundraising — paragraph (f)
 
@@ -127,7 +137,7 @@ PHI permitted without authorization for fundraising:
 - Outcome information
 - Health insurance status
 
-This is a SEPARATE permitted use — not de-identification. But it means names+address+DOB can legally be used for fundraising even though they are Safe Harbor identifiers. The corpus should include fundraising-scoped cases to verify the pipeline distinguishes contexts.
+This is a SEPARATE permitted use — not de-identification. But it means names+address+DOB can legally be used for fundraising even though they are Safe Harbor identifiers. Implication: the pipeline's classification layer must distinguish a fundraising-scoped context from a research/treatment context before applying the fundraising exception, rather than force-dropping these fields unconditionally.
 
 ## Verification — paragraph (h)
 
@@ -148,26 +158,30 @@ Implication: the envelope's disclosure boundary must log verification artifacts 
 - 78 FR 5700 (2013-01-25) — HITECH Final Rule
 - 78 FR 34266 (2013-06-07) — genetic information underwriting amendment
 
-## Actions for corpus
+## PHI-handling implications
 
-1. **Add Limited Data Set layer** (NEW — Layer 11 or integrated into existing layers)
-   - LDS-valid records (names/MRN/SSN/etc removed, dates+city+ZIP retained)
-   - LDS-invalid records (claim to be LDS but contain LDS-excluded identifier)
-   - LDS + quasi-identifier-attack records (LDS format, Sweeney-vulnerable)
+1. **Limited Data Set (LDS) handling** (paragraph (e)) — an LDS action/method in
+   `phi_engine/security/phi_scrub.py` MAY retain dates and town/city/state/ZIP
+   while removing the 16 LDS-excluded identifiers, and must never be classified as
+   fully de-identified output.
 
-2. **Add re-identification-code test cases** (paragraph (c))
-   - Hash-from-PII case (violates (c)(1)) — e.g., MRN = SHA256(SSN)
-   - Hash-with-salt case (permitted)
-   - Sequential re-ID (permitted)
-   - Published mechanism disclosure (violates (c)(2))
+2. **Re-identification-code handling** (paragraph (c)) — `phi_scrub`'s
+   HMAC-pseudonymize action computes `HMAC-SHA256(key, label:raw_id)` -- a
+   keyed, ONE-WAY hash of the individual's OWN raw identifier value. Key
+   possession does not decrypt a pseudonym back to its raw value, but it
+   does permit deterministic recomputation of the pseudonym for any
+   candidate raw value, enabling enumeration/linkage against a bounded
+   candidate space. This is linkable pseudonymization, not an independent
+   (c) re-identification code, and it does not by itself satisfy Safe
+   Harbor or (c) absent a documented Expert Determination (b)(1). The
+   pipeline must never disclose the pseudonymization mechanism or key in
+   published output.
 
-3. **Add fundraising-context cases** (paragraph (f))
-   - Records tagged as fundraising-scope with permitted fields
-   - Verify detector distinguishes fundraising from research/treatment contexts
+3. **Fundraising-context handling** (paragraph (f)) — classification must
+   distinguish a fundraising-scoped context from research/treatment before
+   applying the fundraising permitted-use exception; outside that context, the
+   listed fields remain Safe Harbor identifiers subject to normal scrub actions.
 
-4. **Add verification-disclosure log cases** (paragraph (h))
-   - Disclosure request with valid government letterhead
-   - Disclosure request without authority verification
-   - The envelope's audit log must capture the verification artifact
-
-5. **Update the taxonomy doc** with all four additions above and correct citation.
+4. **Verification-disclosure handling** (paragraph (h)) — any disclosure path the
+   pipeline exposes must log a verification artifact (badge/letterhead/statement
+   of authority) per (h), captured value-free in `output/<study>/audit/`.

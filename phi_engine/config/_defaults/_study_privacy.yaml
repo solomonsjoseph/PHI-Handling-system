@@ -1,0 +1,17 @@
+# Maintainer template for config/<STUDY>/_study_privacy.yaml (Note 11).
+# Copy and customize per study; the study-setup wizard writes a completed file.
+jurisdictions:
+  - USA
+data_as_of: "YYYY-MM-DD"
+# Default pinned_only: offline, deterministic, no network at run time.
+# Operators wanting live official-rule refresh set online_preferred here
+# AND export REPORTAL_RULEBOOK_AI_EXTRACT=1 (+ --allow-network).
+rule_refresh: pinned_only
+conflict_policy: strictest_wins
+approval:
+  mode: hybrid
+  max_synthetic_attempts: 5
+parallelism:
+  mode: auto
+# Publish-time kanon_publish_gate (pyCANON k-anonymity) is DEFERRED — not used in
+# the live publish path. Re-identification is classification + scrub + pattern scan.

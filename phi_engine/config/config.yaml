@@ -1,0 +1,85 @@
+# ============================================================
+# RePORT AI Portal Runtime Configuration (Production-Aligned)
+# ============================================================
+
+app:
+  name: RePORT AI Portal
+  version: "0.18.0"
+  mode: user
+  log_level: INFO
+
+
+# ============================================================
+# SECURITY (NO SECRETS HERE)
+# ============================================================
+
+security:
+  encryption:
+    enabled: false
+    log_encryption: false
+    # NOTE: log encryption is not yet implemented — this block is reserved
+    # for a future feature.  No logs are encrypted at runtime.
+    public_key_path: config/keys/log_public.pem
+
+  rbac:
+    enabled: false
+
+  audit:
+    enabled: true
+
+
+# ============================================================
+# PATHS (STATIC ONLY, NO LOGIC)
+# ============================================================
+
+paths:
+  data_dir: data/
+  output_dir: output/
+  logs_dir: .logs/
+
+
+# ============================================================
+# AI Assistant / AGENT
+# ============================================================
+
+ai_assistant:
+  llm_model: qwen3:8b  # default: Ollama local model (no API key needed). Override via LLM_MODEL env var or wizard.
+  agent:
+    orchestration_mode: auto
+    max_tokens: 16384
+    timeout_seconds: 300
+  telemetry:
+    enabled: true
+    sink: telemetry/events.jsonl
+
+
+# ============================================================
+# LLM CLIENT (PHI detection)
+# Provider options:
+#   anthropic    -- Claude; set ANTHROPIC_API_KEY
+#   openai       -- GPT; set OPENAI_API_KEY
+#   openai-oauth -- ChatGPT subscription via local proxy (personal/local use only)
+#                   Setup: npx @openai/codex login
+#                          npx openai-oauth   (proxy at http://127.0.0.1:10531/v1)
+#   google-genai -- Gemini; set GOOGLE_API_KEY
+#   ollama       -- local model; set base_url to Ollama server
+# Switch provider by setting PHI_LLM_PROVIDER env var, or editing here.
+# ============================================================
+llm:
+  provider: none
+  model: none
+  api_key_env: ""
+  base_url: http://localhost:11434
+  timeout_s: 60
+  max_retries: 3
+  confidence_threshold: 0.75  # LLM confidence below this threshold → flag for human review
+
+local_llm:
+  provider: none
+  models: []
+  base_url: http://127.0.0.1:11434
+  allowed_base_urls:
+    - http://127.0.0.1:11434
+  offline_approved: false
+  timeout_s: 60
+  max_retries: 1
