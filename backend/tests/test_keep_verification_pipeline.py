@@ -3,6 +3,7 @@ import asyncio
 
 from phi_core.agents.llm import LlmConfig
 from phi_core.control.store import MemoryControlStore
+from phi_core.control.testing import complete_fake_task, start_test_run
 
 
 def test_keep_verification_routes_to_human_review_without_executing(tmp_path, monkeypatch):
@@ -33,59 +34,61 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
             self.agent_log = FakeAgentLog()
 
     class FakeStatute:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     class FakePraxis:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def method_for(self, _category):
             return {}
 
     class FakeLexicon:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {"columns": []}
+            return await complete_fake_task(self.ctx, {"columns": []})
 
     class FakeInstrument(FakeLexicon):
         async def run(self, **_kwargs):
-            return {"fields": []}
+            return await complete_fake_task(self.ctx, {"fields": []})
 
     class FakeSchema(FakeLexicon):
         pass
 
     class FakeJudge:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
             self.last_message_id = None
         async def run(self, **_kwargs):
-            return {"decisions": [{
+            return await complete_fake_task(self.ctx, {"decisions": [{
                 "file_id": "dataset.csv",
                 "column": "barcode",
                 "action": "keep",
                 "reason": "Judge decision",
-            }]}
+            }]})
 
     class FakeSentinel:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
 
         async def run(self, **_kwargs):
-            return {"issues": []}
+            return await complete_fake_task(self.ctx, {"issues": []})
 
     class FakeExecutor:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
             executor_calls.append(True)
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
     monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
@@ -103,21 +106,27 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
         phase_events.append((phase, payload))
 
     db = FakeDb()
-    result = asyncio.run(orchestrator.run_pipeline(
-        {
-            "id": "session",
-            "files": [{
-                "kind": "dataset",
-                "file_id": "dataset.csv",
-                "stored_path": str(source),
-            }],
-        },
-        db,
-        LlmConfig(provider="anthropic", model="test", max_tokens=100),
-        emit,
-        on_phase,
-        control_store=MemoryControlStore(),
-    ))
+
+    async def _go():
+        store = MemoryControlStore()
+        await start_test_run(store, "session")
+        return await orchestrator.run_pipeline(
+            {
+                "id": "session",
+                "files": [{
+                    "kind": "dataset",
+                    "file_id": "dataset.csv",
+                    "stored_path": str(source),
+                }],
+            },
+            db,
+            LlmConfig(provider="anthropic", model="test", max_tokens=100),
+            emit,
+            on_phase,
+            control_store=store,
+        )
+
+    result = asyncio.run(_go())
 
     assert result["status"] == "awaiting_human_review"
     assert result["decisions"][0]["action"] == "human_review"

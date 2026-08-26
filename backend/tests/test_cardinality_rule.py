@@ -4,6 +4,7 @@ import pytest
 from phi_core.agents.llm import LlmConfig
 from phi_core.agents.reasoning import _HARD_RULE_TABLE, apply_site_cardinality_rule
 from phi_core.control.store import MemoryControlStore
+from phi_core.control.testing import complete_fake_task, start_test_run
 
 
 def _decide(**kw):
@@ -165,42 +166,43 @@ def _run_cardinality_pipeline(tmp_path, monkeypatch):
             self.agent_log = FakeAgentLog()
 
     class FakeStatute:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     class FakePraxis:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def method_for(self, _category):
             return {}
 
     class FakeLexicon:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {"columns": []}
+            return await complete_fake_task(self.ctx, {"columns": []})
 
     class FakeInstrument(FakeLexicon):
         async def run(self, **_kwargs):
-            return {"fields": []}
+            return await complete_fake_task(self.ctx, {"fields": []})
 
     class FakeSchema(FakeLexicon):
-        def __init__(self, *_a, **_kwargs):
-            super().__init__(*_a, **_kwargs)
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            super().__init__(ctx, *_a, **_kwargs)
             self._stats = {("dataset.csv", "treatment_facility_name"): {"distinct": 4, "rows": 40}}
 
     class FakeJudge:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
             self.last_message_id = None
 
         async def run(self, **_kwargs):
-            return {"decisions": [{
+            return await complete_fake_task(self.ctx, {"decisions": [{
                 "file_id": "dataset.csv",
                 "column": "treatment_facility_name",
                 "action": "keep",
@@ -208,10 +210,11 @@ def _run_cardinality_pipeline(tmp_path, monkeypatch):
                 "reason": "Judge decision",
                 "subject": "site",
                 "phi_category": "NONE",
-            }]}
+            }]})
 
     class FakeSentinel:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             # Forces the pipeline into human review right after this
             # iteration's short-circuit, so the test never needs to mock
             # Executor/Auditor/Ledger/Herald -- the loop-ordering proof
@@ -219,7 +222,7 @@ def _run_cardinality_pipeline(tmp_path, monkeypatch):
             self.call_failures = 1
 
         async def run(self, **_kwargs):
-            return {"issues": []}
+            return await complete_fake_task(self.ctx, {"issues": []})
 
     monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
     monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
@@ -236,22 +239,28 @@ def _run_cardinality_pipeline(tmp_path, monkeypatch):
         phase_events.append((phase, payload))
 
     db = FakeDb()
-    result = asyncio.run(orchestrator.run_pipeline(
-        {
-            "id": "session",
-            "iteration_cap": 1,
-            "files": [{
-                "kind": "dataset",
-                "file_id": "dataset.csv",
-                "stored_path": str(source),
-            }],
-        },
-        db,
-        LlmConfig(provider="anthropic", model="test", max_tokens=100),
-        emit,
-        on_phase,
-        control_store=MemoryControlStore(),
-    ))
+
+    async def _go():
+        store = MemoryControlStore()
+        await start_test_run(store, "session")
+        return await orchestrator.run_pipeline(
+            {
+                "id": "session",
+                "iteration_cap": 1,
+                "files": [{
+                    "kind": "dataset",
+                    "file_id": "dataset.csv",
+                    "stored_path": str(source),
+                }],
+            },
+            db,
+            LlmConfig(provider="anthropic", model="test", max_tokens=100),
+            emit,
+            on_phase,
+            control_store=store,
+        )
+
+    result = asyncio.run(_go())
     return result, phase_events
 
 

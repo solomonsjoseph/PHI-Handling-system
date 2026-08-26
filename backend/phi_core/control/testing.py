@@ -11,7 +11,9 @@ from .artifacts import ArtifactService
 from .context import AgentContext, ResearchCache
 from .gateway import GatewayRequest, GatewayResult, ToolGateway
 from .policy import CapabilityPolicy
-from .store import MemoryControlStore
+from .records import WorkflowRun
+from .store import ControlStore, MemoryControlStore
+from .tasks import TaskService
 from .writer import ArtifactWriter
 
 
@@ -67,6 +69,42 @@ class MemoryResearchCache:
             "source": source,
             "schema_version": schema_version,
         }
+
+
+async def complete_fake_task(ctx: Any, result: dict[str, Any]) -> dict[str, Any]:
+    """Complete ``ctx``'s task with ``result`` and return ``result`` unchanged.
+
+    Real agents get this for free from ``Agent.__init_subclass__``'s wrapper
+    (``phi_core/agents/base.py``), which only wraps actual ``Agent``
+    subclasses. An orchestrator-level unit-test fake standing in for a real
+    agent is a bare class, not an ``Agent`` subclass, so it never completes
+    its task -- leaving it stuck ``leased`` forever and ``accept_result``
+    refusing every acceptance with "not accepted". Call this at the end of
+    a fake's ``run()`` (or equivalent) with the same ``ctx`` orchestrator
+    passed into its constructor.
+    """
+    if ctx is not None and getattr(ctx, "tasks", None) is not None:
+        await ctx.tasks.complete(result if isinstance(result, dict) else {})
+    return result
+
+
+async def start_test_run(
+    store: ControlStore, session_id: str, *, run_id: str | None = None, principal: str = "test-operator",
+) -> WorkflowRun:
+    """Open a real ``WorkflowRun`` through ``SuperOrchestrator.start_run``
+    for orchestrator-level unit tests that call ``run_pipeline`` directly
+    with a bare ``MemoryControlStore()``. Every production entry path opens
+    a run this way before running the pipeline (see ``server.py``); a test
+    that skips this step leaves ``accept_result``/``_load_run`` with no
+    ``WorkflowRun`` document to find, raising ``unknown run_id`` on the
+    pipeline's first agent acceptance. Defaults ``run_id`` to ``session_id``
+    so it matches ``run_pipeline``'s own default ``effective_run_id`` when
+    the caller passes no explicit ``run_id``.
+    """
+    from .superorchestrator import SuperOrchestrator
+
+    orch = SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None)))
+    return await orch.start_run(session_id=session_id, principal=principal, run_id=run_id or session_id)
 
 
 def make_ctx(agent: str, **overrides: Any) -> AgentContext:

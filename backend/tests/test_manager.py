@@ -16,7 +16,7 @@ from phi_core.agents.base import _json_validator
 from phi_core.agents.llm import LlmConfig
 from phi_core.agents.manager import Manager, ManagerAdvice, ManagerDecision
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.testing import FakeGateway, make_ctx
+from phi_core.control.testing import FakeGateway, complete_fake_task, make_ctx, start_test_run
 
 # ---- shared fakes, following test_keep_verification_pipeline.py:13-26 -----
 
@@ -421,11 +421,11 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
     from phi_core.agents import orchestrator
 
     class FakeManager:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, *, roster, phase_plan):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
         async def note_phase(self, phase, elapsed_s):
             return None
@@ -443,41 +443,43 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
             return {"outcome": outcome}
 
     class FakeStatute:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     class FakeSchema:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {"columns": []}
+            return await complete_fake_task(self.ctx, {"columns": []})
     class FakePraxis:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def method_for(self, _category):
             return {}
 
     class FakeJudge:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
             self.last_message_id = None
         async def run(self, **_kwargs):
-            return {"decisions": [{"file_id": "f", "column": "c",
+            return await complete_fake_task(self.ctx, {"decisions": [{"file_id": "f", "column": "c",
                                    "action": "keep", "reason": "r",
-                                   "subject": "participant"}]}
+                                   "subject": "participant"}]})
 
     class FakeSentinel:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
 
         async def run(self, **_kwargs):
-            return {"issues": [{"column": "c", "severity": "blocking",
-                                "detail": "unresolved leak"}]}
+            return await complete_fake_task(self.ctx, {"issues": [{"column": "c", "severity": "blocking",
+                                "detail": "unresolved leak"}]})
 
     monkeypatch.setattr(orchestrator, "Manager", FakeManager)
     monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
@@ -496,10 +498,15 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
     async def on_phase(phase, payload):
         phase_events.append((phase, payload))
 
-    result = asyncio.run(orchestrator.run_pipeline(
-        {"id": "s", "files": [{"kind": "dataset", "file_id": "f", "columns": ["c"]}]},
-        db, LlmConfig(provider="anthropic", model="test", max_tokens=100),
-        emit, on_phase, control_store=MemoryControlStore()))
+    async def _go():
+        store = MemoryControlStore()
+        await start_test_run(store, "s")
+        return await orchestrator.run_pipeline(
+            {"id": "s", "files": [{"kind": "dataset", "file_id": "f", "columns": ["c"]}]},
+            db, LlmConfig(provider="anthropic", model="test", max_tokens=100),
+            emit, on_phase, control_store=store)
+
+    result = asyncio.run(_go())
 
     assert result["status"] == "awaiting_human_review"
     filt, update_doc = db.sessions.updates[-1]
@@ -519,11 +526,11 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
     scout_started = asyncio.Event()
 
     class FakeManager:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, *, roster, phase_plan):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
         async def note_phase(self, phase, elapsed_s):
             return None
@@ -544,64 +551,66 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
 
 
     class FakeStatute:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     class FakeSchema:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {"columns": []}
+            return await complete_fake_task(self.ctx, {"columns": []})
 
     class FakePraxis:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def method_for(self, _category):
             return {}
 
     class FakeJudge:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
             self.last_message_id = None
 
         async def run(self, **_kwargs):
-            return {"decisions": [{"file_id": "f", "column": "c",
+            return await complete_fake_task(self.ctx, {"decisions": [{"file_id": "f", "column": "c",
                                    "action": "keep", "confidence": 0.95,
                                    "phi_category": "NONE", "citation": "",
-                                   "reason": "r", "subject": "participant"}]}
+                                   "reason": "r", "subject": "participant"}]})
 
     class FakeSentinel:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
 
         async def run(self, **_kwargs):
-            return {"issues": []}
+            return await complete_fake_task(self.ctx, {"issues": []})
 
     class FakeExecutor:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, files, decisions, omit_by_file=None):
-            return {"exports": {"f": "/tmp/does-not-matter.csv"}}
+            return await complete_fake_task(self.ctx, {"exports": {"f": "/tmp/does-not-matter.csv"}})
 
     class FakeOperator:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, files, decisions, exports, omit_by_file=None):
-            return {"failed_file_ids": [], "verdicts": []}
+            return await complete_fake_task(self.ctx, {"failed_file_ids": [], "verdicts": []})
 
     class FakeReviewer:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, decisions, operator_result, exports, omit_by_file=None):
-            return {"exports": exports, "findings": []}
+            return await complete_fake_task(self.ctx, {"exports": exports, "findings": []})
 
     class FakeScout:
         def __init__(self, *_a, **_kwargs):
@@ -645,10 +654,15 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
     async def on_phase(_phase, _payload):
         return None
 
-    result = asyncio.run(orchestrator.run_pipeline(
-        {"id": "s", "files": [{"kind": "dataset", "file_id": "f", "columns": ["c"]}]},
-        db, LlmConfig(provider="anthropic", model="test", max_tokens=100),
-        emit, on_phase, control_store=MemoryControlStore()))
+    async def _go():
+        store = MemoryControlStore()
+        await start_test_run(store, "s")
+        return await orchestrator.run_pipeline(
+            {"id": "s", "files": [{"kind": "dataset", "file_id": "f", "columns": ["c"]}]},
+            db, LlmConfig(provider="anthropic", model="test", max_tokens=100),
+            emit, on_phase, control_store=store)
+
+    result = asyncio.run(_go())
 
     assert result["status"] == "awaiting_human_review"
     filt, update_doc = db.sessions.updates[-1]

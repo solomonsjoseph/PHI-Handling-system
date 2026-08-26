@@ -4,6 +4,7 @@ import pytest
 from phi_core.agents.llm import LlmConfig
 from phi_core.agents.reasoning import CONFIDENCE_FLOOR, apply_confidence_floor
 from phi_core.control.store import MemoryControlStore
+from phi_core.control.testing import complete_fake_task, start_test_run
 
 
 def _decide(**kw):
@@ -66,54 +67,56 @@ def _run_confidence_floor_pipeline(tmp_path, monkeypatch, iteration_cap):
             self.agent_log = FakeAgentLog()
 
     class FakeStatute:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     class FakePraxis:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def method_for(self, _category):
             return {}
 
     class FakeLexicon:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {"columns": []}
+            return await complete_fake_task(self.ctx, {"columns": []})
 
     class FakeInstrument(FakeLexicon):
         async def run(self, **_kwargs):
-            return {"fields": []}
+            return await complete_fake_task(self.ctx, {"fields": []})
 
     class FakeSchema(FakeLexicon):
         pass
 
     class FakeJudge:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
             self.last_message_id = None
 
         async def run(self, **_kwargs):
-            return {"decisions": [{
+            return await complete_fake_task(self.ctx, {"decisions": [{
                 "file_id": "dataset.csv",
                 "column": "col",
                 "action": "keep",
                 "confidence": 0.55,
                 "reason": "Judge decision",
                 "phi_category": "NONE",
-            }]}
+            }]})
 
     class FakeSentinel:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
 
         async def run(self, **_kwargs):
-            return {"issues": []}
+            return await complete_fake_task(self.ctx, {"issues": []})
 
     monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
     monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
@@ -130,22 +133,28 @@ def _run_confidence_floor_pipeline(tmp_path, monkeypatch, iteration_cap):
         phase_events.append((phase, payload))
 
     db = FakeDb()
-    result = asyncio.run(orchestrator.run_pipeline(
-        {
-            "id": "session",
-            "iteration_cap": iteration_cap,
-            "files": [{
-                "kind": "dataset",
-                "file_id": "dataset.csv",
-                "stored_path": str(source),
-            }],
-        },
-        db,
-        LlmConfig(provider="anthropic", model="test", max_tokens=100),
-        emit,
-        on_phase,
-        control_store=MemoryControlStore(),
-    ))
+
+    async def _go():
+        store = MemoryControlStore()
+        await start_test_run(store, "session")
+        return await orchestrator.run_pipeline(
+            {
+                "id": "session",
+                "iteration_cap": iteration_cap,
+                "files": [{
+                    "kind": "dataset",
+                    "file_id": "dataset.csv",
+                    "stored_path": str(source),
+                }],
+            },
+            db,
+            LlmConfig(provider="anthropic", model="test", max_tokens=100),
+            emit,
+            on_phase,
+            control_store=store,
+        )
+
+    result = asyncio.run(_go())
     return result, phase_events
 
 

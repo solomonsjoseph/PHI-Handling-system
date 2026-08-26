@@ -22,7 +22,7 @@ from phi_core.agents.reasoning import (
     apply_column_actions_to_dataset,
 )
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.testing import make_ctx
+from phi_core.control.testing import complete_fake_task, make_ctx, start_test_run
 
 
 def _fixed_check(batch: list[int]) -> list[dict]:
@@ -1015,22 +1015,28 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
         phase_events.append((phase, payload))
 
     db = FakeDb()
-    result = asyncio.run(orchestrator.run_pipeline(
-        {
-            "id": "session",
-            "files": [
-                {"kind": "dataset", "file_id": "f1", "subtype": "csv",
-                 "stored_path": str(bad_export), "columns": ["age"]},
-                {"kind": "dataset", "file_id": "f2", "subtype": "csv",
-                 "stored_path": str(good_export), "columns": ["age"]},
-            ],
-        },
-        db,
-        LlmConfig(provider="anthropic", model="test", max_tokens=100),
-        emit,
-        on_phase,
-        control_store=MemoryControlStore(),
-    ))
+
+    async def _go():
+        store = MemoryControlStore()
+        await start_test_run(store, "session")
+        return await orchestrator.run_pipeline(
+            {
+                "id": "session",
+                "files": [
+                    {"kind": "dataset", "file_id": "f1", "subtype": "csv",
+                     "stored_path": str(bad_export), "columns": ["age"]},
+                    {"kind": "dataset", "file_id": "f2", "subtype": "csv",
+                     "stored_path": str(good_export), "columns": ["age"]},
+                ],
+            },
+            db,
+            LlmConfig(provider="anthropic", model="test", max_tokens=100),
+            emit,
+            on_phase,
+            control_store=store,
+        )
+
+    result = asyncio.run(_go())
 
     assert "f1" not in result["exports"]
     assert result["exports"] == {"f2": str(good_export)}
@@ -1096,40 +1102,41 @@ def test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor(tmp_
             self.agent_log = FakeAgentLog()
 
     class FakeStatute:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     class FakePraxis:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def method_for(self, _category):
             return {}
 
     class FakeLexicon:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {"columns": []}
+            return await complete_fake_task(self.ctx, {"columns": []})
 
     class FakeInstrument(FakeLexicon):
         async def run(self, **_kwargs):
-            return {"fields": []}
+            return await complete_fake_task(self.ctx, {"fields": []})
 
     class FakeSchema(FakeLexicon):
         pass
 
     class FakeJudge:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
             self.last_message_id = None
 
         async def run(self, **_kwargs):
-            return {"decisions": [
+            return await complete_fake_task(self.ctx, {"decisions": [
                 {"file_id": "f1", "column": "field", "action": "drop",
                  "phi_category": "G", "citation": "45 CFR 164.514(b)(2)(i)(G)",
                  "confidence": 0.95, "reason": "Judge decision"},
@@ -1139,55 +1146,60 @@ def test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor(tmp_
                 {"file_id": "f2", "column": "field", "action": "drop",
                  "phi_category": "G", "citation": "45 CFR 164.514(b)(2)(i)(G)",
                  "confidence": 0.95, "reason": "Judge decision"},
-            ]}
+            ]})
 
     class FakeSentinel:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
 
         async def run(self, **_kwargs):
-            return {"issues": []}
+            return await complete_fake_task(self.ctx, {"issues": []})
 
     executor_calls: list[int] = []
 
     class FakeExecutor:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
             executor_calls.append(1)
-            return {"exports": {"f1": str(f1_export), "f2": str(f2_export)}}
+            return await complete_fake_task(
+                self.ctx, {"exports": {"f1": str(f1_export), "f2": str(f2_export)}}
+            )
 
     class FakeAuditor:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def _log(self, *_args, **_kwargs):
             return None
 
         async def run(self, **_kwargs):
-            return {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+            return await complete_fake_task(
+                self.ctx, {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
+            )
 
     class FakeScout:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     class FakeLedger:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     class FakeHerald:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
     monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
@@ -1211,8 +1223,11 @@ def test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor(tmp_
         phase_events.append((phase, payload))
 
     db = FakeDb()
-    with pytest.raises(DecisionGateFailure) as excinfo:
-        asyncio.run(orchestrator.run_pipeline(
+
+    async def _go():
+        store = MemoryControlStore()
+        await start_test_run(store, "session")
+        return await orchestrator.run_pipeline(
             {
                 "id": "session",
                 "files": [
@@ -1226,8 +1241,11 @@ def test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor(tmp_
             LlmConfig(provider="anthropic", model="test", max_tokens=100),
             emit,
             on_phase,
-            control_store=MemoryControlStore(),
-        ))
+            control_store=store,
+        )
+
+    with pytest.raises(DecisionGateFailure) as excinfo:
+        asyncio.run(_go())
 
     assert "duplicate_decision" in str(excinfo.value)
     assert not executor_calls, "Executor must never run once the coverage proof has failed"

@@ -235,7 +235,10 @@ async def test_create_child_work_refuses_a_task_type_the_parent_manifest_does_no
 
     with pytest.raises(CapabilityDenied):
         await orch.create_child_work(
-            run_id=run.run_id, parent_task_id=parent.task_id, task_type="executor",
+            # "ledger_compare" is only in Ledger's own allowed_child_task_types
+            # (its Compare/Aggregate split), not Pipeline's -- "executor" is a
+            # genuine direct Pipeline child per MANIFESTS["Pipeline"].
+            run_id=run.run_id, parent_task_id=parent.task_id, task_type="ledger_compare",
             input_ref={}, budget=ResourceBudget(),
         )
 

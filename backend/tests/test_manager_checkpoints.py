@@ -17,6 +17,7 @@ from phi_core.agents.reasoning import (
     plain_human_review_reasons,
 )
 from phi_core.control.store import MemoryControlStore
+from phi_core.control.testing import complete_fake_task, start_test_run
 from phi_core.crypto import decrypt_reversal_map, encrypt_reversal_map
 
 
@@ -151,12 +152,13 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
             self.agent_log = FakeAgentLog()
 
     class FakeAgent:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
             self.last_message_id = None
 
         async def run(self, **_kwargs):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     class FakeStatute(FakeAgent):
         pass
@@ -167,26 +169,26 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
 
     class FakeLexicon(FakeAgent):
         async def run(self, **_kwargs):
-            return {"columns": []}
+            return await complete_fake_task(self.ctx, {"columns": []})
 
     class FakeInstrument(FakeAgent):
         async def run(self, **_kwargs):
-            return {"fields": []}
+            return await complete_fake_task(self.ctx, {"fields": []})
 
     class FakeSchema(FakeLexicon):
         pass
 
     class FakeJudge(FakeAgent):
         async def run(self, **_kwargs):
-            return {"decisions": [
+            return await complete_fake_task(self.ctx, {"decisions": [
                 {"file_id": "f1", "column": "id", "action": "drop",
                  "phi_category": "A", "citation": "45 CFR 164.514(b)(2)(i)(A)",
                  "confidence": 0.95, "reason": "direct identifier"},
-            ]}
+            ]})
 
     class FakeSentinel(FakeAgent):
         async def run(self, **_kwargs):
-            return {"issues": []}
+            return await complete_fake_task(self.ctx, {"issues": []})
 
     class FakeExecutor(FakeAgent):
         async def run(self, **_kwargs):
@@ -210,13 +212,19 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
             events.append((phase, payload))
 
         db = FakeDb()
-        result = asyncio.run(orchestrator.run_pipeline(
-            {"id": "session", "files": [
-                {"kind": "dataset", "file_id": "f1", "subtype": "csv",
-                 "stored_path": "/tmp/does-not-matter.csv", "columns": ["id"]},
-            ]}, db, LlmConfig(provider="anthropic", model="test", max_tokens=100), emit, on_phase,
-            control_store=MemoryControlStore(),
-        ))
+
+        async def _go():
+            store = MemoryControlStore()
+            await start_test_run(store, "session")
+            return await orchestrator.run_pipeline(
+                {"id": "session", "files": [
+                    {"kind": "dataset", "file_id": "f1", "subtype": "csv",
+                     "stored_path": "/tmp/does-not-matter.csv", "columns": ["id"]},
+                ]}, db, LlmConfig(provider="anthropic", model="test", max_tokens=100), emit, on_phase,
+                control_store=store,
+            )
+
+        result = asyncio.run(_go())
     finally:
         for name, orig in originals.items():
             setattr(orchestrator, name, orig)

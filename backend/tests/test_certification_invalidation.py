@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from phi_core.agents.llm import LlmConfig
 from phi_core.control.store import MemoryControlStore
+from phi_core.control.testing import complete_fake_task, start_test_run
 
 
 class _FakeCollection:
@@ -324,12 +325,13 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
     })
 
     class EmptyAgent:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
             self.last_message_id = None
 
         async def run(self, **_kwargs):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     class FakePraxis(EmptyAgent):
         async def method_for(self, _category):
@@ -337,15 +339,15 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
 
     class FakeJudge(EmptyAgent):
         async def run(self, **_kwargs):
-            return {"decisions": []}
+            return await complete_fake_task(self.ctx, {"decisions": []})
 
     class FakeSentinel(EmptyAgent):
         async def run(self, **_kwargs):
-            return {"issues": []}
+            return await complete_fake_task(self.ctx, {"issues": []})
 
     class FakeExecutor(EmptyAgent):
         async def run(self, **_kwargs):
-            return {"exports": {}}
+            return await complete_fake_task(self.ctx, {"exports": {}})
 
     monkeypatch.setattr(orchestrator, "Statute", EmptyAgent)
     monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
@@ -363,15 +365,20 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
     async def on_phase(_phase, _payload):
         return None
 
-    asyncio.run(orchestrator.run_pipeline(
-        {"id": "sid", "files": []},
-        db,
-        LlmConfig(provider="anthropic", model="test", max_tokens=100),
-        emit,
-        on_phase,
-        run_id="old-claim",
-        control_store=MemoryControlStore(),
-    ))
+    async def _go():
+        store = MemoryControlStore()
+        await start_test_run(store, "sid", run_id="old-claim")
+        return await orchestrator.run_pipeline(
+            {"id": "sid", "files": []},
+            db,
+            LlmConfig(provider="anthropic", model="test", max_tokens=100),
+            emit,
+            on_phase,
+            run_id="old-claim",
+            control_store=store,
+        )
+
+    asyncio.run(_go())
 
     assert db.doc == {
         "id": "sid",

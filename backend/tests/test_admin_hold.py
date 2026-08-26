@@ -71,7 +71,10 @@ async def test_admin_set_and_clear_hold_round_trip_and_record_trace_events():
     sid = uuid.uuid4().hex
     run_id = uuid.uuid4().hex
     await db.sessions.insert_one({"id": sid, "status": "complete", "_pipeline_run_id": run_id})
-    await db.workflow_runs.insert_one({"run_id": run_id, "session_id": sid, "hold": "", "event_seq": 0})
+    await db.workflow_runs.insert_one({
+        "run_id": run_id, "session_id": sid, "hold": "", "event_seq": 0,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    })
     try:
         set_result = await srv.admin_set_hold(
             srv.AdminHoldBody(session_id=sid, reason="litigation-hold-1"), principal="reviewer-1",

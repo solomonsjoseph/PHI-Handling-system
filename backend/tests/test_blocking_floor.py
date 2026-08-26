@@ -4,6 +4,7 @@ import pytest
 from phi_core.agents.llm import LlmConfig
 from phi_core.agents.reasoning import BLOCKING_ISSUE_FLOOR, apply_blocking_floor
 from phi_core.control.store import MemoryControlStore
+from phi_core.control.testing import complete_fake_task, start_test_run
 
 
 def _decide(**kw):
@@ -82,29 +83,29 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
             self.agent_log = FakeAgentLog()
 
     class FakeStatute:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {}
+            return await complete_fake_task(self.ctx, {})
 
     class FakePraxis:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def method_for(self, _category):
             return {}
 
     class FakeLexicon:
-        def __init__(self, *_a, **_kwargs):
-            pass
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
 
         async def run(self, **_kwargs):
-            return {"columns": []}
+            return await complete_fake_task(self.ctx, {"columns": []})
 
     class FakeInstrument(FakeLexicon):
         async def run(self, **_kwargs):
-            return {"fields": []}
+            return await complete_fake_task(self.ctx, {"fields": []})
 
     class FakeSchema(FakeLexicon):
         pass
@@ -116,7 +117,8 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
     judge_actions = ["keep", "pseudonymize", "hash", "keep", "pseudonymize"]
 
     class FakeJudge:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
             self.last_message_id = None
             self.calls = 0
@@ -124,7 +126,7 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
         async def run(self, **_kwargs):
             action = judge_actions[self.calls] if self.calls < len(judge_actions) else "keep"
             self.calls += 1
-            return {"decisions": [{
+            return await complete_fake_task(self.ctx, {"decisions": [{
                 "file_id": "dataset.csv",
                 "column": "col",
                 "action": action,
@@ -132,10 +134,11 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
                 "reason": "Judge decision",
                 "subject": "study",
                 "phi_category": "NONE",
-            }]}
+            }]})
 
     class FakeSentinel:
-        def __init__(self, *_a, **_kwargs):
+        def __init__(self, ctx=None, *_a, **_kwargs):
+            self.ctx = ctx
             self.call_failures = 0
 
         async def run(self, **_kwargs):
@@ -146,7 +149,7 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
             }
             if sentinel_issue_column is not None:
                 issue["column"] = sentinel_issue_column
-            return {"issues": [issue]}
+            return await complete_fake_task(self.ctx, {"issues": [issue]})
 
     monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
     monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
@@ -163,22 +166,28 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
         phase_events.append((phase, payload))
 
     db = FakeDb()
-    result = asyncio.run(orchestrator.run_pipeline(
-        {
-            "id": "session",
-            "iteration_cap": iteration_cap,
-            "files": [{
-                "kind": "dataset",
-                "file_id": "dataset.csv",
-                "stored_path": str(source),
-            }],
-        },
-        db,
-        LlmConfig(provider="anthropic", model="test", max_tokens=100),
-        emit,
-        on_phase,
-        control_store=MemoryControlStore(),
-    ))
+
+    async def _go():
+        store = MemoryControlStore()
+        await start_test_run(store, "session")
+        return await orchestrator.run_pipeline(
+            {
+                "id": "session",
+                "iteration_cap": iteration_cap,
+                "files": [{
+                    "kind": "dataset",
+                    "file_id": "dataset.csv",
+                    "stored_path": str(source),
+                }],
+            },
+            db,
+            LlmConfig(provider="anthropic", model="test", max_tokens=100),
+            emit,
+            on_phase,
+            control_store=store,
+        )
+
+    result = asyncio.run(_go())
     return result, phase_events
 
 
