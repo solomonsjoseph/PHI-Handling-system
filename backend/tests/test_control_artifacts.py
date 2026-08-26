@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import pytest
-from phi_core.control.artifacts import ArtifactError, ArtifactService
+from phi_core.control.artifacts import ArtifactError, ArtifactService, reconcile
+from phi_core.control.policy import CapabilityDenied, CapabilityPolicy
 from phi_core.control.store import MemoryControlStore
 from phi_core.paths import UnsafePath
 
@@ -423,3 +424,57 @@ async def test_reconcile_retries_a_previously_failed_deletion() -> None:
 
     assert counts == {"deleted": 1, "failed": 0, "skipped_hold": 0}
     assert await store.get_one("artifacts", {"artifact_id": artifact_id}) is None
+
+
+@pytest.mark.asyncio
+async def test_stage_denies_a_root_outside_the_producer_grants() -> None:
+    service, store = _service()
+    grant = CapabilityPolicy(None).issue_grant(
+        run_id=service.run_id,
+        task_id="c" * 32,
+        agent="Executor",
+        task_type="executor",
+    )
+    assert grant.scope.artifact_roots == frozenset({"staging"})
+    await store.insert("capability_grants", grant)
+
+    with pytest.raises(CapabilityDenied, match="artifact root 'evidence' is not granted"):
+        await service.stage(
+            "evidence_snapshot",
+            "snapshot.json",
+            "internal",
+            "short",
+            producer_task_id=grant.task_id,
+            root="evidence",
+        )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_collects_expired_artifacts_but_preserves_held_records() -> None:
+    service, store = _service()
+    expired_id = await _stage_and_finalize(service, b"expired")
+    held_id = await _stage_and_finalize(service, b"held")
+    old_expiry = "2000-01-01T00:00:00+00:00"
+
+    expired_doc = await store.get_one("artifacts", {"artifact_id": expired_id})
+    held_doc = await store.get_one("artifacts", {"artifact_id": held_id})
+    from phi_core.control.records import ArtifactRecord
+
+    await store.replace_one(
+        "artifacts",
+        {"artifact_id": expired_id},
+        ArtifactRecord.model_validate(expired_doc).model_copy(update={"expires_at": old_expiry}),
+    )
+    await store.replace_one(
+        "artifacts",
+        {"artifact_id": held_id},
+        ArtifactRecord.model_validate(held_doc).model_copy(
+            update={"expires_at": old_expiry, "hold": "legal-hold-1"}
+        ),
+    )
+
+    counts = await reconcile(store)
+
+    assert counts == {"deleted": 1, "failed": 0, "skipped_hold": 1}
+    assert await store.get_one("artifacts", {"artifact_id": expired_id}) is None
+    assert (await store.get_one("artifacts", {"artifact_id": held_id}))["state"] == "staged"

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import logging
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -45,6 +46,8 @@ from .detectors import _analyzer as _presidio_analyzer
 from .jurisdictions import GuardPattern, get_pack
 
 MAX_FINDINGS_PER_FILE = 20
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def should_fire(p: GuardPattern, matched: str, cell_text: str,
@@ -189,6 +192,16 @@ def scan_names(text: str, jurisdiction: str = "us") -> list[Finding]:
                 score_threshold=MIN_PRESIDIO_CONFIDENCE,
             )
         except Exception:
+            _LOGGER.exception("Presidio name detector failed at line %s", lineno)
+            findings.append(Finding(
+                file="",
+                pattern_id="PRESIDIO_PERSON_NAME_UNRESOLVED",
+                hipaa_category=category,
+                sample="",
+                line=lineno,
+            ))
+            if len(findings) >= MAX_FINDINGS_PER_FILE:
+                return findings
             continue
         for r in results:
             matched = line[r.start:r.end]

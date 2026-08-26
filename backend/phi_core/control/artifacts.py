@@ -23,7 +23,8 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -39,8 +40,8 @@ from phi_core.paths import (
     sanitise_filename,
 )
 
-from .policy import BudgetExceeded
-from .records import ArtifactRecord, DataClass, PublicationPointer
+from .policy import BudgetExceeded, CapabilityDenied
+from .records import ArtifactRecord, CapabilityGrant, DataClass, PublicationPointer
 from .runs import check_run_budget, record_run_usage
 from .store import ControlStore
 from .workflow import WorkflowError
@@ -55,6 +56,17 @@ _ROOT_DIRS: Mapping[str, Any] = {
 }
 
 _PROMOTABLE_STATES = ("staged", "accepted")
+
+# F-POLICY-002 interim retention defaults. These intentionally mirror the
+# server's session-retention policy until a separate retention policy module
+# replaces both call sites.
+RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "30"))
+REVIEW_RETENTION_DAYS = int(os.environ.get("REVIEW_RETENTION_DAYS", str(RETENTION_DAYS)))
+
+
+def _expires_at(retention_class: str) -> str:
+    days = REVIEW_RETENTION_DAYS if retention_class == "review" else RETENTION_DAYS
+    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
 
 
 def _now() -> str:
@@ -181,9 +193,18 @@ class ArtifactService:
         """
         if await is_session_tombstoned(self._store, self.session_id):
             raise ArtifactError("session_tombstoned", self.session_id)
-        sanitise_filename(filename)  # raises UnsafePath on a malformed name; result discarded by design
+        sanitise_filename(filename)
         if root not in _ROOT_DIRS:
             raise ArtifactError("unknown_root", f"no such artifact root: {root!r}")
+        if producer_task_id:
+            grant_doc = await self._store.get_one(
+                "capability_grants",
+                {"run_id": self.run_id, "task_id": producer_task_id},
+            )
+            if grant_doc is not None:
+                granted_roots = CapabilityGrant.model_validate(grant_doc).scope.artifact_roots
+                if granted_roots and root not in granted_roots:
+                    raise CapabilityDenied(f"artifact root {root!r} is not granted to task {producer_task_id!r}")
         artifact_id = uuid4().hex
         rel_path = f"{self.session_id}/{self.run_id}/{artifact_id}"
         record = ArtifactRecord(
@@ -197,6 +218,7 @@ class ArtifactService:
             rel_path=rel_path,
             data_class=data_class,
             retention_class=retention_class,
+            expires_at=_expires_at(retention_class),
             state="provisional",
         )
         await self._store.insert("artifacts", record)
@@ -252,7 +274,12 @@ class ArtifactService:
         except WorkflowError:
             pass
 
-        updated = record.model_copy(update={"sha256": sha256, "size_bytes": size, "state": "staged"})
+        updated = record.model_copy(update={
+            "sha256": sha256,
+            "size_bytes": size,
+            "state": "staged",
+            "expires_at": record.expires_at or _expires_at(record.retention_class),
+        })
         if not await self._store.compare_and_set(
             "artifacts", {"artifact_id": artifact_id}, {"state": "provisional"}, updated
         ):
@@ -265,6 +292,82 @@ class ArtifactService:
             return None
         pointers = [PublicationPointer.model_validate(doc) for doc in docs]
         return max(pointers, key=lambda pointer: pointer.generation)
+    async def reject_export(
+        self,
+        *,
+        artifact_id: str,
+        file_path: str,
+        reason: str,
+        sha256: str = "",
+    ) -> ArtifactRecord:
+        """Mark the canonical export behind a guardable alias rejected.
+
+        Executor normally creates the record before it exposes the alias.
+        The fallback registration covers a recovered alias whose record was
+        lost before the guard ran, but only after proving the alias belongs
+        to this service's run-scoped artifact directory.
+        """
+        doc = await self._store.get_one("artifacts", {"artifact_id": artifact_id})
+        if doc is not None:
+            record = ArtifactRecord.model_validate(doc)
+            if record.session_id != self.session_id or record.run_id != self.run_id:
+                raise ArtifactError("artifact_scope_mismatch", artifact_id)
+            if record.state in ("deleted", "legal_hold"):
+                raise ArtifactError("artifact_not_rejectable", f"state={record.state!r}")
+            if record.state == "rejected" and record.rejection_reason == reason:
+                return record
+            rejected = record.model_copy(update={"state": "rejected", "rejection_reason": reason})
+            if not await self._store.compare_and_set(
+                "artifacts",
+                {"artifact_id": artifact_id},
+                {"state": record.state},
+                rejected,
+            ):
+                raise ArtifactError("artifact_state_race", artifact_id)
+            return rejected
+
+        if not is_safe_scoped_id(artifact_id):
+            raise ArtifactError("artifact_missing", artifact_id)
+        alias_path = Path(file_path)
+        try:
+            resolved_alias = alias_path.resolve(strict=True)
+        except OSError as exc:
+            raise ArtifactError("artifact_missing", str(alias_path)) from exc
+        for root, root_dir in _ROOT_DIRS.items():
+            final_dir = run_scoped_dir(root_dir, self.session_id, self.run_id)
+            canonical_path = final_dir / artifact_id
+            if (
+                resolved_alias.parent == final_dir.resolve()
+                and resolved_alias.name.startswith(f"{artifact_id}.")
+                and canonical_path.is_file()
+            ):
+                actual_sha256, size = _hash_file(canonical_path)
+                if sha256 and sha256 != actual_sha256:
+                    raise ArtifactError("artifact_hash_mismatch", artifact_id)
+                record = ArtifactRecord(
+                    artifact_id=artifact_id,
+                    session_id=self.session_id,
+                    run_id=self.run_id,
+                    producer_task_id="",
+                    scope="run",
+                    type="guard_rejected_export",
+                    root=root,
+                    rel_path=f"{self.session_id}/{self.run_id}/{artifact_id}",
+                    sha256=actual_sha256,
+                    size_bytes=size,
+                    state="rejected",
+                    data_class="restricted_metadata",
+                    retention_class="export",
+                    expires_at=_expires_at("export"),
+                    rejection_reason=reason,
+                )
+                await self._store.insert("artifacts", record)
+                return record
+        raise ArtifactError("artifact_missing", artifact_id)
+
+
+
+
 
     async def certify_publication(
         self,
@@ -331,6 +434,7 @@ class ArtifactService:
                 "rel_path": f"{record.session_id}/{record.run_id}/{artifact_id}",
                 "state": "promoted",
                 "generation": generation,
+                "expires_at": record.expires_at or _expires_at(record.retention_class),
                 "promoted_at": _now(),
             }
         )
@@ -378,19 +482,41 @@ class ArtifactService:
             if await self._store.delete_one("publication_pointers", {"pointer_id": pointer["pointer_id"]}):
                 removed += 1
         return removed
+async def register_guard_rejections(
+    artifact_service: ArtifactService,
+    *,
+    guard_report: Mapping[str, Any],
+) -> list[ArtifactRecord]:
+    """Transition every Publish Guard-blocked export in ``guard_report``.
+
+    ``guard_report`` is the serialized output of
+    :func:`publish_guard.scan_all_exports`. Files without the Executor's
+    canonical artifact id are not registered because no safe artifact-root
+    path can be proven for them.
+    """
+    rejected: list[ArtifactRecord] = []
+    for result in guard_report.get("results", []):
+        if result.get("status") != "blocked":
+            continue
+        artifact_id = str(result.get("artifact_id") or "")
+        if not artifact_id:
+            continue
+        rejected.append(await artifact_service.reject_export(
+            artifact_id=artifact_id,
+            file_path=str(result.get("file_path") or ""),
+            reason=str(result.get("detail") or "Publish Guard blocked export."),
+            sha256=str(result.get("sha256") or ""),
+        ))
+    return rejected
 
 
 # ---- reconcile (Phase 7 step 3): periodic artifact collection -------------
 
 DEFAULT_STALE_PROVISIONAL_HOURS = 24.0
 
-# States a record can be deleted from unconditionally, once reached.
-# `rejected`/`superseded` have no producer yet -- Operator, Reviewer, and
-# Publish Guard reject *decisions*, not artifacts, today -- so this sweep
-# is exercised directly in tests against a hand-built record and is ready
-# for whichever future caller starts transitioning artifacts into either
-# state. `deletion_pending` is this function's own in-flight marker,
-# picked up again after a prior sweep's filesystem deletion failed.
+# Rejected records are now produced by Reviewer and Publish Guard. The
+# `deletion_pending` state is this function's own in-flight marker, picked
+# up again after a prior sweep's filesystem deletion failed.
 _DELETABLE_STATES = frozenset({"rejected", "superseded", "deletion_pending"})
 
 
@@ -403,6 +529,18 @@ def _artifact_disk_path(record: ArtifactRecord) -> Any:
         return _tmp_dir(record.root) / record.artifact_id
     return run_scoped_dir(_root_dir(record.root), record.session_id, record.run_id) / record.artifact_id
 
+
+
+def _is_expired(record: ArtifactRecord) -> bool:
+    if not record.expires_at:
+        return False
+    try:
+        expires_at = datetime.fromisoformat(record.expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at <= datetime.now(timezone.utc)
 
 async def _reconcile_one(store: ControlStore, record: ArtifactRecord) -> bool:
     """Mark ``record`` ``deletion_pending``, confirm its bytes are gone,
@@ -424,9 +562,10 @@ async def _reconcile_one(store: ControlStore, record: ArtifactRecord) -> bool:
         return False  # raced with a concurrent transition; retried next sweep
     try:
         (_tmp_dir(record.root) / record.artifact_id).unlink(missing_ok=True)
-        (run_scoped_dir(_root_dir(record.root), record.session_id, record.run_id) / record.artifact_id).unlink(
-            missing_ok=True
-        )
+        final_dir = run_scoped_dir(_root_dir(record.root), record.session_id, record.run_id)
+        (final_dir / record.artifact_id).unlink(missing_ok=True)
+        for alias_path in final_dir.glob(f"{record.artifact_id}.*"):
+            alias_path.unlink(missing_ok=True)
     except OSError as exc:
         failed = pending.model_copy(update={
             "delete_attempts": pending.delete_attempts + 1, "delete_error": str(exc),
@@ -463,8 +602,6 @@ async def reconcile(store: ControlStore, *, stale_provisional_hours: float = DEF
     already ``deleted``/``legal_hold``. Returns a count per outcome for
     the caller (the admin assurance route) to report.
     """
-    from datetime import timedelta
-
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=stale_provisional_hours)).isoformat()
     counts = {"deleted": 0, "failed": 0, "skipped_hold": 0}
     for doc in await store.find_many("artifacts", {}):
@@ -474,8 +611,10 @@ async def reconcile(store: ControlStore, *, stale_provisional_hours: float = DEF
         if record.hold:
             counts["skipped_hold"] += 1
             continue
-        eligible = record.state in _DELETABLE_STATES or (
-            record.state == "provisional" and record.created_at < cutoff
+        eligible = (
+            record.state in _DELETABLE_STATES
+            or (record.state == "provisional" and record.created_at < cutoff)
+            or _is_expired(record)
         )
         if not eligible and record.state in (*_PROMOTABLE_STATES, "promoted"):
             if not _artifact_disk_path(record).is_file():

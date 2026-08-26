@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import os
 from pathlib import Path
 
 from phi_core.agents.reviewer import Reviewer
@@ -349,3 +350,34 @@ def test_build_report_reviewer_coverage_absent_when_no_agent_log():
     unavailable_sections = {u["section"] for u in report["unavailable"]}
     assert "reviewer_coverage" in unavailable_sections
     assert "context_hygiene" in unavailable_sections
+
+
+def test_reviewer_rejects_the_artifact_behind_an_excluded_export() -> None:
+    async def run() -> tuple[dict, dict]:
+        ctx = make_ctx("Reviewer")
+        writer = ctx.artifacts
+        assert writer is not None
+        artifact_id, tmp_path = await writer.stage(
+            "dataset_export",
+            "out.csv",
+            "restricted_metadata",
+            "export",
+        )
+        tmp_path.write_text("id,name\n1,Jane\n", encoding="utf-8")
+        await writer.finalize(artifact_id)
+        alias = tmp_path.parent.parent / ctx.session_id / ctx.run_id / f"{artifact_id}.csv"
+        os.link(alias.with_suffix(""), alias)
+
+        result = await Reviewer(ctx).run(
+            [_decision("f1", "id"), _decision("f1", "name")],
+            {"verdicts": [_verdict("f1", "id")], "failed_file_ids": [], "status": "clean"},
+            {"f1": str(alias)},
+        )
+        record = await writer._service._store.get_one("artifacts", {"artifact_id": artifact_id})
+        return result, record
+
+    result, record = asyncio.run(run())
+
+    assert "f1" not in result["exports"]
+    assert record["state"] == "rejected"
+    assert record["rejection_reason"] == "Reviewer excluded export: missing_operator_verdict."

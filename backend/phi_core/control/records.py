@@ -332,6 +332,7 @@ class ArtifactRecord(ControlRecord):
     created_at: str = Field(default_factory=_now)
     promoted_at: str = ""
     expires_at: str = ""
+    rejection_reason: str = ""
     deleted_at: str = ""
     delete_attempts: int = 0
     delete_error: str = ""

@@ -26,6 +26,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from phi_core.control.artifacts import ArtifactService
+from phi_core.paths import artifact_id_from_export_alias
+
 from .base import Agent
 from .batching import run_batched
 from .operator import _read_columns
@@ -167,6 +170,29 @@ class Reviewer(Agent):
                 blocked.add(r["file_id"])
 
         status = "issues" if findings or failed_file_ids else "clean"
+        artifact_service = getattr(self.ctx.artifacts, "_service", None)
+        if isinstance(artifact_service, ArtifactService):
+            findings_by_file: dict[str, list[dict[str, Any]]] = {}
+            for finding in findings:
+                findings_by_file.setdefault(finding["file_id"], []).append(finding)
+            for file_id in blocked:
+                export_path = exports.get(file_id)
+                if not export_path:
+                    continue
+                artifact_id = artifact_id_from_export_alias(export_path)
+                if not artifact_id:
+                    continue
+                kinds = sorted({str(finding.get("kind", "")) for finding in findings_by_file.get(file_id, [])})
+                reason = (
+                    f"Reviewer excluded export: {', '.join(kinds)}."
+                    if kinds
+                    else "Reviewer excluded export after an Operator failure."
+                )
+                await artifact_service.reject_export(
+                    artifact_id=artifact_id,
+                    file_path=export_path,
+                    reason=reason,
+                )
         filtered_exports = {fid: path for fid, path in exports.items() if fid not in blocked}
 
         return {

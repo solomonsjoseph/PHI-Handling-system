@@ -81,6 +81,7 @@ def _manifest(
     tools: Mapping[str, int] | None = None,
     max_attempts: int | None = None,
     allowed_child_task_types: frozenset[str] | None = None,
+    artifact_roots: frozenset[str] = frozenset(),
 ) -> AgentManifest:
     if output_schema not in OUTPUT_SCHEMAS:
         raise RuntimeError(f"unknown output schema {output_schema!r}")
@@ -99,7 +100,7 @@ def _manifest(
         network_domains=frozenset({"api.anthropic.com"}) if tools else frozenset(),
         allowed_providers=_GLOBAL_PROVIDER_SET if providers is None else providers,
         allowed_models=frozenset(),
-        scope=_SESSION_RUN_SCOPE,
+        scope=ScopeSpec(session=True, run=True, artifact_roots=artifact_roots),
         reads=frozenset(),
         writes=frozenset(),
         budget=ResourceBudget(**budget_values),
@@ -118,7 +119,14 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
         "Praxis": _manifest("Praxis", purpose="Research de-identification practice.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
         "Judge": _manifest("Judge", purpose="Propose column decisions.", input_class="restricted_metadata", output_schema="judge_decisions"),
         "Sentinel": _manifest("Sentinel", purpose="Challenge proposed decisions.", input_class="restricted_metadata", output_schema="decision_proposal"),
-        "Executor": _manifest("Executor", purpose="Apply deterministic decisions.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),
+        "Executor": _manifest(
+            "Executor",
+            purpose="Apply deterministic decisions.",
+            input_class="internal",
+            output_schema="no_provider_output",
+            providers=frozenset(),
+            artifact_roots=frozenset({"staging"}),
+        ),
         "Auditor": _manifest("Auditor", purpose="Audit staged output metadata.", input_class="restricted_metadata", output_schema="audit_report"),
         "Scout": _manifest("Scout", purpose="Research reporting context.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS, max_attempts=1),
         "Ledger": _manifest("Ledger", purpose="Build a reporting ledger.", input_class="internal", output_schema="report",

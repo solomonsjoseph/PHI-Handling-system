@@ -1,6 +1,7 @@
 """Publish Guard tests — the boundary between 'input PHI data' and
 'output ready to share publicly'."""
 import builtins
+import os
 from pathlib import Path
 
 import pytest
@@ -793,3 +794,51 @@ def test_guard_result_artifact_id_empty_for_non_alias_filename(tmp_path: Path):
     ])
     r = scan_export_file("f1", p)
     assert r.artifact_id == ""
+
+
+def test_presidio_detector_exception_blocks_an_export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import phi_core.publish_guard as guard
+
+    class FailingAnalyzer:
+        def analyze(self, **_kwargs):
+            raise RuntimeError("detector unavailable")
+
+    monkeypatch.setattr(guard, "_presidio_analyzer", lambda: FailingAnalyzer())
+    path = _write_csv(tmp_path, "safe.csv", [["notes"], ["ordinary study note"]])
+
+    result = scan_export_file("f1", path)
+
+    assert result.status == "blocked"
+    assert [finding["pattern_id"] for finding in result.findings] == ["PRESIDIO_PERSON_NAME_UNRESOLVED"]
+
+
+@pytest.mark.asyncio
+async def test_publish_guard_rejection_is_registered_and_reconciled(tmp_path: Path) -> None:
+    from phi_core.control.artifacts import ArtifactService, reconcile, register_guard_rejections
+    from phi_core.control.store import MemoryControlStore
+
+    session_id = "a" * 32
+    run_id = "b" * 32
+    store = MemoryControlStore()
+    service = ArtifactService(store, session_id=session_id, run_id=run_id)
+    artifact_id, staged_path = await service.stage(
+        "dataset_export", "export.csv", "restricted_metadata", "export"
+    )
+    staged_path.write_text("ssn\n111-22-3333\n", encoding="utf-8")
+    await service.finalize(artifact_id)
+    alias = staged_path.parent.parent / session_id / run_id / f"{artifact_id}.csv"
+    os.link(alias.with_suffix(""), alias)
+
+    report = scan_all_exports({"f1": str(alias)}).to_dict()
+    rejected = await register_guard_rejections(service, guard_report=report)
+
+    assert [record.artifact_id for record in rejected] == [artifact_id]
+    record = await store.get_one("artifacts", {"artifact_id": artifact_id})
+    assert record["state"] == "rejected"
+    assert record["rejection_reason"] == "1 residual PHI finding(s)"
+
+    counts = await reconcile(store)
+
+    assert counts == {"deleted": 1, "failed": 0, "skipped_hold": 0}
+    assert await store.get_one("artifacts", {"artifact_id": artifact_id}) is None
+    assert not alias.exists()
