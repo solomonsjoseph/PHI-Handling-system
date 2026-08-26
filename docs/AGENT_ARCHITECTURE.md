@@ -2,7 +2,14 @@
 
 ## Scope and how to read this
 
-This document records the code-backed PHI pipeline, supervision, verification, and human-review architecture. The Code anchors table identifies the source symbols for claims developed in this document.
+This document records the code-backed PHI pipeline, supervision, verification, and human-review architecture at the **agent** level: per-agent contracts, the deterministic Judge/Sentinel loop, and the failure/escalation matrix. The Code anchors table identifies the source symbols for claims developed in this document.
+
+**Superseded by the Phase 4-9 control-plane program.** This document predates the durable-execution, artifact-registry, event-tracing, and Super Orchestrator work recorded in `docs/adr/0001` through `0007`, `docs/assurance/PHASE_REPORTS.md`, and `memory/ARCHITECTURE.md`. The per-agent contracts, the deterministic gate sequence, and the failure/escalation matrix below remain accurate: none of that agent-level logic changed. Three claims below are now specifically **wrong** and are called out inline rather than silently left stale:
+- Every reference to `agent_log` as the write path for prompt/reply tracing: that collection's write path was retired in Phase 7 (F-OBS-001). The current sole writer is `backend/phi_core/control/events.py::TraceEventStore`, writing to `trace_events`.
+- Every reference to `Manager.escalate_to_human_review`: that method was deleted in Phase 5 (D10). Every orchestrator escalation site now calls `orchestrator._escalate_to_human_review`, which persists the session document itself and then calls `SuperOrchestrator.request_human_review` (`backend/phi_core/control/superorchestrator.py`).
+- The claim that the request-body `reviewer` field is inert and that no checkpoint object exists: Phase 6 step 8 replaced the `reviewer` field with a read-only identity from `GET /api/auth/whoami`, and D9's `WorkflowRun.checkpoint` (`backend/phi_core/control/workflow.py`) is now a real, persisted object, though `run_pipeline` itself (this document's Level 1 subject) still does not construct one directly -- `SuperOrchestrator.advance` does, at the layer above.
+
+For how a session's pipeline/resume execution is actually dispatched, leased, and completed today (durable `WorkItem`s, `Worker` claim-and-lease, `SuperOrchestrator.start_run`/`advance`), see `docs/adr/0001-workflow-engine.md`, `docs/adr/0003-task-and-lease-model.md`, and `docs/adr/0006-super-orchestrator.md` rather than the Level 1/Level 5 diagrams' "Pause"/"Tail" framing below, which describes the pre-Phase-4 synchronous-worker architecture.
 
 ## System context (Level 0)
 

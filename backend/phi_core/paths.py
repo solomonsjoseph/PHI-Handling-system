@@ -74,7 +74,6 @@ def safe_join(base: Path, user_name: str | None, *, fallback: str = "upload.bin"
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 UPLOAD_DIR = DATA_DIR / "uploads"
-EXPORT_DIR = DATA_DIR / "exports"
 CHATGPT_TOKEN_DIR = DATA_DIR / "chatgpt"
 # D14 artifact-registry roots. ``intake`` reuses ``UPLOAD_DIR`` rather than
 # adding a redundant constant; every other ``ArtifactRecord.root`` literal
@@ -86,7 +85,6 @@ PUBLISHED_DIR = DATA_DIR / "published"
 CACHE_DIR = DATA_DIR / "cache"
 for _d in (
     UPLOAD_DIR,
-    EXPORT_DIR,
     CHATGPT_TOKEN_DIR,
     STAGING_DIR,
     EVIDENCE_DIR,

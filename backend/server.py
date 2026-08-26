@@ -49,6 +49,7 @@ Everything else (/, /static/...) is the built frontend SPA, mounted last
 from __future__ import annotations
 
 import asyncio
+import collections
 import hashlib
 import json
 import logging
@@ -67,6 +68,8 @@ from fastapi.staticfiles import StaticFiles
 from phi_core import chatgpt_auth
 from phi_core.agents import AgentMessage, LlmConfig
 from phi_core.agents import run_pipeline as run_agent_pipeline
+from phi_core.control import limits
+from phi_core.control.events import EventBroker
 from phi_core.crypto import decrypt_api_key, decrypt_display_name, encrypt_api_key, encrypt_display_name
 from phi_core.db import get_db
 from phi_core.intake import (
@@ -183,7 +186,11 @@ async def _security_headers(request: Request, call_next):
 # 4.20: rate limits. Process-local sliding window keyed by resolved
 # principal when one is present, else client address -- a single container
 # needs no shared store. Exceeding a limit returns 429 with Retry-After.
-_RATE_BUCKETS: dict[str, list[float]] = {}
+# D15 4b: an `OrderedDict` capped at `MAX_RATE_BUCKET_KEYS`, least-recently
+# -used eviction, with any key whose window has emptied out removed
+# immediately rather than left as a dead entry -- an attacker rotating
+# through distinct identities cannot grow this dict without bound.
+_RATE_BUCKETS: "collections.OrderedDict[str, list[float]]" = collections.OrderedDict()
 
 
 def _rate_limit_identity(request: Request) -> str:
@@ -200,9 +207,20 @@ def rate_limited(bucket: str, limit: int, window_seconds: int):
         key = f"{bucket}:{_rate_limit_identity(request)}"
         now = time.monotonic()
         cutoff = now - window_seconds
-        hits = _RATE_BUCKETS.setdefault(key, [])
-        while hits and hits[0] < cutoff:
-            hits.pop(0)
+        hits = _RATE_BUCKETS.get(key)
+        if hits is not None:
+            while hits and hits[0] < cutoff:
+                hits.pop(0)
+            if hits:
+                _RATE_BUCKETS.move_to_end(key)
+            else:
+                del _RATE_BUCKETS[key]
+                hits = None
+        if hits is None:
+            hits = []
+            _RATE_BUCKETS[key] = hits
+            if len(_RATE_BUCKETS) > limits.MAX_RATE_BUCKET_KEYS:
+                _RATE_BUCKETS.popitem(last=False)
         if len(hits) >= limit:
             retry_after = max(1, int(hits[0] + window_seconds - now))
             raise HTTPException(
@@ -260,30 +278,37 @@ async def _stream_to_disk(upload_file: UploadFile, dst_path: Path, max_bytes: in
     return written
 
 
-# --- In-memory progress queues per session (SSE) --------------------------
+# --- Run-scoped SSE fan-out (D15) ------------------------------------------
 #
-# Per-session queue lifecycle (SEC-002 fix, audit iteration_18):
-#   * created lazily by `_queue_for` when the pipeline first emits OR the
-#     client first subscribes to the stream
-#   * removed by `_release_stream` when the LAST subscriber for that
-#     session disconnects OR the pipeline emits the terminal `__end__`
-#     event
-# Client counts prevent premature GC when the pipeline outlives one
-# client's connection (e.g. tab reload) but ensure the queue does not
-# leak for sessions no one is watching any more.
+# Replaces the single shared `asyncio.Queue` per session_id that used to
+# split each event between whichever concurrent subscriber called
+# `queue.get()` next instead of delivering it to all of them.
+# `EventBroker` keys subscriptions by run_id when one exists (so a session
+# resuming into a new run_id naturally gets a fresh subscription rather
+# than eavesdropping on a superseded run) and falls back to the session_id
+# itself for the few early-failure `_emit` call sites that fire before a
+# durable run_id exists.
 
-_progress_queues: dict[str, asyncio.Queue] = {}
-_progress_subscribers: dict[str, int] = {}
+_event_broker = EventBroker()
+
+
+def _stream_key(session_id: str, run_id: str | None) -> str:
+    return run_id or session_id
+
 
 # Terminal statuses that guarantee the pipeline is done and no more
-# events will arrive on the SSE queue.
+# events will arrive on the SSE queue. `expired_awaiting_review` (D15
+# step 4: raw PHI erased after REVIEW_RETENTION_DAYS with no reviewer
+# action) and `erasure_pending` (Phase 7: right-to-erasure filesystem
+# work not yet confirmed) are both dead ends -- no worker resumes either.
 _SETTLED_STATUSES = frozenset({"complete", "failed", "cancelled", "blocked",
-                                "intake_failed", "awaiting_human_review", "partially_complete"})
+                                "intake_failed", "awaiting_human_review", "partially_complete",
+                                "expired_awaiting_review", "erasure_pending"})
 
-# Cap of concurrent SSE subscribers per session. 4 is enough for the
-# operator + a couple of secondary viewers + one connection retry. Beyond
-# that we refuse new subscribers (returns HTTP 429) to prevent an
-# attacker from opening thousands of streams and pinning memory.
+# Cap of concurrent SSE subscribers per run. 4 is enough for the operator
+# + a couple of secondary viewers + one connection retry. Beyond that we
+# refuse new subscribers (returns HTTP 429) to prevent an attacker from
+# opening thousands of streams and pinning memory.
 _MAX_STREAM_SUBSCRIBERS_PER_SESSION = 4
 
 # Admission control: cap concurrent pipeline runs on this process. Each
@@ -328,24 +353,6 @@ def _release_pipeline_run() -> None:
     _active_pipeline_count = max(0, _active_pipeline_count - 1)
 
 
-def _queue_for(session_id: str) -> asyncio.Queue:
-    q = _progress_queues.get(session_id)
-    if q is None:
-        q = asyncio.Queue()
-        _progress_queues[session_id] = q
-    return q
-
-
-def _release_stream(session_id: str) -> None:
-    """One subscriber has disconnected; free the queue if this was the last."""
-    remaining = _progress_subscribers.get(session_id, 1) - 1
-    if remaining <= 0:
-        _progress_subscribers.pop(session_id, None)
-        _progress_queues.pop(session_id, None)
-    else:
-        _progress_subscribers[session_id] = remaining
-
-
 async def _emit(session_id: str, ev: ProgressEvent, run_id: str | None = None) -> None:
     db = get_db()
     query = {"id": session_id}
@@ -353,11 +360,17 @@ async def _emit(session_id: str, ev: ProgressEvent, run_id: str | None = None) -
         query["_pipeline_run_id"] = run_id
     result = await db.sessions.update_one(
         query,
-        {"$push": {"progress": ev.model_dump()}, "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
+        {
+            # D15 4b: the persisted array is bounded to the most recent
+            # MAX_SESSION_PROGRESS_EVENTS entries -- the complete history
+            # lives in `trace_events`, which has no such cap.
+            "$push": {"progress": {"$each": [ev.model_dump()], "$slice": -limits.MAX_SESSION_PROGRESS_EVENTS}},
+            "$set": {"updated_at": datetime.now(timezone.utc).isoformat()},
+        },
     )
     if run_id is not None and not getattr(result, "matched_count", 0):
         return
-    await _queue_for(session_id).put(ev)
+    _event_broker.publish(_stream_key(session_id, run_id), ev.model_dump())
 
 
 async def _fail_session_correlated(db, sid: str, run_filter: dict, e: Exception, *, run_id: str | None) -> None:
@@ -414,6 +427,34 @@ async def _validate_rerun_inputs(files: list[dict]) -> list[str]:
         if digest.hexdigest() != expected_sha256:
             stale.append(file_id)
     return stale
+
+
+async def _emit_terminal_trace(store, *, sid: str, run_id: str, task_id: str, fence: int, status: str) -> None:
+    """D15: append the audit-grade counterpart of the terminal
+    ``ProgressEvent`` into ``trace_events``. Fenced against ``task_id``'s
+    own ``WorkItem``: a worker whose lease was reconciled away while it
+    kept running past its 15-minute ceiling (a zombie) cannot publish a
+    terminal trace event for a task another worker has since completed --
+    ``TraceEventStore.append`` raises ``EventAppendError`` and the stale
+    attempt is discarded rather than recorded as if it still applied.
+    ``work_item.fence`` never changes between claim and this handler
+    returning (only ``TaskService.complete``/``fail`` bump it, and that
+    happens after this call, in ``Worker._execute``), so the current
+    holder's own fence always matches unless it has already been
+    superseded."""
+    if status not in _SETTLED_STATUSES:
+        return
+    from phi_core.control.events import EventAppendError, TraceEventStore
+    from phi_core.control.records import TraceEvent
+
+    event = TraceEvent(
+        run_id=run_id, seq=0, session_id=sid, task_id=task_id, outcome=status,
+        input_class="internal", output_class="internal",
+    )
+    try:
+        await TraceEventStore(store, run_id=run_id, session_id=sid).append(event, fence=fence)
+    except EventAppendError:
+        _log.info("terminal trace event for run_id=%s task_id=%s discarded (fenced or stale)", run_id, task_id)
 
 
 async def _handle_pipeline_run(store, work_item) -> dict[str, Any]:
@@ -528,6 +569,13 @@ async def _handle_pipeline_run(store, work_item) -> dict[str, Any]:
         return {"status": "failed"}
     finally:
         _release_pipeline_run()
+        if session is not None:
+            final_doc = await db.sessions.find_one(run_filter, {"status": 1})
+            if final_doc:
+                await _emit_terminal_trace(
+                    store, sid=sid, run_id=run_id, task_id=work_item.task_id,
+                    fence=work_item.fence, status=final_doc.get("status", ""),
+                )
         await _emit(sid, ProgressEvent(phase="__end__", message="stream end"), run_id=run_id)
 
 
@@ -685,6 +733,13 @@ async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
         return {"status": "failed"}
     finally:
         _release_pipeline_run()
+        if session is not None:
+            final_doc = await db.sessions.find_one(run_filter, {"status": 1})
+            if final_doc:
+                await _emit_terminal_trace(
+                    store, sid=sid, run_id=run_id, task_id=work_item.task_id,
+                    fence=work_item.fence, status=final_doc.get("status", ""),
+                )
         await _emit(sid, ProgressEvent(phase="__end__", message="stream end"), run_id=run_id)
 
 
@@ -893,6 +948,36 @@ async def session_list(principal: str = Depends(resolve_principal)):
     return {"sessions": out}
 
 
+def _erase_session_from_disk(sid: str, export_paths: dict | None) -> dict[str, str]:
+    """Every filesystem erasure a session's right-to-erasure or expiry
+    needs: its artifact-registry roots (``erase_session_artifacts``), its
+    raw ``UPLOAD_DIR/<sid>`` tree, and every path in ``export_paths``.
+
+    Returns a mapping of failures (empty on full success) rather than the
+    ``ignore_errors=True``/``except OSError: pass`` this replaces --
+    ``session_delete`` and ``_purge_settled_sessions_loop`` both use this
+    to decide whether a session's erasure is confirmed or must be
+    recorded and retried."""
+    import shutil
+
+    from phi_core.control.artifacts import erase_session_artifacts
+
+    errors = erase_session_artifacts(sid)
+    try:
+        shutil.rmtree(UPLOAD_DIR / sid)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        errors["uploads"] = str(exc)
+    for p in (export_paths or {}).values():
+        if p:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except OSError as exc:
+                errors[f"export:{p}"] = str(exc)
+    return errors
+
+
 @app.delete("/api/sessions/{sid}")
 async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
     """Right-to-erasure: remove the session document, its agent_log rows,
@@ -908,10 +993,16 @@ async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
     ``_pipeline_run_id`` token, no durable run record; tombstoning remains
     its compatible anti-resurrection boundary and its cancellation request
     cannot be reconstructed after the fact.
-    """
-    import shutil
 
-    from phi_core.control.artifacts import ArtifactService, erase_session_artifacts, tombstone_session
+    Phase 7: the session document is deleted only once every filesystem
+    erasure is confirmed. A failure (permission error, concurrent external
+    change) leaves the session as ``status="erasure_pending"`` with the
+    exact errors and an attempt count recorded, rather than silently
+    reporting success -- ``_purge_settled_sessions_loop`` retries it on
+    the next sweep. The session stays tombstoned throughout, so it cannot
+    resurrect or accept new work while erasure is pending.
+    """
+    from phi_core.control.artifacts import ArtifactService, tombstone_session
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.store import MongoControlStore
     from phi_core.control.superorchestrator import SuperOrchestrator
@@ -919,7 +1010,9 @@ async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
     from phi_core.control.workflow import WorkflowError
 
     db = get_db()
-    doc = await _owned_session(sid, principal, {"_id": 0, "export_paths": 1, "_pipeline_run_id": 1})
+    doc = await _owned_session(
+        sid, principal, {"_id": 0, "export_paths": 1, "_pipeline_run_id": 1, "erasure_attempts": 1},
+    )
     control_store = MongoControlStore(db)
     await tombstone_session(control_store, sid)
     if run_id := doc.get("_pipeline_run_id"):
@@ -940,15 +1033,17 @@ async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
                 raise
     run_id = doc.get("_pipeline_run_id") or sid
     await ArtifactService(control_store, session_id=sid, run_id=run_id).erase_session_records(sid)
-    erase_session_artifacts(sid)
-    for p in (doc.get("export_paths") or {}).values():
-        if p:
-            try:
-                Path(p).unlink(missing_ok=True)
-            except OSError:
-                pass
-    shutil.rmtree(UPLOAD_DIR / sid, ignore_errors=True)
-    await db.agent_log.delete_many({"session_id": sid})
+    errors = _erase_session_from_disk(sid, doc.get("export_paths"))
+    if errors:
+        await db.sessions.update_one(_owned_filter(sid, principal), {"$set": {
+            "status": "erasure_pending",
+            "erasure_error": "; ".join(f"{k}: {v}" for k, v in errors.items()),
+            "erasure_attempts": int(doc.get("erasure_attempts", 0)) + 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }})
+        return {"deleted": False, "erasure_pending": True}
+    await db.agent_log.delete_many({"session_id": sid})  # pre-migration rows, if any remain
+    await db.trace_events.delete_many({"session_id": sid})
     await db.sessions.delete_one(_owned_filter(sid, principal))
     return {"deleted": True}
 
@@ -1114,19 +1209,22 @@ async def session_stream(sid: str, principal: str = Depends(resolve_principal)):
     # attackers cannot open thousands of streams to random ids and pin a
     # queue per id. Settled sessions serve their history over the regular
     # GET endpoints; there is nothing more to stream.
-    doc = await _owned_session(sid, principal, {"status": 1})
+    doc = await _owned_session(sid, principal, {"status": 1, "_pipeline_run_id": 1})
     if doc.get("status") in _SETTLED_STATUSES:
         raise HTTPException(status_code=409,
                             detail=f"session already settled ({doc.get('status')}); "
                                    "no more stream events will arrive")
-    if _progress_subscribers.get(sid, 0) >= _MAX_STREAM_SUBSCRIBERS_PER_SESSION:
+    # D15: keyed by the session's current run_id when one exists, so a
+    # human-review resume (a new run_id for the same session) subscribes
+    # fresh rather than sharing a bucket with a superseded run.
+    stream_key = _stream_key(sid, doc.get("_pipeline_run_id"))
+    if _event_broker.subscriber_count(stream_key) >= _MAX_STREAM_SUBSCRIBERS_PER_SESSION:
         raise HTTPException(status_code=429,
                             detail="too many concurrent stream subscribers "
                                    "for this session")
 
     async def gen():
-        _progress_subscribers[sid] = _progress_subscribers.get(sid, 0) + 1
-        q = _queue_for(sid)
+        sub = _event_broker.subscribe(stream_key)
         try:
             # HANG PROTECTION: emit an SSE keep-alive comment every 15 s so
             # browsers / proxies do not close the connection during a long
@@ -1135,18 +1233,22 @@ async def session_stream(sid: str, principal: str = Depends(resolve_principal)):
             # spec so the EventSource on the client ignores it silently.
             while True:
                 try:
-                    ev: ProgressEvent = await asyncio.wait_for(q.get(), timeout=15.0)
+                    event: dict = await asyncio.wait_for(sub.queue.get(), timeout=15.0)
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
                     continue
-                yield f"data: {json.dumps(ev.model_dump())}\n\n"
-                if ev.phase == "__end__":
+                yield f"data: {json.dumps(event)}\n\n"
+                # `__end__` (the pipeline finished) and `__resync__` (this
+                # subscriber overflowed and was told to refetch) both end
+                # the stream; the browser's native EventSource reconnects
+                # on its own, landing on a fresh `subscribe` call.
+                if event.get("phase") in ("__end__", "__resync__"):
                     break
         finally:
-            # SEC-002 fix: release the queue on client disconnect or
+            # SEC-002 fix: release the subscription on client disconnect or
             # stream end so an idle/nonexistent subscriber cannot pin
             # memory indefinitely.
-            _release_stream(sid)
+            _event_broker.unsubscribe(sub)
 
     return StreamingResponse(
         gen(),
@@ -1160,6 +1262,140 @@ async def coverage_matrix_endpoint():
     """Static coverage matrix used by the wizard result page and the bundle."""
     from phi_core.coverage_matrix import COVERAGE, TOOLS, coverage_counts
     return {"rows": COVERAGE, "tools": TOOLS, "counts": coverage_counts()}
+
+@app.get("/api/admin/assurance", dependencies=[Depends(rate_limited("admin_assurance", 30, 60))])
+async def admin_assurance(principal: str = Depends(resolve_principal)):
+    """D15 step 5: one operator-facing snapshot of everything the control
+    plane's own durability and policy machinery is currently unhappy
+    about, gated to ``lead_reviewer`` since it surfaces cross-session
+    operational detail (task ids, error text) no ordinary reviewer needs.
+
+    Every list is capped at 50 rows, newest/most-relevant first -- this
+    is a triage dashboard, not an export.
+    """
+    if reviewer_role(principal) != "lead_reviewer":
+        raise HTTPException(403, "principal is not a lead_reviewer (see REVIEWER_PRINCIPALS)")
+    db = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+
+    stuck_leases = await db.work_items.find(
+        {"state": "leased", "lease_expires_at": {"$lt": now}},
+        {"_id": 0, "task_id": 1, "task_type": 1, "run_id": 1, "lease_owner": 1, "lease_expires_at": 1},
+    ).limit(50).to_list(length=None)
+
+    denial_counts: dict[str, int] = {}
+    total_denials = 0
+    async for row in db.trace_events.find(
+        {"outcome": {"$in": ["budget_exceeded", "denied"]}}, {"_id": 0, "outcome": 1, "status_text": 1},
+    ).limit(2000):
+        total_denials += 1
+        reason = row.get("status_text") or row.get("outcome") or "unknown"
+        denial_counts[reason] = denial_counts.get(reason, 0) + 1
+
+    gate_failures = await db.gate_results.find(
+        {"status": {"$in": ["fail", "blocked"]}},
+        {"_id": 0, "gate_id": 1, "run_id": 1, "task_id": 1, "gate": 1, "status": 1, "detail": 1, "created_at": 1},
+    ).sort("created_at", -1).limit(50).to_list(length=None)
+
+    orphan_artifacts = await db.artifacts.find(
+        {"$or": [{"state": "deletion_pending"}, {"delete_attempts": {"$gt": 0}}]},
+        {"_id": 0, "artifact_id": 1, "session_id": 1, "run_id": 1, "state": 1,
+         "delete_attempts": 1, "delete_error": 1},
+    ).limit(50).to_list(length=None)
+
+    erasure_failures = await db.sessions.find(
+        {"status": "erasure_pending"},
+        {"_id": 0, "id": 1, "erasure_error": 1, "erasure_attempts": 1, "updated_at": 1},
+    ).limit(50).to_list(length=None)
+
+    publication_outcomes = await db.publication_pointers.find(
+        {}, {"_id": 0, "session_id": 1, "run_id": 1, "generation": 1, "certified_at": 1},
+    ).sort("certified_at", -1).limit(50).to_list(length=None)
+
+    return {
+        "generated_at": now,
+        "stuck_leases": stuck_leases,
+        "policy_denials": {"total": total_denials, "by_reason": denial_counts},
+        "gate_failures": gate_failures,
+        "orphan_artifacts": orphan_artifacts,
+        "erasure_failures": erasure_failures,
+        "publication_outcomes": publication_outcomes,
+    }
+
+
+class AdminHoldBody(BaseModel):
+    session_id: str
+    reason: str = ""
+
+
+async def _record_hold_trace_event(db, *, run_id: str, session_id: str, principal: str, reason: str, action: str) -> None:
+    """Best-effort audit record for a hold set/clear (F-POLICY-003: "set
+    and clear events include principal and reason in a trace event").
+    Non-terminal, so no fence is required."""
+    from phi_core.control.events import EventAppendError, TraceEventStore
+    from phi_core.control.records import TraceEvent
+    from phi_core.control.store import MongoControlStore
+
+    event = TraceEvent(
+        run_id=run_id, seq=0, session_id=session_id, outcome=action,
+        status_text=f"principal={principal} reason={reason}",
+        input_class="internal", output_class="internal",
+    )
+    try:
+        await TraceEventStore(MongoControlStore(db), run_id=run_id, session_id=session_id).append(event)
+    except EventAppendError:
+        pass
+
+
+@app.post("/api/admin/hold", dependencies=[Depends(rate_limited("admin_hold", 30, 60))])
+async def admin_set_hold(body: AdminHoldBody, principal: str = Depends(resolve_principal)):
+    """F-POLICY-003: set a D14 legal/administrative hold on a session's
+    run, suspending every retention timer that checks
+    ``WorkflowRun.hold``/``ArtifactRecord.hold`` (terminal-session purge,
+    review-retention expiry, artifact reconciliation, the reversal-key
+    migration) until cleared. Gated to ``lead_reviewer``."""
+    if reviewer_role(principal) != "lead_reviewer":
+        raise HTTPException(403, "principal is not a lead_reviewer (see REVIEWER_PRINCIPALS)")
+    if not body.reason.strip():
+        raise HTTPException(400, "a hold requires a reason")
+    db = get_db()
+    doc = await db.sessions.find_one({"id": body.session_id}, {"_id": 0, "_pipeline_run_id": 1})
+    if doc is None:
+        raise HTTPException(404, "session not found")
+    run_id = doc.get("_pipeline_run_id")
+    if not run_id:
+        raise HTTPException(409, "session has no durable run to hold")
+    result = await db.workflow_runs.update_one({"run_id": run_id}, {"$set": {"hold": body.reason}})
+    if not getattr(result, "matched_count", 0):
+        raise HTTPException(404, "run not found")
+    await _record_hold_trace_event(
+        db, run_id=run_id, session_id=body.session_id, principal=principal, reason=body.reason, action="hold_set",
+    )
+    return {"run_id": run_id, "hold": body.reason}
+
+
+@app.delete("/api/admin/hold", dependencies=[Depends(rate_limited("admin_hold", 30, 60))])
+async def admin_clear_hold(session_id: str, reason: str = "", principal: str = Depends(resolve_principal)):
+    """Clear a hold set by `admin_set_hold`, resuming every suspended
+    retention timer at the next sweep. Gated to `lead_reviewer`."""
+    if reviewer_role(principal) != "lead_reviewer":
+        raise HTTPException(403, "principal is not a lead_reviewer (see REVIEWER_PRINCIPALS)")
+    db = get_db()
+    doc = await db.sessions.find_one({"id": session_id}, {"_id": 0, "_pipeline_run_id": 1})
+    if doc is None:
+        raise HTTPException(404, "session not found")
+    run_id = doc.get("_pipeline_run_id")
+    if not run_id:
+        raise HTTPException(409, "session has no durable run to clear a hold from")
+    result = await db.workflow_runs.update_one({"run_id": run_id}, {"$set": {"hold": ""}})
+    if not getattr(result, "matched_count", 0):
+        raise HTTPException(404, "run not found")
+    await _record_hold_trace_event(
+        db, run_id=run_id, session_id=session_id, principal=principal, reason=reason, action="hold_cleared",
+    )
+    return {"run_id": run_id, "hold": ""}
+
+
 
 
 _classification_accuracy_cache: dict[str, Any] | None = None
@@ -1314,7 +1550,7 @@ async def session_bundle(sid: str, publication: bool = False, attestation_pdf: b
     await _verify_clean_artifacts(db, sid, session, _clean_export_artifact_ids(session))
     agent_log_msgs = None
     if publication and session.get("corpus_ground_truth"):
-        agent_log_msgs = await db.agent_log.find({"session_id": sid}, {"_id": 0}).to_list(length=None)
+        agent_log_msgs = await _session_trace_messages(db, sid)
     data, filename = build_bundle(session, BundleOptions(
         include_publication=publication, include_attestation_pdf=attestation_pdf,
     ), agent_log=agent_log_msgs)
@@ -1873,7 +2109,7 @@ async def corpus_study_benchmark(sid: str, principal: str = Depends(resolve_prin
     leak/precision/autonomy figures. See :func:`phi_corpus.benchmark.build_report`."""
     db = get_db()
     doc = await _owned_session(sid, principal, {"_id": 0})
-    agent_log_msgs = await db.agent_log.find({"session_id": sid}, {"_id": 0}).to_list(length=None)
+    agent_log_msgs = await _session_trace_messages(db, sid)
     return _build_corpus_benchmark_report(doc, agent_log_msgs)
 
 
@@ -1885,7 +2121,7 @@ async def corpus_study_benchmark_download(sid: str, principal: str = Depends(res
 
     db = get_db()
     doc = await _owned_session(sid, principal, {"_id": 0})
-    agent_log_msgs = await db.agent_log.find({"session_id": sid}, {"_id": 0}).to_list(length=None)
+    agent_log_msgs = await _session_trace_messages(db, sid)
     report = _build_corpus_benchmark_report(doc, agent_log_msgs)
     scenario_id = (doc.get("corpus_ground_truth") or {}).get("scenario_id", "corpus")
     zip_bytes = bundle_zip(report)
@@ -1963,8 +2199,24 @@ class ChatGptLoginPollOut(BaseModel):
 _chatgpt_logins: dict[str, chatgpt_auth.DeviceLogin] = {}
 
 
+def _prune_chatgpt_logins() -> None:
+    """D15 4b: expire entries past ``chatgpt_auth.DEVICE_CODE_EXPIRES_IN_S``
+    and, if still at the cap after that, evict the single oldest survivor
+    to make room -- an operator starting a new login never gets refused,
+    but the dict never grows without bound either."""
+    now = time.time()
+    expired = [lid for lid, login in _chatgpt_logins.items()
+               if now - login.started_at > chatgpt_auth.DEVICE_CODE_EXPIRES_IN_S]
+    for lid in expired:
+        del _chatgpt_logins[lid]
+    if len(_chatgpt_logins) >= limits.MAX_CHATGPT_LOGINS:
+        oldest = min(_chatgpt_logins, key=lambda lid: _chatgpt_logins[lid].started_at)
+        del _chatgpt_logins[oldest]
+
+
 @app.post("/api/settings/chatgpt/login", dependencies=[Depends(require_api_token)])
 async def chatgpt_login_start():
+    _prune_chatgpt_logins()
     login = await chatgpt_auth.start_device_login()
     login_id = uuid.uuid4().hex
     _chatgpt_logins[login_id] = login
@@ -2182,46 +2434,153 @@ async def _start_warmup_scheduler():
 
 
 RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "30"))
+# F-POLICY-002: interim decision, recorded and accepted in
+# docs/assurance/FINDINGS.md -- defaults to the same window as every
+# other terminal-state retention timer until an operator sets a
+# different one explicitly.
+REVIEW_RETENTION_DAYS = int(os.environ.get("REVIEW_RETENTION_DAYS", str(RETENTION_DAYS)))
+
+_TERMINAL_RETENTION_STATUSES = ["complete", "failed", "cancelled", "blocked", "intake_failed",
+                                "partially_complete", "expired_awaiting_review"]
+
+
+async def _run_hold(db, run_id: str | None) -> str:
+    """The active D14 hold reason on ``run_id``'s ``WorkflowRun``, or ``""``
+    when there is none -- including when ``run_id`` is falsy or no
+    durable run exists (a pre-Phase-5 session has nothing to hold
+    against). Every retention timer in this module checks this before
+    any deletion."""
+    if not run_id:
+        return ""
+    run_doc = await db.workflow_runs.find_one({"run_id": run_id}, {"hold": 1})
+    return (run_doc or {}).get("hold") or ""
 
 
 async def _purge_settled_sessions_loop():
-    """Hourly: delete settled sessions older than RETENTION_DAYS, together
-    with their UPLOAD_DIR/<sid> tree, their export_paths files, and their
-    agent_log rows. Runs forever; a single bad iteration backs off and
-    retries rather than killing the loop.
+    """Hourly: four independent retention sweeps, each backed off and
+    retried rather than allowed to kill the loop on a bad iteration.
 
-    ``partially_complete`` sessions remain resumable until RETENTION_DAYS
-    after their last update. Once that window expires, they are purged with
-    their uploaded PHI like any other settled session.
+    1. Terminal sessions (``_TERMINAL_RETENTION_STATUSES``) older than
+       ``RETENTION_DAYS``: erase filesystem bytes, then the session
+       document -- only once erasure is confirmed (see
+       ``_erase_session_from_disk``); a failure records
+       ``status="erasure_pending"`` for step 3 to retry instead of either
+       silently losing track of it or deleting the document with PHI
+       still on disk. ``partially_complete`` sessions remain resumable
+       until this window expires.
+    2. ``awaiting_human_review`` sessions older than
+       ``REVIEW_RETENTION_DAYS`` (F-POLICY-002): raw PHI under
+       ``UPLOAD_DIR/<sid>`` is erased and the session moves to the
+       terminal ``expired_awaiting_review`` status -- a stalled human
+       review does not retain raw PHI indefinitely.
+    3. Sessions already ``erasure_pending`` from a prior failed sweep or
+       a failed ``session_delete`` call: retried unconditionally.
+    4. ``ArtifactService.reconcile`` (Phase 7 step 3): the registry-wide
+       artifact collection sweep, run from the same interval rather than
+       a fifth background task.
+
+    Every step skips a session (or, for reconcile, an artifact) whose
+    ``WorkflowRun``/``ArtifactRecord`` carries a non-empty ``hold``.
     """
-    import shutil
+    from phi_core.control.artifacts import reconcile as reconcile_artifacts
+    from phi_core.control.store import MongoControlStore
+
     while True:
+        db = get_db()
+
+        # Step 1: terminal-state sessions past RETENTION_DAYS.
         try:
-            db = get_db()
             cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
             cursor = db.sessions.find(
-                {"status": {"$in": ["complete", "failed", "cancelled", "blocked", "intake_failed",
-                                    "partially_complete"]},
-                 "updated_at": {"$lt": cutoff}},
-                {"_id": 0, "id": 1, "export_paths": 1},
+                {"status": {"$in": _TERMINAL_RETENTION_STATUSES}, "updated_at": {"$lt": cutoff}},
+                {"_id": 0, "id": 1, "export_paths": 1, "_pipeline_run_id": 1, "erasure_attempts": 1},
             )
             async for doc in cursor:
                 sid = doc.get("id")
                 if not sid:
                     continue
-                shutil.rmtree(UPLOAD_DIR / sid, ignore_errors=True)
-                for p in (doc.get("export_paths") or {}).values():
-                    if p:
-                        try:
-                            Path(p).unlink(missing_ok=True)
-                        except OSError:
-                            pass
-                await db.agent_log.delete_many({"session_id": sid})
+                if await _run_hold(db, doc.get("_pipeline_run_id")):
+                    continue
+                errors = _erase_session_from_disk(sid, doc.get("export_paths"))
+                if errors:
+                    await db.sessions.update_one({"id": sid}, {"$set": {
+                        "status": "erasure_pending",
+                        "erasure_error": "; ".join(f"{k}: {v}" for k, v in errors.items()),
+                        "erasure_attempts": int(doc.get("erasure_attempts", 0)) + 1,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }})
+                    continue
+                await db.agent_log.delete_many({"session_id": sid})  # pre-migration rows, if any remain
+                await db.trace_events.delete_many({"session_id": sid})
                 await db.sessions.delete_one({"id": sid})
         except asyncio.CancelledError:  # pragma: no cover - shutdown
             raise
         except Exception:  # pragma: no cover - defensive
             pass
+
+        # Step 2: awaiting_human_review sessions past REVIEW_RETENTION_DAYS.
+        try:
+            review_cutoff = (datetime.now(timezone.utc) - timedelta(days=REVIEW_RETENTION_DAYS)).isoformat()
+            cursor = db.sessions.find(
+                {"status": "awaiting_human_review", "updated_at": {"$lt": review_cutoff}},
+                {"_id": 0, "id": 1, "_pipeline_run_id": 1},
+            )
+            async for doc in cursor:
+                sid = doc.get("id")
+                if not sid:
+                    continue
+                if await _run_hold(db, doc.get("_pipeline_run_id")):
+                    continue
+                import shutil
+                try:
+                    shutil.rmtree(UPLOAD_DIR / sid)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    continue  # retried next sweep; status stays awaiting_human_review
+                await db.sessions.update_one({"id": sid}, {"$set": {
+                    "status": "expired_awaiting_review",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }})
+        except asyncio.CancelledError:  # pragma: no cover - shutdown
+            raise
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        # Step 3: retry sessions already erasure_pending.
+        try:
+            cursor = db.sessions.find(
+                {"status": "erasure_pending"},
+                {"_id": 0, "id": 1, "export_paths": 1, "_pipeline_run_id": 1, "erasure_attempts": 1},
+            )
+            async for doc in cursor:
+                sid = doc.get("id")
+                if not sid:
+                    continue
+                errors = _erase_session_from_disk(sid, doc.get("export_paths"))
+                if errors:
+                    await db.sessions.update_one({"id": sid}, {"$set": {
+                        "erasure_error": "; ".join(f"{k}: {v}" for k, v in errors.items()),
+                        "erasure_attempts": int(doc.get("erasure_attempts", 0)) + 1,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }})
+                    continue
+                await db.agent_log.delete_many({"session_id": sid})  # pre-migration rows, if any remain
+                await db.trace_events.delete_many({"session_id": sid})
+                await db.sessions.delete_one({"id": sid})
+        except asyncio.CancelledError:  # pragma: no cover - shutdown
+            raise
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        # Step 4: the artifact-registry-wide reconcile sweep.
+        try:
+            await reconcile_artifacts(MongoControlStore(db))
+        except asyncio.CancelledError:  # pragma: no cover - shutdown
+            raise
+        except Exception:  # pragma: no cover - defensive
+            pass
+
         await asyncio.sleep(3600)
 
 
@@ -2234,27 +2593,11 @@ async def _startup_maintenance():
     already reports that."""
     try:
         db = get_db()
-        await db.sessions.create_index("id", unique=True)
-        await db.sessions.create_index("owner")
-        await db.agent_log.create_index("session_id")
-        await db.agent_log.create_index("ts", expireAfterSeconds=RETENTION_DAYS * 86400)
-
-        # Control-plane durable-record indexes.  Collections are created lazily
-        # by Mongo while keeping every identity and CAS lookup indexed.
-        await db.workflow_runs.create_index("run_id", unique=True)
-        await db.workflow_runs.create_index([("session_id", 1), ("state", 1)])
-        await db.work_items.create_index("task_id", unique=True)
-        await db.work_items.create_index([("run_id", 1), ("idempotency_key", 1)], unique=True)
-        await db.work_items.create_index("effect_key", unique=True, sparse=True)
-        await db.work_items.create_index([("state", 1), ("next_eligible_at", 1)])
-        await db.work_items.create_index([("state", 1), ("lease_expires_at", 1)])
-        await db.trace_events.create_index([("run_id", 1), ("seq", 1)], unique=True)
-        await db.trace_events.create_index("event_id", unique=True)
-        await db.artifacts.create_index("artifact_id", unique=True)
-        await db.artifacts.create_index([("root", 1), ("rel_path", 1)], unique=True)
-        await db.artifacts.create_index([("state", 1), ("expires_at", 1)])
-        await db.human_review_events.create_index([("request_id", 1), ("client_event_id", 1)], unique=True)
-        await db.evidence_claims.create_index("claim_id", unique=True)
+        from phi_core.control.limits import WEB_CACHE_REFRESH_DAYS
+        from phi_core.control.migrate import create_control_plane_indexes
+        await create_control_plane_indexes(
+            db, retention_days=RETENTION_DAYS, web_cache_refresh_days=WEB_CACHE_REFRESH_DAYS,
+        )
 
         # Reconcile orphaned runs: an in-process asyncio.create_task pipeline
         # dies silently on restart, leaving the session stuck outside a
@@ -2467,7 +2810,7 @@ async def session_cancel(sid: str, principal: str = Depends(resolve_principal)):
     await _emit(sid, ProgressEvent(
         phase="cancel_requested",
         message="Cancel requested by operator; pipeline will exit at next phase boundary.",
-    ))
+    ), run_id=run_id)
     return {"status": "cancel_requested", "already_settled": False}
 
 class HumanReviewSubmit(BaseModel):
@@ -3007,41 +3350,70 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     return result
 
 
+def _trace_event_to_message(doc: dict) -> dict:
+    """Reconstruct the ``AgentMessage``-shaped dict the frontend's
+    ``_groupTrace`` and ``phi_corpus.benchmark.report_from_session``
+    already expect, from a persisted ``TraceEvent`` document (D15
+    agent_log migration). ``TraceEvent.ts`` is stored as a plain string
+    (unlike the legacy ``agent_log`` collection's native BSON date), so
+    no post-read ``isoformat()`` conversion is needed here."""
+    return {
+        "id": doc.get("event_id", ""),
+        "seq": doc.get("seq", 0),
+        "session_id": doc.get("session_id", ""),
+        "agent": doc.get("agent", ""),
+        "phase": doc.get("phase", ""),
+        "ts": doc.get("ts", ""),
+        "direction": doc.get("direction", ""),
+        "payload": doc.get("payload") or {},
+        "duration_ms": doc.get("latency_ms", 0),
+        "parent_id": doc.get("parent_msg_id") or None,
+        "status_text": doc.get("status_text", ""),
+    }
+
+
+async def _session_trace_messages(
+    db, sid: str, *, after_seq: int | None = None, limit: int | None = None,
+) -> list[dict]:
+    """Every ``trace_events`` row for ``sid``, oldest first, mapped back to
+    the ``AgentMessage`` shape. Replaces the legacy ``db.agent_log.find``
+    read path shared by ``session_bundle``, ``corpus_study_benchmark``,
+    and ``session_agent_trace``."""
+    query: dict[str, Any] = {"session_id": sid}
+    if after_seq is not None:
+        query["seq"] = {"$gt": after_seq}
+    cursor = db.trace_events.find(query, {"_id": 0}).sort("seq", 1)
+    if limit is not None:
+        cursor = cursor.limit(limit)
+    return [_trace_event_to_message(doc) async for doc in cursor]
+
+
 @app.get("/api/sessions/{sid}/agent-trace")
-async def session_agent_trace(sid: str, limit: int = 200, after: str | None = None,
+async def session_agent_trace(sid: str, limit: int = 200, after_seq: int = 0,
                               principal: str = Depends(resolve_principal)):
     """Return one page of the audit log of every agent message on this session.
 
-    Cursor-paginated: ``after`` is the ``ts`` (ISO-8601, as returned in a
-    prior page's last message) of the newest message the caller already
-    has; this page returns strictly newer messages only. Tier 3's full,
-    uncapped per-message text (see ``AgentMessage``) makes a naive
-    full-history refetch on every SSE tick expensive at scale; the frontend
-    appends pages incrementally instead (see ``SessionDetail.jsx``).
+    Cursor-paginated: ``after_seq`` is the ``trace_events.seq`` of the
+    newest message the caller already has (D15 step 2: replaces the
+    former ISO-timestamp ``after`` cursor, which lost ties); this page
+    returns strictly newer messages only. Tier 3's full, uncapped
+    per-message text (see ``AgentMessage``) makes a naive full-history
+    refetch on every SSE tick expensive at scale; the frontend appends
+    pages incrementally instead (see ``SessionDetail.jsx``).
     """
     from phi_core.security import scrub_nested as _scrub_nested
     db = get_db()
     await _owned_session(sid, principal, {"id": 1})
-    query: dict[str, Any] = {"session_id": sid}
-    if after:
-        try:
-            query["ts"] = {"$gt": datetime.fromisoformat(after)}
-        except ValueError as exc:
-            raise HTTPException(400, f"invalid cursor: {after!r} is not an ISO-8601 timestamp") from exc
     limit = max(1, min(int(limit), 2000))
-    cursor = db.agent_log.find(query, {"_id": 0}).sort("ts", 1).limit(limit)
-    msgs: list[dict] = []
-    async for m in cursor:
-        ts = m.get("ts")
-        if hasattr(ts, "isoformat"):
-            m["ts"] = ts.isoformat()
-        # SEC-006: agent-trace payloads are nested dicts (`prompt_text`,
-        # `reply_text`) that echo dictionary/form/comment PHI. Scrub every
-        # string leaf recursively rather than only top-level string fields.
-        msgs.append(_scrub_nested(m))
+    raw = await _session_trace_messages(db, sid, after_seq=after_seq or None, limit=limit)
+    # SEC-006: agent-trace payloads are nested dicts (`prompt_text`,
+    # `reply_text`) that echo dictionary/form/comment PHI. Scrub every
+    # string leaf recursively rather than only top-level string fields.
+    msgs = [_scrub_nested(m) for m in raw]
+    next_seq = max((m.get("seq", 0) for m in raw), default=after_seq) if raw else after_seq
     return {
         "messages": msgs,
-        "next_cursor": msgs[-1]["ts"] if msgs else after,
+        "next_cursor": next_seq,
         "has_more": len(msgs) == limit,
     }
 

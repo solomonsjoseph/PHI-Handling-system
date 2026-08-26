@@ -1,9 +1,11 @@
 # ARCHITECTURE - PHI Console
 
 **Status:** Reference document. Read alongside `GOAL.md` (operational spec) and `VISION.md`
-(north star). Written 2026-08-13 against the code as it exists after the production-hardening
-pass; regenerate the numeric anchors below whenever a cited file moves materially.
-
+(north star). Written 2026-08-13 against the code as it existed after the production-hardening
+pass; updated 2026-08-25 at the close of the Phase 7-9 control-plane program (durable event
+tracing, artifact-registry retention/reconciliation, controlled learning, migrations) to correct
+the specific claims below that program changed. Regenerate the numeric anchors whenever a cited
+file moves materially.
 ---
 
 ## 1. End-to-end flow
@@ -208,8 +210,9 @@ partially.
 | `MONGO_URL` | Must contain `@` (authenticated) | `_refuse_to_boot_insecure`. |
 | `APP_ENCRYPTION_KEY` | Base64 Fernet key | `_refuse_to_boot_insecure`; also `crypto._load_or_create_key` raises directly if reached with this unset outside dev. |
 | `ATTESTATION_SIGNING_KEY` | Base64 PKCS8 Ed25519 private key | `_refuse_to_boot_insecure`; without it a production bundle would ship an unsigned attestation, which is only tolerated in dev. |
-| `DATA_DIR` | Any writable path | `phi_core/paths.py` creates `uploads/`, `exports/`, `chatgpt/` under it with mode `0700` on every boot. |
-| `RETENTION_DAYS` (default 30) | n/a | Governs the hourly purge loop; not boot-blocking. |
+| `DATA_DIR` | Any writable path | `phi_core/paths.py` creates `uploads/`, `staging/`, `evidence/`, `reversal/`, `published/`, `cache/`, `chatgpt/` under it with mode `0700` on every boot -- Phase 3's D14 artifact registry; the flat `exports/` directory this row previously named was deleted, its dead code removed in Phase 9. |
+| `RETENTION_DAYS` (default 30) | n/a | Governs the hourly purge loop for terminal-state sessions and the `web_cache`/`trace_events`-adjacent TTL windows; not boot-blocking. |
+| `REVIEW_RETENTION_DAYS` (default: same as `RETENTION_DAYS`) | n/a | F-POLICY-002: a paused `awaiting_human_review` session past this window has its raw `UPLOAD_DIR/<sid>` bytes erased and moves to `expired_awaiting_review`, suspended while the run carries a `hold`. Not boot-blocking. |
 | `MAX_CONCURRENT_PIPELINES` (default 2) | n/a | Admission-control cap; not boot-blocking, but a low value under real load surfaces as 429s. |
 | `MAX_COLUMNS_PER_STUDY` (default 500) | n/a | Refuses an oversized study before an unbounded Judge prompt is built. |
 | `FORWARDED_ALLOW_IPS` (default `127.0.0.1`, read by the Docker image's CMD) | Reverse proxy's address when one is in front | If wrong, rate-limit buckets (4.20) either don't reflect real client IPs (too narrow) or trust a spoofable header (too wide). |
@@ -222,6 +225,13 @@ a ChatGPT OAuth account instead.
 ---
 
 ## 6. Threat model
+
+This section is a five-boundary summary predating the Phase 7-9 control-plane program.
+`docs/assurance/THREAT_MODEL.md` is now the authoritative, current threat model: it adds the
+provider, tool, workflow, cache, and artifact trust boundaries this section does not cover
+(durable-execution replay/fencing, controlled-learning activation, artifact-registry
+reconciliation, event-tracing tamper detection) and should be read alongside, not instead of,
+the five rows below, which remain accurate for the boundaries they describe.
 
 Five trust boundaries carry untrusted data into this system.
 

@@ -99,6 +99,45 @@ def test_only_the_artifact_service_writes_the_publication_pointer() -> None:
     assert sites, "expected at least one write site in artifacts.py -- the scan itself found nothing"
 
 
+# ---- test_only_trace_event_store_writes_trace_events ----------------------
+
+
+def _trace_events_write_sites() -> list[tuple[Path, int]]:
+    """AST-scan every backend .py file for a store-mutation call
+    (`insert`/`delete_one`/`delete_many`/`replace_one`/`compare_and_set`)
+    whose first positional argument is the literal `"trace_events"`."""
+    write_methods = {"insert", "delete_one", "delete_many", "replace_one", "compare_and_set"}
+    sites: list[tuple[Path, int]] = []
+    for path in BACKEND_ROOT.rglob("*.py"):
+        if "/.venv/" in str(path) or "/node_modules/" in str(path):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in write_methods or not node.args:
+                continue
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and first.value == "trace_events":
+                sites.append((path, node.lineno))
+    return sites
+
+
+def test_only_trace_event_store_writes_trace_events() -> None:
+    """D15: `TraceEventStore.append` is the only place in the codebase
+    that mutates `trace_events`, so `seq` allocation, hash chaining, and
+    the terminal-outcome fence check can never be bypassed by a writer
+    that goes straight to the store."""
+    sites = _trace_events_write_sites()
+    allowed = BACKEND_ROOT / "phi_core" / "control" / "events.py"
+    offenders = [(p, ln) for p, ln in sites if p != allowed]
+    assert offenders == [], f"trace_events written outside events.py: {offenders}"
+    assert sites, "expected at least one write site in events.py -- the scan itself found nothing"
+
+
 # ---- test_concurrent_child_creation_cannot_exceed_parent_ancestor_or_run_budgets
 
 
@@ -218,3 +257,68 @@ def test_no_module_outside_the_super_orchestrator_calls_task_service_enqueue() -
     offenders = [(p, ln) for p, ln in sites if p not in allowed]
     assert offenders == [], f"TaskService.enqueue called outside the documented exceptions: {offenders}"
     assert sites, "expected at least one .enqueue( call site -- the scan itself found nothing"
+
+
+# ---- test_no_agents_module_imports_control_learning -----------------------
+
+
+def _agents_module_paths() -> list[Path]:
+    agents_dir = BACKEND_ROOT / "phi_core" / "agents"
+    return [p for p in agents_dir.rglob("*.py") if "__pycache__" not in str(p)]
+
+
+def test_no_agents_module_imports_control_learning() -> None:
+    """D16: runtime agents never import `control.learning` at all -- a
+    proposal a running task authors is inert data a human must evaluate,
+    approve, and activate through `LearningService`; nothing under
+    `phi_core/agents/` may even hold a reference to that module."""
+    offenders: list[Path] = []
+    for path in _agents_module_paths():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.endswith("control.learning"):
+                offenders.append(path)
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.endswith("control.learning"):
+                        offenders.append(path)
+    assert offenders == [], f"phi_core/agents/ module imports control.learning: {offenders}"
+
+
+# ---- test_no_agents_module_writes_learning_or_capability_collections ------
+
+
+def _forbidden_collection_write_sites() -> list[tuple[Path, int, str]]:
+    """AST-scan every `phi_core/agents/` file for a store-mutation call
+    (`insert`/`replace_one`/`compare_and_set`/`delete_one`/`delete_many`)
+    whose first positional argument names a learning or capability-policy
+    collection."""
+    write_methods = {"insert", "replace_one", "compare_and_set", "delete_one", "delete_many"}
+    forbidden_collections = {"learning_proposals", "learning_evaluations", "learning_activations", "capability_grants"}
+    sites: list[tuple[Path, int, str]] = []
+    for path in _agents_module_paths():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in write_methods or not node.args:
+                continue
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and first.value in forbidden_collections:
+                sites.append((path, node.lineno, first.value))
+    return sites
+
+
+def test_no_agents_module_writes_learning_or_capability_collections() -> None:
+    """D16 gate: "runtime tasks cannot write active policy stores." No
+    `phi_core/agents/` module names `learning_proposals`,
+    `learning_evaluations`, `learning_activations`, or `capability_grants`
+    in a store-mutation call -- structurally true today since no
+    `AgentContext` field or `Agent` attribute exposes a raw `ControlStore`
+    at all (verified directly against `AgentContext`'s field list; the
+    plan's own `test_control_capability.py::test_agents_receive_no_database_handle`
+    was never actually written in Phase 2, tracked as a residual gap in
+    `docs/assurance/FINDINGS.md`). This scan guards the property directly
+    rather than only its current cause."""
+    sites = _forbidden_collection_write_sites()
+    assert sites == [], f"phi_core/agents/ writes a learning/policy collection: {sites}"

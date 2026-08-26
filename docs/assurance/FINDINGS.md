@@ -122,8 +122,8 @@
 ## F-POLICY-001
 
 - Owner: operator
-- Code anchors: `backend/server.py:_refuse_to_boot_insecure`, planned `backend/phi_core/control/review.py`
-- Acceptance tests: `backend/tests/test_control_review.py`
+- Code anchors: `backend/server.py:_refuse_to_boot_insecure`, `backend/phi_core/security.py::reviewer_principals,reviewer_role`
+- Acceptance tests: `backend/tests/test_production_readiness.py`
 - Status: open
 - Disposition: Interim reviewer roles come from `REVIEWER_PRINCIPALS=name:role,...`; `reviewer` resolves columns and `lead_reviewer` may supersede reviews, activate learning, and access assurance administration. Outside development, an unset value fails boot.
 - Residual risk: operator has not supplied a product authorization model.
@@ -140,16 +140,16 @@
 ## F-POLICY-003
 
 - Owner: operator
-- Code anchors: planned `backend/phi_core/control/artifacts.py`, planned `POST /api/admin/hold`
-- Acceptance tests: `backend/tests/test_control_artifacts.py::test_hold_suspends_every_retention_timer`
+- Code anchors: `backend/server.py:admin_set_hold,admin_clear_hold`, `backend/phi_core/control/artifacts.py`
+- Acceptance tests: `backend/tests/test_admin_hold.py`, `backend/tests/test_control_artifacts.py::test_hold_suspends_every_retention_timer`
 - Status: open
-- Disposition: Interim hold authority is limited to `lead_reviewer`; set and clear events include principal and reason in a trace event.
-- Residual risk: operator has not defined an alternative legal-hold process.
+- Disposition: `POST /api/admin/hold` and `DELETE /api/admin/hold` set/clear `WorkflowRun.hold`, gated to `lead_reviewer`; both record a `hold_set`/`hold_cleared` trace event with principal and reason.
+- Residual risk: operator has not defined an alternative legal-hold process (e.g. an approval workflow above a single `lead_reviewer`'s say-so).
 
 ## F-POLICY-004
 
 - Owner: operator
-- Code anchors: `backend/phi_core/agents/base.py`, planned `backend/phi_core/control/policy.py`
+- Code anchors: `backend/phi_core/agents/base.py`, `backend/phi_core/control/policy.py::CapabilityPolicy`
 - Acceptance tests: `backend/tests/test_control_capability.py::test_restricted_phi_is_never_sendable`
 - Status: open
 - Disposition: Interim provider egress ceiling is `restricted_metadata`; `restricted_phi` is denied for every manifest. Any widening requires an operator decision and manifest change.

@@ -22,7 +22,7 @@ Datasets (CSV, XLSX, Parquet) expose ONLY column headers to the LLM. Row values 
 /app
   backend/
     server.py               FastAPI service on :8001
-    phi_core/               generators, detectors, file_readers, llm_classifier, anonymizer, benchmark, pipeline
+    phi_core/                generators, detectors, file_readers, anonymizer, benchmark, agents/, control/
     .env                    MONGO_URL, DB_NAME, ANTHROPIC_API_KEY, DATA_DIR, CORPUS_SEED
     requirements.txt
   frontend/
@@ -31,7 +31,11 @@ Datasets (CSV, XLSX, Parquet) expose ONLY column headers to the LLM. Row values 
   docs/file_formats/        DICOM PS3.15 + FHIR R4 authority notes
   data/
     uploads/{session_id}/   uploaded files (local disk only, never leaves the pod)
-    exports/                anonymized outputs
+    staging/, evidence/, reversal/, published/, cache/
+                            the D14 artifact registry: every produced file is
+                            staged, hash-verified, then promoted to
+                            published/{session_id}/{run_id}/ before it is ever
+                            served for download
 ```
 
 ## Run
