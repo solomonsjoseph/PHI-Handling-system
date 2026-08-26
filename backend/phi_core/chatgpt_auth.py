@@ -30,6 +30,9 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+
+from .paths import CHATGPT_TOKEN_DIR
+
 # Mirrors litellm.llms.chatgpt.common_utils.py (litellm/llms/chatgpt/common_utils.py).
 CHATGPT_AUTH_BASE = "https://auth.openai.com"
 CHATGPT_DEVICE_CODE_URL = "https://auth.openai.com/api/accounts/deviceauth/usercode"
@@ -37,8 +40,6 @@ CHATGPT_DEVICE_TOKEN_URL = "https://auth.openai.com/api/accounts/deviceauth/toke
 CHATGPT_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CHATGPT_DEVICE_VERIFY_URL = "https://auth.openai.com/codex/device"
 CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-
-from .paths import CHATGPT_TOKEN_DIR
 
 _HTTP_TIMEOUT = 20.0
 # The device code itself is valid for 15 minutes server-side (matches

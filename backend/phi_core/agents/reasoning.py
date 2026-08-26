@@ -19,13 +19,13 @@ import openpyxl as _openpyxl
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..anonymizer import apply_to_text
+from ..control.records import EvidenceClaim, GateResult
 from ..crypto import pseudonym_salt
 from ..detectors import detect_text
 from ..file_readers import iter_dataset_rows, read_narrative
 from ..jurisdictions import get_pack
 from ..publish_guard import should_fire
 from ..security import scrub_persisted_text
-from ..control.records import EvidenceClaim, GateResult
 from .base import Agent
 
 _detect_text = detect_text
