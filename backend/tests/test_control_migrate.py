@@ -14,7 +14,9 @@ from pathlib import Path
 import pytest
 from phi_core.control.migrate import (
     backfill_export_artifacts,
+    backfill_export_artifacts_rollback,
     backfill_workflow_runs,
+    backfill_workflow_runs_rollback,
     clear_orphaned_reversal_key_blobs,
     create_control_plane_indexes,
     migrate_agent_log_to_trace_events,
@@ -49,7 +51,7 @@ async def test_create_control_plane_indexes_is_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_backfill_workflow_runs_creates_a_run_for_a_legacy_session_and_is_idempotent():
+async def test_backfill_workflow_runs_round_trips_a_legacy_session():
     db = get_db()
     sid = _sid()
     run_id = _sid()
@@ -62,18 +64,47 @@ async def test_backfill_workflow_runs_creates_a_run_for_a_legacy_session_and_is_
         assert run_doc["session_id"] == sid
         assert run_doc["correlation_id"] == "backfill:migrate_workflow_runs"
 
-        created_second = await backfill_workflow_runs(db)
-        assert created_second == 0  # already backfilled; nothing left to do
+        rolled_back = await backfill_workflow_runs_rollback(db)
+        assert rolled_back >= 1
+        assert await db.workflow_runs.find_one({"run_id": run_id}) is None
+        assert await db.sessions.find_one({"id": sid, "_pipeline_run_id": run_id}) is not None
+
+        created_again = await backfill_workflow_runs(db)
+        assert created_again >= 1
+        restored_run = await db.workflow_runs.find_one({"run_id": run_id})
+        assert restored_run is not None
+        assert restored_run["correlation_id"] == "backfill:migrate_workflow_runs"
     finally:
         await db.sessions.delete_one({"id": sid})
         await db.workflow_runs.delete_one({"run_id": run_id})
 
 
 @pytest.mark.asyncio
-async def test_backfill_export_artifacts_registers_and_moves_a_legacy_export(tmp_path):
+async def test_backfill_workflow_runs_rollback_keeps_a_run_with_history():
     db = get_db()
     sid = _sid()
     run_id = _sid()
+    await db.sessions.insert_one({"id": sid, "status": "complete", "_pipeline_run_id": run_id})
+    try:
+        await backfill_workflow_runs(db)
+        await db.trace_events.insert_one({"run_id": run_id, "seq": 1})
+
+        await backfill_workflow_runs_rollback(db)
+
+        assert await db.workflow_runs.find_one({"run_id": run_id}) is not None
+    finally:
+        await db.sessions.delete_one({"id": sid})
+        await db.workflow_runs.delete_one({"run_id": run_id})
+        await db.trace_events.delete_one({"run_id": run_id, "seq": 1})
+
+
+@pytest.mark.asyncio
+async def test_backfill_export_artifacts_round_trips_a_legacy_export(tmp_path):
+    db = get_db()
+    sid = _sid()
+    run_id = _sid()
+    published_export: Path | None = None
+    remigrated_export: Path | None = None
     legacy_export = tmp_path / "legacy_export.csv"
     legacy_export.write_text("handled data", encoding="utf-8")
     await db.sessions.insert_one({
@@ -87,14 +118,29 @@ async def test_backfill_export_artifacts_registers_and_moves_a_legacy_export(tmp
         assert record["state"] == "promoted"
         assert record["parents"] == [f"legacy:{legacy_export}"]
         updated_session = await db.sessions.find_one({"id": sid})
-        assert updated_session["export_paths"]["dataset"] != str(legacy_export)
-        assert Path(updated_session["export_paths"]["dataset"]).is_file()
+        published_export = Path(updated_session["export_paths"]["dataset"])
+        assert published_export.is_file()
 
-        migrated_second = await backfill_export_artifacts(db)
-        assert migrated_second == 0  # already registered; nothing left to do
+        rolled_back = await backfill_export_artifacts_rollback(db)
+        assert rolled_back >= 1
+        restored_session = await db.sessions.find_one({"id": sid})
+        assert restored_session["export_paths"] == {"dataset": str(legacy_export)}
+        assert legacy_export.read_text(encoding="utf-8") == "handled data"
+        assert not published_export.exists()
+        assert await db.artifacts.find_one({"artifact_id": record["artifact_id"]}) is None
+
+        migrated_again = await backfill_export_artifacts(db)
+        assert migrated_again >= 1
+        remigrated_session = await db.sessions.find_one({"id": sid})
+        remigrated_export = Path(remigrated_session["export_paths"]["dataset"])
+        assert remigrated_export.is_file()
+        assert remigrated_export.read_text(encoding="utf-8") == "handled data"
     finally:
         await db.sessions.delete_one({"id": sid})
         await db.artifacts.delete_many({"session_id": sid})
+        for path in (published_export, remigrated_export):
+            if path is not None:
+                path.unlink(missing_ok=True)
 
 
 @pytest.mark.asyncio

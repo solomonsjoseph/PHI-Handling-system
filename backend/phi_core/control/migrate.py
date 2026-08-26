@@ -42,6 +42,22 @@ _INDEX_SPECS: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...] = (
     ("evidence_claims", ("claim_id",), {"unique": True}),
 )
 
+_WORKFLOW_RUN_BACKFILL_CORRELATION_ID = "backfill:migrate_workflow_runs"
+_LEGACY_EXPORT_PARENT_PREFIX = "legacy:"
+_RUN_HISTORY_COLLECTIONS = (
+    "artifacts",
+    "capability_grants",
+    "evidence_claims",
+    "gate_results",
+    "human_review_events",
+    "human_review_requests",
+    "publication_records",
+    "trace_events",
+    "trace_segments",
+    "trace_tombstones",
+    "work_items",
+)
+
 
 async def create_control_plane_indexes(db, *, retention_days: int, web_cache_refresh_days: int) -> None:
     """Every index the control plane depends on, shared verbatim between
@@ -60,8 +76,8 @@ async def backfill_workflow_runs(db) -> int:
     `WorkflowRun` row, so run-scoped code added since Phase 5
     (`check_run_budget`, `TraceEventStore`, retention's `_run_hold`) has
     something to look up instead of silently treating the run as
-    unbounded/unheld. Reverse: delete the `workflow_runs` row whose
-    `correlation_id` starts with `"backfill:"`."""
+    unbounded/unheld. Roll back an untouched backfill with
+    `backfill_workflow_runs_rollback`."""
     created = 0
     cursor = db.sessions.find(
         {"_pipeline_run_id": {"$exists": True, "$ne": None}}, {"_id": 0, "id": 1, "_pipeline_run_id": 1, "status": 1},
@@ -77,22 +93,82 @@ async def backfill_workflow_runs(db) -> int:
         run = WorkflowRun(
             run_id=run_id, session_id=sid, run_type="study",
             state="complete" if doc.get("status") in ("complete", "partially_complete") else "failed",
-            correlation_id="backfill:migrate_workflow_runs",
+            correlation_id=_WORKFLOW_RUN_BACKFILL_CORRELATION_ID,
         )
         await db.workflow_runs.insert_one(run.model_dump(mode="json"))
         created += 1
     return created
 
 
+async def _backfilled_run_has_history(db, document: dict[str, Any]) -> bool:
+    """Return whether a tagged backfill is no longer safe to remove."""
+    run = WorkflowRun.model_validate({key: value for key, value in document.items() if key != "_id"})
+    if (
+        run.workflow_version
+        or run.policy_version
+        or run.terminal_outcome
+        or run.node
+        or run.checkpoint
+        or run.checkpoint_version
+        or run.started_at
+        or run.paused_at
+        or run.resumed_at
+        or run.cancelled_at
+        or run.completed_at
+        or run.cancel_requested
+        or run.cancel_requested_at
+        or run.decision_version
+        or run.publication_generation
+        or run.hold
+        or run.event_seq
+        or run.opaque_map
+        or run.outbox
+        or any(run.budget.model_dump(exclude={"schema_version"}).values())
+        or any(run.usage.model_dump(exclude={"schema_version"}).values())
+    ):
+        return True
+    for collection in _RUN_HISTORY_COLLECTIONS:
+        if await db[collection].find_one({"run_id": run.run_id}, {"_id": 1}) is not None:
+            return True
+    return False
+
+
+async def backfill_workflow_runs_rollback(db) -> int:
+    """Delete only pristine `backfill_workflow_runs` records.
+
+    The correlation marker identifies rows this migration created. A row
+    with any recorded run activity or associated run-scoped record is
+    deliberately retained: deleting it would discard real history that
+    accrued after the backfill.
+    """
+    rolled_back = 0
+    cursor = db.workflow_runs.find({"correlation_id": _WORKFLOW_RUN_BACKFILL_CORRELATION_ID})
+    async for document in cursor:
+        if await _backfilled_run_has_history(db, document):
+            continue
+        result = await db.workflow_runs.delete_one({
+            "_id": document["_id"],
+            "correlation_id": _WORKFLOW_RUN_BACKFILL_CORRELATION_ID,
+            "event_seq": 0,
+            "decision_version": 0,
+            "publication_generation": 0,
+            "checkpoint_version": 0,
+            "checkpoint": {},
+            "outbox": [],
+            "hold": "",
+            "cancel_requested": False,
+        })
+        rolled_back += getattr(result, "deleted_count", 0)
+    return rolled_back
+
+
 async def backfill_export_artifacts(db) -> int:
     """Every `export_paths` entry with no matching `ArtifactRecord`
     (bytes written before the D14 artifact registry existed) is hashed in
     place, registered as a `promoted` `ArtifactRecord`, and its bytes
-    moved under `published/<session_id>/<run_id>/<artifact_id>`; the
-    session's `export_paths` entry is updated to the new path. Reverse:
-    move the file back to its recorded pre-migration path (kept in the
-    artifact's `parents` field as `legacy:<original path>`) and delete
-    the `ArtifactRecord`."""
+    copied under `published/<session_id>/<run_id>/<artifact_id>`; the
+    session's `export_paths` entry is updated to the new path. Roll back
+    a migration-owned record with `backfill_export_artifacts_rollback`."""
     migrated = 0
     cursor = db.sessions.find(
         {"export_paths": {"$exists": True, "$ne": {}}}, {"_id": 0, "id": 1, "export_paths": 1, "_pipeline_run_id": 1},
@@ -137,7 +213,7 @@ async def backfill_export_artifacts(db) -> int:
                 scope="session", type="legacy_export", root="published",
                 rel_path=f"{sid}/{run_id}/{artifact_id}", sha256=digest.hexdigest(), size_bytes=size,
                 state="promoted", data_class="restricted_metadata", retention_class="short",
-                parents=[f"legacy:{raw_path}"], generation=1,
+                parents=[f"{_LEGACY_EXPORT_PARENT_PREFIX}{raw_path}"], generation=1,
                 promoted_at=datetime.now(timezone.utc).isoformat(),
             )
             await db.artifacts.insert_one(record.model_dump(mode="json"))
@@ -147,6 +223,51 @@ async def backfill_export_artifacts(db) -> int:
         if changed:
             await db.sessions.update_one({"id": sid}, {"$set": {"export_paths": updated_paths}})
     return migrated
+
+
+async def backfill_export_artifacts_rollback(db) -> int:
+    """Restore legacy paths and remove copies registered by the backfill."""
+    rolled_back = 0
+    cursor = db.artifacts.find({"type": "legacy_export", "root": "published"})
+    async for record in cursor:
+        parents = record.get("parents")
+        if (
+            not isinstance(parents, list)
+            or len(parents) != 1
+            or not isinstance(parents[0], str)
+            or not parents[0].startswith(_LEGACY_EXPORT_PARENT_PREFIX)
+        ):
+            continue
+        legacy_path = Path(parents[0].removeprefix(_LEGACY_EXPORT_PARENT_PREFIX))
+        published_path = PUBLISHED_DIR / record.get("rel_path", "")
+        session_id = record.get("session_id")
+        if not session_id or not published_path.is_file():
+            continue
+        session = await db.sessions.find_one({"id": session_id}, {"_id": 1, "export_paths": 1})
+        export_paths = (session or {}).get("export_paths")
+        if not isinstance(export_paths, dict):
+            continue
+        updated_paths = {
+            key: str(legacy_path) if value == str(published_path) else value
+            for key, value in export_paths.items()
+        }
+        if updated_paths == export_paths:
+            continue
+        if legacy_path.exists():
+            digest = hashlib.sha256()
+            with legacy_path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != record.get("sha256"):
+                continue
+            published_path.unlink()
+        else:
+            legacy_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(published_path, legacy_path)
+        await db.sessions.update_one({"_id": session["_id"]}, {"$set": {"export_paths": updated_paths}})
+        result = await db.artifacts.delete_one({"_id": record["_id"]})
+        rolled_back += getattr(result, "deleted_count", 0)
+    return rolled_back
 
 
 async def migrate_agent_log_to_trace_events(db) -> int:

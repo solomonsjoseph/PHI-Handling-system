@@ -44,9 +44,9 @@ the run as unbounded and unheld — this migration gives every legacy
 session the same durable-run floor a session created after Phase 5 has
 always had.
 
-**Reverse:** `db.workflow_runs.delete_many({"correlation_id": "backfill:migrate_workflow_runs"})`.
-No other row references the backfilled `WorkflowRun` by anything this
-migration itself created, so deleting it is a clean revert.
+**Reverse:** call `backfill_workflow_runs_rollback(db)`. It deletes only
+the migration-marked row when it remains pristine. A marked run with
+recorded activity or run-scoped history is retained rather than deleted.
 
 ## `backfill_export_artifacts`
 
@@ -62,14 +62,12 @@ an entry whose current path already resolves under `PUBLISHED_DIR` is
 skipped outright, since migrating rewrites the very path a naive
 database-keyed idempotency check would have looked up.
 
-**Reverse:** for each migrated `ArtifactRecord` (`type="legacy_export"`),
-copy its published bytes back to the original path recorded in
-`parents[0]` (stripped of the `legacy:` prefix), rewrite the owning
-session's `export_paths` entry back to that path, then
-`db.artifacts.delete_one({"artifact_id": ...})`. The original file is
-never deleted by the forward migration (only copied), so the original
-bytes remain available for this reverse step as long as nothing else
-removed them in the interim.
+**Reverse:** call `backfill_export_artifacts_rollback(db)`. It restores
+each owning session's matching `export_paths` entry to the path in its
+`legacy:` parent marker, deletes the copied published file when the
+original retained bytes still match the recorded digest, and removes the
+`ArtifactRecord`. If the legacy file no longer exists, it moves the
+published copy back to that path before deleting the record.
 
 ## `migrate_agent_log_to_trace_events`
 
@@ -106,4 +104,6 @@ re-identification.
 with no separate backup by design (D14's "exact-once" semantics for a
 reversal key: the operator sees it exactly once, at download time, or
 never again). Clearing it here is the same one-way action
-`session_reversal_key`'s own successful download already performs.
+`session_reversal_key`'s own successful download already performs. Before
+running the migration, back up the candidate `sessions` documents with
+`mongodump --collection=sessions --query='{"reversal_key_blob":{"$exists":true,"$ne":null},"status":{"$in":["complete","failed","cancelled","blocked","intake_failed","partially_complete","expired_awaiting_review","erasure_pending"]}}'`.
