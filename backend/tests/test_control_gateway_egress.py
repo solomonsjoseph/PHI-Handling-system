@@ -77,4 +77,4 @@ def test_only_gateway_has_a_production_litellm_import() -> None:
         if "import litellm" in source or "from litellm" in source:
             imports.append(path.relative_to(root).as_posix())
 
-    assert sorted(imports) == ["chatgpt_auth.py", "control/gateway.py"]
+    assert sorted(imports) == ["control/gateway.py"]

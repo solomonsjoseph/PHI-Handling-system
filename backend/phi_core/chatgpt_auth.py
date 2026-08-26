@@ -30,14 +30,13 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-from litellm.llms.chatgpt.common_utils import (
-    CHATGPT_AUTH_BASE,
-    CHATGPT_CLIENT_ID,
-    CHATGPT_DEVICE_CODE_URL,
-    CHATGPT_DEVICE_TOKEN_URL,
-    CHATGPT_DEVICE_VERIFY_URL,
-    CHATGPT_OAUTH_TOKEN_URL,
-)
+# Mirrors litellm.llms.chatgpt.common_utils.py (litellm/llms/chatgpt/common_utils.py).
+CHATGPT_AUTH_BASE = "https://auth.openai.com"
+CHATGPT_DEVICE_CODE_URL = "https://auth.openai.com/api/accounts/deviceauth/usercode"
+CHATGPT_DEVICE_TOKEN_URL = "https://auth.openai.com/api/accounts/deviceauth/token"
+CHATGPT_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
+CHATGPT_DEVICE_VERIFY_URL = "https://auth.openai.com/codex/device"
+CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 from .paths import CHATGPT_TOKEN_DIR
 
