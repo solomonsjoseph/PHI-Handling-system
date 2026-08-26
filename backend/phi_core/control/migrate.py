@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from phi_core.paths import PUBLISHED_DIR, run_scoped_dir
 
+from .events import canonical_json
 from .records import ArtifactRecord, WorkflowRun
 
 _INDEX_SPECS: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...] = (
@@ -282,12 +283,14 @@ async def migrate_agent_log_to_trace_events(db) -> int:
 
     converted = 0
     seq_by_run: dict[str, int] = {}
+    prev_hash_by_run: dict[str, str] = {}
     cursor = db.agent_log.find({}).sort("ts", 1)
     async for msg in cursor:
         run_id = msg.get("session_id", "")  # legacy rows have no run_id; scope the synthetic chain by session
         seq_by_run[run_id] = seq_by_run.get(run_id, 0) + 1
         ts = msg.get("ts")
         ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts or "")
+        prev_hash = prev_hash_by_run.get(run_id, "")
         event = {
             "schema_version": 1,
             "event_id": uuid4().hex,
@@ -305,10 +308,15 @@ async def migrate_agent_log_to_trace_events(db) -> int:
             "input_class": "internal",
             "output_class": "internal",
             "fence": 0,
-            "prev_hash": "",
-            "hash": hashlib.sha256(f"legacy:{msg.get('id', uuid4().hex)}".encode()).hexdigest(),
+            "prev_hash": prev_hash,
             "ts": ts_str,
         }
+        # Same canonical predecessor-based algorithm TraceEventStore.append uses
+        # (events.py): hash covers prev_hash plus every other field, so a sealed
+        # migrated range cryptographically covers its earlier events too.
+        event_hash = hashlib.sha256((prev_hash + canonical_json(event)).encode("utf-8")).hexdigest()
+        event["hash"] = event_hash
+        prev_hash_by_run[run_id] = event_hash
         await db.trace_events.insert_one(event)
         await db.agent_log.delete_one({"_id": msg["_id"]})
         converted += 1

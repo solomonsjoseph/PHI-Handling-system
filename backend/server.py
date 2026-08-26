@@ -70,7 +70,13 @@ from phi_core.agents import AgentMessage, LlmConfig
 from phi_core.agents import run_pipeline as run_agent_pipeline
 from phi_core.control import limits
 from phi_core.control.events import EventBroker
-from phi_core.crypto import decrypt_api_key, decrypt_display_name, encrypt_api_key, encrypt_display_name
+from phi_core.crypto import (
+    decrypt_api_key,
+    decrypt_display_name,
+    encrypt_api_key,
+    encrypt_display_name,
+    signing_public_key_pem,
+)
 from phi_core.db import get_db
 from phi_core.intake import (
     ANY_OF,
@@ -78,7 +84,7 @@ from phi_core.intake import (
     MANDATORY,
     build_manifest,
 )
-from phi_core.jurisdictions import get_pack
+from phi_core.jurisdictions import REGISTRY, get_pack
 from phi_core.models import FileArtifact, ProgressEvent, Session
 from phi_core.paths import CHATGPT_TOKEN_DIR, UPLOAD_DIR, cleanup_session_unpacked, safe_join
 from phi_core.security import (
@@ -139,6 +145,8 @@ def _refuse_to_boot_insecure() -> None:
         problems.append("APP_ENCRYPTION_KEY must be set")
     if not os.environ.get("ATTESTATION_SIGNING_KEY", "").strip():
         problems.append("ATTESTATION_SIGNING_KEY must be set")
+    elif signing_public_key_pem() is None:
+        problems.append("ATTESTATION_SIGNING_KEY is set but is not a valid base64 PKCS8 Ed25519 private key")
     if problems:
         raise RuntimeError(
             "Refusing to start with PHI_ENV=" + os.environ.get("PHI_ENV", "production")
@@ -520,6 +528,23 @@ async def _handle_pipeline_run(store, work_item) -> dict[str, Any]:
         session["files"] = files_hydrated
         await db.sessions.update_one(run_filter, {"$set": {"files": files_hydrated}})
 
+        # SEC: reject duplicate physical column headers before the pipeline
+        # runs. csv.DictReader (and the xlsx path's positional header list)
+        # collapse duplicate header names, so the Executor's transform loop
+        # later writes one merged/last-wins value into every matching output
+        # slot -- silent row-value corruption that Operator/Reviewer can't
+        # catch because they key decisions by header name too. Fail closed.
+        for f in files_hydrated:
+            if f.get("kind") != "dataset":
+                continue
+            cols = f.get("columns") or []
+            dupes = sorted({c for c in cols if cols.count(c) > 1})
+            if dupes:
+                raise ValueError(
+                    f"dataset {f.get('filename', f.get('file_id'))!r} has duplicate "
+                    f"column header(s): {', '.join(dupes)}"
+                )
+
         # 4.21: refuse an oversized study rather than sending an
         # unbounded Judge prompt / decision list.
         _enforce_column_cap(files_hydrated)
@@ -879,6 +904,11 @@ class SessionCreate(BaseModel):
 
 @app.post("/api/sessions")
 async def session_create(body: SessionCreate, principal: str = Depends(resolve_principal)):
+    key = (body.jurisdiction or "us").strip().lower()
+    pack = get_pack(key)
+    if key not in REGISTRY or not pack.supported:
+        raise HTTPException(400, f"jurisdiction '{body.jurisdiction}' is not supported "
+                             "(US HIPAA is the only active jurisdiction)")
     s = Session(jurisdiction=body.jurisdiction, owner=principal)
     await get_db().sessions.insert_one(s.model_dump())
     return s.model_dump()
@@ -1072,6 +1102,22 @@ async def session_intake(
         )
     if not (file.filename or "").lower().endswith(".zip"):
         raise HTTPException(400, "intake requires a .zip archive")
+
+    # Claim the session for this intake before touching any path /handle's
+    # claim filter (intake_status=="ready", status in intake/complete/failed/
+    # cancelled) can also match. Without this, /handle can claim the *old*
+    # ready state while this call is still overwriting intake.zip and the
+    # shared unpacked/ tree underneath it, letting the pipeline read a
+    # mixture of old and new files despite this call later returning 409.
+    intake_claim_filter = dict(_owned_filter(sid, principal))
+    intake_claim_filter["status"] = {"$nin": list(_LIVE_STATUSES)}
+    claimed = await db.sessions.update_one(
+        intake_claim_filter,
+        {"$set": {"intake_status": "in_progress", "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    if not getattr(claimed, "matched_count", 0):
+        raise HTTPException(409, "session has a pipeline run in progress; cancel it before re-uploading")
+
     session_dir = UPLOAD_DIR / sid
     session_dir.mkdir(parents=True, exist_ok=True)
     # Filename is fixed server-side to close SEC-001; stream with a hard cap.
@@ -1152,6 +1198,7 @@ async def session_intake(
         "missing_components": manifest.missing_components,
         "review_entries": [
             {"relpath": e.relpath, "reason": e.reason, "blocking": e.blocking}
+            for e in manifest.entries if e.component == "_unclassified"
         ],
         "accepted_by_component": {
             comp: [
@@ -1336,6 +1383,29 @@ class AdminHoldBody(BaseModel):
     reason: str = ""
 
 
+async def _propagate_hold_to_artifacts(control_store, *, run_id: str, hold: str) -> None:
+    """Apply ``hold`` to every ``ArtifactRecord`` belonging to ``run_id``.
+
+    The hourly reconciler (``phi_core.control.artifacts.reconcile``) only
+    consults ``ArtifactRecord.hold``, never the owning ``WorkflowRun.hold``
+    set by admin_set_hold/admin_clear_hold -- so without this, an artifact
+    from a held run is still eligible for deletion. Best-effort: a record
+    that fails to replace (concurrent update) is retried on the next
+    set/clear call rather than blocking the admin hold response.
+    """
+    from phi_core.control.records import ArtifactRecord
+
+    records = await control_store.find_many("artifact_records", {"run_id": run_id})
+    for doc in records:
+        record = ArtifactRecord.model_validate(doc)
+        if record.hold == hold:
+            continue
+        updated = record.model_copy(update={"hold": hold})
+        await control_store.replace_one(
+            "artifact_records", {"artifact_id": record.artifact_id}, updated
+        )
+
+
 async def _record_hold_trace_event(db, *, run_id: str, session_id: str, principal: str, reason: str, action: str) -> None:
     """Best-effort audit record for a hold set/clear: "set
     and clear events include principal and reason in a trace event".
@@ -1386,6 +1456,7 @@ async def admin_set_hold(body: AdminHoldBody, principal: str = Depends(resolve_p
         )
     except WorkflowError as exc:
         raise HTTPException(404, "run not found") from exc
+    await _propagate_hold_to_artifacts(control_store, run_id=run_id, hold=body.reason)
     await _record_hold_trace_event(
         db, run_id=run_id, session_id=body.session_id, principal=principal, reason=body.reason, action="hold_set",
     )
@@ -1418,6 +1489,7 @@ async def admin_clear_hold(session_id: str, reason: str = "", principal: str = D
         )
     except WorkflowError as exc:
         raise HTTPException(404, "run not found") from exc
+    await _propagate_hold_to_artifacts(control_store, run_id=run_id, hold="")
     await _record_hold_trace_event(
         db, run_id=run_id, session_id=session_id, principal=principal, reason=reason, action="hold_cleared",
     )
@@ -1521,23 +1593,34 @@ def _artifact_service(db, sid: str, run_id: str):
     return ArtifactService(MongoControlStore(db), session_id=sid, run_id=run_id)
 
 
-async def _verify_clean_artifacts(db, sid: str, session: dict, clean_ids: dict[str, str]) -> None:
+async def _verify_clean_artifacts(db, sid: str, session: dict,
+                                   clean_ids: dict[str, str]) -> dict[str, Path]:
     """Hash-verify every currently clean export through the artifact
     registry before serving a bundle or a reversal key, raising
     ``HTTPException(409)`` on a genuine artifact refusal (missing bytes,
-    hash mismatch). A no-op when there is nothing clean to verify."""
+    hash mismatch). A no-op when there is nothing clean to verify.
+
+    Returns ``{file_id: published_path}`` for the paths that were actually
+    hash-verified, so a caller (``build_bundle``) can read bundle bytes from
+    those exact verified paths rather than from ``session["export_paths"]``'s
+    staging alias (an independent file after promotion, not what the hash
+    check above verified).
+    """
     from phi_core.control.artifacts import ArtifactError
 
     if not clean_ids:
-        return
+        return {}
     run_id = session.get("_pipeline_run_id") or sid
     service = _artifact_service(db, sid, run_id)
     all_ids = list(clean_ids.values())
-    for artifact_id in all_ids:
+    verified: dict[str, Path] = {}
+    for file_id, artifact_id in clean_ids.items():
         try:
-            await _open_published_artifact(service, sid, run_id, artifact_id, all_ids)
+            verified[file_id] = await _open_published_artifact(
+                service, sid, run_id, artifact_id, all_ids)
         except ArtifactError as exc:
             raise HTTPException(409, f"export artifact unavailable: {exc.reason}") from exc
+    return verified
 
 
 @app.get("/api/sessions/{sid}/bundle")
@@ -1575,13 +1658,13 @@ async def session_bundle(sid: str, publication: bool = False, attestation_pdf: b
     # D14: bind the certified guard status to a hash-verified artifact
     # before assembling anything -- a tampered or missing export on disk
     # refuses the whole bundle rather than silently shipping stale bytes.
-    await _verify_clean_artifacts(db, sid, session, _clean_export_artifact_ids(session))
+    verified_paths = await _verify_clean_artifacts(db, sid, session, _clean_export_artifact_ids(session))
     agent_log_msgs = None
     if publication and session.get("corpus_ground_truth"):
         agent_log_msgs = await _session_trace_messages(db, sid)
     data, filename = build_bundle(session, BundleOptions(
         include_publication=publication, include_attestation_pdf=attestation_pdf,
-    ), agent_log=agent_log_msgs)
+    ), agent_log=agent_log_msgs, verified_paths=verified_paths)
     return Response(
         content=data,
         media_type="application/zip",
@@ -2796,15 +2879,27 @@ async def session_cancel(sid: str, principal: str = Depends(resolve_principal)):
     """
     db = get_db()
     doc = await _owned_session(sid, principal, {"status": 1, "_pipeline_run_id": 1})
-    # partially_complete and awaiting_human_review are both "paused,
-    # comparison in this module (review_filter, _LIVE_STATUSES) treats them
-    # as equivalent. Only the two of them stay cancellable here; a
-    # cancel-requested flag on either is a no-op today (the resume tail
-    # built in session_human_review does not consult it, unlike the initial
-    # orchestrator run), but the eligibility check itself must not diverge
-    # between two states the rest of the codebase treats as interchangeable.
     if doc.get("status") in ("complete", "failed", "cancelled", "blocked", "intake_failed"):
         return {"status": doc.get("status"), "already_settled": True}
+    # partially_complete and awaiting_human_review are both "paused": no
+    # running phase boundary will ever observe cancel_requested for them
+    # (the resume tail in session_human_review only matches status in
+    # {awaiting_human_review, partially_complete}, not cancelled), so a
+    # flag-only cancel here would be silently ignored and a later human
+    # review submission would resume and keep processing PHI. Transition
+    # straight to cancelled instead; this also makes session_human_review's
+    # own status filter reject the resume with 409.
+    if doc.get("status") in ("awaiting_human_review", "partially_complete"):
+        await db.sessions.update_one(
+            _owned_filter(sid, principal),
+            {"$set": {
+                "status": "cancelled",
+                "cancel_requested": True,
+                "cancel_requested_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }},
+        )
+        return {"status": "cancelled", "already_settled": False}
     await db.sessions.update_one(
         _owned_filter(sid, principal),
         {"$set": {

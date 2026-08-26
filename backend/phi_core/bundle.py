@@ -540,10 +540,20 @@ absent from prior work:
 # ------------------------------------------------------------------------
 
 def build_bundle(session: dict[str, Any], opts: BundleOptions,
-                  agent_log: list[dict[str, Any]] | None = None) -> tuple[bytes, str]:
+                  agent_log: list[dict[str, Any]] | None = None,
+                  verified_paths: dict[str, Path] | None = None) -> tuple[bytes, str]:
     """Return (zip_bytes, filename). ``agent_log`` unlocks the real
     per-dataset benchmark's context_hygiene section in the publication
-    add-on; omit it and that section reports itself unavailable."""
+    add-on; omit it and that section reports itself unavailable.
+
+    ``verified_paths`` (``{file_id: published_path}``), when given, is the
+    hash-verified set from ``server._verify_clean_artifacts``. The bundle
+    reads dataset/dictionary/form bytes from those exact paths rather than
+    from ``session["export_paths"]``'s staging alias: after
+    ``ArtifactService._promote`` copies staging bytes to
+    ``PUBLISHED_DIR`` (``shutil.copyfile``), the two are independent files,
+    so bundling the alias would sign whatever bytes it happens to hold at
+    bundle time, not the bytes the hash check actually verified."""
     sid = session.get("id") or "session"
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     buf = io.BytesIO()
@@ -570,12 +580,20 @@ def build_bundle(session: dict[str, Any], opts: BundleOptions,
                 continue
             if not ep or not Path(ep).exists():
                 continue
+            # Suffix comes from the staging alias name (metadata only); the
+            # bytes we actually read come from the hash-verified published
+            # path when one was supplied.
             src = Path(ep)
+            if verified_paths is not None:
+                vp = verified_paths.get(file_id)
+                if vp is None or not Path(vp).exists():
+                    continue
+                src = Path(vp)
             meta = files_meta.get(file_id, {})
             kind = meta.get("kind", "narrative")
             folder = {"dataset": "datasets", "metadata": "dictionary",
                       "narrative": "forms"}.get(kind, "misc")
-            arcname = f"safe_to_share/{folder}/{meta.get('file_id', '')}{src.suffix}"
+            arcname = f"safe_to_share/{folder}/{meta.get('file_id', '')}{Path(ep).suffix}"
             data = src.read_bytes()
             zf.writestr(arcname, data)
             file_hashes[arcname] = _sha256_of_bytes(data)

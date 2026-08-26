@@ -18,7 +18,7 @@ from . import limits
 from .egress import _STRUCTURAL_KEYS, canonical_payload, egress_digest
 from .policy import BudgetExceeded, CapabilityDenied, CapabilityPolicy
 from .records import CapabilityGrant, DataClass, TraceEvent
-from .runs import check_run_budget, record_run_usage
+from .runs import check_run_budget, record_grant_tool_usage, record_run_usage
 from .store import ControlStore
 from .workflow import WorkflowError
 
@@ -128,6 +128,27 @@ def _citation_urls(value: Any) -> tuple[str, ...]:
     return tuple(dict.fromkeys(urls))
 
 
+def _tool_was_used(value: Any) -> bool:
+    """Whether the provider response actually invoked a tool, not merely
+    whether one was offered in the request. Anthropic's server-side tool
+    use surfaces as a content block whose ``type`` is ``server_tool_use``
+    or a ``*_tool_result`` block; a model can answer without touching an
+    offered tool, so ``tools`` being non-empty on the request proves
+    nothing about execution."""
+
+    def visit(item: Any) -> bool:
+        if isinstance(item, Mapping):
+            block_type = item.get("type")
+            if isinstance(block_type, str) and ("tool_use" in block_type or "tool_result" in block_type):
+                return True
+            return any(visit(child) for child in item.values())
+        if isinstance(item, (list, tuple)):
+            return any(visit(child) for child in item)
+        return False
+
+    return visit(value)
+
+
 def _usage(response: Any) -> Mapping[str, int]:
     raw = getattr(response, "usage", None) or {}
     if hasattr(raw, "model_dump"):
@@ -206,11 +227,14 @@ class ProviderGateway:
         started = time.monotonic()
         try:
             response = await asyncio.wait_for(
-                asyncio.to_thread(self._completion, req, messages, tools), timeout=req.timeout_s
+                asyncio.to_thread(self._completion, req, messages, tools, self._api_key()), timeout=req.timeout_s
             )
         except TimeoutError:
+            # No provider consumption happened -- give the whole reservation back.
+            await self._reconcile_run_budget(req)
             return GatewayResult("", (), req.provider, req.model, "", {}, 0.0, self._latency(started), "timeout", "timeout", digest)
         except Exception as exc:
+            await self._reconcile_run_budget(req)
             return GatewayResult(
                 scrub_persisted_text(str(exc)), (), req.provider, req.model, "", {}, 0.0,
                 self._latency(started), "provider_error", "provider_error", digest,
@@ -225,8 +249,13 @@ class ProviderGateway:
                 messages=messages,
                 tools=tools,
             )
+            mismatch_usage = _usage(response)
+            await self._reconcile_run_budget(
+                req, tokens=int(mismatch_usage.get("total_tokens", 0)),
+                cost_usd=int(mismatch_usage.get("total_tokens", 0)) / 1000 * limits.ASSUMED_USD_PER_1K_TOKENS,
+            )
             return GatewayResult(
-                "", (), actual_provider, actual_model, str(getattr(response, "id", "")), _usage(response), 0.0,
+                "", (), actual_provider, actual_model, str(getattr(response, "id", "")), mismatch_usage, 0.0,
                 self._latency(started), "denied", "provider_mismatch", egress_digest(mismatch_payload),
             )
 
@@ -234,12 +263,20 @@ class ProviderGateway:
         total_tokens = int(usage.get("total_tokens", 0))
         cost_usd = total_tokens / 1000 * limits.ASSUMED_USD_PER_1K_TOKENS
         tool_calls = len(tools)
-        # Real provider consumption happened regardless of what happens next
-        # (an oversized output is still a spent call) -- record it against
-        # the run before either return below, best-effort: a usage-record
-        # race must never fail an otherwise-successful/oversized call.
+        # `check_run_budget` (in `_validate_request`) already reserved the
+        # worst-case (max_tokens/max_cost_usd/aggregate tool uses) atomically
+        # before the call went out. Real provider consumption happened
+        # regardless of what happens next (an oversized output is still a
+        # spent call) -- reconcile the reservation down to the actual amount
+        # before either return below, best-effort: a usage-record race must
+        # never fail an otherwise-successful/oversized call.
+        await self._reconcile_run_budget(req, tokens=total_tokens, cost_usd=cost_usd, tool_calls=tool_calls)
+        # The grant's own per-tool ceiling (checked pre-call in
+        # ``_validate_request`` against ``grant.tools_used``) must be
+        # persisted here too, or every repeated call against the same
+        # grant is checked against an always-zero starting point.
         try:
-            await record_run_usage(self._store, req.run_id, tokens=total_tokens, cost_usd=cost_usd, tool_calls=tool_calls)
+            await record_grant_tool_usage(self._store, req.grant_id, req.allowed_tools)
         except WorkflowError:
             pass
 
@@ -250,10 +287,15 @@ class ProviderGateway:
                 "", (), actual_provider, actual_model, str(getattr(response, "id", "")), usage, cost_usd,
                 self._latency(started), "denied", "MAX_OUTPUT_BYTES exceeded", digest,
             )
+        response_dump = response.model_dump() if hasattr(response, "model_dump") else response
         events = tuple(
             ToolEvent(
-                tool=str(tool["name"]), requested=True, executed=True, status="ok",
-                citations=_citation_urls(response), tool_request_id=f"{req.task_id}:{tool['name']}",
+                tool=str(tool["name"]),
+                requested=True,
+                executed=_tool_was_used(response_dump),
+                status="ok" if _tool_was_used(response_dump) else "not_used",
+                citations=_citation_urls(response_dump),
+                tool_request_id=f"{req.task_id}:{tool['name']}",
             )
             for tool in tools
         )
@@ -327,23 +369,59 @@ class ProviderGateway:
         ]
         return messages, tools
 
+    def _api_key(self) -> str:
+        """The operator-configured BYO key for the active provider, decrypted
+        by ``_current_llm_cfg`` and stashed on ``CapabilityPolicy`` at
+        activation time. Never sourced from a request or grant field: those
+        are persisted, and a raw key must never land in Mongo."""
+        return str(getattr(getattr(self._policy, "_llm_config", None), "api_key", "") or "")
+
     @staticmethod
-    def _completion(req: GatewayRequest, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Any:
+    def _completion(
+        req: GatewayRequest, messages: list[dict[str, Any]], tools: list[dict[str, Any]], api_key: str = ""
+    ) -> Any:
         if req.provider == "chatgpt":
             _require_chatgpt_connected()
         model = req.model
         if req.provider == "openrouter" and not model.startswith("openrouter/"):
             model = f"openrouter/{model}"
-        kwargs: dict[str, Any] = {"model": model, "max_tokens": req.max_tokens, "messages": messages}
+        kwargs: dict[str, Any] = {
+            "model": model, "max_tokens": req.max_tokens, "messages": messages, "timeout": req.timeout_s,
+        }
         if tools:
             kwargs["tools"] = tools
         if req.endpoint:
             kwargs["api_base"] = req.endpoint
+        if api_key:
+            kwargs["api_key"] = api_key
         return litellm.completion(**kwargs)
 
     @staticmethod
     def _latency(started: float) -> int:
         return int((time.monotonic() - started) * 1000)
+
+    async def _reconcile_run_budget(
+        self, req: GatewayRequest, *, tokens: int = 0, cost_usd: float = 0.0, tool_calls: int = 0,
+    ) -> None:
+        """Give back the difference between what ``check_run_budget`` (via
+        ``_validate_request``) reserved up front -- ``req.max_tokens``,
+        ``req.max_cost_usd``, and the aggregate requested tool uses -- and
+        what this call actually consumed. Called on every exit path after a
+        successful reservation (timeout, provider error, provider mismatch,
+        and the normal completion), so a call that reserved the worst case
+        but consumed less -- or nothing, on error -- never leaves the run
+        permanently charged for headroom it never used. Best-effort: a lost
+        usage-record race must never turn a real result into a raised error."""
+        reserved_tool_calls = sum(req.allowed_tools.values())
+        try:
+            await record_run_usage(
+                self._store, req.run_id,
+                tokens=tokens - req.max_tokens,
+                cost_usd=cost_usd - req.max_cost_usd,
+                tool_calls=tool_calls - reserved_tool_calls,
+            )
+        except WorkflowError:
+            pass
 
     async def _record_budget_denial(self, req: GatewayRequest, reason: str) -> None:
         """Insert a ``TraceEvent`` with ``outcome="budget_exceeded"`` for a

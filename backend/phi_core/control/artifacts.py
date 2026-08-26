@@ -42,9 +42,8 @@ from phi_core.paths import (
 
 from .policy import BudgetExceeded, CapabilityDenied
 from .records import ArtifactRecord, CapabilityGrant, DataClass, PublicationPointer
-from .runs import check_run_budget, record_run_usage
+from .runs import check_run_budget
 from .store import ControlStore
-from .workflow import WorkflowError
 
 _ROOT_DIRS: Mapping[str, Any] = {
     "intake": UPLOAD_DIR,
@@ -255,7 +254,11 @@ class ArtifactService:
 
         # D5 (Phase 5 step 7): MAX_ARTIFACT_BYTES_PER_RUN is a run-wide
         # aggregate, checked here rather than at `stage()` time because
-        # only `finalize()` knows the real byte count. Refused before the
+        # only `finalize()` knows the real byte count. `check_run_budget`
+        # atomically reserves (increments) usage by `size` as part of the
+        # check itself -- not a separate read-then-increment -- so two
+        # concurrent finalize() calls can never both observe headroom for
+        # more bytes than the run's ceiling allows. Refused before the
         # rename, so the tmp file and the provisional record are left
         # exactly as any other pre-`os.replace` failure leaves them.
         try:
@@ -266,13 +269,8 @@ class ArtifactService:
         final_dir = run_scoped_dir(_root_dir(record.root), self.session_id, self.run_id)
         final_path = final_dir / artifact_id
         os.replace(tmp_path, final_path)
-        # Real bytes are on disk now regardless of what the CAS below does
-        # -- record the consumption before it, best-effort: a usage-record
-        # race must never turn a successful promotion into a raised error.
-        try:
-            await record_run_usage(self._store, self.run_id, artifact_bytes=size)
-        except WorkflowError:
-            pass
+        # `size` is the real byte count already reserved above (not an
+        # upper bound), so there is nothing left to reconcile here.
 
         updated = record.model_copy(update={
             "sha256": sha256,
@@ -416,6 +414,27 @@ class ArtifactService:
             raise ArtifactError("artifact_missing", artifact_id)
         record = ArtifactRecord.model_validate(doc)
         if record.state not in _PROMOTABLE_STATES:
+            if record.state == "promoted":
+                # Resumable retry: a prior certify_publication call already
+                # persisted its pointer and promoted this artifact before a
+                # later artifact in the same generation failed. Rather than
+                # reject the retry (which would strand this artifact behind
+                # artifact_not_staged forever), verify the published copy is
+                # still intact and advance it to the new generation.
+                published_dir = run_scoped_dir(PUBLISHED_DIR, record.session_id, record.run_id)
+                published_path = published_dir / artifact_id
+                try:
+                    actual_sha256, _ = _hash_file(published_path)
+                except OSError as exc:
+                    raise ArtifactError("artifact_missing", str(published_path)) from exc
+                if actual_sha256 != record.sha256:
+                    raise ArtifactError(
+                        "artifact_hash_mismatch",
+                        f"expected={record.sha256} actual={actual_sha256}",
+                    )
+                updated = record.model_copy(update={"generation": generation})
+                await self._store.replace_one("artifacts", {"artifact_id": artifact_id}, updated)
+                return updated
             raise ArtifactError("artifact_not_staged", f"state={record.state!r}")
         source_dir = run_scoped_dir(_root_dir(record.root), record.session_id, record.run_id)
         source_path = source_dir / artifact_id

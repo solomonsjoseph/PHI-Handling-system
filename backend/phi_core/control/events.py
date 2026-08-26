@@ -119,8 +119,8 @@ class TraceEventStore:
         the hash, and insert. Returns the event actually persisted (with
         ``run_id``/``session_id``/``seq``/``fence``/``prev_hash``/``hash``
         filled in, regardless of what the caller passed for them)."""
-        seq = await self._allocate_seq()
         checked_fence = await self._checked_fence(event, fence)
+        seq = await self._allocate_seq()
         prev = await self._store.get_one("trace_events", {"run_id": self._run_id, "seq": seq - 1}) if seq else None
         prev_hash = prev["hash"] if prev else ""
         candidate = event.model_copy(update={

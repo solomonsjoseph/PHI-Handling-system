@@ -123,7 +123,7 @@ def validate_llm_base_url(base_url: str, provider: str) -> None:
                 400, f"base_url host {host!r} not in ALLOWED_LLM_BASE_URL_HOSTS"
             )
     else:
-        provider_allow = set(PROVIDER_HOSTS.get(provider, ())) | _custom_hosts()
+        provider_allow = set(PROVIDER_HOSTS.get(provider, ()))
         if not provider_allow:
             raise HTTPException(400, f"provider {provider!r} does not accept base_url")
         if host not in provider_allow:
