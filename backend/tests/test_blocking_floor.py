@@ -115,17 +115,23 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
     # short-circuits the loop before the blocking floor gets its three
     # tries.
     judge_actions = ["keep", "pseudonymize", "hash", "keep", "pseudonymize"]
+    # A fresh FakeJudge is instantiated every Judge<->Sentinel loop iteration
+    # (orchestrator.run_pipeline does `judge = Judge(judge_ctx)` per-iteration,
+    # matching the real agent), so a per-instance counter always reads back
+    # index 0. Track the call count outside the class so it advances across
+    # iterations the way judge_actions is meant to be cycled.
+    judge_calls = [0]
 
     class FakeJudge:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
             self.call_failures = 0
             self.last_message_id = None
-            self.calls = 0
 
         async def run(self, **_kwargs):
-            action = judge_actions[self.calls] if self.calls < len(judge_actions) else "keep"
-            self.calls += 1
+            calls = judge_calls[0]
+            action = judge_actions[calls] if calls < len(judge_actions) else "keep"
+            judge_calls[0] += 1
             return await complete_fake_task(self.ctx, {"decisions": [{
                 "file_id": "dataset.csv",
                 "column": "col",

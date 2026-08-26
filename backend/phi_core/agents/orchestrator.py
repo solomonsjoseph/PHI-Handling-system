@@ -276,6 +276,7 @@ async def execute_decisions(
     # of what it wrote and is never mutated here; `exports` is the
     # Operator-then-Reviewer-filtered view every later step in this
     # function uses.
+    await on_phase("operator", {"decision_count": len(decisions)})
     try:
         operator_ctx = await make_ctx("Operator")
         op_out = await Operator(operator_ctx).run(
