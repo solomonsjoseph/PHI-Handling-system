@@ -420,8 +420,17 @@ async def execute_decisions(
         artifact_refs.append((file_id, sha256))
     auditor_agent = Auditor(await make_ctx("Auditor"))
     audit, scout, benchmark = await asyncio.gather(
-        auditor_agent.run(decisions=decisions, exports=exports, files=files, artifact_refs=artifact_refs,
-                          statute=statute, praxis_methods=praxis_methods),
+        auditor_agent.run(
+            decisions=decisions, exports=exports, files=files, artifact_refs=artifact_refs,
+            statute=statute, praxis_methods=praxis_methods,
+            audit_controls=(
+                await asyncio.gather(
+                    store.find_many("evidence_claims", {"run_id": run_id}),
+                    store.find_many("gate_results", {"run_id": run_id}),
+                )
+                if store is not None and run_id else ([], [])
+            ),
+        ),
         scout_task,
         _empty(None),   # placeholder for future synthetic benchmark run
         return_exceptions=True,

@@ -149,3 +149,39 @@ async def test_auth_cookie_is_secure_in_production_not_in_dev(monkeypatch):
     monkeypatch.setenv("PHI_ENV", "dev")
     resp = await srv.auth_session(srv.AuthSessionBody(token="tok-a"))
     assert "Secure" not in resp.headers.get("set-cookie", "")
+
+
+# ---------------------------------------------------------------------------
+# Auditor's deterministic escalation gate must not let a clean LLM verdict
+# override missing evidence or a failed decision gate.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("evidence_claims", "gate_results", "expected_reason"),
+    [
+        (
+            [{"run_id": "run-1", "task_id": "judge-1", "subject": "decision:file-1:patient_id",
+              "statement": "patient_id classification", "state": "UNVERIFIED"}],
+            [],
+            "auditor_evidence_unverified",
+        ),
+        (
+            [],
+            [{"run_id": "run-1", "task_id": "judge-1", "gate": "assert_exact_coverage",
+              "gate_version": "gates/1", "status": "fail", "subject": "orchestrator.final_decision"}],
+            "auditor_deterministic_gate_failed",
+        ),
+    ],
+)
+def test_auditor_escalation_blocks_clean_audit_for_unverified_evidence_or_failed_gate(
+    evidence_claims, gate_results, expected_reason
+):
+    from phi_core.agents.reasoning import auditor_escalation_reason
+    from phi_core.control.records import EvidenceClaim, GateResult
+
+    clean_audit = {"verdict": "clean", "issues": [], "confidence": 0.999}
+    assert auditor_escalation_reason(
+        clean_audit,
+        evidence_claims=[EvidenceClaim(**claim) for claim in evidence_claims],
+        gate_results=[GateResult(**result) for result in gate_results],
+    ) == expected_reason

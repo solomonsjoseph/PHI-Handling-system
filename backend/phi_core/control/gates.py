@@ -11,9 +11,9 @@ records those functions already produce, and the two things
 (``assert_exact_coverage``) and a durable, monotonic ``decision_version``
 counter every downstream write can key off.
 
-Wiring every existing call site onto this module is Phase 3 step 2 and is
-explicitly out of scope here; ``control/adapters.py`` exists so that
-migration is a mechanical follow-up rather than a signature rewrite.
+The temporary adapter module used during the Phase 3 migration was deleted
+once both live callers moved directly to this typed interface. New callers
+must use this module directly.
 """
 from __future__ import annotations
 

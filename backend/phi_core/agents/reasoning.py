@@ -13,7 +13,7 @@ import hmac as _hmac
 import os as _os
 import re as _re
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import openpyxl as _openpyxl
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -25,6 +25,7 @@ from ..file_readers import iter_dataset_rows, read_narrative
 from ..jurisdictions import get_pack
 from ..publish_guard import should_fire
 from ..security import scrub_persisted_text
+from ..control.records import EvidenceClaim, GateResult
 from .base import Agent
 
 _detect_text = detect_text
@@ -1318,6 +1319,8 @@ _ESCALATION_REASON_PLAIN: dict[str, str] = {
     "executor_crashed": "an unexpected error happened while writing the final files",
     "auditor_issues_verdict": "the final independent check found a specific problem that needs a person's decision",
     "auditor_artifact_identity_mismatch": "the final check could not confirm it reviewed the exact files about to be shared",
+    "auditor_evidence_unverified": "the final check lacks verified evidence for a covered decision",
+    "auditor_deterministic_gate_failed": "a deterministic decision gate failed for material being audited",
 }
 
 
@@ -1338,9 +1341,15 @@ def plain_human_review_reasons(reasons: list[str]) -> list[str]:
     return out
 
 
-def auditor_escalation_reason(audit: dict[str, Any], *, artifact_refs: dict[str, str] | None = None) -> str | None:
+def auditor_escalation_reason(
+    audit: dict[str, Any],
+    *,
+    artifact_refs: dict[str, str] | None = None,
+    evidence_claims: Sequence[EvidenceClaim | Mapping[str, Any]] | None = None,
+    gate_results: Sequence[GateResult | Mapping[str, Any]] | None = None,
+) -> str | None:
     """Deterministic gate on Auditor's output. Fails toward the safer path
-    (second human review) on any of three independent grounds, never
+    (second human review) on any of five independent grounds, never
     toward silent pass-through -- same fail-closed shape as every other
     boundary check in this pipeline:
 
@@ -1352,12 +1361,22 @@ def auditor_escalation_reason(audit: dict[str, Any], *, artifact_refs: dict[str,
     3. Artifact identity: when ``artifact_refs`` (``{file_id: sha256}`` for
        every export actually on disk) is supplied, every entry Auditor's
        response names in ``artifacts_checked`` must reference a real
-       ``file_id`` in that map with a matching ``sha256``. An unknown
-       ``file_id`` or a stale/mismatched hash means the audit was computed
-       against something other than what is about to ship -- a stale
-       replayed response or a hallucinated verification -- and must not be
-       trusted regardless of its confidence or verdict.
+       ``file_id`` in that map with a matching ``sha256``.
+    4. Any covered claim requiring ``VERIFIED`` evidence is in any other
+       evidence state.
+    5. Any covered deterministic gate has a ``fail`` or ``blocked`` status.
+
+    ``Auditor.run`` attaches the control records it received to ``audit`` so
+    the production caller cannot omit them while evaluating this gate.
+    Explicit arguments keep the pure gate directly testable.
     """
+    def value(
+        record: EvidenceClaim | GateResult | Mapping[str, Any],
+        field: str,
+        default: Any = "",
+    ) -> Any:
+        return record.get(field, default) if isinstance(record, Mapping) else getattr(record, field, default)
+
     try:
         confidence = float(audit.get("confidence"))
     except (TypeError, ValueError):
@@ -1374,6 +1393,13 @@ def auditor_escalation_reason(audit: dict[str, Any], *, artifact_refs: dict[str,
             sha256 = checked.get("sha256")
             if file_id not in artifact_refs or artifact_refs.get(file_id) != sha256:
                 return "auditor_artifact_identity_mismatch"
+    claims = evidence_claims if evidence_claims is not None else audit.get("evidence_claims") or []
+    if any(value(claim, "required_state", "VERIFIED") == "VERIFIED"
+           and value(claim, "state", "UNKNOWN") != "VERIFIED" for claim in claims):
+        return "auditor_evidence_unverified"
+    results = gate_results if gate_results is not None else audit.get("gate_results") or []
+    if any(value(result, "status", "") in {"fail", "blocked"} for result in results):
+        return "auditor_deterministic_gate_failed"
     return None
 
 
@@ -1438,9 +1464,19 @@ class Auditor(Agent):
         "decision counts, and regulation text (never row values)."
     )
 
-    async def run(self, decisions: list[dict[str, Any]], exports: dict[str, str], files: list[dict[str, Any]],
-                  artifact_refs: list[tuple[str, str]], statute: dict[str, Any] | None = None,
-                  praxis_methods: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def run(
+        self,
+        decisions: list[dict[str, Any]],
+        exports: dict[str, str],
+        files: list[dict[str, Any]],
+        artifact_refs: list[tuple[str, str]],
+        statute: dict[str, Any] | None = None,
+        praxis_methods: dict[str, Any] | None = None,
+        audit_controls: tuple[
+            Sequence[EvidenceClaim | Mapping[str, Any]],
+            Sequence[GateResult | Mapping[str, Any]],
+        ] = ((), ()),
+    ) -> dict[str, Any]:
         # Summarise deterministically (no row values sent to LLM)
         summary_by_file: dict[str, dict[str, int]] = {}
         per_column: list[dict[str, Any]] = []
@@ -1471,11 +1507,21 @@ class Auditor(Agent):
             f"Artifacts to echo back exactly in artifacts_checked: {artifact_lines}\n"
             "Respond with JSON only."
         )
-        return await self.call_json(prompt, phase="auditor.verify",
-                                    default={"verdict": "issues", "issues": [], "metrics": {},
-                                             "artifacts_checked": [], "confidence": 0.0,
-                                             "summary": "Auditor call failed; treated as below the confidence floor."},
-                                    status_text="Independently re-deriving the correct action per column")
+        audit = await self.call_json(
+            prompt,
+            phase="auditor.verify",
+            default={"verdict": "issues", "issues": [], "metrics": {},
+                     "artifacts_checked": [], "confidence": 0.0,
+                     "summary": "Auditor call failed; treated as below the confidence floor."},
+            status_text="Independently re-deriving the correct action per column",
+        )
+        def record_dict(record: EvidenceClaim | GateResult | Mapping[str, Any]) -> dict[str, Any]:
+            return record.model_dump(mode="json") if isinstance(record, BaseModel) else dict(record)
+
+        evidence_claims, gate_results = audit_controls
+        audit["evidence_claims"] = [record_dict(claim) for claim in evidence_claims]
+        audit["gate_results"] = [record_dict(result) for result in gate_results]
+        return audit
 
 
 # --- deterministic dataset transformer ------------------------------------
