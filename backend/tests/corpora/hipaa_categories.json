@@ -1,0 +1,123 @@
+{
+  "version": "1.0",
+  "description": "Labelled HIPAA-category classification corpus. Each entry gives a column_name + dictionary hint + the expected HIPAA Safe Harbor letter and the correct handling method per 45 CFR 164.514(b)(2)(i).",
+  "columns": [
+    {"column": "patient_name", "dict_hint": "Full patient name", "expected_hipaa_letter": "A", "expected_action": "drop"},
+    {"column": "first_name", "dict_hint": "Given name", "expected_hipaa_letter": "A", "expected_action": "drop"},
+    {"column": "last_name", "dict_hint": "Family name", "expected_hipaa_letter": "A", "expected_action": "drop"},
+    {"column": "full_name", "dict_hint": "Concatenated first + last name", "expected_hipaa_letter": "A", "expected_action": "drop"},
+    {"column": "subject_name", "dict_hint": "Study subject name", "expected_hipaa_letter": "A", "expected_action": "drop"},
+    {"column": "provider_name", "dict_hint": "Attending physician name", "expected_hipaa_letter": "A", "expected_action": "drop"},
+    {"column": "given_name", "dict_hint": "First name of participant", "expected_hipaa_letter": "A", "expected_action": "drop"},
+    {"column": "family_name", "dict_hint": "Surname of participant", "expected_hipaa_letter": "A", "expected_action": "drop"},
+
+    {"column": "address", "dict_hint": "Mailing address street line 1", "expected_hipaa_letter": "B", "expected_action": "drop"},
+    {"column": "street", "dict_hint": "Street address", "expected_hipaa_letter": "B", "expected_action": "drop"},
+    {"column": "street_address", "dict_hint": "Street with number", "expected_hipaa_letter": "B", "expected_action": "drop"},
+    {"column": "mailing_address", "dict_hint": "Full mailing address", "expected_hipaa_letter": "B", "expected_action": "drop"},
+    {"column": "city", "dict_hint": "City of residence", "expected_hipaa_letter": "B", "expected_action": "drop"},
+    {"column": "county", "dict_hint": "County of residence", "expected_hipaa_letter": "B", "expected_action": "drop"},
+    {"column": "zip", "dict_hint": "5-digit US ZIP code", "expected_hipaa_letter": "B", "expected_action": "zip3_truncate"},
+    {"column": "zipcode", "dict_hint": "US ZIP code", "expected_hipaa_letter": "B", "expected_action": "zip3_truncate"},
+    {"column": "zip_code", "dict_hint": "Postal code", "expected_hipaa_letter": "B", "expected_action": "zip3_truncate"},
+    {"column": "postal_code", "dict_hint": "Postal / ZIP code", "expected_hipaa_letter": "B", "expected_action": "zip3_truncate"},
+
+    {"column": "dob", "dict_hint": "Date of birth", "expected_hipaa_letter": "C", "expected_action": "year_only"},
+    {"column": "date_of_birth", "dict_hint": "Date of birth ISO", "expected_hipaa_letter": "C", "expected_action": "year_only"},
+    {"column": "birth_date", "dict_hint": "Birth date", "expected_hipaa_letter": "C", "expected_action": "year_only"},
+    {"column": "birthdate", "dict_hint": "Birthdate", "expected_hipaa_letter": "C", "expected_action": "year_only"},
+    {"column": "admission_date", "dict_hint": "Hospital admission date", "expected_hipaa_letter": "C", "expected_action": "year_only"},
+    {"column": "discharge_date", "dict_hint": "Hospital discharge date", "expected_hipaa_letter": "C", "expected_action": "year_only"},
+    {"column": "death_date", "dict_hint": "Date of death", "expected_hipaa_letter": "C", "expected_action": "year_only"},
+    {"column": "visit_date", "dict_hint": "Clinic visit date", "expected_hipaa_letter": "C", "expected_action": "year_only"},
+    {"column": "encounter_date", "dict_hint": "Encounter date", "expected_hipaa_letter": "C", "expected_action": "year_only"},
+    {"column": "age", "dict_hint": "Age at enrolment", "expected_hipaa_letter": "C", "expected_action": "cap_age_90"},
+    {"column": "age_years", "dict_hint": "Age in years", "expected_hipaa_letter": "C", "expected_action": "cap_age_90"},
+
+    {"column": "phone", "dict_hint": "Contact phone", "expected_hipaa_letter": "D", "expected_action": "drop"},
+    {"column": "phone_number", "dict_hint": "Contact phone", "expected_hipaa_letter": "D", "expected_action": "drop"},
+    {"column": "mobile", "dict_hint": "Mobile number", "expected_hipaa_letter": "D", "expected_action": "drop"},
+    {"column": "cell", "dict_hint": "Cell phone", "expected_hipaa_letter": "D", "expected_action": "drop"},
+    {"column": "telephone", "dict_hint": "Landline", "expected_hipaa_letter": "D", "expected_action": "drop"},
+    {"column": "home_phone", "dict_hint": "Home landline", "expected_hipaa_letter": "D", "expected_action": "drop"},
+
+    {"column": "fax", "dict_hint": "Fax number", "expected_hipaa_letter": "E", "expected_action": "drop"},
+    {"column": "fax_number", "dict_hint": "Office fax", "expected_hipaa_letter": "E", "expected_action": "drop"},
+
+    {"column": "email", "dict_hint": "Contact email address", "expected_hipaa_letter": "F", "expected_action": "drop"},
+    {"column": "e_mail", "dict_hint": "Contact e-mail", "expected_hipaa_letter": "F", "expected_action": "drop"},
+    {"column": "email_address", "dict_hint": "Study email", "expected_hipaa_letter": "F", "expected_action": "drop"},
+
+    {"column": "ssn", "dict_hint": "Social Security Number", "expected_hipaa_letter": "G", "expected_action": "drop"},
+    {"column": "social_security", "dict_hint": "US SSN", "expected_hipaa_letter": "G", "expected_action": "drop"},
+    {"column": "social_security_number", "dict_hint": "SSN in XXX-XX-XXXX form", "expected_hipaa_letter": "G", "expected_action": "drop"},
+
+    {"column": "mrn", "dict_hint": "Medical record number", "expected_hipaa_letter": "H", "expected_action": "pseudonymize"},
+    {"column": "medical_record", "dict_hint": "Medical record number", "expected_hipaa_letter": "H", "expected_action": "pseudonymize"},
+    {"column": "medical_record_number", "dict_hint": "MRN", "expected_hipaa_letter": "H", "expected_action": "pseudonymize"},
+    {"column": "record_number", "dict_hint": "Chart number", "expected_hipaa_letter": "H", "expected_action": "pseudonymize"},
+
+    {"column": "insurance_id", "dict_hint": "Health plan beneficiary number", "expected_hipaa_letter": "I", "expected_action": "drop"},
+    {"column": "member_id", "dict_hint": "Insurance member id", "expected_hipaa_letter": "I", "expected_action": "drop"},
+    {"column": "health_plan_number", "dict_hint": "Health plan #", "expected_hipaa_letter": "I", "expected_action": "drop"},
+    {"column": "subscriber_id", "dict_hint": "Insurance subscriber id", "expected_hipaa_letter": "I", "expected_action": "drop"},
+
+    {"column": "account_number", "dict_hint": "Billing account", "expected_hipaa_letter": "J", "expected_action": "drop"},
+    {"column": "billing_account", "dict_hint": "Patient billing account", "expected_hipaa_letter": "J", "expected_action": "drop"},
+    {"column": "patient_account", "dict_hint": "Patient account id", "expected_hipaa_letter": "J", "expected_action": "drop"},
+
+    {"column": "license_number", "dict_hint": "Driver licence number", "expected_hipaa_letter": "K", "expected_action": "drop"},
+    {"column": "driver_license", "dict_hint": "Driver licence", "expected_hipaa_letter": "K", "expected_action": "drop"},
+    {"column": "certificate_id", "dict_hint": "Certification id", "expected_hipaa_letter": "K", "expected_action": "drop"},
+    {"column": "dea_number", "dict_hint": "DEA registration", "expected_hipaa_letter": "K", "expected_action": "drop"},
+    {"column": "npi", "dict_hint": "National Provider Identifier", "expected_hipaa_letter": "K", "expected_action": "drop"},
+
+    {"column": "vehicle_id", "dict_hint": "Vehicle identifier", "expected_hipaa_letter": "L", "expected_action": "drop"},
+    {"column": "license_plate", "dict_hint": "Licence plate #", "expected_hipaa_letter": "L", "expected_action": "drop"},
+    {"column": "vin", "dict_hint": "Vehicle identification number", "expected_hipaa_letter": "L", "expected_action": "drop"},
+
+    {"column": "device_id", "dict_hint": "Device identifier", "expected_hipaa_letter": "M", "expected_action": "drop"},
+    {"column": "serial_number", "dict_hint": "Device serial number", "expected_hipaa_letter": "M", "expected_action": "drop"},
+    {"column": "imei", "dict_hint": "Mobile IMEI", "expected_hipaa_letter": "M", "expected_action": "drop"},
+    {"column": "device_uuid", "dict_hint": "Device UUID", "expected_hipaa_letter": "M", "expected_action": "drop"},
+
+    {"column": "url", "dict_hint": "Personal website URL", "expected_hipaa_letter": "N", "expected_action": "drop"},
+    {"column": "website", "dict_hint": "Personal website", "expected_hipaa_letter": "N", "expected_action": "drop"},
+    {"column": "web_url", "dict_hint": "Personal URL", "expected_hipaa_letter": "N", "expected_action": "drop"},
+
+    {"column": "ip", "dict_hint": "Client IP address", "expected_hipaa_letter": "O", "expected_action": "drop"},
+    {"column": "ip_address", "dict_hint": "Client IPv4/IPv6 address", "expected_hipaa_letter": "O", "expected_action": "drop"},
+
+    {"column": "fingerprint", "dict_hint": "Fingerprint biometric hash", "expected_hipaa_letter": "P", "expected_action": "drop"},
+    {"column": "iris_scan", "dict_hint": "Iris scan reference", "expected_hipaa_letter": "P", "expected_action": "drop"},
+    {"column": "biometric_hash", "dict_hint": "Biometric hash reference", "expected_hipaa_letter": "P", "expected_action": "drop"},
+    {"column": "voice_print", "dict_hint": "Voice biometric signature", "expected_hipaa_letter": "P", "expected_action": "drop"},
+
+    {"column": "face_photo", "dict_hint": "Full-face photo URL", "expected_hipaa_letter": "Q", "expected_action": "drop"},
+    {"column": "patient_photo", "dict_hint": "Patient photograph reference", "expected_hipaa_letter": "Q", "expected_action": "drop"},
+    {"column": "portrait_url", "dict_hint": "Portrait URL", "expected_hipaa_letter": "Q", "expected_action": "drop"},
+
+    {"column": "patient_uuid", "dict_hint": "Study UUID linking record to person", "expected_hipaa_letter": "R", "expected_action": "pseudonymize"},
+    {"column": "unique_id", "dict_hint": "Unique identifier not covered elsewhere", "expected_hipaa_letter": "R", "expected_action": "pseudonymize"},
+    {"column": "tracking_code", "dict_hint": "Study tracking code", "expected_hipaa_letter": "R", "expected_action": "pseudonymize"},
+
+    {"column": "notes", "dict_hint": "Free-text clinician notes possibly containing PHI", "expected_hipaa_letter": null, "expected_action": "scrub_text"},
+    {"column": "visit_notes", "dict_hint": "Free-text visit notes", "expected_hipaa_letter": null, "expected_action": "scrub_text"},
+    {"column": "clinician_notes", "dict_hint": "Clinician free-text notes", "expected_hipaa_letter": null, "expected_action": "scrub_text"},
+    {"column": "comments", "dict_hint": "Free-text comments", "expected_hipaa_letter": null, "expected_action": "scrub_text"},
+    {"column": "remarks", "dict_hint": "Free-text remarks", "expected_hipaa_letter": null, "expected_action": "scrub_text"},
+
+    {"column": "hemoglobin", "dict_hint": "Blood hemoglobin (g/dL)", "expected_hipaa_letter": null, "expected_action": "keep"},
+    {"column": "bmi", "dict_hint": "Body mass index", "expected_hipaa_letter": null, "expected_action": "keep"},
+    {"column": "systolic_bp", "dict_hint": "Systolic blood pressure (mmHg)", "expected_hipaa_letter": null, "expected_action": "keep"},
+    {"column": "diastolic_bp", "dict_hint": "Diastolic blood pressure (mmHg)", "expected_hipaa_letter": null, "expected_action": "keep"},
+    {"column": "heart_rate", "dict_hint": "Heart rate (bpm)", "expected_hipaa_letter": null, "expected_action": "keep"},
+    {"column": "temperature", "dict_hint": "Body temperature (°C)", "expected_hipaa_letter": null, "expected_action": "keep"},
+    {"column": "glucose", "dict_hint": "Fasting glucose (mg/dL)", "expected_hipaa_letter": null, "expected_action": "keep"},
+    {"column": "hgb_a1c", "dict_hint": "Hemoglobin A1c (%)", "expected_hipaa_letter": null, "expected_action": "keep"},
+    {"column": "sex", "dict_hint": "Biological sex", "expected_hipaa_letter": null, "expected_action": "keep"},
+    {"column": "study_arm", "dict_hint": "Treatment arm", "expected_hipaa_letter": null, "expected_action": "keep"},
+    {"column": "visit_number", "dict_hint": "Visit sequence number", "expected_hipaa_letter": null, "expected_action": "keep"},
+    {"column": "dose_mg", "dict_hint": "Dose in mg", "expected_hipaa_letter": null, "expected_action": "keep"}
+  ]
+}

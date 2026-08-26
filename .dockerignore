@@ -1,0 +1,14 @@
+# Never bake secrets or local state into an image layer.
+**/.env
+**/.env.*
+!**/.env.example
+
+.git
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/node_modules
+frontend/build
+backend/data
+data
+*.log

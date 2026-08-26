@@ -49,14 +49,27 @@ production_data/
 *.real.json
 *.real.xlsx
 
+# Runtime session artifacts (pod-local; never commit)
+# These fill GPFS file quotas and break git pull with ENOSPC.
+data/uploads/*
+!data/uploads/.gitkeep
+data/exports/*
+!data/exports/.gitkeep
+
+# Large generated outputs (regenerate locally)
+corpus/generated/*.tar.gz
+benchmarks/results/*.detailed.json
 # Logs
 *.log
 logs/
+.logs/
 
 # Local build artifacts
 tmp/
 *.tmp
 .phi-local-*
+*.env
+.credentials
 /.worktrees/
 
 # phi_engine's default (PHI_WORKSPACE-unset) repo-root workspace -- this is
@@ -80,3 +93,43 @@ tmp/
 # These are exploratory notes, not part of any release artifact.
 research/
 
+# ------------------------------------------------------------------
+# Generated / regenerable output. NEVER commit. See CLAUDE.md
+# "Generated artifacts and cleanup". Anything a command can recreate
+# belongs here, today and for every future run.
+# ------------------------------------------------------------------
+# Test and campaign reports (pytest --junitxml, phi_corpus.generate --campaign)
+test_reports/
+coverage.xml
+.coverage.*
+
+# Corpus generator output
+data/corpus/
+*.groundtruth.json
+
+# Node dependency tree
+node_modules/
+
+# Agent and harness scratch state
+.superpowers/
+.impeccable/
+.phi-build-status
+intake-v3-final
+
+# Emergent hosting-platform artifacts (job metadata, webhook crons, bot
+# git identity) -- this codebase runs on any host and carries no
+# platform-specific state.
+/.emergent/
+/.gitconfig
+
+# Planning, specs, and agent memory. The repo holds code, current how-to
+# documentation, decision records, config, and test inputs. Anything that
+# records what was planned, tracked, or remembered lives outside the tree.
+/tasks/
+/memory/
+/docs/assurance/
+/docs/superpowers/
+/design_guidelines.json
+
+# Generated API reference (python backend/scripts/export_openapi.py)
+/docs/API.md

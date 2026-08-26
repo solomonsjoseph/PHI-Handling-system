@@ -28,7 +28,7 @@ the function the NON_CONFIDENTIAL/ordinary path actually calls) on the
 identical marker raises `ModelResponseError: prompt_gate_blocked`
 (`phi_gate: BLOCK -- findings=['SSN']`), proving the detector works and
 would have caught this content -- it simply is never invoked on the
-CONFIDENTIAL branch. See docs/LEAK_TEST_REPORT_2026-07-21.md.
+CONFIDENTIAL branch.
 """
 from __future__ import annotations
 

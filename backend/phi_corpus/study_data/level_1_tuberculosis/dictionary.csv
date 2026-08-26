@@ -1,0 +1,32 @@
+column_name,description
+study_id,Investigator-assigned study identifier for the TB cohort (format TB-YYYY-NNN).
+last_name,Patient's legal last name.
+first_name,Patient's legal first name.
+ssn,Social Security number, held locally by the site for death-index and disease-registry linkage prior to de-identification.
+date_of_birth,Full date of birth.
+street_address,Residential street address.
+city,Residential city.
+state,Residential US state, two-letter postal abbreviation.
+zip_code,Residential 5-digit ZIP code.
+age_of_onset,Age in years at TB disease onset, TB Portals' own field name.
+sex_at_birth,Sex recorded at birth -- 'Sex' in both RVCT and TB Portals.
+race,Race per OMB categories.
+ethnicity,Hispanic or Latino ethnicity per OMB categories.
+country_of_birth,Country of birth. Foreign-born status is the dominant US TB epidemiology risk factor per CDC NTSS surveillance.
+years_in_us,Years of US residence for foreign-born patients; 'N/A' for US-born patients (RVCT field).
+registration_date,Date the patient was registered into the TB program/surveillance system, ahead of confirmed diagnosis. Modeled on TB Portals' 'Registration Date' field.
+diagnosis_date,Date TB disease was confirmed, distinct from program registration and treatment start.
+case_definition,"WHO/RVCT case-registration category: New, Relapse, Treatment after failure, Treatment after loss to follow-up, or Transferred in. Modeled on TB Portals' 'Case Definition' field."
+diagnosis_code,"ICD-10-CM tuberculosis diagnosis code (A15-A19 range), e.g. A15.0 pulmonary TB, A18.2 tuberculous peripheral lymphadenopathy. Modeled on TB Portals' 'Diagnosis Code' field."
+site_of_disease,"Anatomic site of TB disease: pulmonary, extrapulmonary (with site), or both. Equivalent to TB Portals' 'Localization' field."
+sputum_smear_result,Acid-fast bacilli sputum smear microscopy result; 'N/A' when the site of disease is exclusively extrapulmonary.
+sputum_culture_result,Mycobacterial culture result confirming M. tuberculosis.
+chest_xray_finding,"Chest radiograph finding, e.g. cavitary or non-cavitary infiltrate, pleural effusion, or normal."
+drug_susceptibility_result,"Drug-susceptibility testing (DST) result summary, e.g. pan-susceptible, isoniazid-resistant, rifampin-resistant (RR-TB), or multidrug-resistant (MDR-TB). Equivalent to TB Portals' 'DST Profile' field."
+hiv_status,"HIV coinfection status, a standard RVCT/NTSS and TB Portals TB surveillance data element."
+comorbidity_other,"Non-HIV comorbidity most relevant to TB treatment and prognosis, e.g. diabetes mellitus, alcohol use disorder, chronic malnutrition, or none. Modeled on TB Portals' broader 'Comorbidity' field."
+treatment_regimen,"Anti-TB drug regimen prescribed, e.g. first-line HRZE (isoniazid, rifampin, pyrazinamide, ethambutol) or a second-line MDR/RR-TB regimen. Modeled on TB Portals' 'Regimen Drugs' field."
+treatment_start_date,Date the anti-TB treatment regimen began.
+treatment_end_date,Date the treatment regimen ended (completion, death, or last contact before loss to follow-up); 'Ongoing' when the patient is still on treatment.
+treatment_outcome,"Final treatment outcome: completed, died, lost to follow-up, or still on treatment. Equivalent to TB Portals' 'Outcome' field."
+treatment_facility_name,Name of the clinic or health department facility where the patient received TB treatment.

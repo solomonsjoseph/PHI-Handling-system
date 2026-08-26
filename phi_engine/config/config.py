@@ -375,13 +375,6 @@ SOT_GAP_DRAFTS_DIR: Path = TMP_DIR / "sot_gap_drafts"
 SOT_GAP_COVERAGE_PATH: Path = TMP_DIR / "sot_gap_coverage.json"
 SOT_GAP_REPORT_PATH: Path = TMP_DIR / "sot_gap_report.md"
 
-# --- Phase 1: PHI rule audit and expand --------------------------------------
-PHI_TECHNIQUES_INVENTORY_PATH: Path = (
-    BASE_DIR / "docs" / "superpowers" / "specs" / "2026-05-08-phi-techniques-inventory.md"
-)
-PHI_COVERAGE_MATRIX_PATH: Path = (
-    BASE_DIR / "docs" / "superpowers" / "specs" / "2026-05-08-phi-coverage-matrix.md"
-)
 PHI_SWEEP_FINDINGS_PATH: Path = TMP_DIR / "phi_sweep_findings.json"
 PHI_SWEEP_HITL_DRAFTS_DIR: Path = TMP_DIR / "phi_sweep_hitl_drafts"
 PHI_SWEEP_PR_DRAFTS_DIR: Path = TMP_DIR / "phi_sweep_pr_drafts"

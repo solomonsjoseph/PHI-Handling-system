@@ -146,11 +146,8 @@ action, which hashes `label:raw_id` -- see Table C), published algorithm.
 category from Table A. This table intentionally does NOT compare against
 Presidio/AWS/Azure/JSL: this repository has not independently, currently
 re-benchmarked those tools' entity coverage against this taxonomy, and an
-uncited checkmark table is not evidence. See
-`docs/PRIVACY_GATEWAY_RESEARCH.md` for the surviving adversarial-fixture
-exercise and source-traced findings this repository retains (structural
-gaps confirmed by direct code reading, not a comparative benchmark -- see
-`docs/PRIVACY_GATEWAY_STRESS_TEST.md`).
+uncited checkmark table is not evidence. The structural gaps below are
+confirmed by direct code reading, not a comparative benchmark.
 
 | Identifier (from Table A) | Classification path | Residual detector (`phi_patterns.py`) | Applied action / control | Known limitation |
 |---|---|---|---|---|
@@ -170,7 +167,7 @@ gaps confirmed by direct code reading, not a comparative benchmark -- see
 | Full-face photograph | not handled | none | none | `organize()` has no image-file route; image/DICOM inputs are unrecognized-format |
 | Profession | not handled | none | none | No detector or action; quasi-identifier risk is not scored |
 | Quasi-identifier combination (structured/tabular) | `phi_engine/security/kanon_gate.py`/`pycanon_gate.py` | n/a | available EXPLICIT-INVOCATION query-time k-anonymity analysis, NOT wired into the publish path (`pycanon_gate.py`'s own docstring: publish-gate status DEFERRED, no `run.py` callsite) | Structured re-identification risk is an open gap at publish time, not a wired control |
-| Quasi-identifier combination (free text) | not handled | none | none | Confirmed structural gap -- see `docs/PRIVACY_GATEWAY_STRESS_TEST.md` §3 |
+| Quasi-identifier combination (free text) | not handled | none | none | Confirmed structural gap |
 | Limited Data Set (LDS) posture | not currently available | n/a | `phi_scrub` fails closed (`PHIScrubError` raised at synthesis time) | Requires `authorities/phi_limited_dataset.md`, which does not exist in this checkout; `compliance_posture: limited_dataset` cannot currently be selected |
 | Re-identification pseudonym | header-driven | n/a | HMAC-pseudonymize: `HMAC-SHA256(key, label:raw_id)` | Linkable pseudonymization -- one-way (key does not decrypt back to the raw value; it permits deterministic recomputation for a candidate value, enabling enumeration/linkage) -- not an independent §164.514(c) code and not itself Safe-Harbor-compliant absent Expert Determination -- see `authorities/01_hipaa_164_514_full.md` |
 

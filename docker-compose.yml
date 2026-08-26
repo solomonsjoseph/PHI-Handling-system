@@ -1,0 +1,40 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in your shell or a .env file next to this compose file}
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - backend/.env
+    environment:
+      # Overrides backend/.env's MONGO_URL so the app always talks to the
+      # compose-managed, authenticated mongo service (4.1 requires
+      # credentials in the connection string when PHI_ENV != dev).
+      MONGO_URL: mongodb://root:${MONGO_ROOT_PASSWORD:?set MONGO_ROOT_PASSWORD in your shell or a .env file next to this compose file}@mongo:27017/?authSource=admin
+      DATA_DIR: /app/data
+    ports:
+      - "8001:8001"
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+volumes:
+  mongo_data:
+  app_data:
