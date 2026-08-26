@@ -63,6 +63,10 @@ async def test_backfill_workflow_runs_round_trips_a_legacy_session():
         assert run_doc is not None
         assert run_doc["session_id"] == sid
         assert run_doc["correlation_id"] == "backfill:migrate_workflow_runs"
+        first_run = {
+            field: run_doc[field]
+            for field in ("run_id", "session_id", "run_type", "state", "correlation_id")
+        }
 
         rolled_back = await backfill_workflow_runs_rollback(db)
         assert rolled_back >= 1
@@ -74,6 +78,10 @@ async def test_backfill_workflow_runs_round_trips_a_legacy_session():
         restored_run = await db.workflow_runs.find_one({"run_id": run_id})
         assert restored_run is not None
         assert restored_run["correlation_id"] == "backfill:migrate_workflow_runs"
+        assert {
+            field: restored_run[field]
+            for field in ("run_id", "session_id", "run_type", "state", "correlation_id")
+        } == first_run
     finally:
         await db.sessions.delete_one({"id": sid})
         await db.workflow_runs.delete_one({"run_id": run_id})
@@ -117,6 +125,10 @@ async def test_backfill_export_artifacts_round_trips_a_legacy_export(tmp_path):
         assert record is not None
         assert record["state"] == "promoted"
         assert record["parents"] == [f"legacy:{legacy_export}"]
+        first_record = {
+            field: record[field]
+            for field in ("session_id", "run_id", "type", "root", "state", "sha256", "size_bytes", "parents")
+        }
         updated_session = await db.sessions.find_one({"id": sid})
         published_export = Path(updated_session["export_paths"]["dataset"])
         assert published_export.is_file()
@@ -135,6 +147,11 @@ async def test_backfill_export_artifacts_round_trips_a_legacy_export(tmp_path):
         remigrated_export = Path(remigrated_session["export_paths"]["dataset"])
         assert remigrated_export.is_file()
         assert remigrated_export.read_text(encoding="utf-8") == "handled data"
+        remigrated_record = await db.artifacts.find_one({"session_id": sid, "type": "legacy_export"})
+        assert {
+            field: remigrated_record[field]
+            for field in ("session_id", "run_id", "type", "root", "state", "sha256", "size_bytes", "parents")
+        } == first_record
     finally:
         await db.sessions.delete_one({"id": sid})
         await db.artifacts.delete_many({"session_id": sid})
