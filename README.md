@@ -36,7 +36,6 @@ Datasets (CSV, XLSX, Parquet) expose ONLY column headers to the LLM. Row values 
   frontend/
     src/                    React operator console on :3000
   authorities/              Primary legal sources + AUTHORITY_MATRIX.md (single source of truth for IRB)
-  docs/file_formats/        DICOM PS3.15 + FHIR R4 authority notes
   data/
     uploads/{session_id}/   uploaded files (local disk only, never leaves the pod)
     staging/, evidence/, reversal/, published/, cache/
@@ -215,11 +214,11 @@ See `python -m phi_engine --help` for the full argument reference, including
   scanner) before publish when the gate runs cleanly. On a guard exception
   (e.g. Presidio unavailable), the pipeline currently falls back to the
   legacy regex scanner ALONE and can still publish on that scanner's
-  result -- a known, disclosed weak-fallback path, not yet closed (see
-  `docs/PRIVACY_GATEWAY_RECOMMENDATION.md` §"Weak points wrapped or
-  replaced"). Header classification prompts are headers-only, never a row
-  value, and `LLMClient.complete` runs a prompt egress gate
-  (`phi_gate_check`) before provider dispatch. A separate read-path wrapper
+  result -- a known, disclosed weak-fallback path, not yet closed: the
+  legacy-scanner-alone path lacks the Presidio pass's coverage. Header
+  classification prompts are headers-only, never a row value, and
+  `LLMClient.complete` runs a prompt egress gate (`phi_gate_check`) before
+  provider dispatch. A separate read-path wrapper
   (`llm_tool_guard.validate_llm_read_path`) exists but currently has no
   production caller -- it is available, not yet a wired chokepoint.
 
@@ -243,10 +242,14 @@ PHI-Handling-system/
 |-- harness/                     # spec_check, stress/gateway fixture builders,
 |                                 # privacy-gateway research validator
 |-- authorities/                 # Primary legal source mapping (HIPAA 164.514)
-|-- docs/                        # Spec, threat model, and evidence/research reports
+|-- docs/                        # Threat model, operator runbook, migration guide, decision records
 |-- research/                    # Local exploratory notes (gitignored)
 `-- tests/
 ```
+
+See `docs/RUNBOOK.md` for operator procedures and `docs/MIGRATION.md` for
+control-plane migration steps. `python backend/scripts/export_openapi.py`
+regenerates the API reference at `docs/API.md`, which is not committed.
 
 ### Configuration
 
@@ -258,8 +261,6 @@ PHI-Handling-system/
   behavior with no repo-root dependence for data paths.
 - `--study` / `STUDY_NAME`: study name (plain folder name), scoping intake,
   organized output, and per-study configuration.
-
-See `docs/STANDALONE_SPEC.md` for the full portability/security checklist.
 
 ### Verification
 

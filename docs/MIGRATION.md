@@ -72,7 +72,7 @@ published copy back to that path before deleting the record.
 ## `migrate_agent_log_to_trace_events`
 
 Every remaining legacy `agent_log` row (written before Phase 7 retired
-that path — see F-OBS-001) is converted to a `trace_events` row with a
+that path) is converted to a `trace_events` row with a
 synthetic sequence number scoped per `session_id` (legacy rows have no
 `run_id`) and deleted from `agent_log` immediately after its conversion
 succeeds. Consumption is the idempotency guarantee: a second pass finds

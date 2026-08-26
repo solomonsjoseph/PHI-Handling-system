@@ -29,8 +29,7 @@ non-exhaustive state-law advisory note. EU / UK / IN / CA / BR stubs live in
 `phi_core/jurisdictions.py` and stay disabled at the wizard level until Sir
 clears expansion.
 
-See `/app/memory/VISION.md` for the north-star, `/app/memory/GOAL.md` for the
-operational spec, `/app/memory/PRD.md` for the delivery log.
+See `README.md` for the north-star, operational spec, and delivery status.
 
 ### Structure
 
@@ -75,8 +74,6 @@ operational spec, `/app/memory/PRD.md` for the delivery log.
       SessionDetail.jsx            Progress bar, live trace with agent meta + deep-links, review, downloads
       Settings.jsx                 LLM provider / model / temperature / max tokens
       Corpus.jsx                   Adversarial corpus runner + verifier
-  memory/
-    VISION.md, GOAL.md, PRD.md, test_credentials.md
   authorities/                     HIPAA 164.514 primary sources
   data/uploads/<sid>/              intake.zip + unpacked/ (never leaves pod)
   data/exports/                    handled outputs
@@ -186,16 +183,15 @@ Never committed, now or in the future:
   `.phi-build-status`, `tmp/`, `intake-v3-final`
 
 `git add -f` on any of these is prohibited. When a generated result looks like it
-has to be shared, record the finding in `memory/PRD.md` and leave the artifact on
+has to be shared, state the finding in the commit message or the pull request and leave the artifact on
 disk. Working notes never get a new directory in the tree; they go to scratch
 space, which is `/tmp` here.
 
 The repo holds four things and nothing else: codebase (`backend/`, `frontend/`),
-documentation (`memory/`, `authorities/`, `docs/file_formats/`, `README.md`,
-`CLAUDE.md`, `LICENSE`), config (`.claude/`, `.gitignore`,
-`design_guidelines.json`, frontend lint config), and test inputs that a test
-actually reads (`backend/tests/`). A file that fits none of those four does not
-belong in the repo.
+documentation (`README.md`, `CLAUDE.md`, `SECURITY.md`, `LICENSE`, `docs/`,
+`authorities/`), config (`.claude/`, `.gitignore`, frontend lint config), and
+test inputs that a test actually reads (`backend/tests/`). A file that fits
+none of those four does not belong in the repo.
 
 #### Garbage collection after every task
 
@@ -301,10 +297,10 @@ and zero code changes.
   (`phi_engine/pipeline/run.py`'s residual-guard `except Exception:`
   block), the pipeline currently falls back to the legacy regex scanner
   ALONE and can still publish on that scanner's result -- a known,
-  disclosed weak-fallback path, not yet closed (see
-  `docs/PRIVACY_GATEWAY_RECOMMENDATION.md` §"Weak points wrapped or
-  replaced"). Do not describe this as an unconditional two-scanner
-  guarantee.
+  disclosed weak-fallback path, not yet closed: the legacy-scanner-alone
+  path lacks the Presidio pass's coverage and can publish on a narrower
+  guarantee than the two-scanner path provides. Do not describe this as
+  an unconditional two-scanner guarantee.
 - **LLM egress controls; read-path wrapper not yet a production
   chokepoint.** Header classification prompts (`llm_detector.py`) are
   headers-only -- never a row value. `LLMClient.complete` runs
@@ -388,7 +384,7 @@ category, or benchmark claims without a grounding authority citation or a
 - `phi_engine/config/config.py`, `phi_engine/config/config.yaml`, `phi_engine/config/_defaults/` -- static configuration; per-study config is synthesized fresh each run (`phi_engine/pipeline/synthesize_config.py`) and is not source of truth.
 - `harness/make_stress_fixtures.py`, `harness/make_privacy_gateway_fixtures.py` -- deterministic fixture builders used by the stress and privacy-gateway test suites.
 - `harness/spec_check.py` -- post-run invariant checker (`intake_symlink_invariant`, `llm_boundary_canary`, `source_immutability`).
-- `harness/validate_privacy_research.py` -- validates `research/privacy_gateway/{evidence_ledger,candidate_registry,dispositions,search_log}` against `docs/PRIVACY_GATEWAY_RESEARCH.md`.
+- `harness/validate_privacy_research.py` -- validates `research/privacy_gateway/{evidence_ledger,candidate_registry,dispositions,search_log}` against the research report passed via its required `--report` flag.
 
 ### Verification commands
 
@@ -402,8 +398,6 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider \
   tests/test_phi_llm_safety.py \
   tests/test_llm_egress_gate.py \
   tests/test_validate_privacy_research.py
-
-PYTHONDONTWRITEBYTECODE=1 python -m harness.validate_privacy_research
 
 PYTHONDONTWRITEBYTECODE=1 python -m phi_engine --help
 PYTHONDONTWRITEBYTECODE=1 python -c "from phi_engine.security.presidio_gate import analyze_text; assert analyze_text('SSN 123-45-6789')"

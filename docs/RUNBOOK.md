@@ -41,7 +41,7 @@ manifest/model that should never be requesting a given tool, indicates
 either a runaway agent loop or an attempted capability escalation —
 cross-reference `agent`/`task_id` on the matching rows and, if a genuine
 escalation attempt, treat it as a security incident (see
-`docs/assurance/THREAT_MODEL.md`), not routine noise.
+`docs/THREAT_MODEL.md`), not routine noise.
 
 ## Gate failures
 
@@ -118,7 +118,7 @@ outside `ArtifactService.certify_publication` marked it complete.
 
 Not a dashboard field (it is a routine, expected transition, not a
 failure): `awaiting_human_review` sessions past `REVIEW_RETENTION_DAYS`
-(defaults to `RETENTION_DAYS`, F-POLICY-002) have their raw
+(defaults to `RETENTION_DAYS`) have their raw
 `UPLOAD_DIR/<sid>` bytes erased and move to `expired_awaiting_review`.
 
 ```js
