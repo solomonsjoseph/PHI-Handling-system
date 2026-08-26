@@ -35,7 +35,11 @@ def _float_env(name: str, default: float) -> float:
 
 
 MAX_DELEGATION_DEPTH = _int_env("MAX_DELEGATION_DEPTH", 3)
-MAX_CHILDREN_PER_TASK = _int_env("MAX_CHILDREN_PER_TASK", 8)
+# Pipeline's fixed, code-defined sequence creates at most 35 direct child
+# tasks.  Its 48 lifetime ceiling leaves headroom while
+# MAX_PARALLEL_TASKS_PER_PARENT=4, MAX_TASKS_PER_RUN=64, and
+# MAX_PARALLEL_TASKS_PER_RUN=6 continue to bound dynamic delegation.
+MAX_CHILDREN_PER_TASK = _int_env("MAX_CHILDREN_PER_TASK", 48)
 MAX_TASKS_PER_RUN = _int_env("MAX_TASKS_PER_RUN", 64)
 MAX_PARALLEL_TASKS_PER_RUN = _int_env("MAX_PARALLEL_TASKS_PER_RUN", 6)
 MAX_PARALLEL_TASKS_PER_PARENT = _int_env("MAX_PARALLEL_TASKS_PER_PARENT", 4)

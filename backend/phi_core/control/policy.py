@@ -133,13 +133,11 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
         "Operator": _manifest("Operator", purpose="Verify deterministic transformations.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),
         "Reviewer": _manifest("Reviewer", purpose="Review export coverage.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),
         "CorpusResearcher": _manifest("CorpusResearcher", purpose="Research corpus sources.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
-        # The top-level `TaskService`-enqueued unit `session_handle`/
-        # `session_human_review` submit (Phase 4 step 2/4): itself makes no
-        # provider call and activates no grant of its own beyond bookkeeping
-        # -- every real agent activation inside `run_agent_pipeline`/
-        # `execute_decisions` opens its own separate `make_ctx`-issued
-        # grant. `task_types` needs both literals since one manifest
-        # covers a fresh run and a human-review resume alike.
+        # Pipeline is the durable root for a fixed sequence of up to 35
+        # direct child executions: 17 Praxis methods, three Judge/Sentinel
+        # iterations each, and the remaining fixed pipeline steps. Its 48
+        # child ceiling leaves bounded headroom without opening recursive
+        # agent-to-agent delegation.
         "Pipeline": AgentManifest(
             agent="Pipeline",
             manifest_version=_MANIFEST_VERSION,
@@ -155,10 +153,18 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
             scope=_SESSION_RUN_SCOPE,
             reads=frozenset(),
             writes=frozenset(),
-            budget=ResourceBudget(**{**_MANIFEST_MAX_BUDGET.model_dump(), "wall_seconds": 900.0}),
-            allowed_child_task_types=frozenset(),
+            budget=ResourceBudget(**{
+                **_MANIFEST_MAX_BUDGET.model_dump(), "wall_seconds": 900.0, "max_children": 48,
+            }),
+            allowed_child_task_types=frozenset(
+                _task_type(agent) for agent in (
+                    "Manager", "Praxis", "Statute", "Lexicon", "Schema", "Instrument",
+                    "Judge", "Sentinel", "Executor", "Scout", "Operator", "Reviewer",
+                    "Auditor", "Ledger", "Herald",
+                )
+            ),
             max_depth=3,
-            max_children=8,
+            max_children=48,
         ),
     }
 )
