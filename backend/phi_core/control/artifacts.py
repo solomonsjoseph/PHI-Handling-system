@@ -111,9 +111,17 @@ async def tombstone_session(store: ControlStore, session_id: str) -> None:
     await store.insert("session_tombstones", {"session_id": session_id, "tombstoned_at": _now()})
 
 
-def erase_session_artifacts(session_id: str) -> None:
+def erase_session_artifacts(session_id: str) -> dict[str, str]:
     """Delete every on-disk artifact directory for ``session_id`` across
     every artifact root (staging, evidence, reversal, published, cache).
+
+    Returns a mapping of root name -> error message for any root whose
+    directory could not be removed (permission error, concurrent external
+    change); empty when every root's directory is confirmed gone (already
+    absent counts as gone, not a failure). Callers must check this rather
+    than assume success -- Phase 7 replaces the ``ignore_errors=True``
+    this function used to swallow with a result the caller can record and
+    retry.
 
     Purely filesystem-level: the caller is responsible for erasing the
     matching ``artifacts``/``publication_pointers`` store records
@@ -121,8 +129,15 @@ def erase_session_artifacts(session_id: str) -> None:
     needs the async ``ControlStore`` this function does not take."""
     if not is_safe_scoped_id(session_id):
         raise ArtifactError("unsafe_session_id", session_id)
-    for root_dir in _ROOT_DIRS.values():
-        shutil.rmtree(root_dir / session_id, ignore_errors=True)
+    failures: dict[str, str] = {}
+    for name, root_dir in _ROOT_DIRS.items():
+        try:
+            shutil.rmtree(root_dir / session_id)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            failures[name] = str(exc)
+    return failures
 
 
 class ArtifactService:
@@ -363,3 +378,109 @@ class ArtifactService:
             if await self._store.delete_one("publication_pointers", {"pointer_id": pointer["pointer_id"]}):
                 removed += 1
         return removed
+
+
+# ---- reconcile (Phase 7 step 3): periodic artifact collection -------------
+
+DEFAULT_STALE_PROVISIONAL_HOURS = 24.0
+
+# States a record can be deleted from unconditionally, once reached.
+# `rejected`/`superseded` have no producer yet -- Operator, Reviewer, and
+# Publish Guard reject *decisions*, not artifacts, today -- so this sweep
+# is exercised directly in tests against a hand-built record and is ready
+# for whichever future caller starts transitioning artifacts into either
+# state. `deletion_pending` is this function's own in-flight marker,
+# picked up again after a prior sweep's filesystem deletion failed.
+_DELETABLE_STATES = frozenset({"rejected", "superseded", "deletion_pending"})
+
+
+def _artifact_disk_path(record: ArtifactRecord) -> Any:
+    """Where ``record``'s bytes live right now. A ``provisional`` record
+    was never promoted past ``.tmp``; everything else was ``os.replace``d
+    onto its run-scoped (or, once promoted, ``published``-rooted) final
+    path."""
+    if record.state == "provisional":
+        return _tmp_dir(record.root) / record.artifact_id
+    return run_scoped_dir(_root_dir(record.root), record.session_id, record.run_id) / record.artifact_id
+
+
+async def _reconcile_one(store: ControlStore, record: ArtifactRecord) -> bool:
+    """Mark ``record`` ``deletion_pending``, confirm its bytes are gone,
+    and only then remove the database record entirely. Unlinks both the
+    ``.tmp`` staging path and the run-scoped final path (``missing_ok``
+    makes whichever one never existed a no-op) rather than branching on
+    ``record.state`` -- once this function's own CAS has already
+    overwritten that state to ``deletion_pending``, a retried sweep for a
+    record that started ``provisional`` could no longer tell which path
+    type it originally was. A filesystem failure leaves the record
+    ``deletion_pending`` with ``delete_attempts`` incremented and
+    ``delete_error`` set, for the next sweep to retry -- never silently
+    dropped, never removed from the store before its bytes are confirmed
+    gone."""
+    pending = record.model_copy(update={"state": "deletion_pending"})
+    if not await store.compare_and_set(
+        "artifacts", {"artifact_id": record.artifact_id}, {"state": record.state}, pending,
+    ):
+        return False  # raced with a concurrent transition; retried next sweep
+    try:
+        (_tmp_dir(record.root) / record.artifact_id).unlink(missing_ok=True)
+        (run_scoped_dir(_root_dir(record.root), record.session_id, record.run_id) / record.artifact_id).unlink(
+            missing_ok=True
+        )
+    except OSError as exc:
+        failed = pending.model_copy(update={
+            "delete_attempts": pending.delete_attempts + 1, "delete_error": str(exc),
+        })
+        await store.compare_and_set(
+            "artifacts", {"artifact_id": record.artifact_id}, {"state": "deletion_pending"}, failed,
+        )
+        return False
+    await store.delete_one("artifacts", {"artifact_id": record.artifact_id})
+    return True
+
+
+async def reconcile(store: ControlStore, *, stale_provisional_hours: float = DEFAULT_STALE_PROVISIONAL_HOURS) -> dict[str, int]:
+    """Periodic global sweep (Phase 7 step 3), independent of any one
+    ``(session_id, run_id)`` scope -- meant to be called on a fixed
+    interval, the same way ``worker.reconcile_forever`` wraps
+    ``TaskService.reconcile_leases``.
+
+    Eligible for collection:
+
+    - ``rejected`` / ``superseded`` / ``deletion_pending`` (see
+      ``_DELETABLE_STATES``).
+    - ``provisional`` older than ``stale_provisional_hours``: the
+      producing task raised, was cancelled, or the process restarted
+      between ``stage()`` and ``finalize()``, so nothing will ever call
+      ``finalize()`` for it (covers "cancelled or failed staging" and
+      "interrupted intake and partial extraction").
+    - ``staged`` / ``accepted`` / ``promoted`` whose on-disk file is
+      already gone: the deletion condition is trivially satisfied, so the
+      dangling database reference is removed with no filesystem work left
+      to do ("manifest records whose file is missing").
+
+    Never touches a record whose ``hold`` is non-empty (D14 legal hold) or
+    already ``deleted``/``legal_hold``. Returns a count per outcome for
+    the caller (the admin assurance route) to report.
+    """
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=stale_provisional_hours)).isoformat()
+    counts = {"deleted": 0, "failed": 0, "skipped_hold": 0}
+    for doc in await store.find_many("artifacts", {}):
+        record = ArtifactRecord.model_validate(doc)
+        if record.state in ("deleted", "legal_hold"):
+            continue
+        if record.hold:
+            counts["skipped_hold"] += 1
+            continue
+        eligible = record.state in _DELETABLE_STATES or (
+            record.state == "provisional" and record.created_at < cutoff
+        )
+        if not eligible and record.state in (*_PROMOTABLE_STATES, "promoted"):
+            if not _artifact_disk_path(record).is_file():
+                eligible = True
+        if not eligible:
+            continue
+        counts["deleted" if await _reconcile_one(store, record) else "failed"] += 1
+    return counts

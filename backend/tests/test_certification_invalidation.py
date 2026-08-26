@@ -1173,12 +1173,12 @@ async def test_stale_worker_terminal_events_cannot_close_new_run_stream(monkeypa
         "_pipeline_run_id": "run-b",
         "progress": [],
     })
-    queue = asyncio.Queue()
     monkeypatch.setattr(srv, "get_db", lambda: db)
-    monkeypatch.setitem(srv._progress_queues, "sid", queue)
+    sub = srv._event_broker.subscribe("run-b")
 
     await srv._emit("sid", srv.ProgressEvent(phase="complete", message="A complete"), run_id="run-a")
     await srv._emit("sid", srv.ProgressEvent(phase="__end__", message="A stream end"), run_id="run-a")
 
-    assert queue.empty()
+    assert sub.queue.empty()
     assert db.doc["progress"] == []
+    srv._event_broker.unsubscribe(sub)

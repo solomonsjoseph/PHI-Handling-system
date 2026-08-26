@@ -36,6 +36,8 @@ class ControlStore(Protocol):
 
     async def delete_one(self, collection: str, query: Query) -> bool: ...
 
+    async def delete_many(self, collection: str, query: Query) -> int: ...
+
 
 def _plain(value: Any) -> Any:
     """Recursively convert frozen/immutable pydantic container types
@@ -59,6 +61,33 @@ def _document(value: BaseModel | Mapping[str, Any]) -> Document:
 
 def _matches(document: Mapping[str, Any], query: Query) -> bool:
     return all(document.get(field) == value for field, value in query.items())
+
+
+def _matches_with_operators(document: Mapping[str, Any], query: Query) -> bool:
+    """Like ``_matches`` but a value that is itself a mapping is treated as
+    a Mongo-style range/operator clause (``$gte``/``$lte``/``$gt``/``$lt``)
+    rather than a literal to compare equal. Only used by ``delete_many``,
+    whose one real caller (``TraceEventStore.purge_range``) needs a
+    ``seq`` range, not a wider operator language MemoryControlStore has no
+    other use for."""
+    for field, value in query.items():
+        actual = document.get(field)
+        if not isinstance(value, Mapping):
+            if actual != value:
+                return False
+            continue
+        for op, operand in value.items():
+            if op == "$gte" and not (actual is not None and actual >= operand):
+                return False
+            if op == "$lte" and not (actual is not None and actual <= operand):
+                return False
+            if op == "$gt" and not (actual is not None and actual > operand):
+                return False
+            if op == "$lt" and not (actual is not None and actual < operand):
+                return False
+            if op not in ("$gte", "$lte", "$gt", "$lt"):
+                raise NotImplementedError(f"MemoryControlStore.delete_many: unsupported operator {op!r}")
+    return True
 
 
 class MemoryControlStore:
@@ -109,6 +138,13 @@ class MemoryControlStore:
                 return True
         return False
 
+    async def delete_many(self, collection: str, query: Query) -> int:
+        documents = self._collections.get(collection, [])
+        kept = [d for d in documents if not _matches_with_operators(d, query)]
+        removed = len(documents) - len(kept)
+        self._collections[collection] = kept
+        return removed
+
 
 class MongoControlStore:
     """Motor-backed implementation of ``ControlStore``."""
@@ -146,6 +182,10 @@ class MongoControlStore:
     async def delete_one(self, collection: str, query: Query) -> bool:
         result = await self._db[collection].delete_one(dict(query))
         return result.deleted_count == 1
+
+    async def delete_many(self, collection: str, query: Query) -> int:
+        result = await self._db[collection].delete_many(dict(query))
+        return result.deleted_count
 
 
 def _without_object_id(document: Mapping[str, Any] | None) -> Document | None:

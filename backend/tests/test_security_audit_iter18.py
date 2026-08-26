@@ -62,29 +62,107 @@ def test_scrub_persisted_text_redacts_urls_and_ips():
     assert "[O]" in out
 
 
-# ---- SEC-002: SSE queue lifecycle -------------------------------------
+
+# ---- D15 4b: bounded process-local maps ---------------------------------
 
 
-def test_release_stream_drops_queue_when_last_subscriber_leaves():
+@pytest.mark.asyncio
+async def test_rate_buckets_evict_least_recently_used_past_the_key_cap(monkeypatch):
     import server as srv
-    # simulate: one subscriber joins, then leaves
-    srv._progress_queues["s1"] = object()
-    srv._progress_subscribers["s1"] = 1
-    srv._release_stream("s1")
-    assert "s1" not in srv._progress_queues, "queue leaked after last subscriber"
-    assert "s1" not in srv._progress_subscribers
+    from phi_core.control import limits
+
+    monkeypatch.setattr(srv, "_RATE_BUCKETS", srv.collections.OrderedDict())
+    monkeypatch.setattr(limits, "MAX_RATE_BUCKET_KEYS", 3)
+    # Isolate the LRU/cleanup mechanics from principal resolution (dev
+    # mode resolves a soft principal even with no token/cookie).
+    monkeypatch.setattr(srv, "_rate_limit_identity", lambda request: request.host)
+
+    class _Req:
+        def __init__(self, host):
+            self.host = host
+
+    dep = srv.rate_limited("probe", limit=100, window_seconds=60)
+    for host in ("h1", "h2", "h3", "h4"):
+        await dep(_Req(host))
+
+    # 4 distinct identities hit a cap of 3: the least-recently-used (h1)
+    # is evicted, the 3 most recent survive.
+    assert len(srv._RATE_BUCKETS) == 3
+    assert "probe:h1" not in srv._RATE_BUCKETS
+    assert "probe:h4" in srv._RATE_BUCKETS
 
 
-def test_release_stream_keeps_queue_when_other_subscribers_remain():
+@pytest.mark.asyncio
+async def test_rate_bucket_key_is_removed_once_its_window_empties(monkeypatch):
     import server as srv
-    srv._progress_queues["s2"] = object()
-    srv._progress_subscribers["s2"] = 2
-    srv._release_stream("s2")
-    assert "s2" in srv._progress_queues, "queue prematurely freed"
-    assert srv._progress_subscribers["s2"] == 1
+
+    monkeypatch.setattr(srv, "_RATE_BUCKETS", srv.collections.OrderedDict())
+    monkeypatch.setattr(srv, "_rate_limit_identity", lambda request: "h1")
+    monkeypatch.setattr(srv.time, "monotonic", lambda: 1000.0)
+
+    dep = srv.rate_limited("probe", limit=100, window_seconds=1)
+    await dep(object())
+    assert "probe:h1" in srv._RATE_BUCKETS
+
+    # Advance well past the window: the next request's cleanup pass finds
+    # the bucket empty and removes the key entirely rather than leaving a
+    # dead empty-list entry behind.
+    monkeypatch.setattr(srv.time, "monotonic", lambda: 2000.0)
+    await dep(object())
+    assert list(srv._RATE_BUCKETS["probe:h1"]) == [2000.0]  # re-created fresh, not stale
+
+
+def test_chatgpt_logins_prune_expired_entries_and_cap_the_rest(monkeypatch):
+    import time as time_mod
+
+    import server as srv
+    from phi_core import chatgpt_auth
+    from phi_core.control import limits
+
+    monkeypatch.setattr(srv, "_chatgpt_logins", {})
+    monkeypatch.setattr(limits, "MAX_CHATGPT_LOGINS", 2)
+    now = time_mod.time()
+
+    def _login(started_at):
+        return chatgpt_auth.DeviceLogin(
+            device_auth_id="d", user_code="u", verify_url="v", interval_s=5,
+            started_at=started_at, status="pending",
+        )
+
+    srv._chatgpt_logins["expired"] = _login(now - chatgpt_auth.DEVICE_CODE_EXPIRES_IN_S - 10)
+    srv._chatgpt_logins["old"] = _login(now - 5)
+    srv._chatgpt_logins["new"] = _login(now)
+
+    srv._prune_chatgpt_logins()
+
+    assert "expired" not in srv._chatgpt_logins  # past DEVICE_CODE_EXPIRES_IN_S
+    # After expiry cleanup, 2 survivors sit exactly at MAX_CHATGPT_LOGINS
+    # (2): pruning also evicts the oldest of those to make room for the
+    # insertion it is always called right before.
+    assert len(srv._chatgpt_logins) == 1
+    assert "new" in srv._chatgpt_logins
+    assert "old" not in srv._chatgpt_logins
+
+# ---- SEC-002 / D15: SSE fan-out lifecycle -------------------------------
+
+
+def test_unsubscribe_drops_the_run_bucket_when_the_last_subscriber_leaves():
+    import server as srv
+    sub = srv._event_broker.subscribe("run-s1")
+    assert srv._event_broker.subscriber_count("run-s1") == 1
+    srv._event_broker.unsubscribe(sub)
+    assert srv._event_broker.subscriber_count("run-s1") == 0, "bucket leaked after last subscriber"
+
+
+def test_unsubscribe_keeps_the_bucket_when_other_subscribers_remain():
+    import server as srv
+    first = srv._event_broker.subscribe("run-s2")
+    second = srv._event_broker.subscribe("run-s2")
+    srv._event_broker.unsubscribe(first)
+    assert srv._event_broker.subscriber_count("run-s2") == 1, "bucket prematurely freed"
     # cleanup
-    srv._release_stream("s2")
-    assert "s2" not in srv._progress_queues
+    srv._event_broker.unsubscribe(second)
+    assert srv._event_broker.subscriber_count("run-s2") == 0
 
 
 def test_settled_statuses_include_terminal_pipeline_states():
@@ -98,7 +176,7 @@ def test_settled_statuses_include_terminal_pipeline_states():
 
 
 def test_max_stream_subscribers_cap_is_bounded():
-    """SEC-002: the per-session subscriber cap must be small and finite
+    """SEC-002: the per-run subscriber cap must be small and finite
     so an attacker cannot open thousands of streams."""
     import server as srv
     assert 1 <= srv._MAX_STREAM_SUBSCRIBERS_PER_SESSION <= 16
@@ -128,11 +206,12 @@ async def test_stream_refuses_settled_session(monkeypatch):
 async def test_stream_refuses_when_cap_reached(monkeypatch):
     import server as srv
     from fastapi import HTTPException
-    monkeypatch.setattr(srv, "get_db", lambda: _StubDB({"id": "sid2", "status": "reading"}))
-    srv._progress_subscribers["sid2"] = srv._MAX_STREAM_SUBSCRIBERS_PER_SESSION
+    monkeypatch.setattr(srv, "get_db", lambda: _StubDB({"id": "sid2", "status": "reading", "_pipeline_run_id": "run-x"}))
+    subs = [srv._event_broker.subscribe("run-x") for _ in range(srv._MAX_STREAM_SUBSCRIBERS_PER_SESSION)]
     try:
         with pytest.raises(HTTPException) as excinfo:
             await srv.session_stream("sid2")
         assert excinfo.value.status_code == 429
     finally:
-        srv._progress_subscribers.pop("sid2", None)
+        for sub in subs:
+            srv._event_broker.unsubscribe(sub)

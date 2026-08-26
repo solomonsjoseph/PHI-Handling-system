@@ -181,12 +181,16 @@ class Agent:
             parent_id=parent_id,
             status_text=status_text,
         )
-        await self.ctx.trace.legacy_log(msg)
         result = self._last_gateway_result
         tools = result.tool_events if result else ()
         await self.ctx.trace.emit(
+            event_id=msg.id,
             task_id=self.ctx.task_id,
             parent_task_id="",
+            parent_msg_id=parent_id or "",
+            phase=phase,
+            direction=direction,
+            payload=payload,
             depth=0,
             attempt=self.ctx.attempt,
             agent=self.NAME,

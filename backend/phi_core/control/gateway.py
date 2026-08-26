@@ -347,31 +347,23 @@ class ProviderGateway:
 
     async def _record_budget_denial(self, req: GatewayRequest, reason: str) -> None:
         """Insert a ``TraceEvent`` with ``outcome="budget_exceeded"`` for a
-        gateway-time D5 refusal. Duplicates ``StoreTraceWriter.emit``'s
-        ``event_seq`` CAS-allocation rather than importing it: ``context.py``
-        imports this module, so the reverse import would cycle. Best-effort
-        against a run with no durable ``WorkflowRun`` (nothing to allocate
-        a seq under) or a lost CAS race after 8 attempts -- a missed trace
-        row must never turn a real denial into a raised exception."""
-        seq = 0
-        for _ in range(8):
-            current = await self._store.get_one("workflow_runs", {"run_id": req.run_id})
-            if current is None:
-                return
-            seq = int(current.get("event_seq", 0)) + 1
-            updated = dict(current)
-            updated["event_seq"] = seq
-            if await self._store.compare_and_set(
-                "workflow_runs", {"run_id": req.run_id}, {"event_seq": current.get("event_seq", 0)}, updated
-            ):
-                break
-        else:
-            return
+        gateway-time D5 refusal, via the same ``TraceEventStore`` every
+        other trace write goes through (D15: it is the sole writer of
+        ``trace_events``, so this no longer duplicates its ``event_seq``
+        CAS allocation inline -- ``events.py`` has no dependency on this
+        module, so importing it here cannot cycle back through
+        ``context.py``). Best-effort against a lost CAS race: a missed
+        trace row must never turn a real denial into a raised exception."""
+        from .events import EventAppendError, TraceEventStore
+
         event = TraceEvent(
-            run_id=req.run_id, seq=seq, session_id=req.session_id, task_id=req.task_id, agent=req.agent,
+            run_id=req.run_id, seq=0, session_id=req.session_id, task_id=req.task_id, agent=req.agent,
             input_class=req.input_class, output_class=req.input_class, outcome="budget_exceeded", status_text=reason,
         )
-        await self._store.insert("trace_events", event)
+        try:
+            await TraceEventStore(self._store, run_id=req.run_id, session_id=req.session_id).append(event)
+        except EventAppendError:
+            return
 
     @staticmethod
     def _denied(req: GatewayRequest, reason: str) -> GatewayResult:

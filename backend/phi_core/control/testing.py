@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -36,14 +37,19 @@ class FakeGateway:
 
 @dataclass
 class MemoryTrace:
+    """``TraceWriter`` test fake. ``legacy_messages`` is a compatibility
+    convenience for unit tests written before ``emit`` carried every
+    ``AgentMessage`` field (``phase``/``payload``/``direction``/etc.)
+    itself: each entry exposes those fields as attributes via
+    ``SimpleNamespace`` rather than requiring dict-key access, matching
+    the ``AgentMessage`` shape those tests already assert against."""
+
     events: list[dict[str, Any]] = field(default_factory=list)
     legacy_messages: list[Any] = field(default_factory=list)
 
     async def emit(self, **fields: Any) -> None:
         self.events.append(dict(fields))
-
-    async def legacy_log(self, message: Any) -> None:
-        self.legacy_messages.append(message)
+        self.legacy_messages.append(SimpleNamespace(**fields))
 
 
 @dataclass

@@ -672,7 +672,7 @@ export default function SessionDetail() {
     traceFetchInFlightRef.current = true;
     try {
       const params = new URLSearchParams({ limit: '500' });
-      if (traceCursorRef.current) params.set('after', traceCursorRef.current);
+      if (traceCursorRef.current) params.set('after_seq', traceCursorRef.current);
       const { data } = await axios.get(`${API}/sessions/${sid}/agent-trace?${params.toString()}`);
       const page = data.messages || [];
       if (page.length > 0) {
