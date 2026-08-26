@@ -37,7 +37,7 @@ from .base import Agent
 # retrieval, and `contradiction` is fixed VERIFIED absent any built
 # detector -- a documented residual risk, to be closed by a stronger
 # evidence pipeline in a later phase, not invented here. What this DOES
-# close is F-EVID-001: a model-authored URL absent from the response's
+# close is this: a model-authored URL absent from the response's
 # own tool citations can never reach VERIFIED regardless of domain, and
 # every caller below falls back to its existing deterministic pack
 # whenever the resulting claim does not.
@@ -112,7 +112,7 @@ def _verify_research_reply(
     against the response's *actual* tool citations (falling back to the
     tool's own citation URLs as candidates only when the model reported
     none at all), and returns the subset that is genuinely grounded.
-    ``reply_sources`` is never trusted as-is -- that is F-EVID-001.
+    ``reply_sources`` is never trusted as-is -- an unverified model-authored URL is rejected regardless of how confident the reply is.
     """
     cited_urls = {c.get("url") for c in citations if c.get("url")}
     candidate_urls = [s.get("url") for s in (reply_sources or []) if s.get("url")] or sorted(cited_urls)

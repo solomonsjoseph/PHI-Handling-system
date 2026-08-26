@@ -79,8 +79,8 @@ class Manager(Agent):
         "Herald.Sections": "drafts results, discussion, limitations, conclusion",
     }
 
-    # Soft per-call expectations, seeded from the warm-cache baselines in
-    # memory/VISION.md Appendix A and rounded up so they do not cry wolf.
+    # Soft per-call expectations, seeded from measured warm-cache baselines
+    # and rounded up so they do not cry wolf.
     # Advisory only: a slow call that SUCCEEDS is never retried -- retrying it
     # would burn the very wall-clock the budget exists to protect. An overrun is
     # recorded, and is shown to the Manager when that call also fails.

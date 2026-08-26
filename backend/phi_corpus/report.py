@@ -1,8 +1,8 @@
 """Render a ``CampaignResult`` as JSON and markdown.
 
 The markdown is the artifact a reader checks: it must let someone else
-reproduce the exact numbers, per ``memory/VISION.md`` section 7, so
-``corpus_version`` and every seed are printed alongside every table.
+reproduce the exact numbers, so ``corpus_version`` and every seed are
+printed alongside every table.
 """
 from __future__ import annotations
 

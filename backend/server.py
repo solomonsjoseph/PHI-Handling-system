@@ -1337,8 +1337,8 @@ class AdminHoldBody(BaseModel):
 
 
 async def _record_hold_trace_event(db, *, run_id: str, session_id: str, principal: str, reason: str, action: str) -> None:
-    """Best-effort audit record for a hold set/clear (F-POLICY-003: "set
-    and clear events include principal and reason in a trace event").
+    """Best-effort audit record for a hold set/clear: "set
+    and clear events include principal and reason in a trace event".
     Non-terminal, so no fence is required."""
     from phi_core.control.events import EventAppendError, TraceEventStore
     from phi_core.control.records import TraceEvent
@@ -1357,7 +1357,7 @@ async def _record_hold_trace_event(db, *, run_id: str, session_id: str, principa
 
 @app.post("/api/admin/hold", dependencies=[Depends(rate_limited("admin_hold", 30, 60))])
 async def admin_set_hold(body: AdminHoldBody, principal: str = Depends(resolve_principal)):
-    """F-POLICY-003: set a D14 legal/administrative hold on a session's
+    """Set a D14 legal/administrative hold on a session's
     run, suspending every retention timer that checks
     ``WorkflowRun.hold``/``ArtifactRecord.hold`` (terminal-session purge,
     review-retention expiry, artifact reconciliation, the reversal-key
@@ -2462,10 +2462,9 @@ async def _start_warmup_scheduler():
 
 
 RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "30"))
-# F-POLICY-002: interim decision, recorded and accepted in
-# docs/assurance/FINDINGS.md -- defaults to the same window as every
-# other terminal-state retention timer until an operator sets a
-# different one explicitly.
+# Interim decision, accepted deliberately: REVIEW_RETENTION_DAYS
+# defaults to the same window as every other terminal-state retention
+# timer until an operator sets a different one explicitly.
 REVIEW_RETENTION_DAYS = int(os.environ.get("REVIEW_RETENTION_DAYS", str(RETENTION_DAYS)))
 
 _TERMINAL_RETENTION_STATUSES = ["complete", "failed", "cancelled", "blocked", "intake_failed",
@@ -2497,7 +2496,7 @@ async def _purge_settled_sessions_loop():
        still on disk. ``partially_complete`` sessions remain resumable
        until this window expires.
     2. ``awaiting_human_review`` sessions older than
-       ``REVIEW_RETENTION_DAYS`` (F-POLICY-002): raw PHI under
+       ``REVIEW_RETENTION_DAYS``: raw PHI under
        ``UPLOAD_DIR/<sid>`` is erased and the session moves to the
        terminal ``expired_awaiting_review`` status -- a stalled human
        review does not retain raw PHI indefinitely.

@@ -418,7 +418,7 @@ async def test_retention_purge_removes_expired_partially_complete_session(tmp_pa
 
 def _review_retention_stub_db(*, sid: str, updated_at: str, hold: str = ""):
     """A minimal stub DB exercising exactly step 2 of
-    ``_purge_settled_sessions_loop`` (F-POLICY-002): an
+    ``_purge_settled_sessions_loop``: an
     ``awaiting_human_review`` session past ``REVIEW_RETENTION_DAYS``."""
     session = {"id": sid, "status": "awaiting_human_review", "updated_at": updated_at,
                "_pipeline_run_id": "run-" + sid}
@@ -453,7 +453,7 @@ def _review_retention_stub_db(*, sid: str, updated_at: str, hold: str = ""):
 
 @pytest.mark.asyncio
 async def test_awaiting_review_cannot_retain_raw_phi_beyond_review_retention_days(tmp_path, monkeypatch):
-    """F-POLICY-002: a paused human review with no hold loses its raw PHI
+    """A paused human review with no hold loses its raw PHI
     once REVIEW_RETENTION_DAYS elapses, and the session moves to the
     terminal `expired_awaiting_review` status rather than being silently
     left `awaiting_human_review` forever."""

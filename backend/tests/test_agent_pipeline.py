@@ -323,8 +323,7 @@ def test_results_audit_ledger_herald_populated(api, session_id):
 # ------------------------- Anti-loop & Sentinel escalate (live) -----------
 #
 # Task 25: live evidence for two paths that never fired on either prior
-# live run (see docs/superpowers/specs/2026-08-17-judge-redesign-design.md
-# and 2026-08-17-sentinel-design.md). Both build their own small,
+# live run (the Judge-redesign and Sentinel-design work). Both build
 # deliberately adversarial corpus rather than reusing the shared
 # `session_id` fixture's TB-shaped study1.zip, because the shared corpus's
 # `study_id` column is now caught by `_HARD_RULE_TABLE` before Judge or

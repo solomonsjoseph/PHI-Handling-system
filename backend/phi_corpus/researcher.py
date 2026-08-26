@@ -127,7 +127,7 @@ class CorpusResearcher(Agent):
                 # Grounding gate: refuse to return a scenario with no
                 # tool-backed, verified source -- a model-authored URL
                 # absent from the response's own citations is never
-                # accepted as grounding (F-EVID-001). This is strictly
+                # accepted as grounding. This is strictly
                 # tighter than the previous "has any sources" check.
                 if not verified:
                     reply = {

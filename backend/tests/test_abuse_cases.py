@@ -1,5 +1,5 @@
-"""V7: abuse case tests, written against the threat-model rows in
-memory/ARCHITECTURE.md rather than against the implementation. Each test
+"""V7: abuse case tests, written against the threat-model rows for the
+control plane rather than against the implementation. Each test
 targets one boundary: model output, client input, guard suppression,
 prompt injection, and the intake ZIP surface.
 """

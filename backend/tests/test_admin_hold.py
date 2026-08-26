@@ -1,4 +1,4 @@
-"""F-POLICY-003: POST/DELETE /api/admin/hold -- setting and clearing a D14
+"""POST/DELETE /api/admin/hold -- setting and clearing a D14
 legal/administrative hold on a session's run."""
 from __future__ import annotations
 

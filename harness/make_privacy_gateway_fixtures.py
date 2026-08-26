@@ -5,8 +5,7 @@ and intellectual-property/confidential markers across multiple channels
 (prompt input, tool-call arguments, streamed chunks, structured files,
 document metadata+body, image/OCR, DICOM/FHIR/HL7, source code, archive
 members, audio transcripts) with clean and adversarial variants, for the
-privacy-gateway candidate benchmark protocol
-(`docs/PRIVACY_GATEWAY_RESEARCH.md` Approach Step 6).
+privacy-gateway candidate benchmark protocol.
 
 No real PHI, credentials, or payment data is used anywhere in this module:
 

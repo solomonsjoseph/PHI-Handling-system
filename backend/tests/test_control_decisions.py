@@ -292,7 +292,7 @@ async def test_inputs_digest_changes_with_the_decision_set_and_is_stable_for_ide
 
 
 def test_high_confidence_auditor_issue_blocks_completion() -> None:
-    """Mandatory acceptance test (docs/assurance table, Phase 6 row): a
+    """Mandatory acceptance test: a
     verdict='issues' Auditor response with at least one recorded issue
     blocks even at self-reported confidence 0.99 -- confidence is
     telemetry (D12), it can never turn a genuine finding into a pass."""

@@ -1,8 +1,8 @@
 """Validator for the privacy-gateway research contracts.
 
 This module validates the three privacy-gateway research artifacts
-produced by the plan in `docs/PRIVACY_GATEWAY_RESEARCH.md`'s supporting
-evidence pipeline:
+produced by the privacy-gateway research pipeline's supporting evidence
+work:
 
 - `research/privacy_gateway/evidence_ledger.jsonl` -- one row per sourced claim.
 - `research/privacy_gateway/candidate_registry.jsonl` -- one row per product/method.
@@ -10,15 +10,14 @@ evidence pipeline:
   wrap/integrate/build decision per required capability.
 
 Also checks that every inline claim-id citation in the rendered research
-report (`docs/PRIVACY_GATEWAY_RESEARCH.md` by default) resolves to a real
-evidence-ledger claim_id.
+report passed via `--report` resolves to a real evidence-ledger claim_id.
 
 CLI:
     python -m harness.validate_privacy_research \\
         --evidence research/privacy_gateway/evidence_ledger.jsonl \\
         --candidates research/privacy_gateway/candidate_registry.jsonl \\
         --dispositions research/privacy_gateway/dispositions.json \\
-        --report docs/PRIVACY_GATEWAY_RESEARCH.md
+        --report <path/to/rendered/report.md>
 """
 from __future__ import annotations
 
@@ -472,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence", type=Path, default=_PROJECT_ROOT / "research/privacy_gateway/evidence_ledger.jsonl")
     parser.add_argument("--candidates", type=Path, default=_PROJECT_ROOT / "research/privacy_gateway/candidate_registry.jsonl")
     parser.add_argument("--dispositions", type=Path, default=_PROJECT_ROOT / "research/privacy_gateway/dispositions.json")
-    parser.add_argument("--report", type=Path, default=_PROJECT_ROOT / "docs/PRIVACY_GATEWAY_RESEARCH.md")
+    parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args(argv)
 
     all_errors: list[str] = []

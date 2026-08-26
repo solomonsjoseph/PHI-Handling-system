@@ -1,14 +1,13 @@
-"""Phase 2 mandatory acceptance tests for `CapabilityPolicy` (F-CAP-001).
+"""Phase 2 mandatory acceptance tests for `CapabilityPolicy`.
 
 Written during the Phase 8 adversarial pass after discovering this file
 was never actually created when Phase 2 closed, despite being named in
 the master plan's acceptance-test table. Covers 4 of the plan's 5 named
 tests against real, existing code; the 5th
 (`test_untrusted_text_cannot_change_grants_tools_evidence_gates_publication_or_workflow_state`)
-is not attempted here -- it needs a concrete enumeration of "untrusted
 text" injection points across five distinct sources this pass did not
-have grounds to construct honestly, and is recorded as a residual gap in
-`docs/assurance/FINDINGS.md` (F-CAP-001) rather than faked.
+have grounds to construct honestly, and is recorded as a residual,
+intentionally untested gap rather than faked.
 """
 from __future__ import annotations
 

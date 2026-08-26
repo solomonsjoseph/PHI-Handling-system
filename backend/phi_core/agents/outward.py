@@ -43,8 +43,7 @@ def _verify_citation(*, run_id: str, task_id: str, system_name: str,
     """Return ``citation`` unchanged if it is not URL-shaped (plain-text
     attribution carries no verifiable claim for D12 to check), or the
     verified URL if it is and reaches VERIFIED, or ``""`` otherwise --
-    never a model-authored URL shown as fact with no tool backing
-    (F-EVID-001).
+    never a model-authored URL shown as fact with no tool backing.
     """
     url = (citation or "").strip()
     if not url.startswith(("http://", "https://")):

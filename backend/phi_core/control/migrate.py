@@ -3,7 +3,7 @@
 Every function here is safe to run twice: it only ever acts on documents
 still missing the state it would create, so a second pass finds nothing
 left to do and returns a zero count. Each has a documented reverse step
-in ``docs/assurance/MIGRATION.md``.
+in ``docs/MIGRATION.md``.
 
 ``run_all(db)`` is the single entry point ``server.py::_startup_maintenance``
 and any standalone migration invocation (``python -m phi_core.control.migrate``)

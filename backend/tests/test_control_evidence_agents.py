@@ -5,7 +5,7 @@ Statute and Scout, whose evidence-gate tests do not already live
 elsewhere.
 
 Every test proves the same shape: a model-authored URL absent from the
-response's own tool citations can never verify (F-EVID-001), and every
+response's own tool citations can never verify, and every
 agent falls back to its documented deterministic behavior when nothing
 verifies.
 """

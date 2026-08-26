@@ -57,7 +57,7 @@ _ROOT_DIRS: Mapping[str, Any] = {
 
 _PROMOTABLE_STATES = ("staged", "accepted")
 
-# F-POLICY-002 interim retention defaults. These intentionally mirror the
+# Interim retention defaults. These intentionally mirror the
 # server's session-retention policy until a separate retention policy module
 # replaces both call sites.
 RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "30"))

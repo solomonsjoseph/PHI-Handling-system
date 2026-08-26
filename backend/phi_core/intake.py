@@ -1,7 +1,7 @@
 """Intake manifest v3: ZIP -> {datasets/, forms/, dictionary/}.
 
-Aligned with the goal at /app/memory/GOAL.md and Sir's clarification 2026-07-27:
-three data elements only, not four. `data_dictionary/`, `mappings/`, `dictionary/`,
+Three data elements only, not four (per stakeholder clarification 2026-07-27).
+`data_dictionary/`, `mappings/`, `dictionary/`,
 `mapping/`, and `codebook/` are all aliases for the same slot: the schema-defining
 workbook. Datasets is always mandatory; at least one of dictionary or forms must
 accompany it.

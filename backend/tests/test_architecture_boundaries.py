@@ -13,9 +13,8 @@ documented, intentional interim `TaskService.enqueue` caller for the
 "every agent activation becomes a durable child task" migration
 (`ActivationFactory`'s own module docstring: "Phase 5's SuperOrchestrator
 becomes the sole caller of TaskService.enqueue; until then this factory
-is the one place that does"). Tracked in
-docs/adr/0006-super-orchestrator.md and docs/assurance/FINDINGS.md
-(F-ORCH-001).
+is the one place that does"). Tracked as a known, accepted interim
+state in docs/adr/0006-super-orchestrator.md.
 """
 from __future__ import annotations
 
@@ -317,8 +316,8 @@ def test_no_agents_module_writes_learning_or_capability_collections() -> None:
     `AgentContext` field or `Agent` attribute exposes a raw `ControlStore`
     at all (verified directly against `AgentContext`'s field list; the
     plan's own `test_control_capability.py::test_agents_receive_no_database_handle`
-    was never actually written in Phase 2, tracked as a residual gap in
-    `docs/assurance/FINDINGS.md`). This scan guards the property directly
+    was never actually written in Phase 2, and remains a residual,
+    intentionally untested gap. This scan guards the property directly
     rather than only its current cause."""
     sites = _forbidden_collection_write_sites()
     assert sites == [], f"phi_core/agents/ writes a learning/policy collection: {sites}"

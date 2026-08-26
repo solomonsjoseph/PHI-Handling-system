@@ -3,7 +3,7 @@ in one reproducible pass, either offline (deterministic replay, no key, no
 Mongo) or online (the real 12-agent pipeline over HTTP).
 
 The generator itself is microseconds; the cost is entirely the pipeline
-(``memory/PRD.md`` records 190s wall clock per run warm, 219s cold). The
+(190s wall clock per run warm, 219s cold, measured). The
 parallelism that matters is therefore at the campaign level: warm the
 shared cache once instead of per run, fan out runs with a bounded
 in-flight window, and pool the offline replay across processes because
