@@ -121,3 +121,15 @@ intake-v3-final
 # platform-specific state.
 /.emergent/
 /.gitconfig
+
+# Planning, specs, and agent memory. The repo holds code, current how-to
+# documentation, decision records, config, and test inputs. Anything that
+# records what was planned, tracked, or remembered lives outside the tree.
+/tasks/
+/memory/
+/docs/assurance/
+/docs/superpowers/
+/design_guidelines.json
+
+# Generated API reference (python backend/scripts/export_openapi.py)
+/docs/API.md
