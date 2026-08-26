@@ -530,7 +530,10 @@ async def _handle_pipeline_run(store, work_item) -> dict[str, Any]:
         # loading screens. 15 min is 5x the observed 190 s happy path
         # and 2x the worst historical case (~340 s + Herald 90 s x2).
         result = await asyncio.wait_for(
-            run_agent_pipeline(session, db, cfg, emit_msg, on_phase, run_id=run_id, control_store=store),
+            run_agent_pipeline(
+                session, db, cfg, emit_msg, on_phase, run_id=run_id, control_store=store,
+                root_task_id=work_item.task_id,
+            ),
             timeout=900,
         )
         await _emit(sid, ProgressEvent(phase="complete", message=f"Pipeline done: {result.get('status')}", percent=100.0), run_id=run_id)
@@ -655,12 +658,12 @@ async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
         timing.setdefault("end_s", now - run_started)
         timing.setdefault("duration_ms", (now - float(last_phase["t0"])) * 1000)
 
-    _factory = ActivationFactory(db, cfg)
+    _factory = ActivationFactory(db, cfg, store=store)
 
     async def _actx(agent: str):
-        return await _factory.activate(
-            session_id=sid, run_id=run_id, agent=agent, emit=emit_msg,
-            manager=manager_box["value"],
+        return await _factory.activate_child(
+            session_id=sid, run_id=run_id, parent_task_id=work_item.task_id, agent=agent,
+            emit=emit_msg, manager=manager_box["value"],
         )
 
     async def _child_actx(agent: str, parent_task_id: str):
@@ -1114,21 +1117,27 @@ async def session_intake(
     intake_claim_filter["status"] = {"$nin": list(_LIVE_STATUSES)}
     reset = await db.sessions.update_one(
         intake_claim_filter,
-        {"$set": {
-            "files": [f.model_dump() for f in accepted],
-            "progress": [],
-            "export_paths": {},
-            "intake_status": manifest.status,
-            "intake_exit_code": manifest.exit_code,
-            "intake_review": [
-                {"relpath": e.relpath, "reason": e.reason, "blocking": e.blocking}
-                for e in manifest.entries if e.component == "_unclassified"
-            ],
-            "intake_missing": manifest.missing_components,
-            "status": "intake",
-            "error": manifest.error,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }},
+        {
+            "$set": {
+                "files": [f.model_dump() for f in accepted],
+                "progress": [],
+                "export_paths": {},
+                "intake_status": manifest.status,
+                "intake_exit_code": manifest.exit_code,
+                "intake_review": [
+                    {"relpath": e.relpath, "reason": e.reason, "blocking": e.blocking}
+                    for e in manifest.entries if e.component == "_unclassified"
+                ],
+                "intake_missing": manifest.missing_components,
+                "status": "intake",
+                "error": manifest.error,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            "$unset": {
+                "reversal_key_blob": "",
+                "reversal_key_created_at": "",
+            },
+        },
     )
     if not getattr(reset, "matched_count", 0):
         raise HTTPException(409, "session has a pipeline run in progress; cancel it before re-uploading")
@@ -1143,7 +1152,6 @@ async def session_intake(
         "missing_components": manifest.missing_components,
         "review_entries": [
             {"relpath": e.relpath, "reason": e.reason, "blocking": e.blocking}
-            for e in manifest.entries if e.component == "_unclassified"
         ],
         "accepted_by_component": {
             comp: [
@@ -1365,9 +1373,19 @@ async def admin_set_hold(body: AdminHoldBody, principal: str = Depends(resolve_p
     run_id = doc.get("_pipeline_run_id")
     if not run_id:
         raise HTTPException(409, "session has no durable run to hold")
-    result = await db.workflow_runs.update_one({"run_id": run_id}, {"$set": {"hold": body.reason}})
-    if not getattr(result, "matched_count", 0):
-        raise HTTPException(404, "run not found")
+    from phi_core.control.policy import CapabilityPolicy
+    from phi_core.control.store import MongoControlStore
+    from phi_core.control.superorchestrator import SuperOrchestrator
+    from phi_core.control.tasks import TaskService
+    from phi_core.control.workflow import WorkflowError
+
+    control_store = MongoControlStore(db)
+    try:
+        await SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(None))).set_hold(
+            run_id=run_id, reason=body.reason,
+        )
+    except WorkflowError as exc:
+        raise HTTPException(404, "run not found") from exc
     await _record_hold_trace_event(
         db, run_id=run_id, session_id=body.session_id, principal=principal, reason=body.reason, action="hold_set",
     )
@@ -1387,9 +1405,19 @@ async def admin_clear_hold(session_id: str, reason: str = "", principal: str = D
     run_id = doc.get("_pipeline_run_id")
     if not run_id:
         raise HTTPException(409, "session has no durable run to clear a hold from")
-    result = await db.workflow_runs.update_one({"run_id": run_id}, {"$set": {"hold": ""}})
-    if not getattr(result, "matched_count", 0):
-        raise HTTPException(404, "run not found")
+    from phi_core.control.policy import CapabilityPolicy
+    from phi_core.control.store import MongoControlStore
+    from phi_core.control.superorchestrator import SuperOrchestrator
+    from phi_core.control.tasks import TaskService
+    from phi_core.control.workflow import WorkflowError
+
+    control_store = MongoControlStore(db)
+    try:
+        await SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(None))).clear_hold(
+            run_id=run_id,
+        )
+    except WorkflowError as exc:
+        raise HTTPException(404, "run not found") from exc
     await _record_hold_trace_event(
         db, run_id=run_id, session_id=session_id, principal=principal, reason=reason, action="hold_cleared",
     )
@@ -2708,6 +2736,8 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
                 "export_paths": "",
                 "cancel_requested": "",
                 "cancel_requested_at": "",
+                "reversal_key_blob": "",
+                "reversal_key_created_at": "",
             },
         },
     )
@@ -2732,9 +2762,10 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
     from phi_core.control.tasks import TaskService
 
     control_store = MongoControlStore(db)
-    workflow_run = await SuperOrchestrator(
+    orchestrator_service = SuperOrchestrator(
         control_store, TaskService(control_store, CapabilityPolicy(cfg))
-    ).start_run(
+    )
+    workflow_run = await orchestrator_service.start_run(
         session_id=sid,
         principal=principal,
         run_type="study",
@@ -2746,7 +2777,7 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
     for file_record in session.get("files") or []:
         file_record["opaque_file_id"] = opaque.to_opaque("file", file_record["file_id"])
     await db.sessions.update_one({"id": sid, "_pipeline_run_id": run_id}, {"$set": {"files": session.get("files") or []}})
-    await db.workflow_runs.update_one({"run_id": run_id}, {"$set": {"opaque_map": workflow_run.opaque_map}})
+    await orchestrator_service.record_opaque_map(run_id=run_id, opaque_map=workflow_run.opaque_map)
 
     # Phase 5 step 2/9: the route owns its legacy session admission claim
     # and then submits the command. SuperOrchestrator owns the WorkflowRun

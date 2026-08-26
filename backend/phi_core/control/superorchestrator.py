@@ -524,6 +524,47 @@ class SuperOrchestrator:
                 return True
         raise WorkflowError(f"could not record acceptance for task_id={task_id!r} after retries")
 
+    # ---- run metadata --------------------------------------------------
+
+    async def set_hold(self, *, run_id: str, reason: str) -> WorkflowRun:
+        """Persist a retention hold through the workflow run's CAS boundary."""
+        for _ in range(10):
+            run = await self._load_run(run_id)
+            if run.hold == reason:
+                return run
+            updated = run.model_copy(update={"hold": reason, "updated_at": _now()})
+            if await self._store.compare_and_set(
+                "workflow_runs", {"run_id": run_id}, {"updated_at": run.updated_at}, updated
+            ):
+                return updated
+        raise WorkflowError(f"could not set hold for run_id={run_id!r} after retries")
+
+    async def clear_hold(self, *, run_id: str) -> WorkflowRun:
+        """Clear a retention hold through the workflow run's CAS boundary."""
+        for _ in range(10):
+            run = await self._load_run(run_id)
+            if not run.hold:
+                return run
+            updated = run.model_copy(update={"hold": "", "updated_at": _now()})
+            if await self._store.compare_and_set(
+                "workflow_runs", {"run_id": run_id}, {"updated_at": run.updated_at}, updated
+            ):
+                return updated
+        raise WorkflowError(f"could not clear hold for run_id={run_id!r} after retries")
+
+    async def record_opaque_map(self, *, run_id: str, opaque_map: dict[str, str]) -> WorkflowRun:
+        """Persist the run's opaque identifiers through the CAS boundary."""
+        for _ in range(10):
+            run = await self._load_run(run_id)
+            if run.opaque_map == opaque_map:
+                return run
+            updated = run.model_copy(update={"opaque_map": dict(opaque_map), "updated_at": _now()})
+            if await self._store.compare_and_set(
+                "workflow_runs", {"run_id": run_id}, {"updated_at": run.updated_at}, updated
+            ):
+                return updated
+        raise WorkflowError(f"could not record opaque map for run_id={run_id!r} after retries")
+
     # ---- recover ------------------------------------------------------
 
     async def recover(self, *, run_id: str, cause: str) -> WorkflowRun:

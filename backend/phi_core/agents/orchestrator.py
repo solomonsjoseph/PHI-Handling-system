@@ -67,6 +67,11 @@ PhaseCb = Callable[[str, dict[str, Any]], Awaitable[None]]
 class PipelineCancelled(Exception):
     """Raised by the orchestrator when the operator requested cancel."""
 
+class ResultAcceptanceError(Exception):
+    """Raised when SuperOrchestrator.accept_result refuses a completed
+    child's result (D9/D5: 'child success is not acceptance'). A caller
+    must never treat an unaccepted result as authoritative."""
+
 
 def _blocking_issues(sentinel_out: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the sentinel issues whose severity is 'blocking'.
@@ -223,23 +228,18 @@ async def execute_decisions(
     Reached identically whether ``gate_decisions`` transitioned here
     directly (``proceed``: a fresh run with no ``human_review`` decisions
     left) or via ``human_review_decisions`` (``resolved``: a resume,
-    possibly with some columns still deferred through ``omit_by_file``)
-    -- the exact D9 property (``docs/adr/0001-workflow-engine.md``) that
-    lets a caller delete a separate resume-only reimplementation of this
-    tail rather than keep two divergent copies in sync by hand.
-
-    ``extra_completion_fields``/``extra_result_fields`` are merged into
-    the terminal (complete/partially_complete) completion write and
-    returned result only -- not into the blocked/escalated early-exit
-    writes, matching what both call sites already needed independently
-    before this extraction (a fresh run's ``advisory_issues``/
-    ``iteration_cap``; a human-review resume's ``session_review``/
-    ``pending_review``/``human_review_required``).
+    possibly with some columns still deferred through ``omit_by_file``).
     """
+    async def require_accepted(ctx: AgentContext, result: dict[str, Any], agent: str) -> None:
+        if not await complete_and_accept(ctx, result):
+            raise ResultAcceptanceError(f"{agent} result was not accepted")
+
     await on_phase("executor", {"decision_count": len(decisions)})
     try:
-        exec_out = await Executor(await make_ctx("Executor")).run(
+        executor_ctx = await make_ctx("Executor")
+        exec_out = await Executor(executor_ctx).run(
             files=files, decisions=decisions, omit_by_file=omit_by_file)
+        await require_accepted(executor_ctx, exec_out, "Executor")
     except Exception as exc:
         # Executor is deterministic and irreversible (writes exports to disk);
         # a crash here must never be papered over by an LLM's advice.
@@ -266,8 +266,8 @@ async def execute_decisions(
 
     # Scout has no dependency on Operator, Reviewer, Publish Guard, or
     # Auditor, so it starts here and runs in the background across all of
-    # them; only Ledger/Herald actually need its result.
-    scout_agent = Scout(await make_ctx("Scout"))
+    scout_ctx = await make_ctx("Scout")
+    scout_agent = Scout(scout_ctx)
     scout_task = asyncio.create_task(scout_agent.run())
 
     # Operator: deterministic self-verification of what Executor wrote,
@@ -276,10 +276,11 @@ async def execute_decisions(
     # of what it wrote and is never mutated here; `exports` is the
     # Operator-then-Reviewer-filtered view every later step in this
     # function uses.
-    await on_phase("operator", {"decision_count": len(decisions)})
     try:
-        op_out = await Operator(await make_ctx("Operator")).run(
+        operator_ctx = await make_ctx("Operator")
+        op_out = await Operator(operator_ctx).run(
             files=files, decisions=decisions, exports=exec_out["exports"], omit_by_file=omit_by_file)
+        await require_accepted(operator_ctx, op_out, "Operator")
     except Exception as exc:
         # Fail open into the existing failed-file machinery: a file Operator
         # cannot verify is dropped from exports exactly like an unreadable
@@ -302,14 +303,15 @@ async def execute_decisions(
     # (e.g. an omit_by_file column that leaked into the header). Its own
     # filtered exports become canonical for every remaining step below,
     # starting with Publish Guard.
-    await on_phase("reviewer", {"decision_count": len(decisions)})
     try:
-        rv_out = await Reviewer(await make_ctx("Reviewer")).run(
+        reviewer_ctx = await make_ctx("Reviewer")
+        rv_out = await Reviewer(reviewer_ctx).run(
             decisions=decisions,
             operator_result={"failed_file_ids": op_failed_ids, "verdicts": op_out["verdicts"]},
             exports=exports,
             omit_by_file=omit_by_file,
         )
+        await require_accepted(reviewer_ctx, rv_out, "Reviewer")
     except Exception as exc:
         # Same fail-open shape as Operator above: an unverifiable file is
         # dropped from exports, never trusted.
@@ -373,6 +375,11 @@ async def execute_decisions(
         # every column of the only dataset is still deferred). This is a
         # legitimate empty-so-far state, not a leak.
         guard_report = {"status": "clean", "results": [], "scanned": 0, "blocked": 0}
+    if store is not None and run_id and guard_report.get("results"):
+        from phi_core.control.artifacts import ArtifactService, register_guard_rejections
+        await register_guard_rejections(
+            ArtifactService(store, session_id=sid, run_id=run_id), guard_report=guard_report,
+        )
     await on_phase("publish_guard", {"status": guard_report["status"],
                                      "scanned": guard_report["scanned"],
                                      "blocked": guard_report["blocked"]})
@@ -508,6 +515,9 @@ async def execute_decisions(
         await make_child_ctx("Ledger.Aggregate", ledger_ctx.task_id),
         complete_and_accept=complete_and_accept,
     ).run(decisions=decisions, audit=audit, scout=scout, benchmark_result=benchmark)
+    if ledger_ctx.tasks is not None:
+        await ledger_ctx.tasks.complete(ledger)
+    await require_accepted(ledger_ctx, ledger, "Ledger")
 
     await _check_cancel(db, sid, on_phase)
 
@@ -522,6 +532,9 @@ async def execute_decisions(
         await make_child_ctx("Herald.Sections", herald_ctx.task_id),
         complete_and_accept=complete_and_accept,
     ).run(ledger=ledger, audit=audit, target_venue=session.get("target_venue") or "JAMIA Open")
+    if herald_ctx.tasks is not None:
+        await herald_ctx.tasks.complete(herald)
+    await require_accepted(herald_ctx, herald, "Herald")
 
     await close_last_phase()
     manager_report = await manager.close_run(final_status)
@@ -571,6 +584,7 @@ async def run_pipeline(
     on_phase: PhaseCb,
     run_id: str | None = None,
     control_store: "ControlStore | None" = None,
+    root_task_id: str | None = None,
 ) -> dict[str, Any]:
     from phi_core.control.gates import DecisionGateFailure, run_decision_gates
 
@@ -583,14 +597,10 @@ async def run_pipeline(
     form_files = [f for f in files if f["kind"] == "narrative"]
     dict_files = [f for f in files if f["kind"] == "metadata"]
 
-    # Sir Q "Live Wallclock Measurement": capture wallclock per phase so the
-    # UI can render per-phase seconds and operators can prove the parallel
-    # launch actually saved time. Wrap the caller's `on_phase` in a timer
-    # that stamps `start` on first visit and `end` on the next visit.
     _phase_timings: dict[str, dict[str, float]] = {}
     _last_phase: dict[str, str | None] = {"key": None, "t0": 0.0}
     _run_started = time.perf_counter()
-    _original_on_phase = on_phase  # capture before we rebind below
+    _original_on_phase = on_phase
 
     async def timed_on_phase(phase: str, payload: dict[str, Any]) -> None:
         now = time.perf_counter()
@@ -616,22 +626,25 @@ async def run_pipeline(
         row.setdefault("end_s", now - _run_started)
         row.setdefault("duration_ms", (now - _last_phase["t0"]) * 1000)
 
-    # Alias so all existing calls to `on_phase(...)` inside this function
-    # go through the timer. External callers still see the original cb.
-    on_phase = timed_on_phase  # rebinding is intentional
-
-    # Sir Q "Sentinel Iteration Cap Tuner": allow per-run rigor. Fast=1,
-    # Balanced=2, Thorough=3. Falls back to the module default when the
-    # session doc doesn't specify one.
+    on_phase = timed_on_phase
     iteration_cap = int(session.get("iteration_cap") or ITERATION_CAP)
     iteration_cap = max(1, min(iteration_cap, ITERATION_CAP))
 
     factory = ActivationFactory(db, llm_cfg, store=control_store)
     effective_run_id = run_id or session.get("_pipeline_run_id") or sid
-
     _manager_box: dict[str, "Manager | None"] = {"value": None}
 
     async def make_ctx(agent: str) -> AgentContext:
+        if root_task_id:
+            return await factory.activate_child(
+                session_id=sid,
+                run_id=effective_run_id,
+                parent_task_id=root_task_id,
+                agent=agent,
+                emit=emit,
+                manager=_manager_box["value"],
+                lease_owner=f"pipeline:{effective_run_id}",
+            )
         return await factory.activate(
             session_id=sid,
             run_id=effective_run_id,
@@ -642,10 +655,6 @@ async def run_pipeline(
         )
 
     async def make_child_ctx(agent: str, parent_task_id: str) -> AgentContext:
-        """D5 plan step 5: Ledger.Compare/Aggregate and Herald.Abstract/
-        Sections are the pipeline's only genuine sub-agent delegation --
-        every other activation is a direct child of the root Pipeline
-        task. Durable child work, not a bare root enqueue."""
         return await factory.activate_child(
             session_id=sid,
             run_id=effective_run_id,
@@ -659,14 +668,19 @@ async def run_pipeline(
     async def complete_and_accept(ctx: AgentContext, result: dict[str, Any]) -> bool:
         return await factory.complete_and_accept(ctx, result)
 
+    async def require_accepted(ctx: AgentContext, result: dict[str, Any], agent: str) -> None:
+        if not await complete_and_accept(ctx, result):
+            raise ResultAcceptanceError(f"{agent} result was not accepted")
+
     manager = Manager(await make_ctx("Manager"), db=db)
     _manager_box["value"] = manager
-    await manager.run(
+    manager_result = await manager.run(
         roster=["Lexicon", "Schema", "Instrument", "Statute", "Praxis", "Judge",
                 "Sentinel", "Executor", "Auditor", "Scout", "Ledger", "Herald"],
         phase_plan=["specialists", "statute", "praxis", "judge_iter", "sentinel_iter",
                     "executor", "publish_guard", "auditor_scout", "ledger", "herald"],
     )
+    await require_accepted(manager.ctx, manager_result, "Manager")
 
     # 1+2+2b. Specialists, Statute, and Praxis kicked off IN PARALLEL.
     #
@@ -698,13 +712,20 @@ async def run_pipeline(
             if ctx.tasks is not None:
                 await ctx.tasks.fail(f"agent_crashed:{type(exc).__name__}")
             raise
+        result = result if isinstance(result, dict) else {}
         if ctx.tasks is not None:
-            await ctx.tasks.complete(result if isinstance(result, dict) else {})
+            await ctx.tasks.complete(result)
+        await require_accepted(ctx, result, "Praxis")
         return result
 
-    statute_task = asyncio.create_task(
-        Statute(await make_ctx("Statute")).run(jurisdiction=session.get("jurisdiction", "us"))
-    )
+    async def _statute_run() -> dict[str, Any]:
+        ctx = await make_ctx("Statute")
+        agent = Statute(ctx)
+        result = await agent.run(jurisdiction=session.get("jurisdiction", "us"))
+        await require_accepted(ctx, result, "Statute")
+        return result
+
+    statute_task = asyncio.create_task(_statute_run())
     praxis_gather_task = asyncio.gather(
         *[_praxis_method(category) for category in hipaa_cats],
         return_exceptions=True,
@@ -714,13 +735,22 @@ async def run_pipeline(
     # enriches its prompt from Lexicon's dictionary columns (Task 6 made
     # Schema deterministic) -- Lexicon, Schema and Instrument all launch
     # under one gather instead of Schema waiting on Lexicon.
-    lexicon_agent = Lexicon(await make_ctx("Lexicon")) if dict_files else None
-    schema_agent = Schema(await make_ctx("Schema")) if dataset_files else None
-    instrument_agent = Instrument(await make_ctx("Instrument")) if form_files else None
+    lexicon_ctx = await make_ctx("Lexicon") if dict_files else None
+    schema_ctx = await make_ctx("Schema") if dataset_files else None
+    instrument_ctx = await make_ctx("Instrument") if form_files else None
+    lexicon_agent = Lexicon(lexicon_ctx) if lexicon_ctx else None
+    schema_agent = Schema(schema_ctx) if schema_ctx else None
+    instrument_agent = Instrument(instrument_ctx) if instrument_ctx else None
     lex_task = lexicon_agent.run(dict_files=dict_files) if lexicon_agent else _empty({"columns": [], "notes": ""})
     schema_task = schema_agent.run(dataset_files=dataset_files) if schema_agent else _empty({"columns": []})
     inst_task = instrument_agent.run(form_files=form_files) if instrument_agent else _empty({"fields": []})
     lexicon, schema, instrument = await asyncio.gather(lex_task, schema_task, inst_task)
+    if lexicon_agent:
+        await require_accepted(lexicon_ctx, lexicon, "Lexicon")
+    if schema_agent:
+        await require_accepted(schema_ctx, schema, "Schema")
+    if instrument_agent:
+        await require_accepted(instrument_ctx, instrument, "Instrument")
     # Deterministic guardian query broker: Manager holds the only reference
     # to each specialist for targeted ask_schema/ask_instrument/ask_lexicon
     # lookups, attached only when that specialist actually ran.
@@ -749,8 +779,9 @@ async def run_pipeline(
         praxis_methods[cat] = res
 
     # 3. Judge <-> Sentinel loop -- short-circuits on 0 blocking issues.
-    judge = Judge(await make_ctx("Judge"))
-    sentinel = Sentinel(await make_ctx("Sentinel"))
+    judge_call_failures = 0
+    sentinel_call_failures = 0
+    last_judge_message_id: str | None = None
     prior_feedback = ""
     approved_decisions: list[dict[str, Any]] = []
     advisory_issues: list[dict[str, Any]] = []
@@ -776,9 +807,14 @@ async def run_pipeline(
     for iteration in range(1, max_iterations + 1):
         await _check_cancel(db, sid, on_phase)
         await on_phase(f"judge_iter_{iteration}", {"iteration": iteration})
+        judge_ctx = await make_ctx("Judge")
+        judge = Judge(judge_ctx)
         j = await judge.run(schema=schema, instrument=instrument, lexicon=lexicon,
                             statute=statute, praxis=praxis_methods,
                             prior_feedback=prior_feedback)
+        await require_accepted(judge_ctx, j, "Judge")
+        judge_call_failures += judge.call_failures
+        last_judge_message_id = judge.last_message_id
         decisions = j.get("decisions", [])
         # 2.10: coerce any model-proposed action/subject/category outside the
         # executable vocabulary to the fail-closed default before the hard-rule
@@ -867,8 +903,12 @@ async def run_pipeline(
                            {"iteration": iteration, "overrides": floor_overrides})
         await _check_cancel(db, sid, on_phase)
         await on_phase(f"sentinel_iter_{iteration}", {"iteration": iteration, "decision_count": len(decisions)})
+        sentinel_ctx = await make_ctx("Sentinel")
+        sentinel = Sentinel(sentinel_ctx)
         s = await sentinel.run(decisions=decisions, statute=statute, instrument=instrument,
-                               parent_id=judge.last_message_id)
+                               parent_id=last_judge_message_id)
+        await require_accepted(sentinel_ctx, s, "Sentinel")
+        sentinel_call_failures += sentinel.call_failures
         # Sentinel-originated escalation: genuine ambiguity Sentinel can't
         # correct itself. Applied immediately -- these columns skip the
         # remaining Judge iterations rather than looping.
@@ -940,15 +980,15 @@ async def run_pipeline(
                         "blocking_count": len(blocking),
                         "advisory_count": len(advisory_issues),
                         "decision_count": len(decisions),
-                        "judge_call_failures": judge.call_failures,
-                        "sentinel_call_failures": sentinel.call_failures})
+                        "judge_call_failures": judge_call_failures,
+                        "sentinel_call_failures": sentinel_call_failures})
             if advice.action == "escalate_human_review":
                 manager_early_escalation = True
                 break
 
     llm_failures = {
-        "judge": judge.call_failures,
-        "sentinel": sentinel.call_failures,
+        "judge": judge_call_failures,
+        "sentinel": sentinel_call_failures,
         "empty_decisions": not decisions,
     }
 
@@ -982,14 +1022,20 @@ async def run_pipeline(
         # A fresh real activation, not `judge.ctx`: a test double can
         # (and does) stand in for `Judge` without retaining `.ctx`, and
         # this stamp is bookkeeping only -- `run_decision_gates` never
-        # calls the gateway this context carries.
-        ctx=await make_ctx("Judge"),
-        # No durable `store`: nothing yet opens a `WorkflowRun` for this
-        # session (control/runs.py::RunStore.open_run is not wired into
-        # the pipeline until Phase 4/5's SuperOrchestrator), and
-        # `_next_decision_version` requires one to exist. `decision_version`
-        # is therefore 0 here, not a persisted monotonic counter, until
-        # that wiring lands.
+        # calls the gateway this context carries. Deliberately calls
+        # `factory.activate` directly rather than `make_ctx` (which would
+        # otherwise route it through `activate_child` under the root
+        # Pipeline task): this stamp has no root task to be a child of
+        # and is intentionally out of scope for the D5 child-of-root
+        # wiring in this step.
+        ctx=await factory.activate(
+            session_id=sid,
+            run_id=effective_run_id,
+            agent="Judge",
+            emit=emit,
+            manager=_manager_box["value"],
+            lease_owner=f"pipeline:{effective_run_id}",
+        ),
     )
     for gate_result in gate_outcome.gate_results:
         await factory.store.insert("gate_results", gate_result)
@@ -1020,11 +1066,11 @@ async def run_pipeline(
     human_needed = any(d.get("action") == "human_review" for d in approved_decisions)
     if human_needed:
         reasons.append("decision_routed_human_review")
-    if judge.call_failures or sentinel.call_failures or not decisions:
+    if judge_call_failures or sentinel_call_failures or not decisions:
         human_needed = True
-        if judge.call_failures:
+        if judge_call_failures:
             reasons.append("judge_call_failure")
-        if sentinel.call_failures:
+        if sentinel_call_failures:
             reasons.append("sentinel_call_failure")
         if not decisions:
             reasons.append("empty_decisions")
