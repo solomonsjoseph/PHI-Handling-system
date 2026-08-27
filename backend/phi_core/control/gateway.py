@@ -18,6 +18,7 @@ from . import limits
 from .egress import _STRUCTURAL_KEYS, canonical_payload, egress_digest
 from .policy import BudgetExceeded, CapabilityDenied, CapabilityPolicy
 from .records import CapabilityGrant, DataClass, TraceEvent
+from .secrets_scan import contains_secret
 from .runs import check_run_budget, record_grant_tool_usage, record_run_usage
 from .store import ControlStore
 from .workflow import WorkflowError
@@ -61,6 +62,7 @@ class GatewayRequest:
     max_tokens: int
     max_cost_usd: float
     policy_version: str
+    prompt_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -213,6 +215,8 @@ class ProviderGateway:
             tools, _ = _scrub(tools)
             if _contains_restricted_content(messages) or _contains_restricted_content(tools):
                 return self._denied(req, "unresolved_restricted_content")
+            if contains_secret(messages) or contains_secret(tools):
+                return self._denied(req, "secret_detected")
         except BudgetExceeded as exc:
             reason = scrub_persisted_text(str(exc))
             await self._record_budget_denial(req, reason)

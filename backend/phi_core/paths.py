@@ -83,6 +83,11 @@ EVIDENCE_DIR = DATA_DIR / "evidence"
 REVERSAL_DIR = DATA_DIR / "reversal"
 PUBLISHED_DIR = DATA_DIR / "published"
 CACHE_DIR = DATA_DIR / "cache"
+# Phase 2A (docs/MASTER_ARCHITECTURE_V2.md #21, local reference doc, never
+# committed): per-run isolated raw-processing workspace root. Overridable so
+# a deployment can point it at ephemeral/encrypted storage distinct from
+# DATA_DIR without code changes.
+SANDBOX_DIR = Path(os.environ.get("PHI_SANDBOX_DIR", str(DATA_DIR / "sandbox")))
 for _d in (
     UPLOAD_DIR,
     CHATGPT_TOKEN_DIR,
@@ -91,6 +96,7 @@ for _d in (
     REVERSAL_DIR,
     PUBLISHED_DIR,
     CACHE_DIR,
+    SANDBOX_DIR,
 ):
     _d.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(_d, 0o700)

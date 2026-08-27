@@ -207,6 +207,11 @@ class WorkflowRun(ControlRecord):
     usage: ResourceUsage = Field(default_factory=ResourceUsage)
     opaque_map: dict[str, str] = Field(default_factory=dict)
     outbox: list[OutboxEntry] = Field(default_factory=list)
+    # Phase 2C (v3 #68): rollup of the trace hash chain, written by
+    # ``events.seal_range``/``seal_and_archive_range`` once a range is
+    # sealed. WorkflowRun is this codebase's RunManifest -- no separate
+    # RunManifest record exists or is needed for this one field.
+    trace_root_hash: str = ""
 
 
 class WorkItem(ControlRecord):
@@ -517,6 +522,22 @@ class TraceEvent(ControlRecord):
     prev_hash: str = ""
     hash: str = ""
     ts: str = Field(default_factory=_now)
+    # Phase 2C (v3 #65 schema-gap closure): genuinely missing fields, added
+    # rather than renaming any field above -- this codebase's existing
+    # names (outcome/retry_category/gateway_decision/agent_version/etc.)
+    # stay canonical; see the module docstring's Phase 1 addendum.
+    trace_id: str = ""
+    model_version: str = ""
+    prompt_template_version: str = ""
+    handoff_id: str = ""
+    sanitized_rationale: str = ""
+    alternatives_considered: list[str] = Field(default_factory=list)
+    authorization_result: str = ""
+    failure_class: str = ""
+    error_code: str = ""
+    correction_number: int = 0
+    previous_state: str = ""
+    new_state: str = ""
 
 
 class RunPrivacyPolicy(FrozenControlRecord):
@@ -655,6 +676,30 @@ class VerifiedClassificationManifest(ControlRecord):
         return value
 
 
+SandboxState = Literal["active", "destroyed", "destroy_failed"]
+
+
+class SandboxRecord(ControlRecord):
+    """Per-run isolated raw-processing workspace (docs #21, local reference
+    doc, never committed): what ``control.sandbox.SandboxManager`` hands
+    back from ``create_sandbox``/``destroy_sandbox``. Not a
+    ``FrozenControlRecord``: ``state``/``destroyed_at`` update in place as
+    the same sandbox is torn down, rather than minting a new id per
+    transition."""
+
+    sandbox_id: str = Field(default_factory=_id)
+    run_id: str
+    workspace_path: str
+    state: SandboxState = "active"
+    max_cpu_seconds: int
+    max_memory_bytes: int
+    max_wall_seconds: int
+    network_denied: bool = True
+    created_at: str = Field(default_factory=_now)
+    destroyed_at: str = ""
+    failure_details: str = ""
+
+
 class CleanupManifest(ControlRecord):
     """Session-destruction verification record (docs #77): never transitions
     a run to SESSION_DESTROYED until this reports ``verified``."""
@@ -670,3 +715,45 @@ class CleanupManifest(ControlRecord):
     storage_sanitization_status: Literal["pending", "complete", "failed"] = "pending"
     verification_status: Literal["pending", "verified", "failed"] = "pending"
     failure_details: str = ""
+
+
+# Phase 2E (target-architecture reconciliation, local reference doc
+# docs/MASTER_ARCHITECTURE_V2.md section 7 "headers and variable names" and
+# section 22 "SourceProjectionGateway", never committed): the audit found no
+# header-specific sensitivity classification and no staged
+# extraction/classification/safety-check/normalization/projection pipeline
+# for study-derived content. These two records are the typed output of that
+# gap's deterministic gate/pipeline (``control.source_projection``); neither
+# is wired into the live agent pipeline yet (later phase's scope).
+
+SourceContentType = Literal["header", "dictionary", "mapping", "form", "comment"]
+
+
+class HeaderClassification(ControlRecord):
+    """One header's disposition from the deterministic HEADER SAFETY GATE
+    (v3 section 7). ``sensitive``/``uncertain`` headers are never projected
+    to the agent plane under their literal text; ``opaque_token`` (minted by
+    ``control.opaque.OpaqueMap`` with kind ``"header"``) is what Schema sees
+    instead, matching the doc's own ``SENSITIVE_HEADER_004`` example."""
+
+    header: str
+    disposition: Literal["safe", "sensitive", "uncertain"]
+    reasons: list[str] = Field(default_factory=list)
+    opaque_token: str = ""
+
+
+class SourceProjectionResult(ControlRecord):
+    """One document's pass through the staged SourceProjectionGateway
+    pipeline (v3 section 22): classification, PHI/PII/secret safety check,
+    untrusted-content normalization, and the resulting purpose-specific
+    projection. ``blocked`` is set (and ``projected_text`` left empty) when
+    an anchored credential/secret shape survives the PHI scrub -- that
+    content is never handed to an agent, full stop, regardless of
+    ``content_type``."""
+
+    content_type: SourceContentType
+    run_id: str
+    disposition: Literal["safe", "sensitive", "uncertain"]
+    reasons: list[str] = Field(default_factory=list)
+    projected_text: str = ""
+    blocked: bool = False

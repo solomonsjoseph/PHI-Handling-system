@@ -11,7 +11,7 @@ from phi_core.crypto import egress_digest_key
 if TYPE_CHECKING:
     from .gateway import GatewayRequest
 
-EGRESS_SCHEMA_VERSION = 1
+EGRESS_SCHEMA_VERSION = 2
 
 # Keys which describe gateway protocol structure rather than untrusted content.
 _STRUCTURAL_KEYS = frozenset(
@@ -42,6 +42,7 @@ def canonical_payload(
     payload = {
         "egress_schema": EGRESS_SCHEMA_VERSION,
         "policy_version": request.policy_version,
+        "prompt_version": request.prompt_version,
         "identity": {
             "session_id": request.session_id,
             "run_id": request.run_id,

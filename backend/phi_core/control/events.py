@@ -37,6 +37,7 @@ from uuid import uuid4
 
 from .records import TraceEvent
 from .store import ControlStore
+from .trace_sanitizer import sanitize_payload
 
 MAX_SEQ_ALLOCATION_RETRIES = 8
 
@@ -123,9 +124,13 @@ class TraceEventStore:
         seq = await self._allocate_seq()
         prev = await self._store.get_one("trace_events", {"run_id": self._run_id, "seq": seq - 1}) if seq else None
         prev_hash = prev["hash"] if prev else ""
+        # D66: sanitize before hashing/insertion, never raw-then-redact --
+        # the sanitized payload is what gets chained, so the hash itself
+        # attests to the sanitized content, not the pre-sanitized input.
         candidate = event.model_copy(update={
             "run_id": self._run_id, "session_id": self._session_id, "seq": seq,
             "fence": checked_fence, "prev_hash": prev_hash, "hash": "",
+            "payload": sanitize_payload(event.payload),
         })
         payload = candidate.model_dump(mode="json")
         payload.pop("hash")
@@ -157,6 +162,20 @@ class TraceEventStore:
             "archive_artifact_id": archive_artifact_id,
         }
         await self._store.insert("trace_segments", segment)
+        # D68: roll the sealed segment's proof up onto WorkflowRun
+        # (this codebase's RunManifest) as `trace_root_hash`. Best-effort,
+        # matching `_allocate_seq`'s own posture toward a run with no
+        # durable WorkflowRun document (unit-test fixture / pre-D9 run):
+        # sealing still succeeds, it just has nowhere to roll the hash up
+        # to.
+        run = await self._store.get_one("workflow_runs", {"run_id": self._run_id})
+        if run is not None:
+            updated_run = dict(run)
+            updated_run["trace_root_hash"] = last["hash"]
+            await self._store.compare_and_set(
+                "workflow_runs", {"run_id": self._run_id},
+                {"trace_root_hash": run.get("trace_root_hash", "")}, updated_run,
+            )
         return segment
 
     async def seal_and_archive_range(self, *, from_seq: int, to_seq: int, artifact_service: Any) -> dict[str, Any]:

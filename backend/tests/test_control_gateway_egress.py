@@ -45,7 +45,7 @@ def test_egress_digest_binds_identity_decision_messages_and_tools(monkeypatch: p
     denied = canonical_payload(request=req, decision={"status": "denied", "denial_reason": "tool_denied"}, messages=messages, tools=tools)
 
     assert egress_digest(allowed) != egress_digest(denied)
-    assert b'"egress_schema":1' in allowed
+    assert b'"egress_schema":2' in allowed
 
 
 def test_opaque_tokens_are_run_scoped_and_fail_closed_for_unknown(monkeypatch: pytest.MonkeyPatch) -> None:

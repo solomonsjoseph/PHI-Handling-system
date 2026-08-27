@@ -73,3 +73,8 @@ MAX_CHECKPOINT_PAYLOAD_REFS = _int_env("MAX_CHECKPOINT_PAYLOAD_REFS", 16)
 # (`server.py::_startup_maintenance`), not just the application-level
 # staleness check `StoreResearchCache.get` performs before that.
 WEB_CACHE_REFRESH_DAYS = _int_env("WEB_CACHE_REFRESH_DAYS", 7)
+# Phase 2A sandbox ceilings (docs #21): bound the raw-data worker process
+# SandboxManager spawns, independent of the task-queue budgets above.
+MAX_SANDBOX_CPU_SECONDS = _int_env("MAX_SANDBOX_CPU_SECONDS", 60)
+MAX_SANDBOX_MEMORY_BYTES = _int_env("MAX_SANDBOX_MEMORY_BYTES", 1073741824)
+MAX_SANDBOX_WALL_SECONDS = _int_env("MAX_SANDBOX_WALL_SECONDS", 120)
