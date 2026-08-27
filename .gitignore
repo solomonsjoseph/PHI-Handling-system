@@ -130,6 +130,7 @@ intake-v3-final
 /docs/assurance/
 /docs/superpowers/
 /design_guidelines.json
+/docs/MASTER_ARCHITECTURE_V2.md
 
 # Generated API reference (python backend/scripts/export_openapi.py)
 /docs/API.md
