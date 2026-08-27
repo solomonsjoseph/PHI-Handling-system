@@ -134,3 +134,6 @@ intake-v3-final
 
 # Generated API reference (python backend/scripts/export_openapi.py)
 /docs/API.md
+
+
+spec.md
