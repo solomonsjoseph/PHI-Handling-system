@@ -56,7 +56,7 @@ Browser (Wizard.jsx / SessionDetail.jsx)
 One `Manager` instance wraps the whole run as a supervisory sidecar: LLM-backed for
 execution-health decisions only (retry/extend/web-search/escalate), with its own `Agent` prompt
 explicitly walling it off from PHI/decision content. Agent lifecycle (activation, completion,
-acceptance) is owned by `ActivationFactory`, called from the orchestrator — not by Manager or the
+acceptance) is owned by `ActivationFactory`, called from the orchestrator, not by Manager or the
 agents themselves. There is one lifecycle owner (`orchestrator.py::run_pipeline` /
 `execute_decisions`), not competing orchestrators.
 
@@ -111,7 +111,7 @@ fields. Resumption re-enters the same `execute_decisions` function used for a fr
 
 **Executor is the sole writer.** Only `Executor.run()` (`reasoning.py:1178`) calls
 `tmp_path.write_text`, staged through `ArtifactWriter`/`ArtifactRecord`. Operator
-(`operator.py:104,130`) and Reviewer (`reviewer.py:41,71,135`) contain no write calls — they only
+(`operator.py:104,130`) and Reviewer (`reviewer.py:41,71,135`) contain no write calls: they only
 read Executor's output and verify it against approved decisions.
 
 **Cleanup covers both explicit deletion and crash/abandonment.** `DELETE /api/sessions/{sid}`
@@ -128,7 +128,7 @@ deleted). Cleanup is not happy-path-only.
 
 All LLM inference funnels through exactly one call site: `ProviderGateway.complete` in
 `backend/phi_core/control/gateway.py` (`litellm.completion`, line 397). `agents/llm.py` is
-config/parsing only — its own docstring states inference is "intentionally implemented only by
+config/parsing only, its own docstring states inference is "intentionally implemented only by
 `phi_core.control.gateway`." Every agent reaches the gateway through the shared base class
 (`agents/base.py:245`, `Agent.call` -> `self.ctx.gateway.complete`). A repo-wide search for direct
 `litellm`/`openai.`/`anthropic.Client` usage outside `control/gateway.py` found no hits in
@@ -140,10 +140,10 @@ config/parsing only — its own docstring states inference is "intentionally imp
 The legacy `agent_log` collection is retired: `control/migrate.py:274-321` migrates any remaining
 rows into `trace_events` and deletes the source. Current writes go through `Agent._log`
 (`base.py:164-219`) into `TraceEvent` (`control/records.py:447-499`), whose schema has no field for
-raw prompt/completion text — only provider/model/endpoint, usage/cost/latency, tool
+raw prompt/completion text, only provider/model/endpoint, usage/cost/latency, tool
 request/exec/result status, data-class, outcome, egress digest, and gateway decision. Every
 `payload=` call site scanned across `agents/*.py` carries only counts, error strings/types, and
-identifiers (e.g. `{"identifiers_removed": n}`, `{"header_count": len(headers)}`) — never raw LLM
+identifiers (e.g. `{"identifiers_removed": n}`, `{"header_count": len(headers)}`), never raw LLM
 text. One caveat: a comment in `records.py:457-465` references future intent for these fields to
 support reconstructing a full prompt/reply trace panel; no such implementation exists today, so
 this is aspirational, not a present leak.
@@ -169,7 +169,7 @@ Sources:
 
 ## 10. Baseline test results
 
-`NOT RUN — MongoDB unreachable in this environment.` `PYTHONDONTWRITEBYTECODE=1 python -m pytest
+`NOT RUN: MongoDB unreachable in this environment.` `PYTHONDONTWRITEBYTECODE=1 python -m pytest
 -q -p no:cacheprovider tests/` was launched with a 600s timeout and produced zero output before
 being killed (exit 143). A direct `pymongo` ping against the configured `MONGO_URL` failed with
 `ServerSelectionTimeoutError`, confirming the suite was hung waiting on a database connection, not
@@ -192,10 +192,10 @@ satisfied by `main` as audited above. Real gaps found:
   worth resolving explicitly (delete the comment, or implement it deliberately with its own
   redaction pass) before anyone builds against the comment's stated intent.
 - **No production Mongo available in this sandbox**: blocks running the baseline suite directly
-  here. Not a repository defect — an environment gap for this audit session specifically.
+  here. Not a repository defect, an environment gap for this audit session specifically.
 
 No agent-role duplication, no competing orchestrators, no raw-PHI trace leakage, and no provider
-bypass were found — the corresponding sections of the pre-implementation prompt (raw-row access,
+bypass were found. The corresponding sections of the pre-implementation prompt (raw-row access,
 provider inventory, trace privacy, human-review authenticity, cleanup/retention) are satisfied as
 implemented.
 
