@@ -169,13 +169,23 @@ Sources:
 
 ## 10. Baseline test results
 
-`NOT RUN: MongoDB unreachable in this environment.` `PYTHONDONTWRITEBYTECODE=1 python -m pytest
--q -p no:cacheprovider tests/` was launched with a 600s timeout and produced zero output before
-being killed (exit 143). A direct `pymongo` ping against the configured `MONGO_URL` failed with
-`ServerSelectionTimeoutError`, confirming the suite was hung waiting on a database connection, not
-failing on logic. PR #15's CI (which does have a Mongo service available) passed before merge, so
-`main` is presumed green; this audit does not fabricate pass/fail counts in place of that
-unavailable evidence.
+Locally: NOT RUN. `PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider tests/` was
+launched with a 600s timeout and produced zero output before being killed (exit 143). A direct
+`pymongo` ping against the configured `MONGO_URL` failed with `ServerSelectionTimeoutError`,
+confirming the suite was hung waiting on a database connection, not failing on logic. This audit
+did not fabricate pass/fail counts in place of that unavailable evidence.
+
+Via CI (`.github/workflows/ci.yml`, which provisions a real Mongo service), on this PR
+(`gh pr checks 16`, run `33029652662`, all jobs green):
+
+- `backend` job (`Test` step): 884 passed, 28 skipped, 4 warnings, in 88.95s
+- `test` job (`Run test suite`): 996 passed, in 71.28s
+- `xls-isolation` job, pandas 2.2.3: 54 passed, in 13.03s
+- `xls-isolation` job, pandas 3.0.5: 54 passed, in 12.09s
+- `credentialed` and `frontend` jobs: pass
+
+No failures across any job. This is the real baseline evidence the pre-implementation prompt's
+Section 57 requires, superseding the local NOT RUN result above.
 
 ## 11. Gap list against target architecture
 
@@ -191,8 +201,9 @@ satisfied by `main` as audited above. Real gaps found:
   reconstruction of a full prompt/reply trace view; no such view exists today. Not a leak, but
   worth resolving explicitly (delete the comment, or implement it deliberately with its own
   redaction pass) before anyone builds against the comment's stated intent.
-- **No production Mongo available in this sandbox**: blocks running the baseline suite directly
-  here. Not a repository defect, an environment gap for this audit session specifically.
+- **No local Mongo available in this sandbox**: blocked running the baseline suite directly here;
+  resolved by pulling real pass/fail counts from this PR's CI run instead (Section 10). Not a
+  repository defect, an environment gap for this audit session specifically.
 
 No agent-role duplication, no competing orchestrators, no raw-PHI trace leakage, and no provider
 bypass were found. The corresponding sections of the pre-implementation prompt (raw-row access,
