@@ -19,7 +19,10 @@ benchmark, and manuscript draft.
 
 The zero-row-read invariant is the whole product: the LLM sees dataset
 **headers** only. Row values are read exclusively by the deterministic Executor
-and the deterministic Publish Guard.
+and the deterministic Publish Guard. One named exception: Lexicon
+(`backend/phi_core/agents/specialists.py:84-147`) sends data-dictionary/codebook
+row text (column labels and descriptions, not patient dataset rows) to the LLM,
+after `scrub_for_prompt` redacts identifiers first.
 
 Jurisdiction scope is **US-only** until end-to-end runs are consistently
 green. Within `us`, Statute researches HIPAA Safe Harbor (45 CFR 164.514) plus
