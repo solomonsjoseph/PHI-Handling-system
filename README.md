@@ -12,17 +12,36 @@ this file documents both.
 **Version:** 2.0.0
 **Address:** Sir. **Style:** no emojis, no em-dashes, cite authorities.
 
-An end-to-end PHI detection, human review, and redaction pipeline for HIPAA (US) with a Presidio + rule detector stack, human-in-the-loop review gate, and a synthetic IRB-review-ready corpus for pre-flight benchmarking.
+A study team drops in a ZIP (datasets + at least one of forms / data_dictionary /
+mappings), a 15-agent pipeline (12 original agents plus Manager, Operator, and
+Reviewer) classifies every column, applies HIPAA §164.514 Safe Harbor
+transformations deterministically, and emits an IRB-grade bundle with
+attestation, benchmark, and manuscript draft. See `CLAUDE.md`'s "PHI Console"
+section for the full agent roster, structure, and API surface -- this file
+gives the north star and operational summary; `CLAUDE.md` is the source of
+truth for the running implementation.
+
+This service is mid-migration to a new target architecture; see `CLAUDE.md`'s
+"Migration status" note. Everything below describes the current, running
+implementation.
 
 ### Core PHI safety constraint
 
-Datasets (CSV, XLSX, Parquet) expose ONLY column headers to the LLM. Row values never leave the process boundary for LLM inspection. All other files (PDF, DOCX, TXT, EML, MD) may be read fully by the LLM.
+Datasets (CSV, XLSX, Parquet) expose ONLY column headers to the LLM. Row values
+are read exclusively by the deterministic Executor and Publish Guard. One
+named exception: Lexicon sends data-dictionary/codebook row text (column
+labels and descriptions, not patient dataset rows) to the LLM, after
+`scrub_for_prompt` redacts identifiers first. All other files (PDF, DOCX)
+feed Instrument/Lexicon extraction, never raw dataset rows.
 
 ### Stack
 
-- **Backend:** FastAPI + Presidio + spaCy + Motor (MongoDB) + direct provider key (Claude Sonnet 4.5 by default).
-- **Frontend:** React operator console. Dark theme, brutalist grid, JetBrains Mono.
-- **Corpus:** Deterministic HIPAA Safe Harbor (A-R) + quasi-identifier generator, seeded, reproducible.
+- **Backend:** FastAPI + Motor (MongoDB) + LiteLLM against a direct provider
+  key (Claude Sonnet 4.5 default; OpenRouter/OpenAI/Gemini also supported).
+- **Frontend:** React operator console (Wizard, SessionDetail live trace,
+  Settings, Corpus runner).
+- **Corpus:** Deterministic HIPAA Safe Harbor (A-R) + quasi-identifier
+  generator, seeded, reproducible; datasets and dictionaries only.
 
 ### Layout
 
@@ -30,20 +49,21 @@ Datasets (CSV, XLSX, Parquet) expose ONLY column headers to the LLM. Row values 
 /app
   backend/
     server.py               FastAPI service on :8001
-    phi_core/                generators, detectors, file_readers, anonymizer, benchmark, agents/, control/
-    .env                    MONGO_URL, DB_NAME, ANTHROPIC_API_KEY, DATA_DIR, CORPUS_SEED
-    requirements.txt
+    phi_core/
+      agents/                15-agent pipeline: specialists, experts, reasoning core, manager/operator/reviewer, outward
+      intake.py, file_readers.py, anonymizer.py, publish_guard.py, bundle.py, crypto.py, jurisdictions.py
+    phi_corpus/              adversarial corpus generator + benchmark report
+    tests/                   340+ regression tests
+    .env                    MONGO_URL, DB_NAME, ANTHROPIC_API_KEY, APP_ENCRYPTION_KEY, ATTESTATION_SIGNING_KEY
   frontend/
     src/                    React operator console on :3000
   authorities/              Primary legal sources + AUTHORITY_MATRIX.md (single source of truth for IRB)
-  data/
-    uploads/{session_id}/   uploaded files (local disk only, never leaves the pod)
-    staging/, evidence/, reversal/, published/, cache/
-                            the D14 artifact registry: every produced file is
-                            staged, hash-verified, then promoted to
-                            published/{session_id}/{run_id}/ before it is ever
-                            served for download
+  data/uploads/<sid>/        intake.zip + unpacked/ (never leaves the pod)
+  data/exports/               handled outputs
 ```
+
+See `CLAUDE.md`'s "Structure" block for the authoritative, current file-level
+layout.
 
 ### Run
 
@@ -73,16 +93,26 @@ variable and what refuses to boot without it (4.1).
 
 ### Workflow
 
-1. Create session, upload files.
-2. Backend reads: headers for datasets, full text for narratives.
-3. LLM classifies content type (Claude Sonnet 4.5, headers only for datasets).
-4. Presidio + rule detectors flag PHI spans, tagged with 45 CFR 164.514 categories A-R.
-5. Human review checkpoint: accept, reject, reclassify, comment. Iterate as needed.
-6. Anonymize and export scrubbed files.
+1. Create session, upload the intake ZIP.
+2. Specialists (Lexicon, Schema, Instrument) and experts (Statute, Praxis)
+   run in parallel: headers, dictionary text, and form fields only, never
+   dataset rows.
+3. Judge<->Sentinel reasoning loop decides a per-column action (keep, drop,
+   cap_age_90, year_only, zip3_truncate, hash, pseudonymize, scrub_text,
+   human_review), tagged with 45 CFR 164.514 categories A-R.
+4. Human review checkpoint for blocking cases; advisory issues log only.
+5. Executor applies approved actions to dataset rows (pure Python, no LLM);
+   Operator and Reviewer deterministically verify the output; Publish Guard
+   scans every export byte before any download is authorized.
+6. Auditor produces the precision/recall/F1 audit-of-record; Scout/Ledger/
+   Herald produce the competitor landscape and manuscript draft.
 
 ### Benchmark
 
-Runs any detector combination against a seeded corpus. Precision, recall, F1 per HIPAA category. Baseline (Presidio + rule) on the shipping corpus: F1 approx 0.78, with 17 of 19 categories at 1.0 recall. Category J (account numbers) and R (internal codes) plus the quasi-identifier layer are the residual gaps that require human judgement per 164.514(b)(2)(ii).
+`phi_corpus/benchmark.py` builds a per-run report (precision/recall/F1 per
+HIPAA category, completeness narrative) from the adversarial corpus, attached
+to each session and downloadable alongside the publication bundle. See
+`CLAUDE.md`'s Auditor description for what the audit-of-record covers.
 
 ### Authority
 
