@@ -9,6 +9,28 @@ statements below are true of this tree; read the half that matches the code you 
 
 ## PHI Console (backend / frontend)
 
+### Migration status
+
+This service is mid-migration to a new target architecture (Manager as
+observer/governor rather than message courier, a Judge/Reviewer/Executor
+core, a HandoffGateway-mediated specialist topology, RunPrivacyPolicy,
+and a deterministic service layer replacing several current agent
+roles). The target architecture document is intentionally not committed
+to this repository; it is tracked as a local, gitignored reference
+(`docs/MASTER_ARCHITECTURE_V2.md`) so design/spec content never enters
+git history, per this repo's existing "planning, specs, and agent
+memory live outside the tree" convention.
+
+Everything below in this section describes the **current, running
+implementation** (the 15-agent pipeline), not the permanent target.
+Treat it as accurate for the code as it exists today. Do not assume
+Judge/Reviewer/Executor, HandoffGateway, or other target-architecture
+concepts exist in this codebase until a corresponding phase has actually
+landed and this document has been updated to say so. Migration proceeds
+phase-by-phase; each phase updates this document to match the code it
+introduces, rather than describing the target architecture in advance
+of the code that implements it.
+
 ### Project
 
 PHI Console. A study team drops in a ZIP (datasets + at least one of forms /
