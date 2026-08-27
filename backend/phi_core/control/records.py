@@ -2,6 +2,22 @@
 
 These models deliberately contain only the fields assigned by D3.  Mongo
 serialization belongs to ``control.store`` so records remain transport-neutral.
+
+Phase 1 addendum (target-architecture reconciliation, local reference doc
+docs/MASTER_ARCHITECTURE_V2.md #84, never committed): a read-only fork audit
+found this module already implements most of that document's "shared
+architecture contracts" list under different names -- ArtifactRecord,
+EvidenceSource/EvidenceClaim, WorkItem, HumanReviewRequest/Event, and
+TraceEvent (already hash-chained, exceeding that document's own spec) are
+canonical here and were not rebuilt. ``RunPrivacyPolicy``, ``ColumnDecision``,
+``StudyKnowledgePackage``, ``RegulatoryFinding``, ``MethodFinding``,
+``MethodRecord``, ``VerifiedClassificationManifest``, and ``CleanupManifest``
+below are the types that audit found genuinely missing; they extend this
+module's existing conventions (schema_version, frozen grant records, plain
+mutable working records) rather than introducing a second schema. No
+HandoffEnvelope/HandoffResult record was added: this codebase's Manager/
+SuperOrchestrator sequences every agent today (ADR 0006), so a direct
+agent-to-agent handoff gateway is not yet applicable work.
 """
 from __future__ import annotations
 
@@ -501,3 +517,156 @@ class TraceEvent(ControlRecord):
     prev_hash: str = ""
     hash: str = ""
     ts: str = Field(default_factory=_now)
+
+
+class RunPrivacyPolicy(FrozenControlRecord):
+    """One run's frozen privacy/de-identification policy (docs #15).
+
+    ``version`` bump means a new policy_id, not an in-place mutation --
+    frozen like every other authority-bearing grant record in this module.
+    """
+
+    policy_id: str = Field(default_factory=_id)
+    run_id: str
+    jurisdictions: list[str] = Field(default_factory=list)
+    applicable_regimes: list[str] = Field(default_factory=list)
+    intended_use: str = ""
+    intended_release_context: str = ""
+    recipient_context_if_relevant: str = ""
+    privacy_or_deidentification_path: str = ""
+    human_authorization_requirements: list[str] = Field(default_factory=list)
+    policy_source_refs: list[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=_now)
+
+
+ColumnOperation = Literal[
+    "keep", "drop", "pseudonymize", "shift", "date_shift",
+    "jitter", "generalize", "cap", "redact", "other_approved_action",
+]
+
+
+class ColumnDecision(ControlRecord):
+    """Judge's typed per-column output (docs #41), replacing the current
+    ``output_schema="judge_decisions"`` plain dict."""
+
+    decision_id: str = Field(default_factory=_id)
+    run_id: str
+    file_id: str
+    dataset_part_id: str = ""
+    column_id: str
+    safe_display_name: str
+    semantic_meaning: str = ""
+    semantic_evidence_refs: list[str] = Field(default_factory=list)
+    sensitivity_classification: str = ""
+    applicable_rule: str = ""
+    regulatory_evidence_refs: list[str] = Field(default_factory=list)
+    operation: ColumnOperation
+    method_id: str = ""
+    method_version: int = 0
+    method_parameters: dict[str, Any] = Field(default_factory=dict)
+    research_utility_reason: str = ""
+    plain_language_reason: str = ""
+    technical_rationale: str = ""
+    decision_status: Literal["draft", "under_review", "correction_required", "verified", "superseded"] = "draft"
+    superseded_by: str = ""
+    created_at: str = Field(default_factory=_now)
+
+
+class StudyKnowledgePackage(ControlRecord):
+    """Unifies Schema/Lexicon/Instrument findings into one versioned package
+    (docs #28), instead of concatenating specialist prose into one prompt."""
+
+    package_id: str = Field(default_factory=_id)
+    run_id: str
+    datasets: list[str] = Field(default_factory=list)
+    columns: list[str] = Field(default_factory=list)
+    schema_findings: list[dict[str, Any]] = Field(default_factory=list)
+    lexicon_findings: list[dict[str, Any]] = Field(default_factory=list)
+    instrument_findings: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    conflicts: list[str] = Field(default_factory=list)
+    unresolved_items: list[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=_now)
+    superseded_by: str = ""
+
+
+class RegulatoryFinding(ControlRecord):
+    """Statute's typed output (docs #35), replacing its current plain dict."""
+
+    finding_id: str = Field(default_factory=_id)
+    run_id: str
+    hipaa_category: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    summary: str = ""
+    created_at: str = Field(default_factory=_now)
+
+
+class MethodFinding(ControlRecord):
+    """Praxis's typed output (docs #37), replacing its current plain dict."""
+
+    finding_id: str = Field(default_factory=_id)
+    run_id: str
+    hipaa_category: str
+    recommended_method_id: str = ""
+    evidence_refs: list[str] = Field(default_factory=list)
+    summary: str = ""
+    created_at: str = Field(default_factory=_now)
+
+
+MethodLifecycle = Literal["researched", "candidate", "validated", "approved", "deprecated"]
+
+
+class MethodRecord(ControlRecord):
+    """MethodRegistry entry (docs #38): research discovery alone never grants
+    execution permission -- only ``lifecycle == "approved"`` does."""
+
+    method_id: str = Field(default_factory=_id)
+    hipaa_category: str
+    name: str
+    lifecycle: MethodLifecycle = "researched"
+    evidence_refs: list[str] = Field(default_factory=list)
+    parameters_schema: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(default_factory=_now)
+
+
+class VerifiedClassificationManifest(ControlRecord):
+    """Frozen once Judge + Reviewer Preview + Human Review all clear (docs
+    #49). Not a ``FrozenControlRecord``: ``status`` transitions to
+    ``invalidated`` in place when an upstream artifact changes (docs #30),
+    rather than minting a new manifest_id for the same decision set."""
+
+    manifest_id: str = Field(default_factory=_id)
+    run_id: str
+    source_artifact_versions: dict[str, int] = Field(default_factory=dict)
+    decision_refs: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    preview_review_id: str
+    human_review_refs: list[str] = Field(default_factory=list)
+    unresolved_items: int = 0
+    status: Literal["verified_for_execution", "invalidated"] = "verified_for_execution"
+    created_at: str = Field(default_factory=_now)
+
+    @field_validator("status", mode="after")
+    @classmethod
+    def _unresolved_items_blocks_verified(cls, value: str, info: Any) -> str:
+        unresolved = info.data.get("unresolved_items", 0)
+        if value == "verified_for_execution" and unresolved:
+            raise ValueError("cannot be verified_for_execution with unresolved_items != 0")
+        return value
+
+
+class CleanupManifest(ControlRecord):
+    """Session-destruction verification record (docs #77): never transitions
+    a run to SESSION_DESTROYED until this reports ``verified``."""
+
+    run_id: str
+    cleanup_started_at: str = Field(default_factory=_now)
+    cleanup_completed_at: str = ""
+    destroyed_categories: list[str] = Field(default_factory=list)
+    retained_safe_categories: list[str] = Field(default_factory=list)
+    credentials_revoked: bool = False
+    keys_destroyed: bool = False
+    sandbox_destroyed: bool = False
+    storage_sanitization_status: Literal["pending", "complete", "failed"] = "pending"
+    verification_status: Literal["pending", "verified", "failed"] = "pending"
+    failure_details: str = ""
