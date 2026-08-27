@@ -37,14 +37,15 @@ async def run_batched(
     original item order regardless of completion order, and every item is
     checked exactly once.
 
-    If ``check`` or ``on_batch`` raises for any batch, every sibling batch
-    that has not yet started is cancelled outright. A sibling already
-    mid-flight inside ``asyncio.to_thread`` cannot be interrupted: its
-    worker thread runs ``check`` to completion, but its coroutine task is
-    cancelled at the ``await`` point, so that batch's result is discarded
-    and its ``on_batch`` never fires. Every sibling task, cancelled or
-    finished, is awaited before this function returns control to the
-    caller, and the original exception is re-raised.
+    If ``check`` or ``on_batch`` raises for any batch, no sibling batch
+    that has not yet started ``check`` is allowed to start it, whether it
+    was still waiting on the pool semaphore or genuinely unscheduled. A
+    sibling already mid-flight inside ``asyncio.to_thread`` cannot be
+    interrupted: its worker thread runs ``check`` to completion, but its
+    coroutine task is cancelled at the ``await`` point, so that batch's
+    result is discarded and its ``on_batch`` never fires. Every sibling
+    task, cancelled or finished, is awaited before this function returns
+    control to the caller, and the original exception is re-raised.
 
     Raises ``ValueError`` if ``batch_size`` or ``pool_size`` is less than 1.
     """
@@ -59,19 +60,34 @@ async def run_batched(
     batches = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
     semaphore = asyncio.Semaphore(pool_size)
     slots: list[list[dict] | None] = [None] * len(batches)
+    failed = False
 
     async def run_one(index: int, batch: list[Any]) -> None:
+        nonlocal failed
         expected_count = len(batch)
-        async with semaphore:
-            batch_results = await asyncio.to_thread(check, batch)
-        if len(batch_results) != expected_count:
-            raise ValueError(
-                f"check returned {len(batch_results)} result(s) for batch "
-                f"{index} of {expected_count} item(s); check must return "
-                "exactly one result per item")
-        slots[index] = batch_results
-        if on_batch is not None:
-            await on_batch(index, batch_results)
+        try:
+            async with semaphore:
+                # A sibling can win the semaphore the instant an earlier
+                # batch's `async with` releases it on exception -- before
+                # asyncio.gather (below) has even seen that exception, let
+                # alone cancelled anyone. Checking `failed` here, after the
+                # acquire but before dispatching to a thread, is what
+                # actually stops a released-but-not-yet-cancelled sibling
+                # from starting; relying on cancellation timing cannot.
+                if failed:
+                    return
+                batch_results = await asyncio.to_thread(check, batch)
+            if len(batch_results) != expected_count:
+                raise ValueError(
+                    f"check returned {len(batch_results)} result(s) for batch "
+                    f"{index} of {expected_count} item(s); check must return "
+                    "exactly one result per item")
+            slots[index] = batch_results
+            if on_batch is not None:
+                await on_batch(index, batch_results)
+        except BaseException:
+            failed = True
+            raise
 
     tasks = [asyncio.ensure_future(run_one(i, batch)) for i, batch in enumerate(batches)]
     try:
@@ -91,5 +107,6 @@ async def run_batched(
 
     results: list[dict] = []
     for batch_results in slots:
+        assert batch_results is not None  # gather raised above if any slot is still empty
         results.extend(batch_results)
     return results
