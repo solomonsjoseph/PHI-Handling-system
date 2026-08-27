@@ -14,10 +14,17 @@ canonical here and were not rebuilt. ``RunPrivacyPolicy``, ``ColumnDecision``,
 ``MethodRecord``, ``VerifiedClassificationManifest``, and ``CleanupManifest``
 below are the types that audit found genuinely missing; they extend this
 module's existing conventions (schema_version, frozen grant records, plain
-mutable working records) rather than introducing a second schema. No
-HandoffEnvelope/HandoffResult record was added: this codebase's Manager/
-SuperOrchestrator sequences every agent today (ADR 0006), so a direct
-agent-to-agent handoff gateway is not yet applicable work.
+mutable working records) rather than introducing a second schema.
+
+Phase 3 addendum (target-architecture reconciliation, local reference doc
+docs/MASTER_ARCHITECTURE_V2.md, never committed): the Phase 1 note above
+said no HandoffEnvelope/HandoffResult record existed because Manager/
+SuperOrchestrator sequences every agent today (ADR 0006). That is still
+true of the running pipeline, but ``control.handoff.HandoffGateway`` now
+builds the standalone validation module a later phase will wire agents
+through, so ``HandoffEnvelope``/``HandoffResult`` below are the typed
+request/response pair it uses. Neither is referenced from
+``phi_core/agents/`` yet.
 """
 from __future__ import annotations
 
@@ -757,3 +764,57 @@ class SourceProjectionResult(ControlRecord):
     reasons: list[str] = Field(default_factory=list)
     projected_text: str = ""
     blocked: bool = False
+
+
+# Phase 3 (target-architecture reconciliation, local reference doc
+# docs/MASTER_ARCHITECTURE_V2.md, never committed): the typed request/
+# response pair for ``control.handoff.HandoffGateway``, the Phase 1
+# docstring addendum's deferred item. The gateway itself, the allowed-
+# topology table, and the per-edge payload schemas live in
+# ``control/handoff.py`` -- these two records are the durable shape a
+# handoff attempt and its verdict take, matching this module's existing
+# split (canonical record here, enforcement logic in its own leaf module).
+
+HandoffReasonCode = Literal[
+    "",
+    "sender_unregistered",
+    "recipient_unregistered",
+    "topology_blocked",
+    "cross_run_reference",
+    "data_class_forbidden",
+    "not_minimum_necessary",
+    "residual_phi_detected",
+    "secret_detected",
+    "tool_not_granted",
+    "payload_schema_invalid",
+]
+
+
+class HandoffEnvelope(ControlRecord):
+    """One agent-to-agent handoff request. ``payload`` is validated against
+    the declared schema for ``(sender, recipient)`` -- never accepted as
+    free-form dict past that boundary."""
+
+    handoff_id: str = Field(default_factory=_id)
+    run_id: str
+    sender: str
+    recipient: str
+    data_class: DataClass
+    requested_tool: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(default_factory=_now)
+
+
+class HandoffResult(ControlRecord):
+    """``HandoffGateway.handoff``'s verdict. Denials are ordinary return
+    values, never exceptions -- only a programming error (a malformed
+    envelope, a store failure) raises."""
+
+    handoff_id: str
+    run_id: str
+    sender: str
+    recipient: str
+    allowed: bool
+    reason_code: HandoffReasonCode = ""
+    detail: str = ""
+    trace_event_id: str = ""

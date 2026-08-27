@@ -31,6 +31,42 @@ phase-by-phase; each phase updates this document to match the code it
 introduces, rather than describing the target architecture in advance
 of the code that implements it.
 
+Landed so far, standalone under `backend/phi_core/control/`, **not yet
+wired into `backend/phi_core/agents/` or `server.py`**: Phase 1 shared
+contracts (`records.py`: `RunPrivacyPolicy`, `ColumnDecision`,
+`StudyKnowledgePackage`, `RegulatoryFinding`, `MethodFinding`,
+`MethodRecord`, `VerifiedClassificationManifest`, `CleanupManifest`);
+Phase 2 control-plane services (`sandbox.py`, `authorization.py`,
+`schema_validation.py`, `methods.py`, `trace_sanitizer.py` /
+`trace_projection.py`, `source_projection.py`, `secrets_scan.py`) —
+of these, only `gateway.py`'s new secret-deny check and `events.py`'s
+trace sanitization run on the live pipeline today, since every agent
+call already routes through `ProviderGateway`/`TraceEventStore`;
+Phase 3 `HandoffGateway` (`handoff.py`) — a fully tested governed
+direct-collaboration gateway (sender/recipient authorization, topology
+validation against an explicit allowed-edge table, cross-run reference
+blocking, data-classification and minimum-necessary checks, residual-PHI
+and secret scanning, tool-capability checks, per-edge output-schema
+validation, and a mandatory sanitized `TraceEvent` per attempt), still
+unwired: it demonstrates the *observe* half of "Manager observes and
+governs" (every handoff attempt is traced) but not the *control* half
+(Manager routing decisions through it), which arrives with Phase 4.
+Known limitation carried from Phase 2: `HandoffGateway`'s residual-PHI
+check reuses `gateway._contains_restricted_content`, which calls
+Presidio; if Presidio's runtime dependency chain is broken (as it
+currently is in this environment — see the numpy/thinc ABI note below),
+that check raises rather than degrading silently, so a handoff would
+fail loudly, not leak.
+
+Environment note: a full `backend/tests/` run in this checkout currently
+shows 105 pre-existing failures unrelated to any landed phase —
+MongoDB is not running locally, and installed `numpy==2.0.2` breaks the
+`thinc`/spaCy ABI that Presidio depends on (repo pins `numpy==1.26.4`,
+requires Python >= 3.11; this checkout runs system Python 3.9). Fix
+before trusting a full-suite run to catch regressions in later phases:
+a pinned venv per `requirements.txt`/`requirements-dev.txt` on Python
+>= 3.11, plus a running `mongod`.
+
 ### Project
 
 PHI Console. A study team drops in a ZIP (datasets + at least one of forms /
