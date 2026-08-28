@@ -148,3 +148,15 @@ review-retention expiry, and artifact reconciliation — checks this field
 and skips the session/artifact entirely while it is non-empty. Clearing
 it (via the API, or `$set: {hold: ""}` for the legacy-record fallback)
 resumes normal retention.
+
+## Encryption-key rotation
+
+Not a dashboard field: a burst of `KeyRotated` exceptions on
+`decrypt_api_key`/`decrypt_reversal_map`, or reviewers being silently
+logged out (`verify_principal_cookie` rejecting every cookie at once),
+means `APP_ENCRYPTION_KEY` changed since the ciphertext/cookie was
+created. In `PHI_ENV=dev`, `crypto.py::_load_or_create_key` regenerates
+and re-persists a fresh key any time it cannot find or persist the
+existing one (e.g. a read-only or ephemeral `backend/.env`), silently
+orphaning everything encrypted or signed under the previous key; see
+`docs/THREAT_MODEL_BACKEND.md` section 6.
