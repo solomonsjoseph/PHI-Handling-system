@@ -13,12 +13,13 @@ uses.
 
 Written during Wave R-b of the Phase R remediation. `docs/PHASE_STATUS.md`'s
 defect table (`D1`-`D9`) is the authoritative, live record of exactly which
-sandbox defects are fixed as of any given commit; several (`D1`, `D2`, `D7`,
-`D9`) are being remediated by a concurrent subagent (R-Sandbox) in this same
-wave. This document describes the structural shape of each gap so it reads
-correctly regardless of the exact commit that lands the fix -- check
+sandbox defects are fixed as of any given commit. `D1`, `D2`, `D3`, `D7`, and
+`D9` were remediated by a concurrent subagent (R-Sandbox) during this same
+wave and are verified fixed as of this document's own final revision
+(checked directly against the live `sandbox.py`); `D5` and `D6` remain open
+by design (see section 5 below and `docs/PHASE_STATUS.md`). Check
 `docs/PHASE_STATUS.md` for current status before treating any item below as
-still open.
+still open regardless.
 
 ## 1. The macOS memory-limit gap and its explicit override switch
 
@@ -155,32 +156,34 @@ attempts to.
 
 ## 4. D9: sandbox directory tree permissions, intermediate directory caveat
 
-`create_sandbox()` builds each run's workspace as
-`SANDBOX_DIR / run_id / uuid4().hex` via a single
-`workspace.mkdir(parents=True, exist_ok=False, mode=0o700)` call, followed by
-an explicit `os.chmod(workspace, 0o700)` on the leaf. `Path.mkdir(parents=True,
-mode=...)` applies the given `mode` to the *final* directory it creates only;
-any intermediate directory it creates along the way (here, `SANDBOX_DIR /
-run_id`, when that run's first sandbox is created) is created with the
+`create_sandbox()` originally built each run's workspace as `SANDBOX_DIR /
+run_id / uuid4().hex` via a single `workspace.mkdir(parents=True,
+exist_ok=False, mode=0o700)` call, followed by an explicit
+`os.chmod(workspace, 0o700)` on the leaf only. `Path.mkdir(parents=True,
+mode=...)` applies the given `mode` to the *final* directory it creates
+only; any intermediate directory it creates along the way (here,
+`SANDBOX_DIR / run_id`, on that run's first sandbox) was created with the
 platform default mode (`0o777` as modified by the process umask, commonly
-`0o755`), not `0o700`. As of this document, D9 (see `docs/PHASE_STATUS.md`)
-tracks this as still open; R-Sandbox is remediating it in this same wave.
+`0o755`), not `0o700`. R-Sandbox fixed this in this same wave: `create_sandbox`
+now creates the `run_id` intermediate directory with an explicit
+`os.chmod(run_dir, 0o700)` of its own, so every level of the tree is `0700`,
+not just the leaf. Verified directly against the current `sandbox.py`.
 
-**The mitigating fact, and its limit:** `phi_core.paths.SANDBOX_DIR` itself
-is created with an explicit `mkdir(..., mode=0o700)` *and* a following
-`os.chmod(SANDBOX_DIR, 0o700)` at module-import time
-(`phi_core/paths.py`), so today, a different OS user cannot traverse into
-`SANDBOX_DIR` at all regardless of what mode any `run_id` subdirectory ends
-up with -- Unix requires execute permission on every path segment to reach
-one further in, and `SANDBOX_DIR` itself denies that to anyone but its
-owner. This is why the gap is contained rather than actively exploitable
-today. It is not the same claim as "the whole sandbox tree is `0700`"; that
-stronger claim would be inaccurate until the `run_id` intermediate directory
-itself is fixed to inherit `0700` explicitly, and any future refactor that
-changes where `SANDBOX_DIR` sits in the filesystem, or who else might share
-its parent, would need to re-examine this contained-not-fixed distinction
-rather than relying on the (currently true, currently load-bearing, not
-structurally guaranteed) `0700` mode on `SANDBOX_DIR` alone.
+**Why the gap was contained rather than actively exploitable while it was
+open:** `phi_core.paths.SANDBOX_DIR` itself is created with an explicit
+`mkdir(..., mode=0o700)` *and* a following `os.chmod(SANDBOX_DIR, 0o700)` at
+module-import time (`phi_core/paths.py`), so a different OS user could never
+traverse into `SANDBOX_DIR` at all regardless of what mode any `run_id`
+subdirectory ended up with -- Unix requires execute permission on every path
+segment to reach one further in, and `SANDBOX_DIR` itself denied that to
+anyone but its owner. That containment held only because of `SANDBOX_DIR`'s
+own mode, not because the `run_id` level was itself correctly restrictive; a
+future refactor that changes where `SANDBOX_DIR` sits in the filesystem, or
+who else might share its parent, should not assume every level below it is
+`0700` by construction without checking, even now that this specific
+instance is fixed -- the same class of gap (an intermediate `mkdir` call
+relying on `parents=True` without an explicit `mode` per level) could
+recur anywhere else in the codebase that builds a nested path the same way.
 
 ## 5. D6: cookie expiry and HMAC domain-separation gap
 
