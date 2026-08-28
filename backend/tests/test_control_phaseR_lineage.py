@@ -15,7 +15,7 @@ and nothing walked it. This module tests the three pieces added to
 from __future__ import annotations
 
 import pytest
-from phi_core.control.artifacts import ArtifactError, ArtifactService
+from phi_core.control.artifacts import ArtifactError, ArtifactService, MANIFEST_COLLECTION
 from phi_core.control.store import MemoryControlStore
 
 
@@ -213,3 +213,52 @@ async def test_invalidate_descendants_is_scoped_to_its_own_run_id() -> None:
     assert other_doc["state"] == "staged"
     knowledge_doc = await store.get_one("artifacts", {"artifact_id": knowledge_id})
     assert knowledge_doc["state"] == "superseded"
+
+
+# ---- Unit D: invalidate_descendants invalidates a linked manifest ---------
+
+
+@pytest.mark.asyncio
+async def test_invalidate_descendants_flips_a_linked_manifest_to_invalidated() -> None:
+    service, store = _service()
+    source_id = await _stage_and_finalize(service, "dataset_export")
+    manifest_artifact_id = await _stage_and_finalize(
+        service, "VerifiedClassificationManifest", parents=[source_id],
+    )
+    await store.insert(
+        MANIFEST_COLLECTION,
+        {
+            "manifest_id": "m1",
+            "artifact_id": manifest_artifact_id,
+            "run_id": service.run_id,
+            "status": "verified_for_execution",
+        },
+    )
+
+    await service.invalidate_descendants(source_id)
+
+    manifest_doc = await store.get_one(MANIFEST_COLLECTION, {"artifact_id": manifest_artifact_id})
+    assert manifest_doc["status"] == "invalidated"
+
+
+@pytest.mark.asyncio
+async def test_invalidate_descendants_leaves_an_unrelated_manifest_untouched() -> None:
+    service, store = _service()
+    source_id = await _stage_and_finalize(service, "dataset_export")
+    unrelated_manifest_artifact_id = await _stage_and_finalize(service, "dataset_export")
+    await store.insert(
+        MANIFEST_COLLECTION,
+        {
+            "manifest_id": "m2",
+            "artifact_id": unrelated_manifest_artifact_id,
+            "run_id": service.run_id,
+            "status": "verified_for_execution",
+        },
+    )
+
+    await service.invalidate_descendants(source_id)
+
+    manifest_doc = await store.get_one(
+        MANIFEST_COLLECTION, {"artifact_id": unrelated_manifest_artifact_id}
+    )
+    assert manifest_doc["status"] == "verified_for_execution"
