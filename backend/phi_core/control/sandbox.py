@@ -117,6 +117,11 @@ class SandboxPathViolation(SandboxError):
     """Raised when a path is not contained within a sandbox's workspace."""
 
 
+class SandboxReturnContractViolation(SandboxError):
+    """Raised when a sandboxed worker's return value is not a path, count,
+    or status (see ``_validate_return_contract``)."""
+
+
 def create_sandbox(
     run_id: str,
     *,
@@ -215,6 +220,24 @@ def _deny_sockets() -> None:
 # SSE, so only a scrubbed, length-capped summary ever leaves the child.
 _MAX_FORWARDED_ERROR_CHARS = 2000
 
+# Return contract: a sandboxed worker may only hand back a workspace-
+# relative artifact path, a count, or a status value -- never an
+# arbitrary object. An arbitrary payload crossing back into the parent
+# process (the same process that runs every LLM agent) would relocate
+# the raw-data read into the parent without creating a real boundary;
+# callers must write real row data to a workspace artifact and hand back
+# its path instead.
+_ALLOWED_RETURN_TYPES = (str, int, float, bool, type(None))
+
+
+def _validate_return_contract(payload: Any) -> None:
+    if not isinstance(payload, _ALLOWED_RETURN_TYPES):
+        raise SandboxReturnContractViolation(
+            "sandbox worker return value violates the return contract: "
+            "expected a path/count/status (str, int, float, bool, or "
+            f"None), got {type(payload).__name__}"
+        )
+
 
 def _child_entry(
     func: Callable[..., Any],
@@ -234,7 +257,9 @@ def _child_entry(
         resource.setrlimit(resource.RLIMIT_AS, (max_memory_bytes, max_memory_bytes))
     _deny_sockets()
     try:
-        queue.put((True, func(*args, **kwargs)))
+        result = func(*args, **kwargs)
+        _validate_return_contract(result)
+        queue.put((True, result))
     except BaseException as exc:  # noqa: BLE001 - forward any failure to the parent
         message = scrub_persisted_text(str(exc))[:_MAX_FORWARDED_ERROR_CHARS]
         queue.put((False, f"{type(exc).__name__}: {message}"))
