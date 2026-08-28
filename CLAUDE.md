@@ -58,14 +58,12 @@ currently is in this environment — see the numpy/thinc ABI note below),
 that check raises rather than degrading silently, so a handoff would
 fail loudly, not leak.
 
-Environment note: a full `backend/tests/` run in this checkout currently
-shows 105 pre-existing failures unrelated to any landed phase —
-MongoDB is not running locally, and installed `numpy==2.0.2` breaks the
-`thinc`/spaCy ABI that Presidio depends on (repo pins `numpy==1.26.4`,
-requires Python >= 3.11; this checkout runs system Python 3.9). Fix
-before trusting a full-suite run to catch regressions in later phases:
-a pinned venv per `requirements.txt`/`requirements-dev.txt` on Python
->= 3.11, plus a running `mongod`.
+Environment note: `backend/.venv` is Python 3.11.16 with `numpy==1.26.4`,
+and `import presidio_analyzer` succeeds. Run the backend through that venv,
+not system Python. A full `backend/tests/` run also needs a running `mongod`:
+three test files use the real `get_db()`, and until the Mongo skip guards land
+(defect D8, Phase R) they hang for pymongo's 30 s server-selection timeout when
+Mongo is down.
 
 ### Project
 
