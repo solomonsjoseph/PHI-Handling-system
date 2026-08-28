@@ -37,7 +37,7 @@ from uuid import uuid4
 
 from .records import TraceEvent
 from .store import ControlStore
-from .trace_sanitizer import sanitize_payload
+from .trace_sanitizer import sanitize_payload, sanitize_status_text
 
 MAX_SEQ_ALLOCATION_RETRIES = 8
 
@@ -124,13 +124,21 @@ class TraceEventStore:
         seq = await self._allocate_seq()
         prev = await self._store.get_one("trace_events", {"run_id": self._run_id, "seq": seq - 1}) if seq else None
         prev_hash = prev["hash"] if prev else ""
-        # D66: sanitize before hashing/insertion, never raw-then-redact --
-        # the sanitized payload is what gets chained, so the hash itself
-        # attests to the sanitized content, not the pre-sanitized input.
+        # D66/D3/D4: sanitize before hashing/insertion, never raw-then-redact --
+        # the sanitized payload/status_text/retry_category is what gets
+        # chained, so the hash itself attests to the sanitized content, not
+        # the pre-sanitized input. status_text and retry_category are plain
+        # free-text fields real callers already interpolate raw study
+        # content into (a dictionary entry name, a column name, a raw
+        # exception str(exc) forwarded out of a sandboxed child process),
+        # so they get the same scrub_persisted_text pass every other
+        # persisted free-text field in this codebase already gets.
         candidate = event.model_copy(update={
             "run_id": self._run_id, "session_id": self._session_id, "seq": seq,
             "fence": checked_fence, "prev_hash": prev_hash, "hash": "",
             "payload": sanitize_payload(event.payload),
+            "status_text": sanitize_status_text(event.status_text),
+            "retry_category": sanitize_status_text(event.retry_category),
         })
         payload = candidate.model_dump(mode="json")
         payload.pop("hash")
