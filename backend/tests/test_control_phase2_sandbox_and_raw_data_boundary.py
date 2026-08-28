@@ -5,7 +5,10 @@ credential stripping), and path containment
 committed)."""
 from __future__ import annotations
 
+import json
 import os
+import resource
+import tempfile
 import time
 from pathlib import Path
 
@@ -21,6 +24,22 @@ from phi_core.control.sandbox import (
     validate_sandbox_path,
 )
 from phi_core.paths import SANDBOX_DIR
+
+# This whole file exercises "normal" sandbox behavior on a platform
+# (Darwin) where RLIMIT_AS cannot be set to any finite value (CPython issue
+# 78783, open, documented XNU limitation), so `create_sandbox` fails closed
+# by default (see `sandbox.py::_MEMORY_LIMIT_ENFORCEABLE`). This autouse
+# fixture supplies the explicit opt-in for every test except the one that
+# specifically proves the fail-closed default, which is deliberately left
+# untouched so that test needs no monkeypatch.delenv: conftest.py sets no
+# such variable, so leaving it alone already reproduces the true default.
+_FAIL_CLOSED_TEST_NAME = "test_create_sandbox_fails_closed_when_memory_limit_is_unenforceable_without_override"
+
+
+@pytest.fixture(autouse=True)
+def _allow_unenforced_sandbox_memory_by_default(request, monkeypatch):
+    if request.node.name != _FAIL_CLOSED_TEST_NAME:
+        monkeypatch.setenv("PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY", "1")
 
 
 def _run_id() -> str:
@@ -165,3 +184,64 @@ def test_run_isolated_refuses_on_non_active_sandbox():
     destroyed, _ = destroy_sandbox(record)
     with pytest.raises(SandboxError):
         run_isolated(destroyed, _add, 1, 1)
+
+
+def _memory_limit_enforceable_probe() -> bool:
+    """Duplicates sandbox.py's own platform probe so this test's RED/GREEN
+    reflects create_sandbox's actual raise behavior, not whether an
+    internal attribute happens to exist yet. Empirically (this exact
+    machine, Darwin 25.6.0), setrlimit(RLIMIT_AS, ...) does NOT reject
+    every finite value -- an arbitrarily huge one (e.g. 1 TiB) succeeds.
+    What actually fails is any value below the process's already-mapped
+    virtual address space, which the real configured ceiling
+    (limits.MAX_SANDBOX_MEMORY_BYTES, 1 GiB by default) falls under on
+    this machine. Probing with that real ceiling -- not an arbitrarily
+    huge sentinel -- is what answers the question that matters ("can this
+    platform enforce the memory bound it actually configures"). Only the
+    soft limit is touched: lowering the hard limit is a one-way ratchet
+    without elevated privilege, so touching it here would make the
+    finally-restore itself capable of failing.
+    """
+    from phi_core.control import limits as limits_module
+
+    original_soft, original_hard = resource.getrlimit(resource.RLIMIT_AS)
+    probe_soft = (
+        limits_module.MAX_SANDBOX_MEMORY_BYTES
+        if original_hard == resource.RLIM_INFINITY
+        else min(limits_module.MAX_SANDBOX_MEMORY_BYTES, original_hard)
+    )
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (probe_soft, original_hard))
+        return True
+    except (ValueError, OSError):
+        return False
+    finally:
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (original_soft, original_hard))
+        except (ValueError, OSError):
+            pass
+
+
+def test_create_sandbox_fails_closed_when_memory_limit_is_unenforceable_without_override():
+    """On a platform where RLIMIT_AS cannot be set to a finite value
+    (Darwin), and with no PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY override set,
+    create_sandbox must refuse rather than silently hand back a sandbox
+    with no real memory ceiling."""
+    if _memory_limit_enforceable_probe():
+        pytest.skip("this platform can enforce RLIMIT_AS; fail-closed branch is not exercised")
+    with pytest.raises(SandboxError):
+        create_sandbox(_run_id())
+
+
+def _read_fsize_soft_limit() -> int:
+    return resource.getrlimit(resource.RLIMIT_FSIZE)[0]
+
+
+def test_run_isolated_bounds_output_size_via_rlimit_fsize():
+    record = create_sandbox(_run_id())
+    try:
+        soft_limit = run_isolated(record, _read_fsize_soft_limit)
+        assert soft_limit == record.max_output_bytes
+        assert record.max_output_bytes > 0
+    finally:
+        destroy_sandbox(record)
