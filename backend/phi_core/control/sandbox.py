@@ -45,11 +45,15 @@ from phi_core.paths import SANDBOX_DIR, is_safe_scoped_id
 from . import limits
 from .records import CleanupManifest, SandboxRecord
 
-# Environment variable name fragments that must never reach the raw-data
-# worker process. Matched case-insensitively as a substring so provider-
-# specific keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, MONGO_URL's credentials
-# embedded in the URL, ...) are all covered without an exhaustive allowlist.
-_DENYLIST_ENV_FRAGMENTS = ("API_KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "MONGO_URL")
+# D1/D7: an explicit allowlist of environment variables the raw-data
+# worker is permitted to inherit. Replaces a substring denylist
+# ("API_KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "MONGO_URL")
+# that missed APP_ENCRYPTION_KEY and ATTESTATION_SIGNING_KEY (D7) and,
+# separately, was applied after os.environ had already been cleared to {}
+# so it never actually ran against anything (D1). An allowlist cannot
+# miss a credential shape the way a denylist can: anything not named here
+# never reaches the child, full stop.
+_ALLOWLISTED_ENV_KEYS = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE")
 
 # Fail-closed switch (Wave R-b): a DEDICATED env var, never PHI_ENV, which
 # is already an unrelated master kill switch for several other things
@@ -193,12 +197,8 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _stripped_env() -> dict[str, str]:
-    return {
-        key: value
-        for key, value in os.environ.items()
-        if not any(fragment in key.upper() for fragment in _DENYLIST_ENV_FRAGMENTS)
-    }
+def _allowlisted_env() -> dict[str, str]:
+    return {key: os.environ[key] for key in _ALLOWLISTED_ENV_KEYS if key in os.environ}
 
 
 def _deny_sockets() -> None:
@@ -217,8 +217,9 @@ def _child_entry(
     max_output_bytes: int,
     queue: "multiprocessing.Queue[tuple[bool, Any]]",
 ) -> None:
+    allowlisted_env = _allowlisted_env()
     os.environ.clear()
-    os.environ.update(_stripped_env())
+    os.environ.update(allowlisted_env)
     resource.setrlimit(resource.RLIMIT_CPU, (max_cpu_seconds, max_cpu_seconds))
     resource.setrlimit(resource.RLIMIT_FSIZE, (max_output_bytes, max_output_bytes))
     if _MEMORY_LIMIT_ENFORCEABLE:
