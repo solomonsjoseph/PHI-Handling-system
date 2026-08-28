@@ -505,6 +505,59 @@ class ArtifactService:
         await self._store.replace_one("artifacts", {"artifact_id": artifact_id}, updated)
         return updated
 
+    async def invalidate_descendants(self, artifact_id: str) -> list[ArtifactRecord]:
+        """Walk ``parents`` forward from ``artifact_id`` within this run
+        (docs #30: "If an upstream artifact changes, invalidate affected
+        descendants"). Every artifact in :attr:`run_id` whose ``parents``
+        contains ``artifact_id``, transitively, is flipped to ``superseded``
+        and returned. ``artifact_id`` itself (the changed ancestor) and any
+        artifact outside this chain are left exactly as they are.
+
+        Run-scoped: only ``self.run_id``'s artifacts are ever consulted or
+        touched, never another run's, even if it happens to reuse the same
+        artifact ids.
+
+        Cycle-safe: a malformed ``parents`` graph containing a cycle cannot
+        infinite-loop -- each artifact id is visited at most once via a
+        seen-set guard, so a cycle is simply where the walk stops rather
+        than where it loops forever.
+
+        Idempotent: an already-``superseded`` descendant is left untouched
+        (no redundant write) and is still returned, so calling this twice
+        in a row produces the same returned set and the same end state.
+        """
+        docs = await self._store.find_many("artifacts", {"run_id": self.run_id})
+        records: dict[str, ArtifactRecord] = {
+            doc["artifact_id"]: ArtifactRecord.model_validate(doc) for doc in docs
+        }
+        children: dict[str, list[str]] = {}
+        for child_id, record in records.items():
+            for parent_id in record.parents:
+                children.setdefault(parent_id, []).append(child_id)
+
+        superseded: list[ArtifactRecord] = []
+        visited: set[str] = {artifact_id}
+        frontier: list[str] = list(children.get(artifact_id, []))
+        while frontier:
+            child_id = frontier.pop()
+            if child_id in visited:
+                continue
+            visited.add(child_id)
+            frontier.extend(children.get(child_id, []))
+
+            record = records.get(child_id)
+            if record is None:
+                continue
+            if record.state != "superseded":
+                updated = record.model_copy(update={"state": "superseded"})
+                if await self._store.compare_and_set(
+                    "artifacts", {"artifact_id": child_id}, {"state": record.state}, updated,
+                ):
+                    records[child_id] = updated
+                    record = updated
+            superseded.append(record)
+        return superseded
+
     async def open_for_download(self, session_id: str, artifact_id: str) -> Any:
         """Return the on-disk path for a promoted, current, hash-verified artifact.
 
