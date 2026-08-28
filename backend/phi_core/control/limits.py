@@ -78,3 +78,23 @@ WEB_CACHE_REFRESH_DAYS = _int_env("WEB_CACHE_REFRESH_DAYS", 7)
 MAX_SANDBOX_CPU_SECONDS = _int_env("MAX_SANDBOX_CPU_SECONDS", 60)
 MAX_SANDBOX_MEMORY_BYTES = _int_env("MAX_SANDBOX_MEMORY_BYTES", 1073741824)
 MAX_SANDBOX_WALL_SECONDS = _int_env("MAX_SANDBOX_WALL_SECONDS", 120)
+# Phase R-a pre-adds (unused this wave; this module closes after it).
+# Distinct from ``MAX_OUTPUT_BYTES`` above, which bounds task-queue output;
+# this bounds the raw-data sandbox worker's own output.
+MAX_SANDBOX_OUTPUT_BYTES = _int_env("MAX_SANDBOX_OUTPUT_BYTES", 104857600)
+# section 48 correction/retry budgets: the per-edge attempt ceiling for the
+# governed correction/handoff loops. The spec (docs #48) names the six
+# budgeted categories but gives no exact numbers, so each defaults to the
+# same conservative ceiling as ``MAX_ATTEMPTS_PER_TASK`` above.
+HANDOFF_ATTEMPT_BUDGET: dict[str, int] = {
+    "judge_reviewer": MAX_ATTEMPTS_PER_TASK,
+    "judge_regulations": MAX_ATTEMPTS_PER_TASK,
+    "judge_methods": MAX_ATTEMPTS_PER_TASK,
+    "specialist_clarification": MAX_ATTEMPTS_PER_TASK,
+    "provider_retry": MAX_ATTEMPTS_PER_TASK,
+    "tool_retry": MAX_ATTEMPTS_PER_TASK,
+}
+# Per-run ceiling on headers the HEADER SAFETY GATE (v3 section 7) may leave
+# "uncertain" before the run is forced to human review; the spec gives no
+# exact number, so 50 is a documented default, not a derived one.
+MAX_UNCERTAIN_HEADERS_PER_RUN = _int_env("MAX_UNCERTAIN_HEADERS_PER_RUN", 50)

@@ -249,8 +249,10 @@ class WorkflowRun(ControlRecord):
     outbox: list[OutboxEntry] = Field(default_factory=list)
     # Phase 2C (v3 #68): rollup of the trace hash chain, written by
     # ``events.seal_range``/``seal_and_archive_range`` once a range is
-    # sealed. WorkflowRun is this codebase's RunManifest -- no separate
-    # RunManifest record exists or is needed for this one field.
+    # sealed. Phase R-a correction: a separate ``RunManifest`` record now
+    # exists below (docs #63) as the exported reproducibility projection of
+    # this run, carrying its own copy of this hash; this field remains the
+    # live, in-place value ``RunManifest`` is projected from.
     trace_root_hash: str = ""
 
 
@@ -753,6 +755,12 @@ class SandboxRecord(ControlRecord):
     created_at: str = Field(default_factory=_now)
     destroyed_at: str = ""
     failure_details: str = ""
+    # Phase R-a pre-adds (unused this wave; this module closes after it):
+    # whether the memory ceiling is actually enforced, and the per-run
+    # sandbox output byte ceiling (distinct from the task-queue
+    # ``MAX_OUTPUT_BYTES`` budget).
+    memory_limit_enforced: bool = False
+    max_output_bytes: int = 0
 
 
 class CleanupManifest(ControlRecord):
@@ -851,6 +859,10 @@ class HandoffEnvelope(ControlRecord):
     requested_tool: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=_now)
+    # Phase R-a pre-adds: the per-edge attempt and correction counters the
+    # retry/correction budget (docs #48) enforces.
+    attempt_number: int = 1
+    correction_number: int = 0
 
 
 class HandoffResult(ControlRecord):
