@@ -285,3 +285,27 @@ def test_run_isolated_bounds_output_size_via_rlimit_fsize():
         assert record.max_output_bytes > 0
     finally:
         destroy_sandbox(record)
+
+
+_LARGE_PAYLOAD_BYTES = 200 * 1024  # comfortably above the ~64 KiB pipe buffer
+
+
+def _return_large_payload() -> str:
+    return "x" * _LARGE_PAYLOAD_BYTES
+
+
+def test_run_isolated_round_trips_large_payload_without_deadlock():
+    """D2: proc.join() must not precede queue.get(). A child that puts a
+    result larger than the OS pipe buffer onto the queue will not
+    terminate until that result is drained (documented CPython
+    multiprocessing behavior: 'a process that has put items on a queue
+    will wait before terminating until all the buffered items are fed by
+    the feeder thread to the underlying pipe'). Joining first therefore
+    deadlocks until the wall-clock timeout, raising a spurious
+    SandboxTimeout instead of returning the real payload."""
+    record = create_sandbox(_run_id(), max_wall_seconds=8)
+    try:
+        result = run_isolated(record, _return_large_payload)
+        assert result == "x" * _LARGE_PAYLOAD_BYTES
+    finally:
+        destroy_sandbox(record)
