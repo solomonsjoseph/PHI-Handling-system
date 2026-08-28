@@ -364,3 +364,21 @@ def test_run_isolated_rejects_non_conforming_return_payload():
             run_isolated(record, _return_raw_row_payload)
     finally:
         destroy_sandbox(record)
+
+
+def test_create_sandbox_intermediate_run_id_directory_is_0700_regardless_of_umask():
+    """D9: mkdir(parents=True, mode=0o700) applies mode only to the leaf
+    directory; any newly created intermediate parent (the run_id
+    directory here) is created with umask-derived permissions instead,
+    ignoring the requested mode entirely."""
+    original_umask = os.umask(0o022)
+    try:
+        run_id = _run_id()
+        record = create_sandbox(run_id)
+        try:
+            intermediate = SANDBOX_DIR / run_id
+            assert oct(intermediate.stat().st_mode)[-3:] == "700"
+        finally:
+            destroy_sandbox(record)
+    finally:
+        os.umask(original_umask)
