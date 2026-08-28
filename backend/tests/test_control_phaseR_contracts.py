@@ -283,3 +283,97 @@ def test_judge_output_schema_matches_column_decision_contract():
     from phi_core.control.policy import MANIFESTS, OUTPUT_SCHEMAS
     assert MANIFESTS["Judge"].output_schema == "column_decision"
     assert "column_decision" in OUTPUT_SCHEMAS
+
+
+# --- Versioning and invalidation coverage for all 8 Phase 1 records ---
+# (RunPrivacyPolicy, ColumnDecision, StudyKnowledgePackage, RegulatoryFinding,
+# MethodFinding, MethodRecord, VerifiedClassificationManifest, CleanupManifest
+# -- the 8 records test_control_phase1_contracts.py pins the exact field set
+# of. Before this wave only 3 (RunPrivacyPolicy frozen, StudyKnowledgePackage
+# superseded_by, VerifiedClassificationManifest invalidated status) had an
+# invalidation/versioning test anywhere in the suite; this closes the other 5.)
+
+
+def test_run_privacy_policy_version_bump_is_a_new_policy_id_never_a_mutation():
+    from phi_core.control.records import RunPrivacyPolicy
+    from pydantic import ValidationError
+
+    policy = RunPrivacyPolicy(run_id="r1", jurisdictions=["us"])
+    with pytest.raises(ValidationError):
+        policy.jurisdictions = ["eu"]
+    revised = RunPrivacyPolicy(run_id="r1", jurisdictions=["eu"])
+    assert revised.policy_id != policy.policy_id
+    assert policy.jurisdictions == ["us"]
+
+
+def test_column_decision_supersede_marks_status_and_ref_without_mutating_original():
+    from phi_core.control.records import ColumnDecision
+
+    decision = ColumnDecision(run_id="r1", file_id="f1", column_id="dob",
+                               safe_display_name="DOB", operation="cap")
+    assert decision.decision_status == "draft"
+    superseded = decision.model_copy(update={"decision_status": "superseded", "superseded_by": "dec-v2"})
+    assert superseded.decision_status == "superseded"
+    assert superseded.superseded_by == "dec-v2"
+    assert decision.decision_status == "draft"
+    assert decision.superseded_by == ""
+
+
+def test_study_knowledge_package_supersede_marks_stale():
+    from phi_core.control.records import StudyKnowledgePackage
+
+    package = StudyKnowledgePackage(run_id="r1")
+    superseded = package.model_copy(update={"superseded_by": "pkg-v2"})
+    assert superseded.superseded_by == "pkg-v2"
+    assert package.superseded_by == ""
+
+
+def test_regulatory_finding_has_no_in_place_invalidation_field_new_version_is_new_id():
+    from phi_core.control.records import RegulatoryFinding
+
+    assert "superseded_by" not in RegulatoryFinding.model_fields
+    finding = RegulatoryFinding(run_id="r1", hipaa_category="A")
+    revised = RegulatoryFinding(run_id="r1", hipaa_category="A", summary="revised")
+    assert revised.finding_id != finding.finding_id
+
+
+def test_method_finding_has_no_in_place_invalidation_field_new_version_is_new_id():
+    from phi_core.control.records import MethodFinding
+
+    assert "superseded_by" not in MethodFinding.model_fields
+    finding = MethodFinding(run_id="r1", hipaa_category="A")
+    revised = MethodFinding(run_id="r1", hipaa_category="A", summary="revised")
+    assert revised.finding_id != finding.finding_id
+
+
+def test_method_record_lifecycle_invalidates_to_deprecated_without_mutating_original():
+    from phi_core.control.records import MethodRecord
+
+    method = MethodRecord(hipaa_category="A", name="cap_age_90")
+    assert method.lifecycle == "researched"
+    deprecated = method.model_copy(update={"lifecycle": "deprecated"})
+    assert deprecated.lifecycle == "deprecated"
+    assert method.lifecycle == "researched"
+
+
+def test_verified_classification_manifest_invalidation_transitions_status_in_place():
+    from phi_core.control.records import VerifiedClassificationManifest
+
+    manifest = VerifiedClassificationManifest(run_id="r1", preview_review_id="p1")
+    assert manifest.status == "verified_for_execution"
+    invalidated = manifest.model_copy(update={"status": "invalidated", "unresolved_items": 1})
+    assert invalidated.status == "invalidated"
+    # docs #49: invalidation transitions status in place, never mints a new id.
+    assert invalidated.manifest_id == manifest.manifest_id
+
+
+def test_cleanup_manifest_verification_status_transitions_pending_to_verified_or_failed():
+    from phi_core.control.records import CleanupManifest
+
+    manifest = CleanupManifest(run_id="r1")
+    assert manifest.verification_status == "pending"
+    verified = manifest.model_copy(update={"verification_status": "verified"})
+    assert verified.verification_status == "verified"
+    failed = manifest.model_copy(update={"verification_status": "failed", "failure_details": "sandbox not destroyed"})
+    assert failed.verification_status == "failed"
+    assert failed.failure_details == "sandbox not destroyed"
