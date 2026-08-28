@@ -158,6 +158,46 @@ def test_run_isolated_strips_provider_credentials_from_worker_env():
         del os.environ["ANTHROPIC_API_KEY"]
 
 
+def _read_env_snapshot() -> str:
+    return json.dumps({
+        "APP_ENCRYPTION_KEY": os.environ.get("APP_ENCRYPTION_KEY"),
+        "ATTESTATION_SIGNING_KEY": os.environ.get("ATTESTATION_SIGNING_KEY"),
+        "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY"),
+        "PATH": os.environ.get("PATH"),
+        "HOME": os.environ.get("HOME"),
+        "TMPDIR": os.environ.get("TMPDIR"),
+    })
+
+
+def test_run_isolated_allowlists_env_and_strips_all_credential_shapes():
+    """D1/D7: the child's environment must be built from an explicit
+    allowlist, not a substring denylist (which missed APP_ENCRYPTION_KEY
+    and ATTESTATION_SIGNING_KEY -- D7) applied after the environment was
+    already wiped to {} (D1), which also silently dropped PATH/HOME/TMPDIR
+    the worker may need."""
+    os.environ["APP_ENCRYPTION_KEY"] = "should-not-reach-worker"
+    os.environ["ATTESTATION_SIGNING_KEY"] = "should-not-reach-worker"
+    os.environ["ANTHROPIC_API_KEY"] = "sk-should-not-reach-worker"
+    os.environ.setdefault("TMPDIR", tempfile.gettempdir())
+    try:
+        record = create_sandbox(_run_id())
+        try:
+            raw = run_isolated(record, _read_env_snapshot)
+        finally:
+            destroy_sandbox(record)
+    finally:
+        del os.environ["APP_ENCRYPTION_KEY"]
+        del os.environ["ATTESTATION_SIGNING_KEY"]
+        del os.environ["ANTHROPIC_API_KEY"]
+    snapshot = json.loads(raw)
+    assert snapshot["APP_ENCRYPTION_KEY"] is None
+    assert snapshot["ATTESTATION_SIGNING_KEY"] is None
+    assert snapshot["ANTHROPIC_API_KEY"] is None
+    assert snapshot["PATH"] is not None
+    assert snapshot["HOME"] is not None
+    assert snapshot["TMPDIR"] is not None
+
+
 def test_run_isolated_denies_network_by_default():
     record = create_sandbox(_run_id())
     try:
