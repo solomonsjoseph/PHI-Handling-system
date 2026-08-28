@@ -70,11 +70,15 @@ async def test_non_anthropic_search_is_denied_without_a_completion() -> None:
 
 
 def test_only_gateway_has_a_production_litellm_import() -> None:
-    root = Path(__file__).resolve().parents[1] / "phi_core"
+    root = Path(__file__).resolve().parents[1]
+    excluded_dirs = {".venv", "node_modules", "tests"}
     imports = []
     for path in root.rglob("*.py"):
+        rel = path.relative_to(root)
+        if excluded_dirs & set(rel.parts):
+            continue
         source = path.read_text(encoding="utf-8")
         if "import litellm" in source or "from litellm" in source:
-            imports.append(path.relative_to(root).as_posix())
+            imports.append(rel.as_posix())
 
     assert sorted(imports) == ["control/gateway.py"]
