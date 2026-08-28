@@ -120,3 +120,45 @@ def test_execution_verification_record_is_named_verification_result():
     assert set(records.EvidenceVerificationResult.model_fields) == {
         "schema_version", "dimension", "state", "reason", "checked_at",
     }
+
+
+# --- Lifecycle single-sourcing (section 78) ---
+
+SECTION_78_STATES = (
+    "created", "sandbox_creating", "sandbox_ready", "uploading",
+    "intake_validating", "awaiting_user_clarification", "specialists_running",
+    "study_knowledge_ready", "judge_triage", "research_pending",
+    "research_running", "classification_draft", "preview_review",
+    "correction_required", "human_review_pending", "classification_verified",
+    "executor_preparing", "code_validating", "executing", "execution_verifying",
+    "final_review", "rewinding", "final_assurance", "package_building",
+    "ready_for_export", "export_confirmed", "learning_sanitizing",
+    "destroying", "session_destroyed", "blocked", "cancelled",
+    "security_incident",
+)
+_TRANSITIONAL = ("pending", "running", "paused", "cancelling", "awaiting_human_review")
+_D9_TERMINAL = ("complete", "partially_complete", "failed")
+
+
+def test_run_state_is_the_section_78_lifecycle_plus_transitional_and_d9_terminal():
+    import phi_core.control.records as r
+    members = set(r.RunState.__args__)
+    assert len(members) == 40
+    assert set(SECTION_78_STATES) <= members
+    assert set(_TRANSITIONAL) <= members
+    assert set(_D9_TERMINAL) <= members
+
+
+def test_run_lifecycle_states_is_the_single_source_in_workflow():
+    from phi_core.control import workflow
+    assert tuple(workflow.RUN_LIFECYCLE_STATES) == SECTION_78_STATES
+
+
+def test_session_status_is_derived_from_run_state_not_an_independent_enum():
+    from phi_core import models
+    # Session.status is typed by RunState (the single lifecycle source), not
+    # an independent 13-value SessionStatus Literal.
+    assert hasattr(models, "Session")
+    assert models.Session.model_fields["status"].annotation is records.RunState
+    # The old SessionStatus enum is gone; only the display projection remains.
+    assert callable(models.session_status_display)
