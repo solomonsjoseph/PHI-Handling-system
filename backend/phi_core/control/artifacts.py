@@ -260,6 +260,7 @@ class ArtifactService:
             rel_path=rel_path,
             data_class=data_class,
             retention_class=retention_class,
+            parents=list(parents or []),
             expires_at=_expires_at(retention_class),
             state="provisional",
         )
