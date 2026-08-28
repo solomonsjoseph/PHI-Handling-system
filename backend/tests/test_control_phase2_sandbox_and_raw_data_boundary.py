@@ -309,3 +309,38 @@ def test_run_isolated_round_trips_large_payload_without_deadlock():
         assert result == "x" * _LARGE_PAYLOAD_BYTES
     finally:
         destroy_sandbox(record)
+
+
+def _raise_with_phi_shaped_message():
+    raise ValueError("invalid cell value 'Jane Doe' (SSN 111-22-3333) in column 'patient_name'")
+
+
+def _raise_with_huge_message():
+    raise ValueError("x" * 50000)
+
+
+def test_run_isolated_scrubs_exception_text_before_forwarding_to_parent():
+    """D3 (child half): the child must forward only the exception's type
+    name plus scrub_persisted_text(str(exc)), never the raw exception
+    text -- a raw exception can embed the offending cell/column content,
+    which then gets chained and streamed over SSE."""
+    record = create_sandbox(_run_id())
+    try:
+        with pytest.raises(SandboxError) as excinfo:
+            run_isolated(record, _raise_with_phi_shaped_message)
+    finally:
+        destroy_sandbox(record)
+    message = str(excinfo.value)
+    assert "Jane Doe" not in message
+    assert "111-22-3333" not in message
+    assert "ValueError" in message
+
+
+def test_run_isolated_caps_forwarded_exception_text_length():
+    record = create_sandbox(_run_id())
+    try:
+        with pytest.raises(SandboxError) as excinfo:
+            run_isolated(record, _raise_with_huge_message)
+    finally:
+        destroy_sandbox(record)
+    assert len(str(excinfo.value)) < 5000
