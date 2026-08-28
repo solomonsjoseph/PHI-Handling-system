@@ -16,7 +16,10 @@ must consume an interface or decision.
 Every `xfail(strict=True)` in the suite is listed here with its nodeid, resolving phase,
 and exact reason string. A phase may not close with an unrecorded xfail.
 
-(empty)
+- nodeid: `tests/test_control_phaseR_contracts.py::test_judge_output_schema_matches_column_decision_contract`
+  resolving phase: Phase 7
+  reason: "Phase 7: Judge's output_schema is still the legacy 'judge_decisions' registration; ColumnDecision's typed contract uses 'column_decision'. Both sides of the duplicate-schema debt must move together."
+  commit: `c7b16db`
 
 ### DELETED_TESTS
 
@@ -120,3 +123,59 @@ collection: **1028 tests**.
 | D7 | `_DENYLIST_ENV_FRAGMENTS`, `sandbox.py:53` | Matches `API_KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `CREDENTIAL`, `MONGO_URL`. Misses `APP_ENCRYPTION_KEY`, `ATTESTATION_SIGNING_KEY`, `AWS_ACCESS_KEY_ID`, `DATABASE_URL`, `SSH_AUTH_SOCK`. |
 | D8 | `conftest.py:4-5` | Claims tests guard on `MONGO_URL`. False: zero Mongo skip guards exist. |
 | D9 | `sandbox.py:82-83` | `mkdir(parents=True, mode=0o700)` applies the mode to the leaf only; the `run_id` intermediate is umask-derived. |
+
+## Phase R: remediation and integration of Phases 1 to 3
+
+### Wave R-a (solo): contracts and shared-file pre-adds — COMPLETE
+
+13 commits (`3de3d3b`..`5b7e24c`), 9 files touched (exactly the owns list). Final targeted
+run: `pytest tests/test_control_records_policy.py tests/test_control_workflow.py
+tests/test_control_phaseR_contracts.py tests/test_control_evidence.py
+tests/test_control_evidence_agents.py -q -p no:cacheprovider -p no:xdist` ->
+**325 passed, 1 xfailed**.
+
+**Delivered:** all 9 absent section-84 contracts (FailureClass, EvidenceRecord,
+ReviewFinding, HumanReviewPacket, HumanDecision, ExecutionTask, ExecutionResult,
+VerificationResult, LearningCase, RunManifest); 4 partial contracts completed (RunState,
+AgentContract/AgentManifest, TraceEvent, HumanDecision); lifecycle single-sourced
+(`workflow.RUN_LIFECYCLE_STATES` is now the sole source; `models.SessionStatus` replaced by
+derived `session_status_display()`); all 7 pre-adds (`SandboxRecord.memory_limit_enforced`,
+`SandboxRecord.max_output_bytes`, `HandoffEnvelope.attempt_number`,
+`HandoffEnvelope.correction_number`, `limits.MAX_SANDBOX_OUTPUT_BYTES`,
+`limits.HANDOFF_ATTEMPT_BUDGET`, `limits.MAX_UNCERTAIN_HEADERS_PER_RUN`); state-transition
+tests (34 legal + 226 illegal pairs, both directions); versioning/invalidation tests for all
+8 Phase 1 records; `agents/reviewer.py` now constructs typed `ReviewFinding` records.
+
+**Deviations from the brief, resolved in favor of the durable spec:**
+- `FailureClass` has **26** members (section 105 text), not the 28 the brief stated.
+  Verified twice (manual enumeration + `awk` count over the section).
+- `limits.HANDOFF_ATTEMPT_BUDGET`: section 48 names 6 budgeted edge categories with no
+  numeric values anywhere in the text. Defaulted every category to
+  `limits.MAX_ATTEMPTS_PER_TASK` (3), recorded as a chosen default, not spec-derived.
+- `limits.MAX_UNCERTAIN_HEADERS_PER_RUN = 50` and `limits.MAX_SANDBOX_OUTPUT_BYTES =
+  104857600` (100 MiB): no numeric value given anywhere in the spec; chosen defaults,
+  documented in-line.
+- `EvidenceRecord` (section 39, 17-field list) is the registry's public read-model
+  contract; `EvidenceSource`/`EvidenceClaim` remain the internal storage/verification split
+  in `control/evidence.py`, unchanged.
+- `AgentManifest`/`AgentContract`: section 12's 14 names mostly have no literal match in the
+  existing 18 `AgentManifest` fields (only `allowed_tools` matched). Added the 13
+  non-overlapping names as new fields with safe defaults rather than renaming/merging, to
+  avoid breaking `policy.py`'s `MANIFESTS` construction (not touched this wave).
+- `TraceEvent`'s "9 missing section 65 fields": section 65 lists 37 names; most already have
+  a differently-named equivalent on `TraceEvent` (kept, not renamed, per the ground rule
+  against renaming to OpenTelemetry `gen_ai.*` spellings). The 9 genuinely new fields added:
+  `agent_role`, `attempt_id`, `event_type`, `input_artifact_refs`, `output_artifact_refs`,
+  `tool_call_id`, `decision`, `policy_checks`, `human_review_ref`.
+
+**Wave-landing check** (run by the orchestrator after R-a landed, backend server restarted
+first to pick up the model changes):
+`cd backend && .venv/bin/python -m pytest tests -q -p no:cacheprovider -n auto --deselect
+tests/test_agent_pipeline.py --deselect tests/test_ocr_pdf.py --deselect
+tests/test_corpus_researcher.py` -> **7 failed, 1295 passed, 3 skipped, 1 xfailed, 59.97s**.
+All 7 failures are pre-existing baseline failures (4 sandbox D1/D2/D9, 3
+`test_human_review_invariant.py` client_event_id schema mismatches) — **zero regressions**.
+`server.py` imports cleanly with `DATA_DIR` set; the earlier bare `import server` failure in
+R-a's own transcript was the pre-existing missing-`DATA_DIR` issue, not a regression.
+
+Next: Wave R-b (5 parallel subagents: R-Sandbox, R-Lineage, R-Trace, R-Handoff, R-Docs).
