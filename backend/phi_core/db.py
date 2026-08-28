@@ -9,7 +9,9 @@ from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
 @lru_cache(maxsize=1)
 def get_db() -> AsyncIOMotorDatabase:
-    client = AsyncIOMotorClient(os.environ["MONGO_URL"])
+    # D8: a down/unreachable mongod fails in ~2s instead of pymongo's
+    # default 30s server-selection timeout.
+    client = AsyncIOMotorClient(os.environ["MONGO_URL"], serverSelectionTimeoutMS=2000)
     return client[os.environ["DB_NAME"]]
 
 
