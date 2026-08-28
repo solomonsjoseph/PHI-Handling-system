@@ -35,6 +35,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
+from .workflow import RUN_LIFECYCLE_STATES
+
 
 def _id() -> str:
     return uuid4().hex
@@ -58,16 +60,14 @@ class FrozenControlRecord(ControlRecord):
 
 
 RunState = Literal[
-    "pending",
-    "running",
-    "awaiting_human_review",
-    "paused",
-    "cancelling",
-    "cancelled",
-    "blocked",
-    "failed",
-    "partially_complete",
-    "complete",
+    *RUN_LIFECYCLE_STATES,
+    # Transition-in-flight values the live pipeline still emits
+    # (server.py/events.py), kept alongside the section-78 vocabulary.
+    "pending", "running", "paused", "cancelling", "awaiting_human_review",
+    # D9 terminal node names, which ``SuperOrchestrator.advance`` stamps
+    # onto ``WorkflowRun.state`` directly (a terminal node's name is always
+    # a valid RunState).
+    "complete", "partially_complete", "failed",
 ]
 
 TaskState = Literal[

@@ -11,6 +11,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from .control.records import RunState
+
 
 def _uid() -> str:
     return uuid4().hex
@@ -20,11 +22,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-SessionStatus = Literal[
-    "created", "intake", "reading", "classifying", "anonymizing",
-    "awaiting_human_review", "partially_complete", "complete", "cancelled", "failed",
-    "blocked", "corpus_ready", "intake_failed",
-]
+def session_status_display(state: RunState) -> str:
+    """Display projection of a run's ``RunState``.
+
+    The session-level status the API surfaces is the ``RunState`` value
+    itself (the section-78 lifecycle names are already the display string).
+    This function replaces the former independent ``SessionStatus`` Literal:
+    ``Session.status`` is typed by ``RunState`` directly, so the lifecycle
+    vocabulary can no longer drift in two places.
+    """
+    return state
 
 
 class DetectedSpan(BaseModel):
@@ -70,7 +77,7 @@ class Session(BaseModel):
     jurisdiction: str = "us"
     intake_status: Literal["none", "ready", "review_required", "failed"] = "none"
     intake_exit_code: int = 0
-    intake_review: list[dict[str, Any]] = []
+    status: RunState = "created"
     intake_missing: list[str] = []
     files: list[FileArtifact] = []
     progress: list[ProgressEvent] = []

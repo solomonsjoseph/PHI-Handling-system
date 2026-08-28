@@ -100,6 +100,48 @@ NON_TERMINAL_NODES: tuple[str, ...] = (
 NODES: frozenset[str] = frozenset(NON_TERMINAL_NODES) | TERMINAL_NODES
 
 
+# Section 78 "durable lifecycle": the single source of the run/session
+# lifecycle vocabulary. ``records.RunState`` is this list (lowercased) plus
+# the transition-in-flight values the live pipeline still emits and the D9
+# terminal node names; ``models.Session.status`` is typed by ``RunState`` and
+# projected to a display string from it. Keeping the 32 names here (rather
+# than duplicated in both modules) is what makes the lifecycle single-sourced.
+RUN_LIFECYCLE_STATES: tuple[str, ...] = (
+    "created",
+    "sandbox_creating",
+    "sandbox_ready",
+    "uploading",
+    "intake_validating",
+    "awaiting_user_clarification",
+    "specialists_running",
+    "study_knowledge_ready",
+    "judge_triage",
+    "research_pending",
+    "research_running",
+    "classification_draft",
+    "preview_review",
+    "correction_required",
+    "human_review_pending",
+    "classification_verified",
+    "executor_preparing",
+    "code_validating",
+    "executing",
+    "execution_verifying",
+    "final_review",
+    "rewinding",
+    "final_assurance",
+    "package_building",
+    "ready_for_export",
+    "export_confirmed",
+    "learning_sanitizing",
+    "destroying",
+    "session_destroyed",
+    "blocked",
+    "cancelled",
+    "security_incident",
+)
+
+
 class WorkflowError(RuntimeError):
     """Raised by ``next_node`` for an unmodelled ``(node, outcome)`` pair, or
     by ``node``/``is_terminal`` for a name absent from ``NODES``. An
