@@ -37,17 +37,27 @@ the names already registered in ``policy.MANIFESTS`` means every check
 that needs "a registered contract" (checks 1, 2, 5, 9) works against real
 data with no parallel, not-yet-real registry to maintain.
 
-The eleven required checks run in order and every one is a plain
-``(bool, reason_code, detail)`` return, never an exception, for a policy
-denial -- only a programming error (a malformed store, an unknown edge
-with no schema registered) raises. Checks 6 (minimum-necessary) and 10
-(output schema) both consult the same per-edge pydantic schema in
-``EDGE_SCHEMAS``: 6 checks the payload's *keys* are a subset of the
-schema's declared fields (deny-by-default on any extra key), 10 then runs
-full validation (types, required fields) via that schema. This is one
-schema doing two jobs the spec lists as separate checks, not two schemas
-doing one job: a second, parallel allow-list of field names would drift
-from the schema the moment either one changed.
+Checks 1-10 run in order and every one is a plain ``(bool, reason_code,
+detail)`` return, never an exception, for a policy denial -- only a
+programming error (a malformed store, an unknown edge with no schema
+registered) raises. Checks 6 (minimum-necessary) and 10 (output schema)
+both consult the same per-edge pydantic schema in ``EDGE_SCHEMAS``: 6
+checks the payload's *keys* are a subset of the schema's declared fields
+(deny-by-default on any extra key), 10 then runs full validation (types,
+required fields) via that schema. This is one schema doing two jobs the
+spec lists as separate checks, not two schemas doing one job: a second,
+parallel allow-list of field names would drift from the schema the
+moment either one changed.
+
+Check 11 (correction/retry budget, spec section 48) is the one
+deliberate exception to "never an exception": it raises
+``policy.BudgetExceeded`` instead of returning a denial tuple, matching
+every other D5 ceiling refusal already in this codebase (``gateway.py``,
+``artifacts.py``, ``runs.py``, ``superorchestrator.py``), each of which
+is always paired with a ``TraceEvent(outcome="budget_exceeded")``
+recorded before re-raising, never expressed as a ``HandoffReasonCode``
+string. ``handoff()`` reflects this: a budget refusal produces that
+trace event and re-raises, with no ``HandoffResult`` constructed for it.
 """
 from __future__ import annotations
 
@@ -169,6 +179,26 @@ def _references_other_run(value: Any, run_id: str) -> bool:
     return False
 
 
+# ---- check 11: correction/retry budget (spec section 48) -------------------
+# section 48 names six budgeted categories; only the four below correspond
+# to an agent-to-agent handoff edge -- "provider_retry" and "tool_retry"
+# gate LLM/tool retries elsewhere in the system (ProviderGateway, tool
+# dispatch), not a HandoffGateway edge, so they have no entry here. An
+# edge with no entry is unbounded by this check (none exist among today's
+# ALLOWED_EDGES; every edge above maps to one of the four categories).
+_EDGE_ATTEMPT_CATEGORY: Mapping[tuple[str, str], str] = {
+    (JUDGE, REVIEWER): "judge_reviewer",
+    (REVIEWER, JUDGE): "judge_reviewer",
+    (JUDGE, REGULATIONS_EXPERT): "judge_regulations",
+    (REGULATIONS_EXPERT, JUDGE): "judge_regulations",
+    (JUDGE, METHODS_EXPERT): "judge_methods",
+    (METHODS_EXPERT, JUDGE): "judge_methods",
+    (JUDGE, SCHEMA): "specialist_clarification",
+    (JUDGE, LEXICON): "specialist_clarification",
+    (JUDGE, INSTRUMENT): "specialist_clarification",
+}
+
+
 class HandoffGateway:
     """Validates one agent-to-agent handoff and records the attempt.
 
@@ -182,8 +212,35 @@ class HandoffGateway:
         self._session_id = session_id
 
     async def handoff(self, envelope: HandoffEnvelope) -> HandoffResult:
-        allowed, reason_code, detail = self._evaluate(envelope)
         trace = TraceEventStore(self._store, run_id=envelope.run_id, session_id=self._session_id)
+        try:
+            allowed, reason_code, detail = self._evaluate(envelope)
+        except BudgetExceeded as exc:
+            # Check 11's refusal: recorded the same way every other D5
+            # ceiling refusal in this codebase is (outcome="budget_exceeded",
+            # never "allowed"/"denied"), then re-raised -- there is no
+            # HandoffResult for a budget refusal, matching the exception
+            # (not tuple-return) contract check 11 uses.
+            await trace.append(TraceEvent(
+                run_id=envelope.run_id,
+                seq=0,
+                session_id=self._session_id,
+                agent=envelope.sender,
+                phase="handoff",
+                direction=f"{envelope.sender}->{envelope.recipient}",
+                input_class=envelope.data_class,
+                output_class=envelope.data_class,
+                outcome="budget_exceeded",
+                status_text=str(exc),
+                payload={
+                    "handoff_id": envelope.handoff_id,
+                    "sender": envelope.sender,
+                    "recipient": envelope.recipient,
+                    "allowed": False,
+                    "reason": "attempt_budget_exceeded",
+                },
+            ))
+            raise
         event = await trace.append(TraceEvent(
             run_id=envelope.run_id,
             seq=0,
@@ -280,5 +337,24 @@ class HandoffGateway:
             schema_cls.model_validate(envelope.payload)
         except ValidationError as exc:
             return False, "payload_schema_invalid", str(exc)
+
+        # 11. correction/retry budget (spec section 48): unlike checks 1-10,
+        # a budget refusal is not a (bool, reason_code, detail) denial --
+        # it raises ``BudgetExceeded``, the same D5 ceiling-check pattern
+        # every other budget refusal in this codebase already uses
+        # (gateway.py, artifacts.py, runs.py, superorchestrator.py), so
+        # ``handoff()`` can record it the same way: a TraceEvent with
+        # outcome="budget_exceeded", then re-raise. attempt_number and
+        # correction_number both count toward the ceiling -- a correction
+        # round is still another round trip on the same edge.
+        category = _EDGE_ATTEMPT_CATEGORY.get(edge)
+        if category is not None:
+            budget = limits.HANDOFF_ATTEMPT_BUDGET[category]
+            rounds = envelope.attempt_number + envelope.correction_number
+            if rounds > budget:
+                raise BudgetExceeded(
+                    f"{envelope.sender} -> {envelope.recipient} exceeded the "
+                    f"{category!r} retry budget ({rounds} > {budget})"
+                )
 
         return True, "", ""
