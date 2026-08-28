@@ -135,3 +135,46 @@ def test_resume_node_fails_closed_to_human_review_on_unknown_checkpoint_version(
 def test_workflow_version_and_checkpoint_version_are_stable_literals() -> None:
     assert workflow.WORKFLOW_VERSION == "wf/1"
     assert isinstance(workflow.CHECKPOINT_VERSION, int)
+
+
+# --- Phase R-a: exhaustive state-transition coverage (Phase 1 exit
+# criterion "state transitions tested", both directions). Data-driven over
+# ``TRANSITIONS``/``NODES`` themselves so a future edit to the table stays
+# exhaustively covered without hand-maintaining a parallel list here. ---
+
+_ALL_DECLARED_OUTCOMES = sorted({outcome for (_node, outcome) in workflow.TRANSITIONS})
+
+
+@pytest.mark.parametrize(
+    "node,outcome,target",
+    [(node, outcome, target) for (node, outcome), target in workflow.TRANSITIONS.items()],
+)
+def test_every_legal_transition_reaches_its_declared_target(node, outcome, target) -> None:
+    assert workflow.next_node(node, outcome) == target
+
+
+@pytest.mark.parametrize(
+    "node,outcome",
+    [
+        (node, outcome)
+        for node in sorted(workflow.NODES)
+        for outcome in _ALL_DECLARED_OUTCOMES
+        if (node, outcome) not in workflow.TRANSITIONS
+    ],
+)
+def test_every_illegal_node_outcome_pair_fails_closed(node, outcome) -> None:
+    with pytest.raises(workflow.WorkflowError):
+        workflow.next_node(node, outcome)
+
+
+def test_transition_coverage_is_exhaustive_over_declared_outcomes() -> None:
+    """Sanity check on the two parametrized tests above: every (node,
+    outcome) pair over the declared outcome vocabulary is classified as
+    either legal (target lookup) or illegal (raises) -- none silently
+    skipped."""
+    legal = set(workflow.TRANSITIONS)
+    all_pairs = {(node, outcome) for node in workflow.NODES for outcome in _ALL_DECLARED_OUTCOMES}
+    illegal = all_pairs - legal
+    assert legal | illegal == all_pairs
+    assert legal & illegal == set()
+    assert len(legal) == 34
