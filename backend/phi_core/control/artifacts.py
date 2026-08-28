@@ -56,6 +56,36 @@ _ROOT_DIRS: Mapping[str, Any] = {
 
 _PROMOTABLE_STATES = ("staged", "accepted")
 
+# docs #30 (master spec section 30): every type listed under docs #29's
+# ArtifactRegistry is a "consequential output" and must declare where it
+# came from. `stage()` refuses to register one without an explicit,
+# non-empty `parents` list -- there is otherwise no way to walk section
+# 30's chain (SOURCE FILES -> StudyKnowledgePackage -> ... -> FinalPackage)
+# forward from any given artifact.
+CONSEQUENTIAL_ARTIFACT_TYPES = frozenset({
+    "StudyKnowledgePackage",
+    "RegulatoryFinding",
+    "MethodFinding",
+    "JudgeDecisionSet",
+    "ReviewerPreviewResult",
+    "HumanDecision",
+    "VerifiedClassificationManifest",
+    "ExecutionResult",
+    "VerificationResult",
+    "ReviewerFinalResult",
+    "FinalAssuranceResult",
+    "ReportPackage",
+    "CleanupManifest",
+})
+
+# `VerifiedClassificationManifest` (records.py) has its own `manifest_id`
+# primary key and no field linking it back to the `ArtifactRecord` that
+# represents it in section 30's chain. This collection is the link: a
+# document keyed by `artifact_id` alongside the manifest's own fields,
+# written by whatever code stages a manifest as a consequential artifact.
+# `invalidate_descendants` and `open_for_download` are its only readers.
+MANIFEST_COLLECTION = "verified_classification_manifests"
+
 # Interim retention defaults. These intentionally mirror the
 # server's session-retention policy until a separate retention policy module
 # replaces both call sites.
@@ -174,6 +204,7 @@ class ArtifactService:
         producer_task_id: str = "",
         scope: str = "run",
         root: str = "staging",
+        parents: list[str] | None = None,
     ) -> tuple[str, Any]:
         """Register a ``provisional`` artifact and return ``(artifact_id, tmp_path)``.
 
@@ -189,12 +220,24 @@ class ArtifactService:
         erasure. A worker still finishing a run it was never told to stop
         cannot recreate an artifact for a session the operator already
         asked to delete.
+
+        docs #30: ``type`` in :data:`CONSEQUENTIAL_ARTIFACT_TYPES` (docs #29's
+        ArtifactRegistry list) must be staged with a non-empty ``parents``
+        list -- refused with ``ArtifactError("artifact_parents_required", ...)``
+        otherwise, since there would be no way to walk section 30's chain
+        forward from it later. ``parents`` is recorded on the resulting
+        :class:`~.records.ArtifactRecord` regardless of type.
         """
         if await is_session_tombstoned(self._store, self.session_id):
             raise ArtifactError("session_tombstoned", self.session_id)
         sanitise_filename(filename)
         if root not in _ROOT_DIRS:
             raise ArtifactError("unknown_root", f"no such artifact root: {root!r}")
+        if type in CONSEQUENTIAL_ARTIFACT_TYPES and not parents:
+            raise ArtifactError(
+                "artifact_parents_required",
+                f"type={type!r} is a consequential artifact (docs #29) and must declare its parents (docs #30)",
+            )
         if producer_task_id:
             grant_doc = await self._store.get_one(
                 "capability_grants",
