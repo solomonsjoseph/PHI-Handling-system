@@ -162,3 +162,38 @@ def test_session_status_is_derived_from_run_state_not_an_independent_enum():
     assert models.Session.model_fields["status"].annotation is records.RunState
     # The old SessionStatus enum is gone; only the display projection remains.
     assert callable(models.session_status_display)
+
+
+# --- Partial-contract completion: TraceEvent and AgentManifest ---
+
+SECTION_65_MISSING = (
+    "agent_role", "attempt_id", "event_type", "input_artifact_refs",
+    "output_artifact_refs", "tool_call_id", "decision", "policy_checks",
+    "human_review_ref",
+)
+
+SECTION_12_CONTRACT = {
+    "agent_id", "role", "permitted_senders", "permitted_recipients",
+    "allowed_input_data_classes", "forbidden_input_data_classes",
+    "allowed_tools", "forbidden_tools", "network_permissions",
+    "child_agent_permissions", "expected_output_schema", "timeout_policy",
+    "retry_policy", "acceptance_criteria",
+}
+
+
+def test_trace_event_has_the_9_missing_section_65_fields():
+    fields = set(records.TraceEvent.model_fields)
+    assert set(SECTION_65_MISSING) <= fields
+
+
+def test_agent_manifest_carries_all_14_section_12_contract_fields():
+    fields = set(records.AgentManifest.model_fields)
+    assert SECTION_12_CONTRACT <= fields
+
+
+def test_trace_event_fields_are_additive_only():
+    # None of the pre-existing canonical TraceEvent fields were renamed away.
+    for name in ("outcome", "retry_category", "status_text", "gateway_decision",
+                 "agent_version", "artifact_ids", "evidence_ids", "review_ids",
+                 "latency_ms", "usage", "ts", "phase", "agent"):
+        assert name in records.TraceEvent.model_fields, name
