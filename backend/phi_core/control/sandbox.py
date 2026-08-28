@@ -12,13 +12,20 @@ provides the typed contract and enforcement primitives that phase will call.
 
 ``create_sandbox`` allocates a per-run directory under
 ``phi_core.paths.SANDBOX_DIR`` (mode 0700) and a :class:`SandboxRecord`.
+It fails closed with :class:`SandboxError` if this platform cannot
+actually enforce ``RLIMIT_AS`` at the configured ceiling (Darwin/XNU,
+CPython issue 78783), unless ``PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY=1``.
 ``run_isolated`` executes a callable inside that sandbox in a *separate*
 process (``multiprocessing`` ``spawn`` context, not the caller's event
-loop/process): the child strips provider-credential-shaped environment
-variables before running, applies CPU/memory ``resource.setrlimit``
-ceilings, denies outbound sockets by monkeypatching ``socket.socket``, and
-is wall-clock bounded by the parent's ``Process.join(timeout)`` (SIGKILL on
-timeout). ``destroy_sandbox`` removes the workspace tree and flips
+loop/process): the child's environment is rebuilt from a fixed allowlist
+(never a credential denylist) before running, CPU/memory/output-size
+``resource.setrlimit`` ceilings are applied, outbound sockets are denied
+by monkeypatching ``socket.socket``, and the run is wall-clock bounded by
+draining the result queue with a timeout before joining the process
+(SIGKILL if still alive). The child's return value is validated against
+a fixed contract (path/count/status only, never an arbitrary payload) and
+any raised exception is forwarded scrubbed and length-capped, never
+verbatim. ``destroy_sandbox`` removes the workspace tree and flips
 ``SandboxRecord.state``/``CleanupManifest.sandbox_destroyed``.
 
 # ponytail: network-deny is enforced by monkeypatching ``socket.socket``
