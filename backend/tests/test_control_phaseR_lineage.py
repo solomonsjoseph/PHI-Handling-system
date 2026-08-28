@@ -262,3 +262,60 @@ async def test_invalidate_descendants_leaves_an_unrelated_manifest_untouched() -
         MANIFEST_COLLECTION, {"artifact_id": unrelated_manifest_artifact_id}
     )
     assert manifest_doc["status"] == "verified_for_execution"
+
+
+# ---- Unit E/F: read guard on open_for_download -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_open_for_download_refuses_a_superseded_artifact() -> None:
+    service, store = _service()
+    source_id = await _stage_and_finalize(service, "dataset_export")
+    knowledge_id = await _stage_and_finalize(
+        service, "StudyKnowledgePackage", parents=[source_id],
+    )
+    await service.certify_publication(
+        run_id=service.run_id, artifact_ids=[knowledge_id], gate_result_ids=[], fence=1,
+    )
+
+    await service.invalidate_descendants(source_id)
+
+    with pytest.raises(ArtifactError) as exc:
+        await service.open_for_download(service.session_id, knowledge_id)
+    assert exc.value.reason == "artifact_superseded"
+
+
+@pytest.mark.asyncio
+async def test_open_for_download_refuses_when_the_linked_manifest_is_invalidated() -> None:
+    service, store = _service()
+    manifest_artifact_id = await _stage_and_finalize(
+        service, "VerifiedClassificationManifest", parents=["upstream-1"],
+    )
+    await service.certify_publication(
+        run_id=service.run_id, artifact_ids=[manifest_artifact_id], gate_result_ids=[], fence=1,
+    )
+    await store.insert(
+        MANIFEST_COLLECTION,
+        {
+            "manifest_id": "m3",
+            "artifact_id": manifest_artifact_id,
+            "run_id": service.run_id,
+            "status": "invalidated",
+        },
+    )
+
+    with pytest.raises(ArtifactError) as exc:
+        await service.open_for_download(service.session_id, manifest_artifact_id)
+    assert exc.value.reason == "artifact_invalidated"
+
+
+@pytest.mark.asyncio
+async def test_open_for_download_still_serves_a_promoted_artifact_with_no_lineage_concerns() -> None:
+    """The guard must not regress the ordinary happy path."""
+    service, _ = _service()
+    artifact_id = await _stage_and_finalize(service, "dataset_export")
+    await service.certify_publication(
+        run_id=service.run_id, artifact_ids=[artifact_id], gate_result_ids=[], fence=1,
+    )
+    path = await service.open_for_download(service.session_id, artifact_id)
+    assert path.is_file()
