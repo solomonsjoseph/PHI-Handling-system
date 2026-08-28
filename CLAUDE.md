@@ -60,10 +60,13 @@ fail loudly, not leak.
 
 Environment note: `backend/.venv` is Python 3.11.16 with `numpy==1.26.4`,
 and `import presidio_analyzer` succeeds. Run the backend through that venv,
-not system Python. A full `backend/tests/` run also needs a running `mongod`:
-three test files use the real `get_db()`, and until the Mongo skip guards land
-(defect D8, Phase R) they hang for pymongo's 30 s server-selection timeout when
-Mongo is down.
+not system Python. A full `backend/tests/` run also needs a running `mongod`
+for full coverage: three test files use the real `get_db()`
+(`test_admin_assurance.py`, `test_admin_hold.py`, `test_control_migrate.py`);
+as of defect D8's fix (Wave R-b), `backend/tests/conftest.py` skips exactly
+those three modules when Mongo is unreachable instead of hanging for
+pymongo's server-selection timeout, and `phi_core/db.py` bounds that
+timeout to 2s besides.
 
 ### Project
 
