@@ -344,3 +344,23 @@ def test_run_isolated_caps_forwarded_exception_text_length():
     finally:
         destroy_sandbox(record)
     assert len(str(excinfo.value)) < 5000
+
+
+def _return_raw_row_payload():
+    return [{"patient_name": "Jane Doe", "mrn": "MRN1234567"}]
+
+
+def test_run_isolated_rejects_non_conforming_return_payload():
+    """A child worker's return value must be a path/count/status (str,
+    int, float, bool, or None) only -- never an arbitrary object. An
+    arbitrary payload crossing back into the parent process (the same
+    process that runs every LLM agent) would relocate the raw-data read
+    into the parent without creating a real boundary; the caller must
+    write real row data to a workspace artifact and hand back its path
+    instead."""
+    record = create_sandbox(_run_id())
+    try:
+        with pytest.raises(SandboxError):
+            run_isolated(record, _return_raw_row_payload)
+    finally:
+        destroy_sandbox(record)
