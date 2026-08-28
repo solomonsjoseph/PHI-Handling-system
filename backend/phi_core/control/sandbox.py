@@ -151,8 +151,11 @@ def create_sandbox(
             "issue 78783); set PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY=1 to "
             "run raw-data workers without a real memory ceiling anyway"
         )
-    workspace = SANDBOX_DIR / run_id / uuid4().hex
-    workspace.mkdir(parents=True, exist_ok=False, mode=0o700)
+    run_dir = SANDBOX_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(run_dir, 0o700)  # D9: mkdir's mode only applies to the leaf
+    workspace = run_dir / uuid4().hex
+    workspace.mkdir(mode=0o700)
     os.chmod(workspace, 0o700)
     return SandboxRecord(
         run_id=run_id,
