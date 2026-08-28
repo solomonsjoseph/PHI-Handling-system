@@ -188,6 +188,24 @@ class AgentManifest(FrozenControlRecord):
     allowed_child_task_types: frozenset[str]
     max_depth: int
     max_children: int
+    # Phase R-a (docs #12 AgentContract): the 14 contract fields not already
+    # present under this module's names. ``allowed_tools`` above already
+    # covers the section-12 ``allowed_tools``; the rest are additive, with
+    # defaults so ``policy._manifest`` (which constructs manifests under the
+    # earlier field set) continues to build unchanged.
+    agent_id: str = ""
+    role: str = ""
+    permitted_senders: frozenset[str] = Field(default_factory=frozenset)
+    permitted_recipients: frozenset[str] = Field(default_factory=frozenset)
+    allowed_input_data_classes: frozenset[DataClass] = Field(default_factory=frozenset)
+    forbidden_input_data_classes: frozenset[DataClass] = Field(default_factory=frozenset)
+    forbidden_tools: frozenset[str] = Field(default_factory=frozenset)
+    network_permissions: frozenset[str] = Field(default_factory=frozenset)
+    child_agent_permissions: frozenset[str] = Field(default_factory=frozenset)
+    expected_output_schema: str = ""
+    timeout_policy: str = ""
+    retry_policy: str = ""
+    acceptance_criteria: frozenset[str] = Field(default_factory=frozenset)
 
     @field_validator("allowed_tools", mode="after")
     @classmethod
@@ -562,6 +580,19 @@ class TraceEvent(ControlRecord):
     correction_number: int = 0
     previous_state: str = ""
     new_state: str = ""
+    # Phase R-a (v3 #65 remaining gaps): the last nine section-65 field
+    # names with no existing equivalent. Additive only, like the Phase 2C
+    # block above; no existing field is renamed (and none is renamed to the
+    # still-Experimental OpenTelemetry gen_ai.* convention).
+    agent_role: str = ""
+    attempt_id: str = ""
+    event_type: str = ""
+    input_artifact_refs: list[str] = Field(default_factory=list)
+    output_artifact_refs: list[str] = Field(default_factory=list)
+    tool_call_id: str = ""
+    decision: str = ""
+    policy_checks: list[str] = Field(default_factory=list)
+    human_review_ref: str = ""
 
 
 class RunPrivacyPolicy(FrozenControlRecord):
