@@ -49,13 +49,48 @@ threat model or runbook section that discloses it.
 - Root-suite test deps installed into `backend/.venv`: `faker==40.37.0`, `xlwt==1.3.0`.
   Verified the install did not disturb the `numpy==1.26.4` pin or the Presidio import.
 
-### Deferred: baseline test runs (user present)
+### Completed: baseline test runs
 
-The backend serial and `-n auto` baseline, the two `--collect-only` nodeid sets, and the
-root suite run are deferred to a session where the user is present. The exact commands are
-in the session handoff message. Nothing below Phase R may begin until these are recorded
-here with real pass, fail, and skip counts and both nodeid sets committed under
-`docs/baseline/`.
+Recorded with MongoDB up on `127.0.0.1:27017` and the backend server up on
+`127.0.0.1:8001`, per Step 0 item 4.
+
+**Backend serial** (`cd backend && .venv/bin/python -m pytest tests -q -p no:cacheprovider`):
+**12 failed, 1021 passed, 4 skipped, 2 errors, 1039 collected, 75.71 s.** Full failure list:
+`docs/baseline/backend-serial-step0-failures.txt`. This is the canonical Step 0 backend
+result (see the `-n auto` note below for why).
+
+**Backend `-n auto`, and why it is not the canonical baseline.** Ran twice with identical
+inputs. Run 1: 12 failed, 1021 passed, 4 skipped, 2 errors, 57.17 s — matches serial exactly.
+Run 2: 16 failed, 2 errors, 60.74 s — three additional failures in
+`test_security_paths.py::test_intake_rejects_zip_with_evil_entry_path[...]` (`"rate limit
+exceeded; try again later"`) and `test_agent_pipeline.py` failures shifted from
+`"pipeline failed"` to `"pipeline capacity exhausted (2 concurrent runs); retry shortly"`.
+Root cause: `-n auto` runs multiple workers against the one live backend server, and the
+server's own rate limiter and pipeline-concurrency cap (2 concurrent runs) trip
+nondeterministically depending on worker scheduling. This is exactly the order-sensitivity
+the plan warns about. Per Step 0 item 5, **serial is the canonical baseline of record.**
+Per-phase gates still use `-n auto` for speed per the plan's own gate steps; a phase-gate
+failure that is one of these two symptoms (`rate limit exceeded`, `pipeline capacity
+exhausted`) should be re-run serially before being treated as a regression.
+
+**Nodeid sets** (`--collect-only`, filtered to lines containing `::` to exclude the
+pytest summary line, which otherwise pollutes `comm -23` comparisons): backend **1039**
+nodeids at `docs/baseline/backend-nodeids.txt`; root **997** nodeids at
+`docs/baseline/root-nodeids.txt`. Both committed.
+
+**Root suite** (`cd <repo root> && PYTHONDONTWRITEBYTECODE=1 backend/.venv/bin/python -m
+pytest tests -q -p no:cacheprovider`): **85 failed, 909 passed, 3 skipped, 997 collected,
+58.63 s.** Failures cluster entirely in `phi_engine` (out of scope, never edited): 27 in
+`test_xls_isolation.py`, 25 in `test_intake_naming.py`, 15 in `test_intake_manifest_v4.py`,
+6 in `test_stress_standalone.py`, 6 in `test_atomic_fs.py`, 5 in `test_intake_preflight.py`,
+1 in `test_dataset_first_phase2.py`. Many carry `failure_code=READER_UNAVAILABLE` or
+reference `/proc/self/fd`, a Linux-only path, suggesting a macOS-specific gap in an XLS
+reader dependency or fd-accounting technique, not something introduced by installing
+`faker`/`xlwt`. This is a pre-existing `phi_engine` platform gap; per ground rules
+`phi_engine`/root `tests/` are never edited, so this is recorded as the baseline floor,
+not fixed. Full failure list: `docs/baseline/root-suite-step0-failures.txt`.
+
+Step 0 is complete. Phase R may begin.
 
 ## Verified baseline: phases 0 to 3
 
