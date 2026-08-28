@@ -40,8 +40,8 @@ import socket
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
-
 from phi_core.paths import SANDBOX_DIR, is_safe_scoped_id
+from phi_core.security import scrub_persisted_text
 
 from . import limits
 from .records import CleanupManifest, SandboxRecord
@@ -209,6 +209,13 @@ def _deny_sockets() -> None:
     socket.socket = _raise  # type: ignore[assignment,method-assign]
 
 
+# D3 (child half): a raw exception's text can embed the offending
+# cell/column content (e.g. a ValueError raised while validating a row).
+# That text is later SHA-256 chained into the trace and streamed over
+# SSE, so only a scrubbed, length-capped summary ever leaves the child.
+_MAX_FORWARDED_ERROR_CHARS = 2000
+
+
 def _child_entry(
     func: Callable[..., Any],
     args: tuple[Any, ...],
@@ -229,7 +236,8 @@ def _child_entry(
     try:
         queue.put((True, func(*args, **kwargs)))
     except BaseException as exc:  # noqa: BLE001 - forward any failure to the parent
-        queue.put((False, f"{type(exc).__name__}: {exc}"))
+        message = scrub_persisted_text(str(exc))[:_MAX_FORWARDED_ERROR_CHARS]
+        queue.put((False, f"{type(exc).__name__}: {message}"))
 
 
 _PROCESS_JOIN_GRACE_SECONDS = 5
