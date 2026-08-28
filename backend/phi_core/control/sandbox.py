@@ -51,6 +51,54 @@ from .records import CleanupManifest, SandboxRecord
 # embedded in the URL, ...) are all covered without an exhaustive allowlist.
 _DENYLIST_ENV_FRAGMENTS = ("API_KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "MONGO_URL")
 
+# Fail-closed switch (Wave R-b): a DEDICATED env var, never PHI_ENV, which
+# is already an unrelated master kill switch for several other things
+# (boot-time config validation, API token requirement, encryption-key
+# auto-generation, cookie Secure, HSTS, a free lead_reviewer grant) and
+# ships as PHI_ENV=dev in backend/.env.example. Hanging the memory
+# ceiling on that same switch would mean one copied line disables five
+# unrelated protections plus this one.
+_MEMORY_LIMIT_UNENFORCED_OVERRIDE_ENV = "PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY"
+
+
+def _probe_memory_limit_enforceable() -> bool:
+    """Whether ``RLIMIT_AS`` can be set to the real configured sandbox
+    memory ceiling on this platform. Not "does setrlimit accept some
+    arbitrarily huge finite value" (Darwin/XNU accepts those too) but
+    "can this system enforce the ceiling it actually configures"
+    (``limits.MAX_SANDBOX_MEMORY_BYTES``): Darwin/XNU rejects an
+    ``RLIMIT_AS`` value below the process's already-mapped virtual
+    address space with ``EINVAL``, which CPython mistranslates as
+    ``ValueError('current limit exceeds maximum limit')`` (CPython issue
+    78783, open, documented XNU limitation) -- and a modern Python
+    process's shared-library mappings alone can exceed the 1 GiB default
+    ceiling. Only the soft limit is touched: lowering the hard limit is a
+    one-way ratchet without elevated privilege, so touching it here would
+    make the finally-restore itself capable of failing. An identity write
+    (re-setting the limit already in effect, almost always
+    ``RLIM_INFINITY``) succeeds on Darwin too, so it is NOT a valid
+    capability probe.
+    """
+    original_soft, original_hard = resource.getrlimit(resource.RLIMIT_AS)
+    probe_soft = (
+        limits.MAX_SANDBOX_MEMORY_BYTES
+        if original_hard == resource.RLIM_INFINITY
+        else min(limits.MAX_SANDBOX_MEMORY_BYTES, original_hard)
+    )
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (probe_soft, original_hard))
+        return True
+    except (ValueError, OSError):
+        return False
+    finally:
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (original_soft, original_hard))
+        except (ValueError, OSError):
+            pass
+
+
+_MEMORY_LIMIT_ENFORCEABLE = _probe_memory_limit_enforceable()
+
 
 class SandboxError(RuntimeError):
     """Raised on sandbox creation/destruction/execution failure."""
@@ -70,14 +118,29 @@ def create_sandbox(
     max_cpu_seconds: int = limits.MAX_SANDBOX_CPU_SECONDS,
     max_memory_bytes: int = limits.MAX_SANDBOX_MEMORY_BYTES,
     max_wall_seconds: int = limits.MAX_SANDBOX_WALL_SECONDS,
+    max_output_bytes: int = limits.MAX_SANDBOX_OUTPUT_BYTES,
 ) -> SandboxRecord:
     """Allocate a fresh, uniquely-named workspace for ``run_id``.
 
     A random suffix (not just ``run_id``) keeps repeat sandboxes for the
     same run from colliding with a not-yet-destroyed prior one.
+
+    Fails closed when this platform cannot actually enforce the memory
+    ceiling (``_MEMORY_LIMIT_ENFORCEABLE`` is False, e.g. Darwin/XNU, see
+    ``_probe_memory_limit_enforceable``): a raw-data sandbox with no real
+    memory ceiling is not the boundary this module promises. Set
+    ``PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY=1`` to explicitly accept that
+    gap (e.g. local development on macOS).
     """
     if not is_safe_scoped_id(run_id):
         raise SandboxError(f"run_id is not a safe scoped identifier: {run_id!r}")
+    if not _MEMORY_LIMIT_ENFORCEABLE and os.environ.get(_MEMORY_LIMIT_UNENFORCED_OVERRIDE_ENV) != "1":
+        raise SandboxError(
+            "sandbox memory ceiling cannot be enforced on this platform "
+            "(RLIMIT_AS rejects the configured ceiling here, see CPython "
+            "issue 78783); set PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY=1 to "
+            "run raw-data workers without a real memory ceiling anyway"
+        )
     workspace = SANDBOX_DIR / run_id / uuid4().hex
     workspace.mkdir(parents=True, exist_ok=False, mode=0o700)
     os.chmod(workspace, 0o700)
@@ -87,6 +150,8 @@ def create_sandbox(
         max_cpu_seconds=max_cpu_seconds,
         max_memory_bytes=max_memory_bytes,
         max_wall_seconds=max_wall_seconds,
+        max_output_bytes=max_output_bytes,
+        memory_limit_enforced=_MEMORY_LIMIT_ENFORCEABLE,
     )
 
 
@@ -149,12 +214,15 @@ def _child_entry(
     kwargs: dict[str, Any],
     max_cpu_seconds: int,
     max_memory_bytes: int,
+    max_output_bytes: int,
     queue: "multiprocessing.Queue[tuple[bool, Any]]",
 ) -> None:
     os.environ.clear()
     os.environ.update(_stripped_env())
     resource.setrlimit(resource.RLIMIT_CPU, (max_cpu_seconds, max_cpu_seconds))
-    resource.setrlimit(resource.RLIMIT_AS, (max_memory_bytes, max_memory_bytes))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (max_output_bytes, max_output_bytes))
+    if _MEMORY_LIMIT_ENFORCEABLE:
+        resource.setrlimit(resource.RLIMIT_AS, (max_memory_bytes, max_memory_bytes))
     _deny_sockets()
     try:
         queue.put((True, func(*args, **kwargs)))
@@ -183,7 +251,7 @@ def run_isolated(
     queue: "multiprocessing.Queue[tuple[bool, Any]]" = ctx.Queue()
     proc = ctx.Process(
         target=_child_entry,
-        args=(func, args, kwargs, record.max_cpu_seconds, record.max_memory_bytes, queue),
+        args=(func, args, kwargs, record.max_cpu_seconds, record.max_memory_bytes, record.max_output_bytes, queue),
     )
     proc.start()
     proc.join(record.max_wall_seconds)
