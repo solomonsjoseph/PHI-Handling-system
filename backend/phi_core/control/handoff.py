@@ -55,10 +55,10 @@ from typing import Any, Mapping
 
 from pydantic import ValidationError
 
-from . import authorization
+from . import authorization, limits
 from .events import TraceEventStore
 from .gateway import _contains_restricted_content
-from .policy import CapabilityDenied
+from .policy import BudgetExceeded, CapabilityDenied
 from .records import (
     ControlRecord,
     HandoffEnvelope,
@@ -88,7 +88,7 @@ REVIEWER = "Reviewer"
 ALLOWED_EDGES: frozenset[tuple[str, str]] = frozenset({
     (JUDGE, REGULATIONS_EXPERT), (REGULATIONS_EXPERT, JUDGE),
     (JUDGE, METHODS_EXPERT), (METHODS_EXPERT, JUDGE),
-    (REVIEWER, JUDGE),
+    (REVIEWER, JUDGE), (JUDGE, REVIEWER),
     (JUDGE, SCHEMA), (JUDGE, LEXICON), (JUDGE, INSTRUMENT),
 })
 
@@ -114,6 +114,16 @@ class ReviewerHandoff(ControlRecord):
     note: str = ""
 
 
+class RevisedArtifactHandoff(ControlRecord):
+    """Judge -> Reviewer through revised artifact (spec section 11): the
+    answering half of ReviewerHandoff's decision_ids/note conversation --
+    Judge hands the same decision_ids back once revised, with a summary
+    of what changed."""
+
+    decision_ids: list[str] = []
+    revision_summary: str = ""
+
+
 class SchemaQuestion(ControlRecord):
     column: str
     file_id: str = ""
@@ -136,6 +146,7 @@ EDGE_SCHEMAS: Mapping[tuple[str, str], type[ControlRecord]] = {
     (JUDGE, METHODS_EXPERT): MethodQuestion,
     (METHODS_EXPERT, JUDGE): MethodFinding,
     (REVIEWER, JUDGE): ReviewerHandoff,
+    (JUDGE, REVIEWER): RevisedArtifactHandoff,
     (JUDGE, SCHEMA): SchemaQuestion,
     (JUDGE, LEXICON): LexiconQuestion,
     (JUDGE, INSTRUMENT): InstrumentQuestion,
