@@ -577,13 +577,26 @@ class ArtifactService:
         """Return the on-disk path for a promoted, current, hash-verified artifact.
 
         Refuses with an :class:`ArtifactError` whose ``reason`` is exactly
-        one of ``artifact_missing``, ``artifact_not_promoted``,
+        one of ``artifact_missing``, ``artifact_superseded``,
+        ``artifact_invalidated``, ``artifact_not_promoted``,
         ``generation_mismatch``, or ``artifact_hash_mismatch``.
+
+        docs #30: this is the sole read/consumption path for a served
+        artifact, so it is where "never use a stale manifest" is enforced.
+        ``artifact_superseded`` and ``artifact_invalidated`` are raised
+        ahead of the ordinary ``artifact_not_promoted`` check so a caller
+        can tell "this was invalidated by an upstream lineage change" apart
+        from "this was simply never promoted".
         """
         doc = await self._store.get_one("artifacts", {"artifact_id": artifact_id, "session_id": session_id})
         if doc is None:
             raise ArtifactError("artifact_missing", artifact_id)
         record = ArtifactRecord.model_validate(doc)
+        if record.state == "superseded":
+            raise ArtifactError("artifact_superseded", artifact_id)
+        manifest_doc = await self._store.get_one(MANIFEST_COLLECTION, {"artifact_id": artifact_id})
+        if manifest_doc is not None and manifest_doc.get("status") == "invalidated":
+            raise ArtifactError("artifact_invalidated", artifact_id)
         if record.state != "promoted":
             raise ArtifactError("artifact_not_promoted", f"state={record.state!r}")
         pointer = await self._current_pointer(session_id)
