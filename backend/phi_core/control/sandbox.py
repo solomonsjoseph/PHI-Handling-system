@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import queue as _queue_module
 import resource
 import shutil
 import socket
@@ -231,6 +232,9 @@ def _child_entry(
         queue.put((False, f"{type(exc).__name__}: {exc}"))
 
 
+_PROCESS_JOIN_GRACE_SECONDS = 5
+
+
 def run_isolated(
     record: SandboxRecord,
     func: Callable[..., Any],
@@ -245,24 +249,47 @@ def run_isolated(
     ``func`` and its arguments must be picklable (``multiprocessing``
     ``spawn`` context): this is a raw-data worker boundary, not a general
     RPC layer.
+
+    D2: the result is drained from the queue BEFORE joining the process,
+    never after. A child process that has put an item on a
+    ``multiprocessing.Queue`` larger than the OS pipe buffer (~64 KiB)
+    will not actually terminate until that item is fed through the pipe
+    by its feeder thread -- documented CPython behavior, not a bug in the
+    child. Calling ``proc.join()`` first, before anything drains the
+    queue, deadlocks until the wall-clock timeout fires and raises a
+    spurious ``SandboxTimeout`` for a child that already finished its
+    work correctly.
     """
     if record.state != "active":
         raise SandboxError(f"cannot run in a sandbox that is not active: {record.state!r}")
     ctx = multiprocessing.get_context("spawn")
-    queue: "multiprocessing.Queue[tuple[bool, Any]]" = ctx.Queue()
+    result_queue: "multiprocessing.Queue[tuple[bool, Any]]" = ctx.Queue()
     proc = ctx.Process(
         target=_child_entry,
-        args=(func, args, kwargs, record.max_cpu_seconds, record.max_memory_bytes, record.max_output_bytes, queue),
+        args=(
+            func,
+            args,
+            kwargs,
+            record.max_cpu_seconds,
+            record.max_memory_bytes,
+            record.max_output_bytes,
+            result_queue,
+        ),
     )
     proc.start()
-    proc.join(record.max_wall_seconds)
+    try:
+        ok, payload = result_queue.get(timeout=record.max_wall_seconds)
+    except _queue_module.Empty:
+        if proc.is_alive():
+            proc.kill()
+        proc.join(_PROCESS_JOIN_GRACE_SECONDS)
+        raise SandboxTimeout(
+            f"sandbox worker exceeded {record.max_wall_seconds}s wall-clock limit"
+        ) from None
+    proc.join(_PROCESS_JOIN_GRACE_SECONDS)
     if proc.is_alive():
         proc.kill()
         proc.join()
-        raise SandboxTimeout(f"sandbox worker exceeded {record.max_wall_seconds}s wall-clock limit")
-    if queue.empty():
-        raise SandboxError(f"sandbox worker exited without a result (exitcode={proc.exitcode})")
-    ok, payload = queue.get()
     if not ok:
         raise SandboxError(f"sandbox worker raised: {payload}")
     return payload
