@@ -1,6 +1,7 @@
 """Focused D6 contracts for egress and the provider tool boundary."""
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,21 @@ async def test_non_anthropic_search_is_denied_without_a_completion() -> None:
     assert result.denial_reason == "tool_unsupported_by_provider"
 
 
+def _imports_litellm(tree: ast.AST) -> bool:
+    """Whether ``tree`` contains a real ``import litellm``/``from litellm
+    import ...`` statement, as opposed to a docstring or comment merely
+    mentioning the word (both `server.py` and `phi_core/chatgpt_auth.py`
+    do exactly that, describing litellm's own behavior, with no import)."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == "litellm" or alias.name.startswith("litellm.") for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and (node.module == "litellm" or node.module.startswith("litellm.")):
+                return True
+    return False
+
+
 def test_only_gateway_has_a_production_litellm_import() -> None:
     root = Path(__file__).resolve().parents[1]
     excluded_dirs = {".venv", "node_modules", "tests"}
@@ -77,8 +93,15 @@ def test_only_gateway_has_a_production_litellm_import() -> None:
         rel = path.relative_to(root)
         if excluded_dirs & set(rel.parts):
             continue
-        source = path.read_text(encoding="utf-8")
-        if "import litellm" in source or "from litellm" in source:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except SyntaxError:
+            continue
+        if _imports_litellm(tree):
             imports.append(rel.as_posix())
 
-    assert sorted(imports) == ["control/gateway.py"]
+    # Positive control: a scan that silently finds nothing must fail loudly,
+    # not pass by coincidence -- gateway.py's own `import litellm` is the
+    # one legitimate site this scan exists to keep unique.
+    assert imports, "AST-based litellm import scan found zero import sites; the scan itself is broken"
+    assert sorted(imports) == ["phi_core/control/gateway.py"]
