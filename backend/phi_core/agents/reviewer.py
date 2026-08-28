@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from phi_core.control.artifacts import ArtifactService
+from phi_core.control.records import ReviewFinding
 from phi_core.paths import artifact_id_from_export_alias
 
 from .base import Agent
@@ -79,10 +80,11 @@ class Reviewer(Agent):
                 if column in verdict_columns:
                     continue
                 missing += 1
-                findings.append({
-                    "file_id": file_id, "column": column, "kind": "missing_operator_verdict",
-                    "detail": "Operator produced no verdict for this decision.",
-                })
+                findings.append(ReviewFinding(
+                    verdict="CORRECTION_REQUIRED", file_id=file_id, column=column,
+                    kind="missing_operator_verdict",
+                    detail="Operator produced no verdict for this decision.",
+                ).model_dump())
             decisions_checked = len(file_decisions)
             operator_verdicts_found = decisions_checked - missing
 
@@ -107,20 +109,22 @@ class Reviewer(Agent):
                     header_set = set(header)
                     for column in sorted(omit_cols):
                         if column in header_set:
-                            findings.append({
-                                "file_id": file_id, "column": column, "kind": "omit_column_leaked",
-                                "detail": "Column was marked for omission but is still "
-                                          "present in the written export.",
-                            })
+                            findings.append(ReviewFinding(
+                                verdict="CORRECTION_REQUIRED", file_id=file_id, column=column,
+                                kind="omit_column_leaked",
+                                detail="Column was marked for omission but is still "
+                                       "present in the written export.",
+                            ).model_dump())
 
                     file_verdicts = by_file_verdicts.get(file_id, [])
                     zero_fail = all(v.get("verdict") != "fail" for v in file_verdicts)
                     if zero_fail and decisions_checked != len(header):
-                        findings.append({
-                            "file_id": file_id, "kind": "coverage_mismatch",
-                            "detail": f"decision count ({decisions_checked}) does not "
-                                      f"match the written column count ({len(header)})",
-                        })
+                        findings.append(ReviewFinding(
+                            verdict="CORRECTION_REQUIRED", file_id=file_id,
+                            kind="coverage_mismatch",
+                            detail=f"decision count ({decisions_checked}) does not "
+                                   f"match the written column count ({len(header)})",
+                        ).model_dump(exclude={"column"}))
 
             return {
                 "file_id": file_id,
