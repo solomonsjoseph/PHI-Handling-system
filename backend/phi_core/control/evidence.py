@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Mapping, Sequence
 
-from .records import EvidenceClaim, EvidenceSource, EvidenceState, VerificationDimension, VerificationResult
+from .records import EvidenceClaim, EvidenceSource, EvidenceState, EvidenceVerificationResult, VerificationDimension
 
 VERIFICATION_DIMENSIONS: tuple[VerificationDimension, ...] = (
     "retrieval_authenticity",
@@ -65,7 +65,7 @@ def record_source(
     """
     if not tool_backed:
         verifications = [
-            VerificationResult(dimension=dimension, state="UNVERIFIED", reason="not tool-derived")
+            EvidenceVerificationResult(dimension=dimension, state="UNVERIFIED", reason="not tool-derived")
             for dimension in VERIFICATION_DIMENSIONS
         ]
     else:
@@ -73,7 +73,7 @@ def record_source(
         verifications = []
         for dimension in VERIFICATION_DIMENSIONS:
             state, reason = supplied.get(dimension, ("UNVERIFIED", "not evaluated"))
-            verifications.append(VerificationResult(dimension=dimension, state=state, reason=reason))
+            verifications.append(EvidenceVerificationResult(dimension=dimension, state=state, reason=reason))
     return EvidenceSource(claim_id=claim_id, url=url, verifications=verifications, **fields)
 
 

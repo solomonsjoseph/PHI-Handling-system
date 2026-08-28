@@ -26,7 +26,7 @@ from phi_core.control.records import (
     ResourceUsage,
     ScopeSpec,
     TraceEvent,
-    VerificationResult,
+    EvidenceVerificationResult,
     WorkflowRun,
     WorkItem,
 )
@@ -42,7 +42,7 @@ _RECORD_FIELDS = {
     WorkflowRun: {"run_id", "session_id", "schema_version", "workflow_version", "policy_version", "run_type", "state", "terminal_outcome", "node", "checkpoint", "checkpoint_version", "created_at", "started_at", "updated_at", "paused_at", "resumed_at", "cancelled_at", "completed_at", "cancel_requested", "cancel_requested_at", "correlation_id", "decision_version", "publication_generation", "hold", "event_seq", "budget", "usage", "opaque_map", "outbox", "trace_root_hash"},
     WorkItem: {"task_id", "run_id", "session_id", "parent_task_id", "depth", "worker", "worker_version", "task_type", "state", "attempt", "max_attempts", "next_eligible_at", "lease_owner", "lease_expires_at", "heartbeat_at", "fence", "idempotency_key", "effect_key", "input_ref", "output_ref", "grant_id", "budget", "usage", "cancel_requested", "error_category", "correlation_id", "created_at", "claimed_at", "started_at", "updated_at", "completed_at", "outbox", "schema_version"},
     CapabilityGrant: {"grant_id", "run_id", "task_id", "agent", "manifest_version", "policy_version", "issued_at", "expires_at", "tools", "tools_used", "data_class_ceiling", "providers", "models", "provider", "model", "endpoint", "scope", "budget", "usage", "schema_version"},
-    VerificationResult: {"schema_version", "dimension", "state", "reason", "checked_at"},
+    EvidenceVerificationResult: {"schema_version", "dimension", "state", "reason", "checked_at"},
     EvidenceSource: {"schema_version", "source_id", "claim_id", "url", "normalized_domain", "final_redirect_url", "publisher", "retrieved_at", "query", "tool", "tool_request_id", "provider_request_id", "content_hash", "locator", "snapshot_artifact_id", "verifications"},
     EvidenceClaim: {"schema_version", "claim_id", "run_id", "task_id", "subject", "statement", "state", "required_state", "source_ids", "freshness_required_after", "contradicted_by", "created_at", "updated_at"},
     GateResult: {"schema_version", "gate_id", "run_id", "task_id", "gate", "gate_version", "status", "subject", "detail", "inputs_digest", "created_at"},

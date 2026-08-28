@@ -104,6 +104,21 @@ ArtifactState = Literal[
     "legal_hold",
 ]
 
+FailureClass = Literal[
+    "INPUT_ERROR", "FILE_SAFETY_ERROR",
+    "HEADER_SENSITIVE_CONTENT", "SOURCE_SENSITIVE_CONTENT",
+    "SPECIALIST_INTERPRETATION_ERROR",
+    "REGULATION_ERROR", "METHOD_ERROR", "EVIDENCE_ERROR",
+    "CLASSIFICATION_ERROR", "REVIEW_CONFLICT",
+    "HUMAN_INPUT_REQUIRED", "HUMAN_REVIEW_REQUIRED",
+    "POLICY_BLOCK",
+    "AUTHORIZATION_ERROR", "CROSS_RUN_ACCESS_ERROR", "PROVIDER_POLICY_ERROR",
+    "EXECUTOR_CODE_ERROR", "EXECUTION_ERROR", "VERIFICATION_ERROR", "SANDBOX_ERROR",
+    "OUTPUT_ERROR", "REPORTING_SAFETY_ERROR",
+    "TRACE_SANITIZATION_ERROR", "LEARNING_SANITIZATION_ERROR", "CLEANUP_ERROR",
+    "SECURITY_BOUNDARY_VIOLATION",
+]
+
 
 class ResourceBudget(FrozenControlRecord):
     wall_seconds: float = 0.0
@@ -287,7 +302,9 @@ class CapabilityGrant(FrozenControlRecord):
         return dict(value)
 
 
-class VerificationResult(ControlRecord):
+class EvidenceVerificationResult(ControlRecord):
+    """One verification-dimension check on an ``EvidenceSource`` (D12)."""
+
     dimension: VerificationDimension
     state: EvidenceState
     reason: str = ""
@@ -309,7 +326,7 @@ class EvidenceSource(ControlRecord):
     content_hash: str = ""
     locator: str = Field(default="", max_length=500)
     snapshot_artifact_id: str = ""
-    verifications: list[VerificationResult] = Field(default_factory=list)
+    verifications: list[EvidenceVerificationResult] = Field(default_factory=list)
 
 
 class EvidenceClaim(ControlRecord):
@@ -818,3 +835,199 @@ class HandoffResult(ControlRecord):
     reason_code: HandoffReasonCode = ""
     detail: str = ""
     trace_event_id: str = ""
+
+
+# --- Phase R-a: the nine section-84 contracts the reconciliation audit ---
+# found genuinely absent. Field lists are taken verbatim from the cited
+# master-spec sections; each extends the module's ControlRecord convention
+# (schema_version, extra="forbid").
+
+
+class EvidenceRecord(ControlRecord):
+    """The composed evidence-registry read model (docs #39). The
+    ``EvidenceSource``/``EvidenceClaim`` split above stays the storage
+    shape; this record is the registry's public contract. ``source`` and
+    ``interpretation_ref`` stay separate (``SOURCE`` vs ``MODEL
+    INTERPRETATION``) as the spec requires."""
+
+    evidence_id: str = Field(default_factory=_id)
+    evidence_type: str
+    jurisdiction: str
+    authority: str
+    source: str
+    title: str
+    publisher: str
+    publication_date: str = ""
+    effective_date: str = ""
+    retrieved_at: str = ""
+    content_hash: str = ""
+    source_material_ref: str = ""
+    interpretation_ref: str = ""
+    verification_status: EvidenceState = "UNKNOWN"
+    verified_by: str = ""
+    supports_decision_ids: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+ReviewVerdict = Literal["PASS", "CORRECTION_REQUIRED", "HUMAN_REVIEW_REQUIRED"]
+
+
+class ReviewFinding(ControlRecord):
+    """Reviewer Preview's typed finding (docs #43). ``verdict`` is the
+    three-value output; ``file_id``/``column``/``kind``/``detail`` carry
+    the affected decision and reason (docs #44), replacing the plain dicts
+    ``agents/reviewer.py`` used to build."""
+
+    finding_id: str = Field(default_factory=_id)
+    verdict: ReviewVerdict
+    detail: str = ""
+    file_id: str = ""
+    column: str = ""
+    kind: str = ""
+
+
+class HumanReviewPacket(ControlRecord):
+    """The full human-review packet (docs #46) handed to an authorized
+    human. Coexists with ``HumanReviewRequest`` (a thin routing record)."""
+
+    review_item_id: str = Field(default_factory=_id)
+    safe_artifact_column_reference: str
+    reason: str
+    judge_proposal: str = ""
+    judge_rationale: str = ""
+    reviewer_concern: str = ""
+    evidence_refs: list[str] = Field(default_factory=list)
+    previous_attempts: list[str] = Field(default_factory=list)
+    remaining_uncertainty: str = ""
+    available_actions: list[str] = Field(default_factory=list)
+    recommendation_if_appropriate: str = ""
+
+
+HumanDecisionAction = Literal[
+    "APPROVE", "MODIFY", "OVERRIDE", "REQUEST_MORE_EVIDENCE", "DEFER", "HOLD",
+]
+
+
+class HumanDecision(ControlRecord):
+    """The typed content of an authoritative human decision (docs #46).
+    ``HumanReviewEvent`` remains the append-only storage row; this record is
+    its typed ``result`` payload. ``reviewer_principals_sha256`` is the
+    sha256 of the raw ``REVIEWER_PRINCIPALS`` env-var value as it stood at
+    decision time, which makes the authorization reconstructible at audit."""
+
+    decision_id: str = Field(default_factory=_id)
+    action: HumanDecisionAction
+    principal: str
+    role: str = ""
+    decided_at: str = Field(default_factory=_now)
+    version: int = 1
+    reviewer_principals_sha256: str = ""
+
+
+ExecutionTaskState = Literal["submitted", "running", "succeeded", "failed", "cancelled"]
+
+
+class ExecutionTask(ControlRecord):
+    """The validated operation plan Executor submits to the raw-data worker
+    (docs #50). The idempotency spine (docs #53: task_id/attempt_id/...
+    output_artifact_version) makes a retry duplicate-protected."""
+
+    task_id: str = Field(default_factory=_id)
+    run_id: str
+    attempt_id: str = ""
+    manifest_id: str
+    manifest_version: str = ""
+    input_artifact_version: int = 0
+    output_artifact_version: int = 0
+    decision_refs: list[str] = Field(default_factory=list)
+    method_refs: list[str] = Field(default_factory=list)
+    state: ExecutionTaskState = "submitted"
+    created_at: str = Field(default_factory=_now)
+
+
+class ExecutionResult(ControlRecord):
+    """The structured result the raw-data worker returns to Executor
+    (docs #50-53). Carries the same idempotency spine as ``ExecutionTask``."""
+
+    task_id: str
+    run_id: str
+    attempt_id: str = ""
+    manifest_id: str
+    manifest_version: str = ""
+    input_artifact_version: int = 0
+    output_artifact_version: int = 0
+    output_artifact_id: str = ""
+    success: bool = False
+    failure_class: str = ""
+    error_code: str = ""
+    detail: str = ""
+    created_at: str = Field(default_factory=_now)
+
+
+class VerificationResult(ControlRecord):
+    """DeterministicVerifier's post-execution verdict (docs #54). The
+    evidence-dimension record of the same name is ``EvidenceVerificationResult``
+    above; this record owns the execution-verification meaning."""
+
+    verification_id: str = Field(default_factory=_id)
+    task_id: str = ""
+    run_id: str
+    attempt_id: str = ""
+    manifest_id: str = ""
+    manifest_version: str = ""
+    input_artifact_version: int = 0
+    output_artifact_version: int = 0
+    manifest_coverage_percent: int = 100
+    failed_checks: list[str] = Field(default_factory=list)
+    passed: bool = False
+    detail: str = ""
+    created_at: str = Field(default_factory=_now)
+
+
+LearningCaseSource = Literal[
+    "judge_mistake", "reviewer_correction", "human_decision",
+    "research_failure", "method_failure", "executor_failure",
+    "verification_failure", "successful_recovery",
+]
+
+
+class LearningCase(ControlRecord):
+    """A sanitized learning candidate (docs #73) that feeds the existing
+    ``LearningProposal``/``LearningEvaluation``/``LearningActivation``
+    pipeline, not a replacement for it. Only validated sources may produce
+    a candidate; the pipeline stage flags record the sanitize/scan/reconstruct
+    checks the spec's candidate flow requires before persistence."""
+
+    case_id: str = Field(default_factory=_id)
+    run_id: str
+    source: LearningCaseSource
+    abstract: str = ""
+    sanitized: bool = False
+    phi_pii_scan_passed: bool = False
+    reconstruction_check_passed: bool = False
+    policy_validation_passed: bool = False
+    detail: str = ""
+    created_at: str = Field(default_factory=_now)
+
+
+class RunManifest(ControlRecord):
+    """The exported reproducibility projection of a ``WorkflowRun``
+    (docs #63): safe non-PHI run configuration metadata plus the trace
+    root hash. No secrets and no raw study values."""
+
+    manifest_id: str = Field(default_factory=_id)
+    run_id: str
+    repository_commit: str = ""
+    application_version: str = ""
+    workflow_version: str = ""
+    agent_role_versions: dict[str, str] = Field(default_factory=dict)
+    prompt_template_versions: dict[str, str] = Field(default_factory=dict)
+    model_versions: dict[str, str] = Field(default_factory=dict)
+    provider_versions: dict[str, str] = Field(default_factory=dict)
+    run_privacy_policy_version: str = ""
+    method_registry_versions: dict[str, str] = Field(default_factory=dict)
+    validator_versions: dict[str, str] = Field(default_factory=dict)
+    transformation_hashes: dict[str, str] = Field(default_factory=dict)
+    feature_flags: dict[str, str] = Field(default_factory=dict)
+    trace_root_hash: str = ""
+    created_at: str = Field(default_factory=_now)
