@@ -220,3 +220,49 @@ def test_pre_added_limit_constants_exist():
     assert limits.MAX_SANDBOX_OUTPUT_BYTES > 0
     assert isinstance(limits.HANDOFF_ATTEMPT_BUDGET, dict)
     assert limits.MAX_UNCERTAIN_HEADERS_PER_RUN == 50
+
+
+# --- ReviewFinding wired into agents/reviewer.py ---
+
+
+def test_reviewer_findings_carry_the_review_finding_shape(tmp_path):
+    import asyncio
+    import csv
+
+    from phi_core.agents.reviewer import Reviewer
+    from phi_core.control.testing import make_ctx
+
+    src = tmp_path / "out.csv"
+    with src.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["id", "name"])
+        writer.writerow(["1", "Jane"])
+
+    exports = {"f1": str(src)}
+    decisions = [
+        {"file_id": "f1", "column": "id", "action": "keep", "phi_category": "NONE", "citation": ""},
+        {"file_id": "f1", "column": "name", "action": "keep", "phi_category": "NONE", "citation": ""},
+    ]
+    operator_result = {
+        "verdicts": [{
+            "file_id": "f1", "column": "id", "violation": {"phi_category": "NONE", "citation": ""},
+            "method": "keep", "checks": [], "verdict": "pass", "problem": "", "performed": "",
+        }],
+        "failed_file_ids": [],
+        "status": "clean",
+    }
+
+    reviewer = Reviewer(make_ctx("Reviewer"))
+    result = asyncio.run(reviewer.run(decisions, operator_result, exports))
+
+    missing = [f for f in result["findings"] if f["kind"] == "missing_operator_verdict"]
+    assert len(missing) == 1
+    finding = missing[0]
+    # Backward-compatible dict shape (test_reviewer.py indexes by these keys)
+    # plus the ReviewFinding contract fields (docs #43), proving the finding
+    # was constructed as a ReviewFinding, not a hand-rolled dict.
+    assert finding["file_id"] == "f1"
+    assert finding["column"] == "name"
+    assert finding["verdict"] == "CORRECTION_REQUIRED"
+    assert "finding_id" in finding
+    assert "schema_version" in finding
