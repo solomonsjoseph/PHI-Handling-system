@@ -110,6 +110,51 @@ collection: **1028 tests**.
 | 2 | PARTIAL | Wired and real: ProviderGateway as sole LLM egress, secret blocking, and the sanitize-then-hash-chain trace stack. Zero call sites: SandboxManager (2A), HeaderSafetyGate and SourceProjectionGateway (2E), MethodRegistry. Absent entirely: artifact lineage invalidation (section 30). |
 | 3 | PARTIAL | `HandoffGateway` deny-by-default and correct, 22 tests, 11 of 12 checks, 6 of 7 topology edges. Zero call sites. Both exit criteria unmet. |
 
+### Phase 0 reconfirmation at current HEAD (Wave R-b, R-Docs)
+
+`PRECHECK = PASS`
+`INSTRUCTION_BASELINE_STATUS = ALIGNED`, scoped to `feat/phi-infrastructure-v2`
+at `eaaa1f4d04a87f0fa95da4a64b30f5b9138dc58c` (`git rev-parse HEAD`, the tip after
+Wave R-a landed). This supersedes the row 108 note above: the `main@dcec23a` scope
+that note flags as stale is now reconfirmed current, for the reasons below.
+
+Re-audited, not assumed from the stale record:
+
+- `main` at `e2f8d4b` (current tip) differs from the `dcec23a` commit the original
+  audit scoped itself to by exactly 4 commits, all from the audit's own PR (`#16`):
+  the audit report's own creation plus one clarifying sentence added to `CLAUDE.md`.
+  No executable code changed between `dcec23a` and `main`'s current tip.
+- `feat/phi-infrastructure-v2` forks directly from `main`'s current tip
+  (`git merge-base feat/phi-infrastructure-v2 main` == `main`'s tip == `e2f8d4b`;
+  `main` is a confirmed ancestor of `HEAD`), so the audit's Section 2 findings
+  (instruction hierarchy) transitively cover everything on this branch except the
+  27 rewrite commits added on top.
+- A fresh glob for `**/CLAUDE.md`, `**/AGENTS.md`, `**/.cursorrules`, and
+  `**/.github/copilot-instructions.md` across the current tree found exactly one
+  file: the root `CLAUDE.md`. No nested instruction file exists anywhere under
+  `backend/`, `frontend/`, or `phi_engine/` today, matching the original audit's
+  Section 2 finding exactly.
+- `git diff --stat main..HEAD` touches 40 files; of those, the only one under the
+  "instruction file" category is `CLAUDE.md` (56 insertions, 0 deletions). The diff
+  is a pure addition (`git diff main..HEAD -- CLAUDE.md`): a new "Migration status"
+  subsection describing the in-flight Phase R rewrite and an environment note. It
+  introduces no new instruction file, contradicts nothing already in the doc, and
+  every claim in it was independently checked against the current tree (agents/
+  vs control/ wiring state, the Presidio/numpy environment note, the D8 hang
+  description) and found accurate as of this commit.
+- `.claude/settings.json` is unchanged (still pins only `{"model": "sonnet"}`, no
+  instruction content). `.github/workflows/ci.yml` is unchanged in any way relevant
+  to instruction hierarchy.
+
+`PHASE_0_STATUS`: the three items row 108 flagged absent are addressed this wave:
+`PRECHECK`/`INSTRUCTION_BASELINE_STATUS` now recorded above at current HEAD; the
+branch-migration inventory of `feat/agent-design-docs` is now
+`docs/BRANCH_MIGRATION_INVENTORY.md`; the baseline test record is the Step 0 record
+above (backend serial, 12 failed/1021 passed/4 skipped/2 errors), gathered on this
+branch, not pre-rewrite CI data. Phase 0 is now materially complete, not merely
+`PARTIAL`; row 108 above is left unedited as the historical record of what Wave R-a
+found, per this file's own convention of never rewriting completed work in place.
+
 ## Defects found during review
 
 | ID | Location | Defect |
