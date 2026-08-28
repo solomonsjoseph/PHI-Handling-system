@@ -510,8 +510,11 @@ class ArtifactService:
         (docs #30: "If an upstream artifact changes, invalidate affected
         descendants"). Every artifact in :attr:`run_id` whose ``parents``
         contains ``artifact_id``, transitively, is flipped to ``superseded``
-        and returned. ``artifact_id`` itself (the changed ancestor) and any
-        artifact outside this chain are left exactly as they are.
+        and returned. Any :class:`~.records.VerifiedClassificationManifest`
+        linked to a descendant (via :data:`MANIFEST_COLLECTION`) is also
+        flipped to ``invalidated``. ``artifact_id`` itself (the changed
+        ancestor) and any artifact outside this chain are left exactly as
+        they are.
 
         Run-scoped: only ``self.run_id``'s artifacts are ever consulted or
         touched, never another run's, even if it happens to reuse the same
@@ -522,8 +525,9 @@ class ArtifactService:
         seen-set guard, so a cycle is simply where the walk stops rather
         than where it loops forever.
 
-        Idempotent: an already-``superseded`` descendant is left untouched
-        (no redundant write) and is still returned, so calling this twice
+        Idempotent: an already-``superseded`` descendant and an
+        already-``invalidated`` manifest are each left untouched (no
+        redundant write) and still returned/counted, so calling this twice
         in a row produces the same returned set and the same end state.
         """
         docs = await self._store.find_many("artifacts", {"run_id": self.run_id})
@@ -556,6 +560,17 @@ class ArtifactService:
                     records[child_id] = updated
                     record = updated
             superseded.append(record)
+
+            manifest_doc = await self._store.get_one(MANIFEST_COLLECTION, {"artifact_id": child_id})
+            if manifest_doc is not None and manifest_doc.get("status") != "invalidated":
+                invalidated_manifest = dict(manifest_doc)
+                invalidated_manifest["status"] = "invalidated"
+                await self._store.compare_and_set(
+                    MANIFEST_COLLECTION,
+                    {"artifact_id": child_id},
+                    {"status": manifest_doc.get("status")},
+                    invalidated_manifest,
+                )
         return superseded
 
     async def open_for_download(self, session_id: str, artifact_id: str) -> Any:
