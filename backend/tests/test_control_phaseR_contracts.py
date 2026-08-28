@@ -197,3 +197,26 @@ def test_trace_event_fields_are_additive_only():
                  "agent_version", "artifact_ids", "evidence_ids", "review_ids",
                  "latency_ms", "usage", "ts", "phase", "agent"):
         assert name in records.TraceEvent.model_fields, name
+
+
+# --- Pre-adds later waves need (fields/constants added now, unused this wave) ---
+
+
+def test_sandbox_record_pre_added_fields():
+    fields = records.SandboxRecord.model_fields
+    assert "memory_limit_enforced" in fields
+    assert "max_output_bytes" in fields
+    assert fields["memory_limit_enforced"].default is False
+
+
+def test_handoff_envelope_pre_added_fields():
+    fields = records.HandoffEnvelope.model_fields
+    assert "attempt_number" in fields and fields["attempt_number"].default == 1
+    assert "correction_number" in fields and fields["correction_number"].default == 0
+
+
+def test_pre_added_limit_constants_exist():
+    from phi_core.control import limits
+    assert limits.MAX_SANDBOX_OUTPUT_BYTES > 0
+    assert isinstance(limits.HANDOFF_ATTEMPT_BUDGET, dict)
+    assert limits.MAX_UNCERTAIN_HEADERS_PER_RUN == 50
