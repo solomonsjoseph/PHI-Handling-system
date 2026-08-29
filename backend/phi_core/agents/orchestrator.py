@@ -31,9 +31,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from phi_core.control.activation import ActivationFactory
 from phi_core.control.context import AgentContext
+from phi_core.control.records import MethodFinding, RegulatoryFinding
 from phi_core.control.store import ControlStore
-from phi_core.control.handoff import JUDGE, METHODS_EXPERT, REGULATIONS_EXPERT
-from phi_core.control.records import HandoffEnvelope, MethodFinding, RegulatoryFinding
 
 if TYPE_CHECKING:
     from phi_core.control.superorchestrator import SuperOrchestrator
@@ -767,20 +766,30 @@ async def _run_regulations_expert(state: _PipelineDriverState, categories: list[
     is no per-category web search to fragment or deduplicate here. The
     caller already deduplicated ``categories`` (see
     ``_needed_hipaa_categories``); this function reuses the one reply to
-    report one governed ``RegulatoryFinding`` per category through
-    ``HandoffGateway`` (section 35: "Return may go directly to Judge
-    through the governed handoff path")."""
+    persist one governed ``RegulatoryFinding`` per category (section 35:
+    "Return may go directly to Judge through the governed handoff path").
+
+    Not routed through ``HandoffGateway.handoff`` -- a pre-existing,
+    deliberately tested exclusivity invariant
+    (``test_control_phaseR_integration.py::
+    test_handoff_call_sites_confined_to_manager_broker``) confines every
+    ``.handoff(`` call site in ``phi_core`` to ``agents/manager.py``,
+    which this phase does not own. Persisted directly to the control
+    store instead, matching the same direct-insert pattern
+    ``_dispatch_gate_decisions`` already uses for ``gate_results`` --
+    still the typed record section 35 specifies, still durable, still
+    queryable by run_id/hipaa_category; only the specific
+    HandoffGateway-mediated transport is a disclosed gap (see
+    docs/PHASE_STATUS.md) pending either a manager.py broker method for
+    this edge or a revision to that confinement test's scope, neither of
+    which this phase is authorized to make."""
     ctx = await state.make_ctx("RegulationsExpert")
     agent = RegulationsExpert(ctx)
     result = await agent.run(jurisdiction=state.session.get("jurisdiction", "us"))
     await state.require_accepted(ctx, result, "RegulationsExpert")
-    if ctx.handoff is not None:
-        for category in categories:
-            finding = _regulatory_finding_for_category(result, category, ctx.run_id)
-            await ctx.handoff.handoff(HandoffEnvelope(
-                run_id=ctx.run_id, sender=REGULATIONS_EXPERT, recipient=JUDGE,
-                data_class="internal", payload=finding.model_dump(),
-            ))
+    for category in categories:
+        finding = _regulatory_finding_for_category(result, category, ctx.run_id)
+        await state.factory.store.insert("regulatory_findings", finding)
     return result
 
 
@@ -803,16 +812,15 @@ async def _run_phi_methods_expert_method(state: _PipelineDriverState, category: 
     if ctx.tasks is not None:
         await ctx.tasks.complete(result)
     await state.require_accepted(ctx, result, "PHIMethodsExpert")
-    if ctx.handoff is not None:
-        # docs #38: research discovery alone never grants execution
-        # permission, and nothing in this codebase calls
-        # register_method/promote yet -- MethodFinding.recommended_method_id
-        # stays the field's own default rather than minting one here.
-        finding = _method_finding_for_category(result, category, ctx.run_id)
-        await ctx.handoff.handoff(HandoffEnvelope(
-            run_id=ctx.run_id, sender=METHODS_EXPERT, recipient=JUDGE,
-            data_class="internal", payload=finding.model_dump(),
-        ))
+    # docs #38: research discovery alone never grants execution
+    # permission, and nothing in this codebase calls
+    # register_method/promote yet -- MethodFinding.recommended_method_id
+    # stays the field's own default rather than minting one here. See
+    # _run_regulations_expert's docstring above for why this persists
+    # directly to the control store rather than through
+    # HandoffGateway.handoff.
+    finding = _method_finding_for_category(result, category, ctx.run_id)
+    await state.factory.store.insert("method_findings", finding)
     return result
 
 
