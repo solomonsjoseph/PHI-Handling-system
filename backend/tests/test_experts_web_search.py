@@ -65,6 +65,103 @@ def test_statute_pack_fallback_shape():
     assert fb["as_of"] == "deterministic-fallback"
 
 
+# ---------- Section 36: research-query privacy (confirmation, unchanged code) --
+#
+# Phase 6's demand-driven dispatch (agents/orchestrator.py) only ever calls
+# RegulationsExpert.run(jurisdiction=...) and PHIMethodsExpert.method_for(category)
+# -- neither method's signature has a parameter that could carry a raw dataset
+# value, column name, or decision reason. These tests confirm that structural
+# guarantee directly against the real (unchanged) signatures, and confirm the
+# actual prompt text built from a jurisdiction/category never grows a hook for
+# caller-supplied free text.
+
+
+def test_regulations_expert_run_signature_accepts_only_jurisdiction():
+    import inspect
+    from phi_core.agents.experts import RegulationsExpert
+    params = set(inspect.signature(RegulationsExpert.run).parameters) - {"self"}
+    assert params == {"jurisdiction"}, (
+        "RegulationsExpert.run must have no parameter that could carry raw "
+        f"dataset/decision content; got {params}"
+    )
+
+
+def test_phi_methods_expert_method_for_signature_accepts_only_category():
+    import inspect
+    from phi_core.agents.experts import PHIMethodsExpert
+    params = set(inspect.signature(PHIMethodsExpert.method_for).parameters) - {"self"}
+    assert params == {"category"}, (
+        "PHIMethodsExpert.method_for must have no parameter that could carry raw "
+        f"dataset/decision content; got {params}"
+    )
+
+
+def test_regulations_expert_prompt_never_contains_decision_derived_text(monkeypatch):
+    """Section 36: a research query must be a sanitized semantic question,
+    never the raw thing being asked about. Builds the real prompt
+    ``_hipaa_rules_for`` sends and confirms it contains only the
+    jurisdiction/pack-derived static text -- nothing that looks like it
+    came from a specific decision, column, or row."""
+    from unittest.mock import AsyncMock
+
+    from phi_core.agents.experts import RegulationsExpert
+    from phi_core.control.testing import make_ctx
+
+    agent = RegulationsExpert(make_ctx("RegulationsExpert"))
+    agent._log = AsyncMock()
+    captured_prompts: list[str] = []
+
+    async def _capture(prompt, **_kw):
+        captured_prompts.append(prompt)
+        return {"jurisdiction": "us", "identifier_categories": {}, "handling_rules": [],
+                "age_aggregation_threshold": 89, "as_of": "2026-01-01", "sources": []}, []
+
+    agent.call_json_with_web_search = _capture
+
+    import asyncio
+    asyncio.run(agent._hipaa_rules_for("us"))
+
+    assert captured_prompts
+    prompt = captured_prompts[0]
+    # Only ever built from a jurisdiction code + its static JurisdictionPack
+    # label/regulation name -- no decision-shaped content (column names,
+    # free-text reasons, patient values) has any way to reach this prompt.
+    assert "column" not in prompt.lower()
+    assert "row" not in prompt.lower()
+    assert "patient" not in prompt.lower()
+
+
+def test_phi_methods_expert_prompt_never_contains_decision_derived_text():
+    """Same guarantee as above for PHIMethodsExpert.method_for -- its
+    prompt is built from a HIPAA category letter and the fixed
+    JurisdictionPack description for that letter, never from a specific
+    column, row, or Judge decision."""
+    from unittest.mock import AsyncMock
+
+    from phi_core.agents.experts import PHIMethodsExpert
+    from phi_core.control.testing import make_ctx
+
+    agent = PHIMethodsExpert(make_ctx("PHIMethodsExpert"))
+    agent._log = AsyncMock()
+    captured_prompts: list[str] = []
+
+    async def _capture(prompt, **_kw):
+        captured_prompts.append(prompt)
+        return {"category": "E", "methods": [{"name": "date_shift", "sources": []}],
+                "as_of": "2026-01-01"}, []
+
+    agent.call_json_with_web_search = _capture
+
+    import asyncio
+    asyncio.run(agent.method_for("E"))  # E has no deterministic method -> takes the web-search path
+
+    assert captured_prompts
+    prompt = captured_prompts[0]
+    assert "column" not in prompt.lower()
+    assert "row" not in prompt.lower()
+    assert "patient" not in prompt.lower()
+
+
 # ---------- Live web-search integration test ----------------------------
 
 
