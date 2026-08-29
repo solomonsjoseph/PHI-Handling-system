@@ -638,3 +638,82 @@ async def test_confirm_export_refuses_before_begin_export() -> None:
 
     with pytest.raises(WorkflowError):
         await orch.confirm_export(run_id=run.run_id)
+
+
+# ---- begin_cleanup / confirm_cleanup: cleanup-lifecycle responsibility ----
+
+
+@pytest.mark.asyncio
+async def test_begin_cleanup_advances_state_to_destroying() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    run = await _completed_run(orch, run.run_id)
+
+    updated = await orch.begin_cleanup(run_id=run.run_id)
+
+    assert updated.state == "destroying"
+    stored = await store.get_one("workflow_runs", {"run_id": run.run_id})
+    assert stored["state"] == "destroying"
+
+
+@pytest.mark.asyncio
+async def test_begin_cleanup_is_idempotent() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    run = await _completed_run(orch, run.run_id)
+    first = await orch.begin_cleanup(run_id=run.run_id)
+
+    second = await orch.begin_cleanup(run_id=run.run_id)
+
+    assert second.state == "destroying"
+    assert second.updated_at == first.updated_at
+
+
+@pytest.mark.asyncio
+async def test_confirm_cleanup_advances_state_to_session_destroyed_once_verified() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    run = await _completed_run(orch, run.run_id)
+    await orch.begin_cleanup(run_id=run.run_id)
+    manifest = CleanupManifest(run_id=run.run_id, verification_status="verified")
+
+    updated = await orch.confirm_cleanup(run_id=run.run_id, manifest=manifest)
+
+    assert updated.state == "session_destroyed"
+    stored = await store.get_one("workflow_runs", {"run_id": run.run_id})
+    assert stored["state"] == "session_destroyed"
+
+
+@pytest.mark.asyncio
+async def test_confirm_cleanup_refuses_an_unverified_manifest() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    run = await _completed_run(orch, run.run_id)
+    await orch.begin_cleanup(run_id=run.run_id)
+    manifest = CleanupManifest(run_id=run.run_id, verification_status="pending")
+
+    with pytest.raises(WorkflowError):
+        await orch.confirm_cleanup(run_id=run.run_id, manifest=manifest)
+
+
+@pytest.mark.asyncio
+async def test_confirm_cleanup_refuses_before_begin_cleanup() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    run = await _completed_run(orch, run.run_id)
+    manifest = CleanupManifest(run_id=run.run_id, verification_status="verified")
+
+    with pytest.raises(WorkflowError):
+        await orch.confirm_cleanup(run_id=run.run_id, manifest=manifest)
+
+
+@pytest.mark.asyncio
+async def test_confirm_cleanup_refuses_a_manifest_from_another_run() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    run = await _completed_run(orch, run.run_id)
+    await orch.begin_cleanup(run_id=run.run_id)
+    manifest = CleanupManifest(run_id="some-other-run", verification_status="verified")
+
+    with pytest.raises(WorkflowError):
+        await orch.confirm_cleanup(run_id=run.run_id, manifest=manifest)
