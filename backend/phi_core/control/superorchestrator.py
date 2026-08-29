@@ -914,6 +914,27 @@ class SuperOrchestrator:
             raise WorkflowError(f"lost the race rewinding run_id={run_id!r}")
         return updated
 
+    # ---- authorize_final_release -------------------------------------------
+
+    async def authorize_final_release(self, *, run_id: str) -> bool:
+        """The final-release-authorization responsibility (D9/docs #87):
+        the gate before a run's outputs may be released/exported.
+
+        Distinct from ``authorize_publication``'s job (certifying a new
+        publication generation on the artifact-lineage side): this checks
+        the *run* has actually reached a releasable terminal state
+        (``complete`` or ``partially_complete``) with no
+        ``HumanReviewRequest`` still ``open`` -- the read-only precondition
+        ``begin_export`` (below) enforces before it lets export lifecycle
+        state advance past this gate."""
+        run = await self._load_run(run_id)
+        if run.state not in ("complete", "partially_complete"):
+            return False
+        open_requests = await self._store.find_many(
+            "human_review_requests", {"run_id": run_id, "state": "open"}
+        )
+        return not open_requests
+
     # ---- authorize_publication ---------------------------------------------
 
     async def authorize_publication(
