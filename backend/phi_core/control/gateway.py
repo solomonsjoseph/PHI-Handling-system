@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from phi_core.anonymizer import scrub_for_prompt
 from phi_core.security import scrub_persisted_text, validate_llm_base_url, validate_llm_provider
 
-from . import authorization, limits
+from . import authorization, canary, limits
 from .egress import _STRUCTURAL_KEYS, canonical_payload, egress_digest
 from .policy import BudgetExceeded, CapabilityDenied, CapabilityPolicy
 from .records import CapabilityGrant, DataClass, TraceEvent
@@ -228,6 +228,31 @@ class ProviderGateway:
             request=req, decision={"status": "ok", "denial_reason": ""}, messages=messages, tools=tools
         )
         digest = egress_digest(payload)
+
+        # Wave R-d (spec sections 71/72): the outbound payload is never
+        # persisted -- canonical_payload() builds it, egress_digest() hashes
+        # it, and the raw bytes are dropped right after this call returns.
+        # A leak canary planted in an acceptance run's ground truth can only
+        # be caught here, in-process, immediately before the payload would
+        # leave. `active_canary_set` is None for every ordinary production
+        # run (no acceptance harness registered one), so this is a no-op
+        # dict lookup on the hot path in the overwhelming common case.
+        canary_set = canary.active_canary_set(req.run_id)
+        if canary_set is not None:
+            scan = canary_set.scan_payload(payload)
+            await self._record_canary_scan(req, digest, scan)
+            if scan.hit:
+                # No provider consumption happened -- give the reservation
+                # back, same as the timeout path below, before propagating
+                # the violation. Deliberately not caught by the except
+                # clause above (SecurityBoundaryViolation is not a
+                # RuntimeError/ValueError/CapabilityDenied): a security
+                # boundary violation must reach the caller as a raised
+                # exception, never be silently folded into an ordinary
+                # "denied" GatewayResult.
+                await self._reconcile_run_budget(req)
+                raise canary.SecurityBoundaryViolation(scan.canary_id, scan.hit_count)
+
         started = time.monotonic()
         try:
             response = await asyncio.wait_for(
@@ -454,6 +479,39 @@ class ProviderGateway:
         except EventAppendError:
             return
 
+    async def _record_canary_scan(
+        self, req: GatewayRequest, digest: str, scan: "canary.CanaryScanResult"
+    ) -> None:
+        """Insert the one ``TraceEvent`` that carries this outbound
+        payload's ``egress_digest`` together with its canary-scan verdict
+        (Wave R-d, spec section 72). On a hit the payload is deliberately
+        never included -- ``payload`` carries only the opaque
+        ``canary_id`` and ``hit_count`` (section 71: "Do not copy the
+        leaked sensitive value into incident telemetry"). Best-effort like
+        ``_record_budget_denial``: a lost trace write must never turn a
+        real scan result into a raised exception of its own -- the caller
+        still raises ``SecurityBoundaryViolation`` on a hit regardless."""
+        from .events import EventAppendError, TraceEventStore
+
+        if scan.hit:
+            payload: dict[str, Any] = {
+                "canary_scan": "violation", "canary_id": scan.canary_id, "hit_count": scan.hit_count,
+            }
+            outcome = "security_boundary_violation"
+        else:
+            payload = {"canary_scan": "clean"}
+            outcome = "ok"
+        event = TraceEvent(
+            run_id=req.run_id, seq=0, session_id=req.session_id, task_id=req.task_id, agent=req.agent,
+            input_class=req.input_class, output_class=req.input_class, outcome=outcome,
+            failure_class=canary.SecurityBoundaryViolation.failure_class if scan.hit else "",
+            egress_digest=digest, payload=payload,
+        )
+        try:
+            await TraceEventStore(self._store, run_id=req.run_id, session_id=req.session_id).append(event)
+        except EventAppendError:
+            return
+
     @staticmethod
     def _denied(req: GatewayRequest, reason: str) -> GatewayResult:
         return GatewayResult("", (), req.provider, req.model, "", {}, 0.0, 0, "denied", reason, "")
@@ -467,6 +525,13 @@ class ToolGateway:
         self.last_result: GatewayResult | None = None
 
     async def search(self, *, req: GatewayRequest, query: str) -> ToolResult:
+        # Wave R-d / spec section 36: `query` becomes the delegated
+        # request's `user_prompt` below, which flows through
+        # `ProviderGateway.complete`'s own payload assembly and canary
+        # scan (same run_id, via `replace`) -- a canary-bearing query is
+        # blocked and raises `canary.SecurityBoundaryViolation` from
+        # `complete()`, uncaught here, before this method logs or returns
+        # anything. No separate scan call is needed on this path.
         if req.provider != "anthropic":
             return ToolResult("web_search", "", "", "denied", (), "tool_unsupported_by_provider")
         uses = req.allowed_tools.get("web_search", 0)

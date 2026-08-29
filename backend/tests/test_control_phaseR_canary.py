@@ -151,15 +151,15 @@ async def test_canary_in_outbound_payload_blocks_send_and_raises_security_bounda
     store = MemoryControlStore()
     await _open_gateway_run(store)
     grant = await _issue_gateway_grant(store)
-    req = _gateway_request(grant_id=grant.grant_id, user_prompt="patient record MRN-CANARY-LEAK-0001 attached")
-    canary.activate_canary_set(RUN_ID, {"planted": [{"plant_id": "p1", "leak_literals": ["MRN-CANARY-LEAK-0001"]}]})
+    req = _gateway_request(grant_id=grant.grant_id, user_prompt="patient record ZZZUNIQUECANARY7788 attached")
+    canary.activate_canary_set(RUN_ID, {"planted": [{"plant_id": "p1", "leak_literals": ["ZZZUNIQUECANARY7788"]}]})
 
     try:
         with pytest.raises(canary.SecurityBoundaryViolation) as excinfo:
             await ProviderGateway(store).complete(req)
         assert excinfo.value.hit_count >= 1
         assert excinfo.value.canary_id
-        assert "MRN-CANARY-LEAK-0001" not in str(excinfo.value)
+        assert "ZZZUNIQUECANARY7788" not in str(excinfo.value)
 
         events = await store.find_many("trace_events", {"run_id": RUN_ID})
         violation_events = [e for e in events if e.get("payload", {}).get("canary_scan") == "violation"]
@@ -173,8 +173,8 @@ async def test_canary_in_outbound_payload_blocks_send_and_raises_security_bounda
         assert event["failure_class"] == "SECURITY_BOUNDARY_VIOLATION"
         assert event["egress_digest"]
         # Never the raw literal or a reconstructable fragment of it.
-        assert "MRN-CANARY-LEAK-0001" not in str(event)
-        assert "mrn-canary-leak-0001" not in str(event).lower()
+        assert "ZZZUNIQUECANARY7788" not in str(event)
+        assert "zzzuniquecanary7788" not in str(event).lower()
     finally:
         canary.deactivate_canary_set(RUN_ID)
 
@@ -188,7 +188,7 @@ async def test_clean_run_records_canary_scan_clean_alongside_egress_digest(monke
     await _open_gateway_run(store)
     grant = await _issue_gateway_grant(store)
     req = _gateway_request(grant_id=grant.grant_id, user_prompt="ordinary, canary-free request")
-    canary.activate_canary_set(RUN_ID, {"planted": [{"plant_id": "p1", "leak_literals": ["MRN-CANARY-LEAK-0001"]}]})
+    canary.activate_canary_set(RUN_ID, {"planted": [{"plant_id": "p1", "leak_literals": ["ZZZUNIQUECANARY7788"]}]})
 
     try:
         result = await ProviderGateway(store).complete(req)
@@ -215,7 +215,7 @@ async def test_no_active_canary_set_never_scans_and_never_records_a_verdict_even
     store = MemoryControlStore()
     await _open_gateway_run(store)
     grant = await _issue_gateway_grant(store)
-    req = _gateway_request(grant_id=grant.grant_id, user_prompt="MRN-CANARY-LEAK-0001 would match if scanned")
+    req = _gateway_request(grant_id=grant.grant_id, user_prompt="ZZZUNIQUECANARY7788 would match if scanned")
     assert canary.active_canary_set(RUN_ID) is None
 
     result = await ProviderGateway(store).complete(req)
@@ -240,11 +240,11 @@ async def test_toolgateway_search_with_canary_query_is_blocked_via_shared_gatewa
     grant = await _issue_gateway_grant(store)
     req = _gateway_request(grant_id=grant.grant_id, allowed_tools={"web_search": 2})
     tool_gateway = ToolGateway(ProviderGateway(store))
-    canary.activate_canary_set(RUN_ID, {"planted": [{"plant_id": "p1", "leak_literals": ["MRN-CANARY-LEAK-0001"]}]})
+    canary.activate_canary_set(RUN_ID, {"planted": [{"plant_id": "p1", "leak_literals": ["ZZZUNIQUECANARY7788"]}]})
 
     try:
         with pytest.raises(canary.SecurityBoundaryViolation):
-            await tool_gateway.search(req=req, query="find records for MRN-CANARY-LEAK-0001")
+            await tool_gateway.search(req=req, query="find records for ZZZUNIQUECANARY7788")
 
         events = await store.find_many("trace_events", {"run_id": RUN_ID})
         violation_events = [e for e in events if e.get("payload", {}).get("canary_scan") == "violation"]
