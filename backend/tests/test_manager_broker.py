@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 
-from phi_core.agents.manager import Manager
+from phi_core.agents.manager import ExecutionHealthSupervisor, Manager
+from phi_core.control.records import HandoffResult
 from phi_core.control.testing import make_ctx
 
 
@@ -96,3 +97,69 @@ def test_ask_lexicon_budget_exhausted():
         assert result["available"] is True
     exhausted = asyncio.run(m.ask_lexicon("Judge", "mrn", "a", "r"))
     assert exhausted == {"available": False, "reason": "budget_exhausted"}
+
+
+# ---- Wave 4b: handoff-observation action responder -------------------------
+
+
+def test_manager_is_the_execution_health_supervisor_compat_name():
+    """`Manager` is a compatibility re-export of the real, renamed class --
+    proves the alias resolves to the genuine demoted supervisor, not a
+    stale duplicate definition."""
+    assert Manager is ExecutionHealthSupervisor
+
+
+def _result(*, allowed: bool, reason_code: str = "", sender: str = "Judge",
+            recipient: str = "Schema") -> HandoffResult:
+    return HandoffResult(handoff_id="h1", run_id="r1", sender=sender,
+                         recipient=recipient, allowed=allowed, reason_code=reason_code)
+
+
+def test_respond_to_handoff_allows_an_allowed_result():
+    m = _manager()
+    action = asyncio.run(m.respond_to_handoff(result=_result(allowed=True)))
+    assert action == "ALLOW"
+
+
+def test_respond_to_handoff_blocks_a_plain_denial():
+    m = _manager()
+    action = asyncio.run(m.respond_to_handoff(result=_result(allowed=False, reason_code="topology_blocked")))
+    assert action == "BLOCK"
+
+
+def test_respond_to_handoff_cancels_on_residual_phi_detected():
+    m = _manager()
+    action = asyncio.run(m.respond_to_handoff(result=_result(allowed=False, reason_code="residual_phi_detected")))
+    assert action == "CANCEL"
+
+
+def test_respond_to_handoff_cancels_on_secret_detected():
+    m = _manager()
+    action = asyncio.run(m.respond_to_handoff(result=_result(allowed=False, reason_code="secret_detected")))
+    assert action == "CANCEL"
+
+
+def test_respond_to_handoff_escalates_after_repeated_denial_on_same_edge():
+    m = _manager()
+    denial = _result(allowed=False, reason_code="topology_blocked", sender="Judge", recipient="Schema")
+    actions = [asyncio.run(m.respond_to_handoff(result=denial))
+              for _ in range(ExecutionHealthSupervisor.HANDOFF_DENIAL_ESCALATION_THRESHOLD)]
+    assert actions[:-1] == ["BLOCK"] * (len(actions) - 1)
+    assert actions[-1] == "ESCALATE"
+
+
+def test_respond_to_handoff_denial_count_is_scoped_per_edge():
+    m = _manager()
+    same_edge = _result(allowed=False, reason_code="topology_blocked", sender="Judge", recipient="Schema")
+    other_edge = _result(allowed=False, reason_code="topology_blocked", sender="Judge", recipient="Lexicon")
+    for _ in range(ExecutionHealthSupervisor.HANDOFF_DENIAL_ESCALATION_THRESHOLD - 1):
+        assert asyncio.run(m.respond_to_handoff(result=same_edge)) == "BLOCK"
+    # A denial on a *different* edge never contributes to the first edge's count.
+    assert asyncio.run(m.respond_to_handoff(result=other_edge)) == "BLOCK"
+    assert asyncio.run(m.respond_to_handoff(result=same_edge)) == "ESCALATE"
+
+
+def test_respond_to_handoff_budget_returns_limit():
+    m = _manager()
+    action = asyncio.run(m.respond_to_handoff_budget(category="judge_specialist_query"))
+    assert action == "LIMIT"
