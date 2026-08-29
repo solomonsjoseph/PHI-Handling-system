@@ -454,3 +454,62 @@ async def test_authorize_execution_refuses_while_awaiting_human_review() -> None
     task = ExecutionTask(run_id=run.run_id, manifest_id="m1")
 
     assert await orch.authorize_execution(run_id=run.run_id, task=task) is False
+
+
+# ---- rewind: rewind-routing responsibility ----
+
+
+@pytest.mark.asyncio
+async def test_rewind_routes_back_to_an_earlier_node_and_commits_a_fresh_checkpoint() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    for outcome in ("ok", "ok", "ok"):
+        run = await orch.advance(run_id=run.run_id, outcome=outcome)
+    assert run.node == "decide"
+
+    rewound = await orch.rewind(run_id=run.run_id, to_node="research", reason="root cause: bad specialist output")
+
+    assert rewound.node == "research"
+    assert rewound.state == "running"
+    stored = await store.get_one("workflow_runs", {"run_id": run.run_id})
+    assert stored["node"] == "research"
+    assert stored["checkpoint"]["rewind_reason"] == "root cause: bad specialist output"
+
+
+@pytest.mark.asyncio
+async def test_rewind_refuses_an_unknown_node() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+
+    with pytest.raises(WorkflowError):
+        await orch.rewind(run_id=run.run_id, to_node="not_a_real_node", reason="x")
+
+
+@pytest.mark.asyncio
+async def test_rewind_refuses_a_terminal_target_node() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+
+    with pytest.raises(WorkflowError):
+        await orch.rewind(run_id=run.run_id, to_node="failed", reason="x")
+
+
+@pytest.mark.asyncio
+async def test_rewind_refuses_a_target_that_is_not_earlier_than_the_current_node() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+
+    with pytest.raises(WorkflowError):
+        await orch.rewind(run_id=run.run_id, to_node="decide", reason="x")
+
+
+@pytest.mark.asyncio
+async def test_rewind_refuses_once_the_run_is_already_terminal() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    outcomes = ["ok", "ok", "ok", "ok", "proceed", "ok", "ok", "ok", "clean", "ok", "ok", "ok", "complete"]
+    for outcome in outcomes:
+        run = await orch.advance(run_id=run.run_id, outcome=outcome)
+
+    with pytest.raises(WorkflowError):
+        await orch.rewind(run_id=run.run_id, to_node="research", reason="x")
