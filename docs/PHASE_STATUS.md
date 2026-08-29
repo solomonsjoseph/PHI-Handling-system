@@ -16,17 +16,37 @@ must consume an interface or decision.
 Every `xfail(strict=True)` in the suite is listed here with its nodeid, resolving phase,
 and exact reason string. A phase may not close with an unrecorded xfail.
 
-- nodeid: `tests/test_control_phaseR_contracts.py::test_judge_output_schema_matches_column_decision_contract`
-  resolving phase: Phase 7
-  reason: "Phase 7: Judge's output_schema is still the legacy 'judge_decisions' registration; ColumnDecision's typed contract uses 'column_decision'. Both sides of the duplicate-schema debt must move together."
-  commit: `c7b16db`
+(empty)
 
 ### DELETED_TESTS
 
 Every test removed by design is listed here with its nodeid, the production symbol whose
 removal justifies it, and the commit that removed that symbol.
 
-(empty)
+- nodeid: `tests/test_judge_typed_proposal.py::test_well_formed_decisions_pass_through_the_typed_boundary_unchanged`
+  removed symbol: `phi_core.agents.reasoning.JudgeDecision`/`JudgeProposal`
+  commit: Phase 7 flip commit (see `git log --oneline -1` at close of this phase)
+- nodeid: `tests/test_judge_typed_proposal.py::test_extra_fields_like_justification_survive_the_typed_boundary`
+  removed symbol: `phi_core.agents.reasoning.JudgeDecision`/`JudgeProposal`
+  commit: Phase 7 flip commit
+- nodeid: `tests/test_judge_typed_proposal.py::test_malformed_entry_with_a_real_file_id_and_column_fails_closed_to_human_review`
+  removed symbol: `phi_core.agents.reasoning.JudgeDecision`/`JudgeProposal`
+  commit: Phase 7 flip commit
+- nodeid: `tests/test_judge_typed_proposal.py::test_entry_with_no_salvageable_file_id_or_column_is_dropped`
+  removed symbol: `phi_core.agents.reasoning.JudgeDecision`/`JudgeProposal`
+  commit: Phase 7 flip commit
+- nodeid: `tests/test_judge_typed_proposal.py::test_non_dict_top_level_reply_produces_an_empty_proposal_not_a_crash`
+  removed symbol: `phi_core.agents.reasoning.JudgeDecision`/`JudgeProposal`
+  commit: Phase 7 flip commit
+
+Note: `test_judge_typed_proposal.py`'s whole premise (Judge.run returning a
+`JudgeDecision`/`JudgeProposal`-typed proposal) is superseded by the ColumnDecision
+cutover; `Judge.run`'s executable-vocabulary `decisions` list behavior these 5 tests
+pinned is preserved byte-for-byte (verified interactively against the removed
+assertions before deletion) and is now covered by the still-live D11 gate tests
+(`test_control_decisions.py`, `test_human_review_invariant.py`, `test_abuse_cases.py`)
+that exercise the same boundary through `validate_decisions`/`run_decision_gates`
+rather than through the removed typed wrapper.
 
 ### RESIDUAL_RISK
 

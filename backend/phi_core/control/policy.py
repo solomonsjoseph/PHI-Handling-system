@@ -36,7 +36,7 @@ OUTPUT_SCHEMAS: Mapping[str, Mapping[str, object]] = MappingProxyType(
         "header_analysis": MappingProxyType({"type": "object"}),
         "research_evidence": MappingProxyType({"type": "object"}),
         "decision_proposal": MappingProxyType({"type": "object"}),
-        "judge_decisions": MappingProxyType({"type": "array"}),
+        "column_decision": MappingProxyType({"type": "object"}),
         "audit_report": MappingProxyType({"type": "object"}),
         "report": MappingProxyType({"type": "object"}),
         "no_provider_output": MappingProxyType({"type": "object"}),
@@ -123,7 +123,7 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
         "Instrument": _manifest("Instrument", purpose="Classify instruments and form metadata.", input_class="restricted_metadata", output_schema="header_analysis"),
         "RegulationsExpert": _manifest("RegulationsExpert", purpose="Research jurisdictional rules.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
         "PHIMethodsExpert": _manifest("PHIMethodsExpert", purpose="Research de-identification practice.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
-        "Judge": _manifest("Judge", purpose="Propose column decisions.", input_class="restricted_metadata", output_schema="judge_decisions"),
+        "Judge": _manifest("Judge", purpose="Propose column decisions.", input_class="restricted_metadata", output_schema="column_decision"),
         "Sentinel": _manifest("Sentinel", purpose="Challenge proposed decisions.", input_class="restricted_metadata", output_schema="decision_proposal"),
         "Executor": _manifest(
             "Executor",

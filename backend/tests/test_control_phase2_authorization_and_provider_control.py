@@ -144,7 +144,7 @@ def test_authorize_capability_allows_a_matching_grant() -> None:
 
 
 def test_validate_response_schema_accepts_matching_shape() -> None:
-    assert validate_response_schema("judge_decisions", "[]") == []
+    assert validate_response_schema("column_decision", '{"file_id": "f1"}') == {"file_id": "f1"}
     assert validate_response_schema("audit_report", '{"ok": true}') == {"ok": True}
 
 
@@ -155,7 +155,7 @@ def test_validate_response_schema_rejects_non_json() -> None:
 
 def test_validate_response_schema_rejects_wrong_top_level_shape() -> None:
     with pytest.raises(ResponseSchemaError):
-        validate_response_schema("judge_decisions", '{"not": "a list"}')
+        validate_response_schema("column_decision", '["not", "an", "object"]')
 
 
 def test_validate_response_schema_rejects_unknown_schema_name() -> None:

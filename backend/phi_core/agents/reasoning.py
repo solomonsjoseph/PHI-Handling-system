@@ -19,10 +19,10 @@ from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 import openpyxl as _openpyxl
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel
 
 from ..anonymizer import apply_to_text
-from ..control.records import EvidenceClaim, GateResult, StudyKnowledgePackage
+from ..control.records import ColumnDecision, EvidenceClaim, GateResult, StudyKnowledgePackage
 from ..control.sandbox import run_isolated
 from ..crypto import pseudonym_salt
 from ..detectors import detect_text
@@ -49,34 +49,129 @@ ACTION_TYPES = {
 SUBJECT_TYPES = {"participant", "staff", "specimen", "site", "study"}
 
 
-class JudgeDecision(BaseModel):
-    """One column entry of Judge's proposal. Loosely typed on purpose:
-    ``action``/``subject``/``phi_category`` are validated against their
-    real vocabularies by ``validate_decisions`` (D11's first gate), which
-    fails closed to ``human_review`` per-field rather than rejecting the
-    whole entry -- this model's job is the boundary one level up, catching
-    a fundamentally wrong *shape* (a non-string column, a confidence that
-    isn't a number, an entry that isn't an object at all) before anything
-    downstream ever sees it. ``extra='allow'`` preserves fields Judge's
-    prompt does not fix (``justification`` from a Sentinel-feedback
-    correction round) rather than silently dropping them.
+# --- Judge TRIAGE and FINAL CLASSIFICATION (docs sections 31-34, 40, 41) --
+#
+# Judge operates in two stages. TRIAGE (section 32) separates every
+# logical Schema column into exactly one of these five states -- never
+# inventing a sixth, never guessing when evidence is absent (an
+# undocumented column is UNKNOWN, not KEEP or DROP). FINAL CLASSIFICATION
+# (section 41) then emits one typed ``ColumnDecision`` per column,
+# replacing ``JudgeDecision``/``JudgeProposal``: those two classes
+# duplicated ``ColumnDecision`` (``control/records.py``) under a second,
+# competing schema (the R-a debt docs/PHASE_STATUS.md's Phase 1 row
+# records) and are removed here, not aliased.
+TRIAGE_STATES = ("KNOWN", "DERIVED", "CONFLICTED", "UNVERIFIED", "UNKNOWN")
+
+# Section 40 provenance classes, mapped from the (deterministic) TRIAGE
+# outcome. TRIAGE itself never touches an LLM -- it is evidence
+# bookkeeping over Schema/Lexicon/Instrument's own already-produced
+# findings -- so KNOWN/DERIVED read as fact-grade provenance and
+# CONFLICTED/UNVERIFIED/UNKNOWN read as unverified. Judge's own model
+# call then proposes an action for the column regardless of triage state;
+# repeated model interpretation never promotes itself to a source fact
+# (section 40), so it is recorded separately in each ColumnDecision's
+# ``technical_rationale`` rather than overriding the triage-derived class.
+_TRIAGE_PROVENANCE: dict[str, str] = {
+    "KNOWN": "SOURCE_FACT",
+    "DERIVED": "DETERMINISTIC_FACT",
+    "CONFLICTED": "UNVERIFIED_CLAIM",
+    "UNVERIFIED": "UNVERIFIED_CLAIM",
+    "UNKNOWN": "UNVERIFIED_CLAIM",
+}
+
+
+def _entry_identity(
+    entry: Mapping[str, Any], name_keys: Sequence[str] = ("name", "column", "column_id"),
+) -> tuple[str, str]:
+    """``(file_id, column_id)`` identity for one Schema/Lexicon/Instrument
+    finding (docs section 31: classification identity is
+    ``(file_id, column_id)`` -- column names are not globally unique).
+    Schema findings carry the per-file detail as ``_file_id``
+    (``assemble_study_knowledge_package``'s docstring); other sources may
+    use ``file_id`` directly."""
+    file_id = str(entry.get("_file_id") or entry.get("file_id") or "")
+    column_id = ""
+    for key in name_keys:
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            column_id = value
+            break
+    return file_id, column_id
+
+
+def triage_columns(
+    schema_columns: Sequence[Mapping[str, Any]],
+    lexicon_columns: Sequence[Mapping[str, Any]] | None = None,
+    instrument_fields: Sequence[Mapping[str, Any]] | None = None,
+    conflicts: Sequence[str] | None = None,
+) -> dict[tuple[str, str], str]:
+    """Judge TRIAGE (docs section 32): classify every Schema column into
+    exactly one of ``TRIAGE_STATES``, never guessing.
+
+    A column is:
+      KNOWN       -- documented in both the dictionary (Lexicon) and a
+                     study form (Instrument): two independent sources
+                     agree it is understood.
+      DERIVED     -- Schema itself marked it as computed from another
+                     column (``derived``/``derived_from``); DERIVED never
+                     depends on Lexicon/Instrument coverage.
+      CONFLICTED  -- named in ``conflicts`` (a caller-supplied set of
+                     column names existing evidence disagrees about).
+      UNVERIFIED  -- documented by exactly one of Lexicon/Instrument.
+      UNKNOWN     -- documented by neither -- the fail-closed default;
+                     TRIAGE must never promote a column past what its
+                     own evidence actually supports.
+
+    Returns a mapping keyed by classification identity
+    ``(file_id, column_id)`` (docs section 31).
     """
-    model_config = ConfigDict(extra="allow")
-    file_id: str
-    column: str
-    phi_category: str | None = None
-    subject: str = ""
-    action: str = "human_review"
-    reason: str = ""
-    confidence: float = 0.0
-    citation: str = ""
+    lexicon_columns = lexicon_columns or []
+    instrument_fields = instrument_fields or []
+    conflict_names = set(conflicts or [])
+
+    lexicon_names = {_entry_identity(c)[1] for c in lexicon_columns}
+    instrument_names = {_entry_identity(f, ("name", "field", "column"))[1] for f in instrument_fields}
+
+    triage: dict[tuple[str, str], str] = {}
+    for entry in schema_columns:
+        identity = _entry_identity(entry)
+        if not identity[1]:
+            continue
+        if identity[1] in conflict_names:
+            state = "CONFLICTED"
+        elif entry.get("derived") or entry.get("derived_from"):
+            state = "DERIVED"
+        elif identity[1] in lexicon_names and identity[1] in instrument_names:
+            state = "KNOWN"
+        elif identity[1] in lexicon_names or identity[1] in instrument_names:
+            state = "UNVERIFIED"
+        else:
+            state = "UNKNOWN"
+        triage[identity] = state
+    return triage
 
 
-class JudgeProposal(BaseModel):
-    """The typed record ``Judge.run`` returns and ``run_decision_gates``
-    consumes -- the proposal, not the raw model reply. See ``Judge.run``
-    for how a malformed per-entry reply is handled."""
-    decisions: list[JudgeDecision] = []
+# Judge's model-facing action vocabulary (``ACTION_TYPES`` above) predates
+# ColumnDecision's section-41 ``ColumnOperation`` vocabulary and is finer
+# grained in places (``cap_age_90``/``year_only``/``zip3_truncate`` are
+# each one specific parameterization of a broader ColumnOperation). This
+# map is the deterministic, one-way translation FINAL CLASSIFICATION uses
+# to build each column's ``ColumnDecision.operation`` -- never the
+# reverse: the executable gate/execution pipeline (``validate_decisions``,
+# ``run_decision_gates``, ``Executor``) continues to run on Judge's own
+# action vocabulary, which is unambiguous and directly executable and is
+# not itself being retired this phase.
+_OPERATION_FROM_ACTION: dict[str, str] = {
+    "keep": "keep",
+    "drop": "drop",
+    "pseudonymize": "pseudonymize",
+    "hash": "pseudonymize",
+    "cap_age_90": "cap",
+    "year_only": "date_shift",
+    "zip3_truncate": "generalize",
+    "scrub_text": "redact",
+    "human_review": "other_approved_action",
+}
 
 
 _VALID_PHI_CATEGORIES = {chr(c) for c in range(ord("A"), ord("R") + 1)} | {"NONE", "QUASI", None, ""}
@@ -977,6 +1072,13 @@ class Judge(Agent):
             schema = {"columns": study_knowledge_package.schema_findings}
             lexicon = {"columns": study_knowledge_package.lexicon_findings}
             instrument = {"fields": study_knowledge_package.instrument_findings}
+        # TRIAGE (docs section 32), Judge's first stage: deterministic,
+        # never guesses. Computed once per call over Schema's columns
+        # against Lexicon/Instrument coverage; FINAL CLASSIFICATION below
+        # reads it to set each ColumnDecision's provenance class.
+        triage = triage_columns(
+            schema.get("columns") or [], lexicon.get("columns") or [], instrument.get("fields") or [],
+        )
         prompt = (
             f"RegulationsExpert rules (jurisdictional regulations): {statute}\n\n"
             f"Schema columns (dataset headers -- rows never shown): {schema}\n\n"
@@ -1021,34 +1123,95 @@ class Judge(Agent):
             max_tokens=judge_max_tokens,
             expect_key="decisions", min_items=len(schema.get("columns") or []),
             status_text="Deciding how to handle every flagged column")
-        return self._as_proposal(raw)
+        return self._as_proposal(raw, triage)
 
-    @staticmethod
-    def _as_proposal(raw: Any) -> dict[str, Any]:
-        """Validate a raw Judge reply into a `JudgeProposal` and return it
-        as the same `{"decisions": [...]}` shape every caller already
-        expects -- the typed record, not the untrusted dict, is what
-        actually flows into `run_decision_gates` from here on. A per-entry
-        shape failure (not a vocabulary failure -- `validate_decisions`
-        still owns that) fails closed to `human_review` when the entry at
-        least names a real `(file_id, column)`; when it does not, there is
+    def _as_proposal(self, raw: Any, triage: Mapping[tuple[str, str], str] | None = None) -> dict[str, Any]:
+        """Validate a raw Judge reply into FINAL CLASSIFICATION (docs
+        section 41): the executable decision list ``validate_decisions``
+        (D11's first gate) still owns full vocabulary correctness for, and
+        alongside it the typed ``ColumnDecision`` record for each column
+        -- the section-41 output that replaces the removed
+        ``JudgeDecision``/``JudgeProposal`` pair. A per-entry shape
+        failure fails closed to `human_review` when the entry at least
+        names a real `(file_id, column)`; when it does not, there is
         nothing safe to construct and the entry is dropped, letting
         `assert_exact_coverage` catch the resulting gap the same way it
         catches any other missing decision."""
         entries = raw.get("decisions") if isinstance(raw, dict) else None
         decisions: list[dict[str, Any]] = []
+        column_decisions: list[dict[str, Any]] = []
+        triage = triage or {}
         for entry in entries or []:
-            try:
-                decisions.append(JudgeDecision.model_validate(entry).model_dump())
-            except ValidationError:
-                fid = entry.get("file_id") if isinstance(entry, dict) else None
-                col = entry.get("column") if isinstance(entry, dict) else None
-                if isinstance(fid, str) and fid and isinstance(col, str) and col:
-                    decisions.append({
-                        "file_id": fid, "column": col, "action": "human_review",
-                        "reason": "judge_output_malformed", "confidence": 0.0,
-                    })
-        return JudgeProposal(decisions=decisions).model_dump()
+            decision = self._validate_decision_entry(entry)
+            if decision is None:
+                continue
+            decisions.append(decision)
+            state = triage.get((decision["file_id"], decision["column"]), "UNKNOWN")
+            column_decisions.append(self._column_decision(decision, state).model_dump(mode="json"))
+        return {"decisions": decisions, "column_decisions": column_decisions}
+
+    _DECISION_DEFAULTS: dict[str, Any] = {
+        "phi_category": None, "subject": "", "action": "human_review",
+        "reason": "", "confidence": 0.0, "citation": "",
+    }
+
+    @classmethod
+    def _validate_decision_entry(cls, entry: Any) -> dict[str, Any] | None:
+        """Shape-validate one raw Judge reply entry into the executable
+        decision dict (``validate_decisions`` still owns full vocabulary
+        correctness). Returns ``None`` when the entry names no real
+        `(file_id, column)` and nothing safe can be constructed."""
+        if not isinstance(entry, dict):
+            return None
+        file_id = entry.get("file_id")
+        column = entry.get("column")
+        if not (isinstance(file_id, str) and file_id and isinstance(column, str) and column):
+            return None
+        out = dict(cls._DECISION_DEFAULTS)
+        out.update(entry)
+        out["file_id"] = file_id
+        out["column"] = column
+        try:
+            if out["phi_category"] is not None and not isinstance(out["phi_category"], str):
+                raise TypeError("phi_category")
+            if not isinstance(out["subject"], str):
+                raise TypeError("subject")
+            if not isinstance(out["action"], str):
+                raise TypeError("action")
+            if not isinstance(out["reason"], str):
+                raise TypeError("reason")
+            if not isinstance(out["citation"], str):
+                raise TypeError("citation")
+            out["confidence"] = float(out["confidence"])
+        except (TypeError, ValueError):
+            return {
+                "file_id": file_id, "column": column, **cls._DECISION_DEFAULTS,
+                "action": "human_review", "reason": "judge_output_malformed",
+            }
+        return out
+
+    def _column_decision(self, decision: dict[str, Any], triage_state: str) -> ColumnDecision:
+        """FINAL CLASSIFICATION (docs section 41): build the typed
+        ``ColumnDecision`` for one already-validated decision, using the
+        section 40 provenance class its TRIAGE state maps to."""
+        action = decision.get("action") or "human_review"
+        provenance = _TRIAGE_PROVENANCE.get(triage_state, "UNVERIFIED_CLAIM")
+        reason = decision.get("reason") or ""
+        rationale = f"triage={triage_state}; provenance={provenance}; model_interpretation=MODEL_INTERPRETATION"
+        if reason:
+            rationale = f"{rationale}; {reason}"
+        return ColumnDecision(
+            run_id=self.ctx.run_id,
+            file_id=decision["file_id"],
+            column_id=decision["column"],
+            safe_display_name=decision["column"],
+            sensitivity_classification=decision.get("phi_category") or "",
+            applicable_rule=decision.get("citation") or "",
+            operation=_OPERATION_FROM_ACTION.get(action, "other_approved_action"),
+            plain_language_reason=reason,
+            technical_rationale=rationale,
+            decision_status="draft",
+        )
 
     async def resolve_comment(self, column: str, description: str, suggested_action: str | None,
                               suggested_reason: str | None, comment: str) -> dict[str, Any]:

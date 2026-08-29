@@ -271,12 +271,6 @@ def test_reviewer_findings_carry_the_review_finding_shape(tmp_path):
 # --- Duplicate-schema debt marker (resolved in Phase 7) ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 7: Judge's output_schema is still the legacy 'judge_decisions' "
-           "registration; ColumnDecision's typed contract uses 'column_decision'. "
-           "Both sides of the duplicate-schema debt must move together.",
-)
 def test_judge_output_schema_matches_column_decision_contract():
     from phi_core.control.policy import MANIFESTS, OUTPUT_SCHEMAS
     assert MANIFESTS["Judge"].output_schema == "column_decision"
