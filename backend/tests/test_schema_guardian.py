@@ -180,3 +180,26 @@ def test_judge_never_structurally_required_schema_classification_fields():
 
     assert captured["expect_key"] == "decisions"
     assert captured["min_items"] == 2
+
+
+def test_specialists_never_import_the_raw_row_reader():
+    """Section 24/25/26 'no raw row access': the specialists module must
+    never reach for ``file_readers.iter_dataset_rows``, the only reader
+    that yields raw dataset cell values. Schema works from headers plus
+    integer cardinality stats, Lexicon from dictionary rows, Instrument
+    from form text -- none exposes a dataset cell to an LLM."""
+    import ast
+
+    import phi_core.agents.specialists as specialists
+
+    src = Path(specialists.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.alias):
+            names.add(node.name)
+    assert "iter_dataset_rows" not in names
