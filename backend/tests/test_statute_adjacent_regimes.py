@@ -1,4 +1,4 @@
-"""Regression coverage for Statute's advisory US adjacent-regime research."""
+"""Regression coverage for RegulationsExpert's advisory US adjacent-regime research."""
 from __future__ import annotations
 
 import json
@@ -8,15 +8,15 @@ import pytest
 
 
 def _agent():
-    from phi_core.agents.experts import Statute
+    from phi_core.agents.experts import RegulationsExpert
     from phi_core.control.testing import make_ctx
 
-    return Statute(make_ctx("Statute"))
+    return RegulationsExpert(make_ctx("RegulationsExpert"))
 
 
 @pytest.mark.asyncio
 async def test_adjacent_regimes_fall_back_without_blocking_when_search_fails():
-    from phi_core.agents.experts import Statute
+    from phi_core.agents.experts import RegulationsExpert
 
     agent = _agent()
     agent._log = AsyncMock()  # type: ignore[method-assign]
@@ -45,12 +45,12 @@ async def test_adjacent_regimes_fall_back_without_blocking_when_search_fails():
     assert "non-exhaustive" in by_name["State law (non-exhaustive)"]["advisory"]
     cache_put.assert_awaited_once()
     assert cache_put.await_args.args[0:2] == ("adjacent_regulations", "us")
-    assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
+    assert result == {"adjacent_regimes": RegulationsExpert._ADJACENT_REGIMES_FALLBACK}
 
 
 @pytest.mark.asyncio
 async def test_adjacent_regimes_reject_scalar_entries_from_web_reply():
-    from phi_core.agents.experts import Statute
+    from phi_core.agents.experts import RegulationsExpert
 
     agent = _agent()
     agent.call_json_with_web_search = AsyncMock(return_value=(
@@ -62,14 +62,14 @@ async def test_adjacent_regimes_reject_scalar_entries_from_web_reply():
          patch.object(agent.ctx.cache, "put", new=AsyncMock()):
         result = await agent._adjacent_regimes_for("us")
 
-    assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
+    assert result == {"adjacent_regimes": RegulationsExpert._ADJACENT_REGIMES_FALLBACK}
 
 
 
 
 @pytest.mark.asyncio
 async def test_adjacent_regimes_reject_untrusted_cached_entries():
-    from phi_core.agents.experts import Statute
+    from phi_core.agents.experts import RegulationsExpert
 
     agent = _agent()
     agent._log = AsyncMock()  # type: ignore[method-assign]
@@ -80,19 +80,19 @@ async def test_adjacent_regimes_reject_untrusted_cached_entries():
          patch.object(agent.ctx.cache, "put", new=AsyncMock()) as cache_put:
         result = await agent._adjacent_regimes_for("us")
 
-    assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
+    assert result == {"adjacent_regimes": RegulationsExpert._ADJACENT_REGIMES_FALLBACK}
     agent.call_json_with_web_search.assert_not_awaited()
     cache_put.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_adjacent_regimes_reject_cached_non_string_name():
-    from phi_core.agents.experts import Statute
+    from phi_core.agents.experts import RegulationsExpert
 
     agent = _agent()
     agent._log = AsyncMock()  # type: ignore[method-assign]
     agent.call_json_with_web_search = AsyncMock()  # type: ignore[method-assign]
-    regimes = [regime.copy() for regime in Statute._ADJACENT_REGIMES_FALLBACK]
+    regimes = [regime.copy() for regime in RegulationsExpert._ADJACENT_REGIMES_FALLBACK]
     regimes[0]["name"] = ["not", "a", "string"]
     cached = {"content": json.dumps({"adjacent_regimes": regimes})}
 
@@ -100,23 +100,23 @@ async def test_adjacent_regimes_reject_cached_non_string_name():
          patch.object(agent.ctx.cache, "put", new=AsyncMock()) as cache_put:
         result = await agent._adjacent_regimes_for("us")
 
-    assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
+    assert result == {"adjacent_regimes": RegulationsExpert._ADJACENT_REGIMES_FALLBACK}
     agent.call_json_with_web_search.assert_not_awaited()
     cache_put.assert_not_awaited()
 @pytest.mark.asyncio
 async def test_adjacent_regimes_reject_incomplete_or_noncanonical_dict_entries():
-    from phi_core.agents.experts import Statute
+    from phi_core.agents.experts import RegulationsExpert
 
     incomplete = {
         "adjacent_regimes": [
             {"name": regime["name"]}
-            for regime in Statute._ADJACENT_REGIMES_FALLBACK
+            for regime in RegulationsExpert._ADJACENT_REGIMES_FALLBACK
         ],
     }
     noncanonical = {
         "adjacent_regimes": [
             regime.copy()
-            for regime in Statute._ADJACENT_REGIMES_FALLBACK
+            for regime in RegulationsExpert._ADJACENT_REGIMES_FALLBACK
         ],
     }
     noncanonical["adjacent_regimes"][0]["citation"] = "incorrect citation"
@@ -129,7 +129,7 @@ async def test_adjacent_regimes_reject_incomplete_or_noncanonical_dict_entries()
              patch.object(agent.ctx.cache, "put", new=AsyncMock()):
             result = await agent._adjacent_regimes_for("us")
 
-        assert result == {"adjacent_regimes": Statute._ADJACENT_REGIMES_FALLBACK}
+        assert result == {"adjacent_regimes": RegulationsExpert._ADJACENT_REGIMES_FALLBACK}
 
 
 @pytest.mark.asyncio

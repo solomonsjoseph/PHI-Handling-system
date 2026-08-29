@@ -12,7 +12,7 @@ Each entry declares:
   * ``tier``  — flagship|balanced|fast|reasoning
   * ``supports_web_search`` — native web-search tool available
 
-Statute + Praxis web search works today for Anthropic
+RegulationsExpert + PHIMethodsExpert web search works today for Anthropic
 (``web_search_20250305``) and Gemini (``googleSearch``).
 """
 from __future__ import annotations

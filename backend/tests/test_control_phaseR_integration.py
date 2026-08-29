@@ -397,7 +397,7 @@ async def test_executor_dataset_read_happens_only_inside_sandbox_never_in_parent
 async def test_praxis_falls_back_when_recommended_method_is_only_researched_not_approved() -> None:
     """Verified source evidence is not execution authorization (spec
     section 38): once a context carries the ``ctx.methods`` facade,
-    ``Praxis.method_for`` additionally checks
+    ``PHIMethodsExpert.method_for`` additionally checks
     ``ctx.methods.get_approved_methods``. A category whose only
     registered ``MethodRecord`` sits at lifecycle ``"researched"``
     (never promoted to ``"approved"``) falls back to the deterministic
@@ -407,16 +407,16 @@ async def test_praxis_falls_back_when_recommended_method_is_only_researched_not_
     import dataclasses
     from unittest.mock import AsyncMock
 
-    from phi_core.agents.experts import Praxis
+    from phi_core.agents.experts import PHIMethodsExpert
     from phi_core.control.context import StoreMethodRegistryReader
     from phi_core.control.methods import register_method
 
     store = MemoryControlStore()
     await register_method(store, hipaa_category="E", name="researched_only_method")
 
-    ctx = make_ctx("Praxis")
+    ctx = make_ctx("PHIMethodsExpert")
     ctx = dataclasses.replace(ctx, methods=StoreMethodRegistryReader(store))
-    agent = Praxis(ctx)
+    agent = PHIMethodsExpert(ctx)
     agent._log = AsyncMock()
     real_url = "https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164"
     agent.call_json_with_web_search = AsyncMock(return_value=(
@@ -430,7 +430,7 @@ async def test_praxis_falls_back_when_recommended_method_is_only_researched_not_
 
     reply = await agent.method_for("E")
 
-    assert reply["methods"] == [Praxis._fallback("E")["methods"][0]]
+    assert reply["methods"] == [PHIMethodsExpert._fallback("E")["methods"][0]]
     assert reply["methods"][0]["name"] != "researched_only_method"
 
 
@@ -694,7 +694,7 @@ def test_handoff_call_sites_confined_to_manager_broker() -> None:
 
 def test_get_approved_methods_call_sites_confined_to_praxis_and_its_facade() -> None:
     """Exclusivity: ``get_approved_methods`` is only ever called from
-    ``experts.py`` (Praxis's method-resolution gate, Step 5) or from
+    ``experts.py`` (PHIMethodsExpert's method-resolution gate, Step 5) or from
     ``context.py::StoreMethodRegistryReader.get_approved_methods`` (the
     Step 1 facade's own delegation to the free function of the same
     name -- the plumbing itself, not a second execution-time caller)."""

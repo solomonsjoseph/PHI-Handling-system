@@ -6,7 +6,7 @@ import asyncio
 import pytest
 from phi_core.agents.llm import LlmConfig
 from phi_core.control import limits
-from phi_core.control.policy import MANIFESTS, CapabilityDenied, CapabilityPolicy
+from phi_core.control.policy import MANIFESTS, OUTPUT_SCHEMAS, CapabilityDenied, CapabilityPolicy
 from phi_core.control.records import (
     AgentManifest,
     ArtifactRecord,
@@ -66,12 +66,21 @@ def test_d3_records_have_only_the_planned_fields() -> None:
 
 def test_policy_has_the_exact_manifest_roles_and_web_search_research_boundary() -> None:
     assert set(MANIFESTS) == {
-        "Lexicon", "Schema", "Instrument", "Statute", "Praxis", "Judge", "Sentinel", "Executor", "Auditor", "Scout", "Ledger", "Ledger.Compare", "Ledger.Aggregate", "Herald", "Herald.Abstract", "Herald.Sections", "Manager", "Operator", "Reviewer", "CorpusResearcher",
+        "Lexicon", "Schema", "Instrument", "RegulationsExpert", "PHIMethodsExpert", "Judge", "Sentinel", "Executor", "Auditor", "Scout", "Ledger", "Ledger.Compare", "Ledger.Aggregate", "Herald", "Herald.Abstract", "Herald.Sections", "Manager", "Operator", "Reviewer", "CorpusResearcher",
         "Pipeline",  # Phase 4 step 2/4: the TaskService-enqueued top-level pipeline_run/pipeline_resume unit
     }
     web_enabled = {name for name, manifest in MANIFESTS.items() if manifest.allowed_tools}
-    assert web_enabled == {"Statute", "Praxis", "Scout", "CorpusResearcher"}
+    assert web_enabled == {"RegulationsExpert", "PHIMethodsExpert", "Scout", "CorpusResearcher"}
     assert all(MANIFESTS[name].allowed_tools == {"web_search": 3} for name in web_enabled)
+
+
+def test_output_schemas_reserves_study_knowledge_package_for_phase_5() -> None:
+    """Wave 5/6-rename pre-reservation (docs/MASTER_ARCHITECTURE_V2.md section 28):
+    Phase 5 builds the `StudyKnowledgePackage` record itself in `records.py`; this
+    wave only registers the schema key in `control/policy.py` so Phase 5 does not
+    need to touch this now-reserved file for that one line."""
+    assert "study_knowledge_package" in OUTPUT_SCHEMAS
+    assert OUTPUT_SCHEMAS["study_knowledge_package"] == {"type": "object"}
 
 
 def test_policy_issues_an_immutable_manifest_bounded_grant() -> None:

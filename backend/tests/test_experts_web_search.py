@@ -1,4 +1,4 @@
-"""Tests for the Statute + Praxis experts armed with web_search.
+"""Tests for the RegulationsExpert + PHIMethodsExpert experts armed with web_search.
 
 Live-web tests are gated on ANTHROPIC_API_KEY availability. They are the
 canonical proof that the Regulations expert and PHI-Methods expert are
@@ -7,8 +7,8 @@ LLM-training-time answers.
 
 Unit tests (no network) verify:
 * URL citation extraction from LiteLLM stringified web_search responses.
-* Deterministic fallback for well-known HIPAA categories in Praxis.
-* Statute merges the JurisdictionPack fallback when the LLM is terse.
+* Deterministic fallback for well-known HIPAA categories in PHIMethodsExpert.
+* RegulationsExpert merges the JurisdictionPack fallback when the LLM is terse.
 """
 from __future__ import annotations
 
@@ -38,16 +38,16 @@ def test_url_extraction_from_reply_text():
 
 def test_praxis_deterministic_hipaa_category_a_dropped():
     """HIPAA cat A (names) has a canonical deterministic technique;
-    Praxis must NOT waste a web search for it."""
-    from phi_core.agents.experts import Praxis
-    method = Praxis._DETERMINISTIC_METHODS["A"]
+    PHIMethodsExpert must NOT waste a web search for it."""
+    from phi_core.agents.experts import PHIMethodsExpert
+    method = PHIMethodsExpert._DETERMINISTIC_METHODS["A"]
     assert method["name"] == "drop"
     assert method["reference_paper"] == "45 CFR 164.514(b)(2)(i)(A)"
 
 
 def test_praxis_deterministic_hipaa_category_c_dates_year_only():
-    from phi_core.agents.experts import Praxis
-    method = Praxis._DETERMINISTIC_METHODS["C"]
+    from phi_core.agents.experts import PHIMethodsExpert
+    method = PHIMethodsExpert._DETERMINISTIC_METHODS["C"]
     assert "date_year_only" in method["name"]
     assert method["params"]["age_cap"] == 90
 
@@ -55,9 +55,9 @@ def test_praxis_deterministic_hipaa_category_c_dates_year_only():
 def test_statute_pack_fallback_shape():
     """The deterministic fallback returns the same schema as the live
     reply so the Judge does not need to branch on source."""
-    from phi_core.agents.experts import Statute
+    from phi_core.agents.experts import RegulationsExpert
     from phi_core.jurisdictions import get_pack
-    fb = Statute._pack_fallback(get_pack("us"))
+    fb = RegulationsExpert._pack_fallback(get_pack("us"))
     assert fb["jurisdiction"] == "us"
     assert "identifier_categories" in fb
     assert isinstance(fb["handling_rules"], list)

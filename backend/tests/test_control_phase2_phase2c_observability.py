@@ -95,8 +95,8 @@ async def test_append_sanitizes_payload_before_hashing_and_insertion() -> None:
 def test_user_agent_trace_maps_known_agents_to_friendly_copy() -> None:
     events = [
         _event(seq=1, agent="Schema"),
-        _event(seq=2, agent="Statute"),
-        _event(seq=3, agent="Praxis"),
+        _event(seq=2, agent="RegulationsExpert"),
+        _event(seq=3, agent="PHIMethodsExpert"),
     ]
     rows = user_agent_trace(events)
     assert rows[0] == {"event_id": events[0].event_id, "agent": "Schema", "message": "Analyzing dataset headers", "ts": events[0].ts}

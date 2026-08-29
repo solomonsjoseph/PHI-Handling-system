@@ -1,8 +1,8 @@
 """Orchestrator: run the full agent pipeline for a session.
 
 Pipeline:
-  1. Specialists (Lexicon, Schema, Instrument) + Statute + Praxis ALL in
-     parallel (Statute/Praxis don't read file content, so they overlap
+  1. Specialists (Lexicon, Schema, Instrument) + RegulationsExpert + PHIMethodsExpert ALL in
+     parallel (RegulationsExpert/PHIMethodsExpert don't read file content, so they overlap
      with specialists rather than serialising after them).
   2. Judge <-> Sentinel loop (short-circuits on 0 blocking issues; capped at ITERATION_CAP=2)
   3. Human review gate if Sentinel still has blocking issues
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 from ..paths import cleanup_session_unpacked
 from ..security import scrub_decision, scrub_persisted_text
 from .base import ITERATION_CAP, AgentMessage
-from .experts import Praxis, Statute
+from .experts import PHIMethodsExpert, RegulationsExpert
 from .llm import LlmConfig
 from .manager import ExecutionHealthSupervisor
 from .operator import Operator
@@ -750,7 +750,7 @@ async def _prepare_pipeline_state(state: _PipelineDriverState) -> None:
     manager = ExecutionHealthSupervisor(await make_ctx("Manager"), db=state.db)
     state.manager = manager
     manager_result = await manager.run(
-        roster=["Lexicon", "Schema", "Instrument", "Statute", "Praxis", "Judge",
+        roster=["Lexicon", "Schema", "Instrument", "RegulationsExpert", "PHIMethodsExpert", "Judge",
                 "Sentinel", "Executor", "Auditor", "Scout", "Ledger", "Herald"],
         phase_plan=["specialists", "statute", "praxis", "judge_iter", "sentinel_iter",
                     "executor", "publish_guard", "auditor_scout", "ledger", "herald"],
@@ -758,25 +758,25 @@ async def _prepare_pipeline_state(state: _PipelineDriverState) -> None:
     await require_accepted(manager.ctx, manager_result, "Manager")
 
 
-async def _run_statute(state: _PipelineDriverState) -> dict[str, Any]:
-    ctx = await state.make_ctx("Statute")
-    agent = Statute(ctx)
+async def _run_regulations_expert(state: _PipelineDriverState) -> dict[str, Any]:
+    ctx = await state.make_ctx("RegulationsExpert")
+    agent = RegulationsExpert(ctx)
     result = await agent.run(jurisdiction=state.session.get("jurisdiction", "us"))
-    await state.require_accepted(ctx, result, "Statute")
+    await state.require_accepted(ctx, result, "RegulationsExpert")
     return result
 
 
-async def _run_praxis_method(state: _PipelineDriverState, category: str) -> dict[str, Any]:
-    # Praxis is called per-category via `method_for`, never `run` --
+async def _run_phi_methods_expert_method(state: _PipelineDriverState, category: str) -> dict[str, Any]:
+    # PHIMethodsExpert is called per-category via `method_for`, never `run` --
     # `Agent.__init_subclass__`'s completion wrap only ever sees `run`,
     # so this path completes/fails its own task explicitly, matching
     # what that wrap does for every other agent.
-    ctx = await state.make_ctx("Praxis")
-    agent = Praxis(ctx)
+    ctx = await state.make_ctx("PHIMethodsExpert")
+    agent = PHIMethodsExpert(ctx)
     try:
         result = await agent.method_for(category)
     except Exception as exc:
-        await agent._log("praxis.category_failed", "info",
+        await agent._log("phi_methods_expert.category_failed", "info",
                           {"category": category, "error": f"{type(exc).__name__}: {exc}"})
         if ctx.tasks is not None:
             await ctx.tasks.fail(f"agent_crashed:{type(exc).__name__}")
@@ -784,14 +784,14 @@ async def _run_praxis_method(state: _PipelineDriverState, category: str) -> dict
     result = result if isinstance(result, dict) else {}
     if ctx.tasks is not None:
         await ctx.tasks.complete(result)
-    await state.require_accepted(ctx, result, "Praxis")
+    await state.require_accepted(ctx, result, "PHIMethodsExpert")
     return result
 
 
 async def _dispatch_research(state: _PipelineDriverState) -> str:
-    """The ``research`` node: Statute + Praxis, launched alongside --
-    not serialised before -- Lexicon/Schema/Instrument. Neither Statute
-    nor Praxis reads file content, so overlapping their runtime with
+    """The ``research`` node: RegulationsExpert + PHIMethodsExpert, launched alongside --
+    not serialised before -- Lexicon/Schema/Instrument. Neither RegulationsExpert
+    nor PHIMethodsExpert reads file content, so overlapping their runtime with
     specialist file parsing is a wall-clock optimisation the pre-Wave-4b
     pipeline already made; this handler preserves it by creating the
     specialist tasks here and stashing them on ``state`` for
@@ -805,9 +805,9 @@ async def _dispatch_research(state: _PipelineDriverState) -> str:
 
     state.hipaa_cats = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K",
                         "L", "M", "N", "O", "P", "Q", "R"]
-    statute_task = asyncio.create_task(_run_statute(state))
-    praxis_gather_task = asyncio.gather(
-        *[_run_praxis_method(state, category) for category in state.hipaa_cats],
+    regulations_expert_task = asyncio.create_task(_run_regulations_expert(state))
+    phi_methods_expert_gather_task = asyncio.gather(
+        *[_run_phi_methods_expert_method(state, category) for category in state.hipaa_cats],
         return_exceptions=True,
     )
 
@@ -825,8 +825,8 @@ async def _dispatch_research(state: _PipelineDriverState) -> str:
     state.inst_task = (state.instrument_agent.run(form_files=form_files)
                         if state.instrument_agent else _empty({"fields": []}))
 
-    state.statute = await statute_task
-    praxis_results = await praxis_gather_task
+    state.statute = await regulations_expert_task
+    praxis_results = await phi_methods_expert_gather_task
     praxis_methods: dict[str, Any] = {}
     for cat, res in zip(state.hipaa_cats, praxis_results, strict=True):
         if isinstance(res, Exception):

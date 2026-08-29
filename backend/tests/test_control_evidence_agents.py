@@ -1,7 +1,7 @@
 """D12 evidence-verification contracts for the agents that web-search:
-Statute, Praxis (see test_praxis_multi_method.py), Scout, and
+RegulationsExpert, PHIMethodsExpert (see test_praxis_multi_method.py), Scout, and
 CorpusResearcher (see test_corpus_researcher.py). This file covers
-Statute and Scout, whose evidence-gate tests do not already live
+RegulationsExpert and Scout, whose evidence-gate tests do not already live
 elsewhere.
 
 Every test proves the same shape: a model-authored URL absent from the
@@ -17,20 +17,20 @@ import pytest
 from phi_core.control.testing import make_ctx
 
 
-def _statute():
-    from phi_core.agents.experts import Statute
+def _regulations_expert():
+    from phi_core.agents.experts import RegulationsExpert
 
-    return Statute(make_ctx("Statute"))
+    return RegulationsExpert(make_ctx("RegulationsExpert"))
 
 
 @pytest.mark.asyncio
 async def test_hipaa_rules_falls_back_when_reported_sources_are_not_tool_backed():
     """A model-authored `sources` URL that never appears in the response's
-    actual tool citations must never verify -- Statute falls back to the
+    actual tool citations must never verify -- RegulationsExpert falls back to the
     deterministic jurisdiction pack instead of shipping it."""
     from phi_core.jurisdictions import get_pack
 
-    agent = _statute()
+    agent = _regulations_expert()
     agent._log = AsyncMock()  # type: ignore[method-assign]
     reply = {
         "jurisdiction": "us",
@@ -56,7 +56,7 @@ async def test_hipaa_rules_keeps_only_the_tool_backed_source_on_an_authoritative
     """A source whose URL is genuinely present in the response's tool
     citations AND on the authoritative-domain allow-list reaches VERIFIED
     and survives; a second, unverified source on the same reply does not."""
-    agent = _statute()
+    agent = _regulations_expert()
     agent._log = AsyncMock()  # type: ignore[method-assign]
     real_url = "https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164"
     forged_url = "https://example.com/forged"
@@ -87,12 +87,12 @@ async def test_adjacent_regimes_trims_a_regime_source_that_is_not_tool_backed():
     reported URL matches the response's tool citations on an
     authoritative domain keeps it; a sibling regime whose URL was never
     actually returned by the tool has its source dropped, not trusted."""
-    from phi_core.agents.experts import Statute
+    from phi_core.agents.experts import RegulationsExpert
 
-    agent = _statute()
+    agent = _regulations_expert()
     agent._log = AsyncMock()  # type: ignore[method-assign]
     real_url = "https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-A/part-46"
-    regimes = [regime.copy() for regime in Statute._ADJACENT_REGIMES_FALLBACK]
+    regimes = [regime.copy() for regime in RegulationsExpert._ADJACENT_REGIMES_FALLBACK]
     regimes[0] = dict(regimes[0], sources=[{"url": real_url, "title": "Common Rule"}])
     regimes[1] = dict(regimes[1], sources=[{"url": "https://example.com/forged", "title": "forged"}])
     reply = {"adjacent_regimes": regimes}

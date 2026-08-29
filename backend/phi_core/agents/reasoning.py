@@ -927,7 +927,7 @@ class Judge(Agent):
     NAME = "Judge"
     PROMPT = (
         "You are Judge. Given (a) Schema column classifications, (b) Instrument PHI fields "
-        "from forms, (c) Lexicon dictionary entries, and (d) Statute jurisdictional rules, "
+        "from forms, (c) Lexicon dictionary entries, and (d) RegulationsExpert jurisdictional rules, "
         "decide for EACH dataset column: whether to keep, drop, or transform, and which "
         "technique. Never see or infer row values.\n\n"
         "ACTIONS (choose exactly one):\n"
@@ -960,13 +960,13 @@ class Judge(Agent):
     async def run(self, schema: dict, instrument: dict, lexicon: dict, statute: dict,
                   praxis: dict[str, dict] | None = None, prior_feedback: str = "") -> dict[str, Any]:
         prompt = (
-            f"Statute rules (jurisdictional regulations): {statute}\n\n"
+            f"RegulationsExpert rules (jurisdictional regulations): {statute}\n\n"
             f"Schema columns (dataset headers -- rows never shown): {schema}\n\n"
             f"Instrument fields (from study forms): {instrument}\n\n"
             f"Lexicon columns (dictionary): {lexicon}\n"
         )
         if praxis:
-            # Praxis reports candidates. Judge still chooses an action, but
+            # PHIMethodsExpert reports candidates. Judge still chooses an action, but
             # sees every candidate name and whether any preserves utility.
             praxis_summary = {
                 category: {
@@ -981,12 +981,12 @@ class Judge(Agent):
                 }
                 for category, result in praxis.items() if result
             }
-            prompt += (f"\nPraxis methods (current candidate methods per HIPAA "
+            prompt += (f"\nPHIMethodsExpert methods (current candidate methods per HIPAA "
                        f"identifier category): {praxis_summary}\n")
         if prior_feedback:
             prompt += (
                 "\nPreview (Sentinel) blocking feedback to address. Before correcting, "
-                "verify each issue is a real leak / real over-block against Statute + "
+                "verify each issue is a real leak / real over-block against RegulationsExpert + "
                 "Instrument. If an issue is a false positive, keep the original decision "
                 "and add a `justification` field explaining why.\n"
                 f"{prior_feedback}\n"
@@ -1066,7 +1066,7 @@ class Sentinel(Agent):
     NAME = "Sentinel"
     PROMPT = (
         "You are Sentinel. Review Judge's decisions with ONE goal: zero PHI leak, 100% accuracy. "
-        "Cross-check every 'keep' against Statute rules and Instrument fields. Flag any column "
+        "Cross-check every 'keep' against RegulationsExpert rules and Instrument fields. Flag any column "
         "whose action is inconsistent with its PHI category or citation.\n\n"
         "You are the only agent that may send a column to a human. Judge never does. For every "
         "issue, set severity honestly:\n"
@@ -1074,7 +1074,7 @@ class Sentinel(Agent):
         "wrong -- state the correct value in `suggested_action`. This sends the column back to "
         "Judge for one more try, with your correction attached. Reserve for real leaks or clear "
         "regulatory/method mismatches (e.g. keep on a phone column, keep on a name column, drop on "
-        "a study arm, hash used where Statute requires zip3_truncate).\n"
+        "a study arm, hash used where RegulationsExpert requires zip3_truncate).\n"
         "  - 'escalate' when you disagree with Judge's decision but the correct answer is genuinely "
         "ambiguous -- you cannot state a confident correction yourself. This routes the column "
         "straight to a human, skipping further Judge iterations. Use this rarely: only for real "
@@ -1094,14 +1094,14 @@ class Sentinel(Agent):
                   parent_id: str | None = None) -> dict[str, Any]:
         prompt = (
             f"Judge decisions: {decisions}\n\n"
-            f"Statute rules: {statute}\n\n"
+            f"RegulationsExpert rules: {statute}\n\n"
             f"Instrument fields: {instrument}\n"
             "Respond with JSON only. Remember: only 'blocking' severity triggers another iteration."
         )
         out = await self.call_json(prompt, phase="sentinel.review",
                                    default={"verdict": "approved", "issues": []},
                                    parent_id=parent_id,
-                                   status_text="Cross-checking Judge's decisions against Statute and Instrument")
+                                   status_text="Cross-checking Judge's decisions against RegulationsExpert and Instrument")
         # Deterministic post-processing: if there are no blocking issues,
         # force verdict='approved' regardless of what the LLM wrote. This
         # closes the "Sentinel nitpicks endlessly" pathology observed on
@@ -1619,8 +1619,8 @@ class Auditor(Agent):
         prompt = (
             f"Per-column decisions to re-derive and check (no row values): {per_column}\n\n"
             f"File summary counts: {summary_by_file}\n\n"
-            f"Jurisdiction rulebook (Statute): {statute or {}}\n\n"
-            f"Best-practice technique per category (Praxis): {praxis_methods or {}}\n\n"
+            f"Jurisdiction rulebook (RegulationsExpert): {statute or {}}\n\n"
+            f"Best-practice technique per category (PHIMethodsExpert): {praxis_methods or {}}\n\n"
             f"Files: {file_meta}\n\nExports: {list(exports.keys())}\n\n"
             f"Artifacts to echo back exactly in artifacts_checked: {artifact_lines}\n"
             "Respond with JSON only."

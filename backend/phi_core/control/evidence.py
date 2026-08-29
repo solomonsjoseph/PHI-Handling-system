@@ -10,7 +10,7 @@ never substitutes for this: it is telemetry, not evidence.
 This module is deliberately independent of the gateway's live call shape:
 callers correlate a source to its originating response themselves (by
 ``provider_request_id``) and hand this module the resulting yes/no
-``tool_backed`` flag, so the same functions verify a fresh Statute/Praxis
+``tool_backed`` flag, so the same functions verify a fresh RegulationsExpert/PHIMethodsExpert
 reply and a replayed/migrated claim identically.
 """
 from __future__ import annotations

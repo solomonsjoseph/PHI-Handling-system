@@ -165,14 +165,14 @@ def _run_cardinality_pipeline(tmp_path, monkeypatch):
             self.sessions = FakeSessions()
             self.agent_log = FakeAgentLog()
 
-    class FakeStatute:
+    class FakeRegulationsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {})
 
-    class FakePraxis:
+    class FakePHIMethodsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
@@ -224,8 +224,8 @@ def _run_cardinality_pipeline(tmp_path, monkeypatch):
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {"issues": []})
 
-    monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
-    monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
+    monkeypatch.setattr(orchestrator, "RegulationsExpert", FakeRegulationsExpert)
+    monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Lexicon", FakeLexicon)
     monkeypatch.setattr(orchestrator, "Instrument", FakeInstrument)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)

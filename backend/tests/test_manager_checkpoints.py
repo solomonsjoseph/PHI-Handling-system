@@ -160,10 +160,10 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {})
 
-    class FakeStatute(FakeAgent):
+    class FakeRegulationsExpert(FakeAgent):
         pass
 
-    class FakePraxis(FakeAgent):
+    class FakePHIMethodsExpert(FakeAgent):
         async def method_for(self, _category):
             return {}
 
@@ -195,7 +195,7 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
             raise RuntimeError("disk write failed")
 
     monkeypatch_targets = {
-        "Statute": FakeStatute, "Praxis": FakePraxis, "Lexicon": FakeLexicon,
+        "RegulationsExpert": FakeRegulationsExpert, "PHIMethodsExpert": FakePHIMethodsExpert, "Lexicon": FakeLexicon,
         "Instrument": FakeInstrument, "Schema": FakeSchema, "Judge": FakeJudge,
         "Sentinel": FakeSentinel, "Executor": FakeExecutor,
     }

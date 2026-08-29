@@ -22,7 +22,7 @@ def _request(**overrides: object) -> GatewayRequest:
         session_id="session",
         run_id="run",
         task_id="task",
-        agent="Statute",
+        agent="RegulationsExpert",
         attempt=1,
         purpose="research",
         input_class="internal",
@@ -84,7 +84,7 @@ async def test_gateway_denies_a_secret_bearing_prompt_before_dispatch(monkeypatc
 
     monkeypatch.setattr(detectors, "presidio_detect", lambda text: [])
     store = MemoryControlStore()
-    grant = CapabilityPolicy(LlmConfig(provider="anthropic", model="claude-test")).issue_grant(run_id="run", task_id="task", agent="Statute", task_type="statute")
+    grant = CapabilityPolicy(LlmConfig(provider="anthropic", model="claude-test")).issue_grant(run_id="run", task_id="task", agent="RegulationsExpert", task_type="regulationsexpert")
     await store.insert("capability_grants", grant.model_dump())
     gateway = ProviderGateway(store)
 
@@ -103,7 +103,7 @@ async def test_gateway_denies_a_secret_bearing_prompt_before_dispatch(monkeypatc
 
 
 def test_get_contract_returns_the_manifest_for_a_known_agent() -> None:
-    assert get_contract("Statute") is MANIFESTS["Statute"]
+    assert get_contract("RegulationsExpert") is MANIFESTS["RegulationsExpert"]
 
 
 def test_get_contract_denies_an_unknown_agent() -> None:
@@ -117,14 +117,14 @@ def test_list_contracts_matches_manifests_keys() -> None:
 
 def test_authorize_capability_denies_a_provider_mismatch() -> None:
     policy = CapabilityPolicy(LlmConfig(provider="anthropic", model="claude-test"))
-    grant = policy.issue_grant(run_id="run", task_id="task", agent="Statute", task_type="statute")
+    grant = policy.issue_grant(run_id="run", task_id="task", agent="RegulationsExpert", task_type="regulationsexpert")
     with pytest.raises(CapabilityDenied):
         authorize_capability(policy, grant, provider="openai", model="x", endpoint="", data_class="internal")
 
 
 def test_authorize_capability_denies_restricted_phi() -> None:
     policy = CapabilityPolicy(LlmConfig(provider="anthropic", model="claude-test"))
-    grant = policy.issue_grant(run_id="run", task_id="task", agent="Statute", task_type="statute")
+    grant = policy.issue_grant(run_id="run", task_id="task", agent="RegulationsExpert", task_type="regulationsexpert")
     with pytest.raises(CapabilityDenied):
         authorize_capability(
             policy, grant, provider=grant.provider, model=grant.model, endpoint=grant.endpoint,
@@ -134,7 +134,7 @@ def test_authorize_capability_denies_restricted_phi() -> None:
 
 def test_authorize_capability_allows_a_matching_grant() -> None:
     policy = CapabilityPolicy(LlmConfig(provider="anthropic", model="claude-test"))
-    grant = policy.issue_grant(run_id="run", task_id="task", agent="Statute", task_type="statute")
+    grant = policy.issue_grant(run_id="run", task_id="task", agent="RegulationsExpert", task_type="regulationsexpert")
     authorize_capability(
         policy, grant, provider=grant.provider, model=grant.model, endpoint=grant.endpoint, data_class="internal"
     )

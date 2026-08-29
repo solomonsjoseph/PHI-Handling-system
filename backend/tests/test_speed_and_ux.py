@@ -155,14 +155,14 @@ def test_verifier_treats_hash_as_phi_safe_action():
 def test_praxis_agent_wired_into_orchestrator():
     """Sir's spec: 'PHI Methods experts ... the classifier asks for method
     to handle dates then the agent would search the latest jittering
-    method (eg. SANT) then provide the necessary information'. Praxis
+    method (eg. SANT) then provide the necessary information'. PHIMethodsExpert
     must be imported and invoked in the orchestrator before Judge."""
     import inspect
 
     from phi_core.agents import orchestrator
     src = inspect.getsource(orchestrator)
-    assert "Praxis(" in src, "Praxis not instantiated in orchestrator"
-    assert "praxis_methods" in src, "Praxis output not fed forward"
+    assert "PHIMethodsExpert(" in src, "PHIMethodsExpert not instantiated in orchestrator"
+    assert "praxis_methods" in src, "PHIMethodsExpert output not fed forward"
     # Judge signature must accept praxis so it can be consulted
     from phi_core.agents.reasoning import Judge
     sig = inspect.signature(Judge.run)
@@ -186,7 +186,7 @@ def test_judge_prompt_asks_for_false_positive_check():
 
 def test_orchestrator_emits_praxis_phase():
     """UI-visibility check: the orchestrator must emit an on_phase('praxis')
-    call so the live agent-trace panel renders a 'Praxis' row and the
+    call so the live agent-trace panel renders a 'PHIMethodsExpert' row and the
     operator can see the PHI-methods lookup happening."""
     import inspect
 

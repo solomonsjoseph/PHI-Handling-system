@@ -37,7 +37,7 @@ Endpoints (all under /api unless noted):
   GET  /api/settings/llm/catalog           -> multi-provider model catalog
   GET  /api/settings/warmup/schedule       -> auto-warmup toggle state
   POST /api/settings/warmup/schedule       -> set auto-warmup toggle
-  POST /api/settings/warmup                -> prime Statute + Praxis caches
+  POST /api/settings/warmup                -> prime RegulationsExpert + PHIMethodsExpert caches
   POST /api/settings/chatgpt/login         -> start ChatGPT OAuth device-code login
   GET  /api/settings/chatgpt/login/{id}    -> poll device-code login status (one poll)
   GET  /api/settings/chatgpt/status        -> current ChatGPT connection status
@@ -1284,7 +1284,7 @@ async def session_stream(sid: str, principal: str = Depends(resolve_principal)):
         try:
             # HANG PROTECTION: emit an SSE keep-alive comment every 15 s so
             # browsers / proxies do not close the connection during a long
-            # LLM call (Herald.Sections and Statute web-search can each run
+            # LLM call (Herald.Sections and RegulationsExpert web-search can each run
             # >30 s without a message). The comment starts with ":" per SSE
             # spec so the EventSource on the client ignores it silently.
             while True:
@@ -2368,8 +2368,8 @@ async def chatgpt_disconnect():
 
 
 async def _run_warmup(db, cfg) -> dict:
-    """Run Statute + all 17 Praxis warmups. Shared by manual and scheduled paths."""
-    from phi_core.agents.experts import Praxis, Statute
+    """Run RegulationsExpert + all 17 PHIMethodsExpert warmups. Shared by manual and scheduled paths."""
+    from phi_core.agents.experts import PHIMethodsExpert, RegulationsExpert
     from phi_core.control.activation import ActivationFactory
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.store import MongoControlStore
@@ -2396,27 +2396,27 @@ async def _run_warmup(db, cfg) -> dict:
     async def _activate(agent: str):
         return await factory.activate(session_id=warmup_sid, run_id=warmup_run_id, agent=agent, emit=_noop_emit)
 
-    praxis_agent = Praxis(await _activate("Praxis"))
-    statute_task = Statute(await _activate("Statute")).run(jurisdiction="us")
-    praxis_task = asyncio.gather(
-        *[praxis_agent.method_for(c) for c in hipaa_cats],
+    phi_methods_expert_agent = PHIMethodsExpert(await _activate("PHIMethodsExpert"))
+    regulations_expert_task = RegulationsExpert(await _activate("RegulationsExpert")).run(jurisdiction="us")
+    phi_methods_expert_task = asyncio.gather(
+        *[phi_methods_expert_agent.method_for(c) for c in hipaa_cats],
         return_exceptions=True,
     )
-    statute_res, praxis_res = await asyncio.gather(statute_task, praxis_task)
-    praxis_ok = [c for c, r in zip(hipaa_cats, praxis_res, strict=True)
+    regulations_expert_res, phi_methods_expert_res = await asyncio.gather(regulations_expert_task, phi_methods_expert_task)
+    praxis_ok = [c for c, r in zip(hipaa_cats, phi_methods_expert_res, strict=True)
                  if not isinstance(r, Exception)]
     praxis_err = [{"category": c, "error": type(r).__name__}
-                  for c, r in zip(hipaa_cats, praxis_res, strict=True)
+                  for c, r in zip(hipaa_cats, phi_methods_expert_res, strict=True)
                   if isinstance(r, Exception)]
-    # Praxis is called via `method_for`, never `run`, so it never gets
+    # PHIMethodsExpert is called via `method_for`, never `run`, so it never gets
     # `Agent.__init_subclass__`'s completion wrap; complete its one shared
     # task explicitly, matching orchestrator.py's per-category equivalent.
-    if praxis_agent.ctx.tasks is not None:
-        await praxis_agent.ctx.tasks.complete({"primed": praxis_ok, "failed": praxis_err})
+    if phi_methods_expert_agent.ctx.tasks is not None:
+        await phi_methods_expert_agent.ctx.tasks.complete({"primed": praxis_ok, "failed": praxis_err})
     return {
         "ok": True,
-        "statute": {"jurisdiction": statute_res.get("jurisdiction", "us"),
-                    "as_of": statute_res.get("as_of", "cache")},
+        "statute": {"jurisdiction": regulations_expert_res.get("jurisdiction", "us"),
+                    "as_of": regulations_expert_res.get("as_of", "cache")},
         "praxis": {
             "primed": praxis_ok,
             "failed": praxis_err,
@@ -2427,10 +2427,10 @@ async def _run_warmup(db, cfg) -> dict:
 
 @app.post("/api/settings/warmup", dependencies=[Depends(require_api_token), Depends(rate_limited("settings_warmup", 5, 3600))])
 async def settings_warmup():
-    """Prime the Statute + Praxis caches for supported jurisdictions.
+    """Prime the RegulationsExpert + PHIMethodsExpert caches for supported jurisdictions.
 
     Sir Q "Cold-Cache Warmup": the first study of the day pays for 10+ web
-    searches (Praxis E, I..R) plus Statute. This endpoint pre-runs those
+    searches (PHIMethodsExpert E, I..R) plus RegulationsExpert. This endpoint pre-runs those
     with an ephemeral session id so the caches are hot before an operator
     kicks off a real run. Uses the current LLM config and returns per-task
     outcome so the UI can report which categories cached vs. failed.

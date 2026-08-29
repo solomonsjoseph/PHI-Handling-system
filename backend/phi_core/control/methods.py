@@ -1,6 +1,6 @@
 """The MethodRegistry service (docs #38, Phase 2D).
 
-Research discovery does not grant execution permission. Praxis's
+Research discovery does not grant execution permission. PHIMethodsExpert's
 ``MethodFinding`` output is a research artifact; a ``MethodRecord`` only
 becomes safe to execute once ``promote`` has walked it through the fixed
 ``researched -> candidate -> validated -> approved`` lifecycle (or has been

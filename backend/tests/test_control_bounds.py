@@ -29,7 +29,7 @@ SESSION_ID = "b" * 32
 
 def test_teams_are_the_exact_five_non_authoritative_budget_groups() -> None:
     assert TEAMS == {
-        "regulatory_evidence": frozenset({"Statute", "Praxis", "CorpusResearcher"}),
+        "regulatory_evidence": frozenset({"RegulationsExpert", "PHIMethodsExpert", "CorpusResearcher"}),
         "data_and_instrument": frozenset({"Lexicon", "Schema", "Instrument"}),
         "proposal_and_challenge": frozenset({"Judge", "Sentinel"}),
         "verification_and_audit": frozenset({"Executor", "Operator", "Reviewer", "Auditor"}),

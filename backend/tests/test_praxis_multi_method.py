@@ -1,20 +1,20 @@
-"""Regression tests for Praxis's per-category method reports."""
+"""Regression tests for PHIMethodsExpert's per-category method reports."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
 import pytest
-from phi_core.agents.experts import Praxis
+from phi_core.agents.experts import PHIMethodsExpert
 from phi_core.control.testing import make_ctx
 
 
-def _praxis() -> Praxis:
-    return Praxis(make_ctx("Praxis"))
+def _phi_methods_expert() -> PHIMethodsExpert:
+    return PHIMethodsExpert(make_ctx("PHIMethodsExpert"))
 
 
 @pytest.mark.asyncio
 async def test_method_for_c_returns_multiple_schema_complete_methods_and_names_category(monkeypatch):
-    agent = _praxis()
+    agent = _phi_methods_expert()
     agent._log = AsyncMock()
     year_only_url = "https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164#p-164.514(b)(2)(i)(C)"
     offset_url = "https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164#p-164.514(b)(1)"
@@ -61,7 +61,7 @@ async def test_method_for_c_returns_multiple_schema_complete_methods_and_names_c
 @pytest.mark.asyncio
 @pytest.mark.parametrize("category", ["A", "D", "F", "G"])
 async def test_drop_only_categories_are_single_method_without_search(monkeypatch, category):
-    agent = _praxis()
+    agent = _phi_methods_expert()
     agent._log = AsyncMock()
     agent.call_json_with_web_search = AsyncMock()
 
@@ -74,13 +74,13 @@ async def test_drop_only_categories_are_single_method_without_search(monkeypatch
 
 @pytest.mark.asyncio
 async def test_search_failure_returns_deterministic_b_method_wrapped(monkeypatch):
-    agent = _praxis()
+    agent = _phi_methods_expert()
     agent._log = AsyncMock()
     agent.call_json_with_web_search = AsyncMock(side_effect=RuntimeError("search unavailable"))
 
     reply = await agent.method_for("B")
 
-    assert reply["methods"] == [Praxis._DETERMINISTIC_METHODS["B"]]
+    assert reply["methods"] == [PHIMethodsExpert._DETERMINISTIC_METHODS["B"]]
 
 
 @pytest.mark.asyncio

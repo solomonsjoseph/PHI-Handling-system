@@ -97,7 +97,7 @@ def _llm_cfg() -> SimpleNamespace:
 
 async def _issue_gateway_grant(store: MemoryControlStore) -> object:
     policy = CapabilityPolicy(_llm_cfg())
-    grant = policy.issue_grant(run_id=RUN_ID, task_id=TASK_ID, agent="Statute", task_type="statute")
+    grant = policy.issue_grant(run_id=RUN_ID, task_id=TASK_ID, agent="RegulationsExpert", task_type="regulationsexpert")
     await store.insert("capability_grants", grant)
     return grant
 
@@ -115,7 +115,7 @@ async def _open_gateway_run(store: MemoryControlStore) -> WorkflowRun:
 
 def _gateway_request(*, grant_id: str, **overrides) -> GatewayRequest:
     fields: dict = dict(
-        session_id=SESSION_ID, run_id=RUN_ID, task_id=TASK_ID, agent="Statute", attempt=1,
+        session_id=SESSION_ID, run_id=RUN_ID, task_id=TASK_ID, agent="RegulationsExpert", attempt=1,
         purpose="research", input_class="internal", grant_id=grant_id,
         provider="anthropic", model="claude-test", endpoint="",
         system_prompt="system", user_prompt="user", coaching_note=None, tool_results=(),

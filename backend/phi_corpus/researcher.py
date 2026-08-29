@@ -16,8 +16,8 @@ de-identification the raw columns were ``date_of_diagnosis`` (full date)
 and ``date_of_birth``). It returns a ``Scenario``-shaped JSON so the
 existing planter can synthesise realistic corpora on top of it.
 
-The agent uses the same ``call_with_web_search`` plumbing Statute +
-Praxis already have. Cache-first (7-day TTL) so the same domain is not
+The agent uses the same ``call_with_web_search`` plumbing RegulationsExpert +
+PHIMethodsExpert already have. Cache-first (7-day TTL) so the same domain is not
 re-searched twice. Falls back cleanly if web-search fails: returns the
 error rather than a hallucinated scenario (never plant PHI we have not
 grounded in a real study description).

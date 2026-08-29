@@ -84,8 +84,8 @@ class ExecutionHealthSupervisor(Agent):
         "Lexicon": "reads the data dictionary; returns one entry per documented column",
         "Schema": "reads dataset column HEADERS ONLY; returns one classification per header",
         "Instrument": "reads study form text; returns the PHI fields it collects",
-        "Statute": "returns the rulebook for the run's jurisdiction",
-        "Praxis": "returns the current best-practice technique for one HIPAA category",
+        "RegulationsExpert": "returns the rulebook for the run's jurisdiction",
+        "PHIMethodsExpert": "returns the current best-practice technique for one HIPAA category",
         "Judge": "returns exactly one handling decision per dataset column",
         "Sentinel": "reviews Judge's decisions for zero leak; returns issues",
         "Executor": "deterministic; applies approved decisions, makes no LLM call",
@@ -109,7 +109,7 @@ class ExecutionHealthSupervisor(Agent):
         "Auditor": 25.0, "Scout": 40.0, "Instrument": 40.0,
         "Ledger.Compare": 35.0, "Ledger.Aggregate": 35.0,
         "Herald.Abstract": 75.0, "Herald.Sections": 75.0,
-        "Statute": 60.0, "Praxis": 60.0,
+        "RegulationsExpert": 60.0, "PHIMethodsExpert": 60.0,
     }
     DEFAULT_BUDGET_S = 45.0
 

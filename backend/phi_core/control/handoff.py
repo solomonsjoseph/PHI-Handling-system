@@ -6,8 +6,8 @@ genuinely missing but not yet buildable: this codebase's Manager/
 SuperOrchestrator sequences every agent today (ADR 0006), so there was no
 direct agent-to-agent handoff to gate. This module builds that gate on its
 own, ahead of any caller: a deny-by-default validator that will later let
-Judge, Reviewer, Regulations Expert (``Statute``), PHI Methods Expert
-(``Praxis``), Schema, Lexicon, and Instrument exchange a bounded, typed
+Judge, Reviewer, Regulations Expert (``RegulationsExpert``), PHI Methods Expert
+(``PHIMethodsExpert``), Schema, Lexicon, and Instrument exchange a bounded, typed
 message directly instead of solely relaying through Manager.
 
 Deterministic, no-LLM. Wired into ``phi_core/agents/`` by Wave R-c step 6:
@@ -31,10 +31,10 @@ trace store in the first place -- belt and suspenders with D66's own
 sanitize-before-append.
 
 Role identities are the existing registered ``AgentManifest`` names
-(``Judge``, ``Statute``, ``Praxis``, ``Schema``, ``Lexicon``,
+(``Judge``, ``RegulationsExpert``, ``PHIMethodsExpert``, ``Schema``, ``Lexicon``,
 ``Instrument``, ``Reviewer``) rather than new target-architecture strings:
 "Regulations Expert" and "PHI Methods Expert" from the spec are this
-codebase's ``Statute`` and ``Praxis`` under their current names. Reusing
+codebase's ``RegulationsExpert`` and ``PHIMethodsExpert`` under their current names. Reusing
 the names already registered in ``policy.MANIFESTS`` means every check
 that needs "a registered contract" (checks 1, 2, 5, 9) works against real
 data with no parallel, not-yet-real registry to maintain.
@@ -86,8 +86,8 @@ from .store import ControlStore
 # ---- role identities (existing registered AgentManifest names) ------------
 
 JUDGE = "Judge"
-REGULATIONS_EXPERT = "Statute"
-METHODS_EXPERT = "Praxis"
+REGULATIONS_EXPERT = "RegulationsExpert"
+METHODS_EXPERT = "PHIMethodsExpert"
 SCHEMA = "Schema"
 LEXICON = "Lexicon"
 INSTRUMENT = "Instrument"

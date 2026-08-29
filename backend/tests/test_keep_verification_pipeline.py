@@ -33,14 +33,14 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
             self.sessions = FakeSessions()
             self.agent_log = FakeAgentLog()
 
-    class FakeStatute:
+    class FakeRegulationsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {})
 
-    class FakePraxis:
+    class FakePHIMethodsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
@@ -90,8 +90,8 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
             executor_calls.append(True)
             return await complete_fake_task(self.ctx, {})
 
-    monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
-    monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
+    monkeypatch.setattr(orchestrator, "RegulationsExpert", FakeRegulationsExpert)
+    monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Lexicon", FakeLexicon)
     monkeypatch.setattr(orchestrator, "Instrument", FakeInstrument)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)

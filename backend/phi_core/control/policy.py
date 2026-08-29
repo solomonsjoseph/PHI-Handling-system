@@ -40,6 +40,12 @@ OUTPUT_SCHEMAS: Mapping[str, Mapping[str, object]] = MappingProxyType(
         "audit_report": MappingProxyType({"type": "object"}),
         "report": MappingProxyType({"type": "object"}),
         "no_provider_output": MappingProxyType({"type": "object"}),
+        # Reserved for Phase 5's ``StudyKnowledgePackage`` record
+        # (docs/MASTER_ARCHITECTURE_V2.md section 28). Wave 5/6-rename
+        # pre-registers the schema key only, so Phase 5 does not need to
+        # touch this now-reserved file for that one line; the record type
+        # itself is Phase 5's own build, not this wave's.
+        "study_knowledge_package": MappingProxyType({"type": "object"}),
     }
 )
 
@@ -115,8 +121,8 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
         "Lexicon": _manifest("Lexicon", purpose="Classify dataset headers.", input_class="restricted_metadata", output_schema="header_analysis"),
         "Schema": _manifest("Schema", purpose="Inspect file structure.", input_class="restricted_metadata", output_schema="no_provider_output", providers=frozenset()),
         "Instrument": _manifest("Instrument", purpose="Classify instruments and form metadata.", input_class="restricted_metadata", output_schema="header_analysis"),
-        "Statute": _manifest("Statute", purpose="Research jurisdictional rules.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
-        "Praxis": _manifest("Praxis", purpose="Research de-identification practice.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
+        "RegulationsExpert": _manifest("RegulationsExpert", purpose="Research jurisdictional rules.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
+        "PHIMethodsExpert": _manifest("PHIMethodsExpert", purpose="Research de-identification practice.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
         "Judge": _manifest("Judge", purpose="Propose column decisions.", input_class="restricted_metadata", output_schema="judge_decisions"),
         "Sentinel": _manifest("Sentinel", purpose="Challenge proposed decisions.", input_class="restricted_metadata", output_schema="decision_proposal"),
         "Executor": _manifest(
@@ -142,7 +148,7 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
         "Reviewer": _manifest("Reviewer", purpose="Review export coverage.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),
         "CorpusResearcher": _manifest("CorpusResearcher", purpose="Research corpus sources.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
         # Pipeline is the durable root for a fixed sequence of up to 35
-        # direct child executions: 17 Praxis methods, three Judge/Sentinel
+        # direct child executions: 17 PHIMethodsExpert methods, three Judge/Sentinel
         # iterations each, and the remaining fixed pipeline steps. Its 48
         # child ceiling leaves bounded headroom without opening recursive
         # agent-to-agent delegation.
@@ -166,7 +172,7 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
             }),
             allowed_child_task_types=frozenset(
                 _task_type(agent) for agent in (
-                    "Manager", "Praxis", "Statute", "Lexicon", "Schema", "Instrument",
+                    "Manager", "PHIMethodsExpert", "RegulationsExpert", "Lexicon", "Schema", "Instrument",
                     "Judge", "Sentinel", "Executor", "Scout", "Operator", "Reviewer",
                     "Auditor", "Ledger", "Herald",
                 )
@@ -179,7 +185,7 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
 
 TEAMS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
-        "regulatory_evidence": frozenset({"Statute", "Praxis", "CorpusResearcher"}),
+        "regulatory_evidence": frozenset({"RegulationsExpert", "PHIMethodsExpert", "CorpusResearcher"}),
         "data_and_instrument": frozenset({"Lexicon", "Schema", "Instrument"}),
         "proposal_and_challenge": frozenset({"Judge", "Sentinel"}),
         "verification_and_audit": frozenset({"Executor", "Operator", "Reviewer", "Auditor"}),

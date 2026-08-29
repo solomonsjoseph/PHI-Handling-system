@@ -27,7 +27,7 @@ The table below is grounded in ``orchestrator.py``'s current control flow
 (``run_pipeline``, ``orchestrator.py:98-829``), collapsing runtime
 concurrency and retry loops into the fixed checkpoint sequence D9 asks for:
 
-- ``research`` (Statute + Praxis, ``orchestrator.py:158-166``) and
+- ``research`` (RegulationsExpert + PHIMethodsExpert, ``orchestrator.py:158-166``) and
   ``specialists`` (Lexicon + Schema + Instrument, ``orchestrator.py:168-176``)
   run concurrently today; the table orders them sequentially for
   checkpointing purposes only -- a checkpoint answers "what must have

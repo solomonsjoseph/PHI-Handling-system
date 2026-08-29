@@ -1,7 +1,7 @@
 """Regulation and PHI-methods expert agents (armed with web_search).
 
-Statute - jurisdiction regulation expert (HIPAA, DPDPA, GDPR, PIPEDA, LGPD, ...)
-Praxis  - PHI transformation methods expert (jittering, k-anonymity, hashing).
+RegulationsExpert - jurisdiction regulation expert (HIPAA, DPDPA, GDPR, PIPEDA, LGPD, ...)
+PHIMethodsExpert  - PHI transformation methods expert (jittering, k-anonymity, hashing).
 
 Both agents follow the same cache-first / web-search-second policy:
 
@@ -124,12 +124,12 @@ def _verify_research_reply(
     return True, [by_url.get(url, {"url": url}) for url in verified_urls]
 
 
-class Statute(Agent):
+class RegulationsExpert(Agent):
     """Regulations expert. Reads primary-law citations for a jurisdiction."""
 
-    NAME = "Statute"
+    NAME = "RegulationsExpert"
     PROMPT = (
-        "You are Statute, an expert on data-protection regulations. When "
+        "You are RegulationsExpert, an expert on data-protection regulations. When "
         "asked about a jurisdiction and a data category, you MUST search "
         "the web for the current primary-law text (HIPAA CFR, GDPR articles, "
         "DPDPA sections, PIPEDA, LGPD, etc.) and cite it verbatim. "
@@ -223,7 +223,7 @@ class Statute(Agent):
 
     @classmethod
     def _valid_adjacent_regimes(cls, reply: Any) -> bool:
-        """Accept only the five advisory rows Statute is allowed to report."""
+        """Accept only the five advisory rows RegulationsExpert is allowed to report."""
         if not isinstance(reply, dict):
             return False
         regimes = reply.get("adjacent_regimes")
@@ -270,7 +270,7 @@ class Statute(Agent):
     async def _hipaa_rules_for(self, jurisdiction: str) -> dict[str, Any]:
         cached = await self.ctx.cache.get("regulation_rules", jurisdiction) if self.ctx.cache else None
         if cached:
-            await self._log(f"statute.cache_hit:{jurisdiction}", "info",
+            await self._log(f"regulations_expert.cache_hit:{jurisdiction}", "info",
                             {"topic": "regulation_rules"})
             return _json.loads(cached["content"])
 
@@ -286,7 +286,7 @@ class Statute(Agent):
         try:
             reply, citations = await self.call_json_with_web_search(
                 prompt,
-                phase=f"statute.web_search:{jurisdiction}",
+                phase=f"regulations_expert.web_search:{jurisdiction}",
                 default={
                     "jurisdiction": jurisdiction,
                     "regulation": pack.regulation,
@@ -301,7 +301,7 @@ class Statute(Agent):
             )
             verified, verified_sources = _verify_research_reply(
                 run_id=self.ctx.run_id, task_id=self.ctx.task_id,
-                subject=f"statute:{jurisdiction}",
+                subject=f"regulations_expert:{jurisdiction}",
                 statement=f"HIPAA-equivalent identifier categories and handling rules for {jurisdiction}",
                 reply_sources=reply.get("sources"), citations=citations,
                 allow_list=_AUTHORITATIVE_LAW_DOMAINS,
@@ -314,7 +314,7 @@ class Statute(Agent):
                 # documented, non-LLM fallback, same as the exception path.
                 reply = self._pack_fallback(pack)
         except Exception as e:  # pragma: no cover — defensive fallback
-            await self._log(f"statute.error:{jurisdiction}", "info", {"error": str(e)})
+            await self._log(f"regulations_expert.error:{jurisdiction}", "info", {"error": str(e)})
             reply = self._pack_fallback(pack)
 
         # Merge with the deterministic pack so downstream never sees a
@@ -338,7 +338,7 @@ class Statute(Agent):
         cached = await self.ctx.cache.get("adjacent_regulations", jurisdiction) if self.ctx.cache else None
 
         if cached:
-            await self._log(f"statute.cache_hit:{jurisdiction}", "info",
+            await self._log(f"regulations_expert.cache_hit:{jurisdiction}", "info",
                             {"topic": "adjacent_regulations"})
             try:
                 reply = _json.loads(cached["content"])
@@ -375,7 +375,7 @@ class Statute(Agent):
         try:
             reply, citations = await self.call_json_with_web_search(
                 prompt,
-                phase=f"statute.adjacent_web_search:{jurisdiction}",
+                phase=f"regulations_expert.adjacent_web_search:{jurisdiction}",
                 default={},
                 max_uses=3,
                 expect_key="adjacent_regimes",
@@ -397,7 +397,7 @@ class Statute(Agent):
                 for regime in reply["adjacent_regimes"]:
                     claim = EvidenceClaim(
                         run_id=self.ctx.run_id, task_id=self.ctx.task_id,
-                        subject=f"statute:adjacent:{regime.get('name')}",
+                        subject=f"regulations_expert:adjacent:{regime.get('name')}",
                         statement=f"supplementary source for the {regime.get('name')} advisory",
                     )
                     candidate_urls = [s.get("url") for s in (regime.get("sources") or []) if s.get("url")]
@@ -407,7 +407,7 @@ class Statute(Agent):
                     by_url = {s.get("url"): s for s in (regime.get("sources") or []) if s.get("url")}
                     regime["sources"] = [by_url[url] for url in verified_urls]
         except Exception as e:  # pragma: no cover — defensive fallback
-            await self._log(f"statute.adjacent_error:{jurisdiction}", "info",
+            await self._log(f"regulations_expert.adjacent_error:{jurisdiction}", "info",
                             {"error": str(e)})
             reply = {"adjacent_regimes": self._ADJACENT_REGIMES_FALLBACK}
 
@@ -445,12 +445,12 @@ class Statute(Agent):
         return await self.rules_for(jurisdiction)
 
 
-class Praxis(Agent):
+class PHIMethodsExpert(Agent):
     """PHI transformation methods expert. Reports candidate methods by category."""
 
-    NAME = "Praxis"
+    NAME = "PHIMethodsExpert"
     PROMPT = (
-        "You are Praxis, an expert in PHI transformation techniques. You MUST "
+        "You are PHIMethodsExpert, an expert in PHI transformation techniques. You MUST "
         "search the web for current methods and return JSON only with this "
         'schema: {"category": str, "methods": [{"name": str, '
         '"how_to_apply": str, "why": str, "params": object, '
@@ -559,7 +559,7 @@ class Praxis(Agent):
         if cached:
             payload = _json.loads(cached["content"])
             await self._log(
-                f"praxis.cache_hit:{category}", "info",
+                f"phi_methods_expert.cache_hit:{category}", "info",
                 {"methods": len(payload.get("methods") or []),
                  "source": cached.get("source", "cache")},
             )
@@ -568,7 +568,7 @@ class Praxis(Agent):
         if category in self._DETERMINISTIC_CATEGORIES:
             reply = self._fallback(category)
             await self._log(
-                f"praxis.deterministic:{category}", "info",
+                f"phi_methods_expert.deterministic:{category}", "info",
                 {"method": reply["methods"][0]["name"]},
             )
             if self.ctx.cache:
@@ -592,7 +592,7 @@ class Praxis(Agent):
         cache_source = "llm"
         try:
             reply, citations = await self.call_json_with_web_search(
-                prompt, phase=f"praxis.web_search:{category}", default=fallback,
+                prompt, phase=f"phi_methods_expert.web_search:{category}", default=fallback,
                 max_uses=3, expect_key="methods", min_items=1,
                 status_text=f"Researching PHI transformation methods for {description} online",
             )
@@ -605,7 +605,7 @@ class Praxis(Agent):
                 for method in reply["methods"]:
                     claim = EvidenceClaim(
                         run_id=self.ctx.run_id, task_id=self.ctx.task_id,
-                        subject=f"praxis:{category}",
+                        subject=f"phi_methods_expert:{category}",
                         statement=f"supporting source for the {method.get('name')!r} method",
                     )
                     candidate_urls = (
@@ -651,7 +651,7 @@ class Praxis(Agent):
                 else:
                     cache_source = "web_search"
         except Exception as e:  # pragma: no cover
-            await self._log(f"praxis.error:{category}", "info", {"error": str(e)})
+            await self._log(f"phi_methods_expert.error:{category}", "info", {"error": str(e)})
             reply = fallback
             cache_source = "deterministic"
 

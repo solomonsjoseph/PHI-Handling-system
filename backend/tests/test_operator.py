@@ -884,7 +884,7 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
         if ctx is not None and ctx.tasks is not None:
             await ctx.tasks.complete(result)
 
-    class FakeStatute:
+    class FakeRegulationsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self._ctx = ctx
 
@@ -892,7 +892,7 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
             await _complete(self._ctx, {})
             return {}
 
-    class FakePraxis:
+    class FakePHIMethodsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self._ctx = ctx
 
@@ -993,8 +993,8 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
                 await _complete(c, {})
             return {}
 
-    monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
-    monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
+    monkeypatch.setattr(orchestrator, "RegulationsExpert", FakeRegulationsExpert)
+    monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Lexicon", FakeLexicon)
     monkeypatch.setattr(orchestrator, "Instrument", FakeInstrument)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
@@ -1101,14 +1101,14 @@ def test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor(tmp_
             self.sessions = FakeSessions()
             self.agent_log = FakeAgentLog()
 
-    class FakeStatute:
+    class FakeRegulationsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {})
 
-    class FakePraxis:
+    class FakePHIMethodsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
@@ -1201,8 +1201,8 @@ def test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor(tmp_
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {})
 
-    monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
-    monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
+    monkeypatch.setattr(orchestrator, "RegulationsExpert", FakeRegulationsExpert)
+    monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Lexicon", FakeLexicon)
     monkeypatch.setattr(orchestrator, "Instrument", FakeInstrument)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)

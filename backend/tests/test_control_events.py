@@ -43,8 +43,8 @@ async def test_append_allocates_sequential_seq_and_chains_hashes() -> None:
     trace = TraceEventStore(store, run_id=RUN_ID, session_id=SESSION_ID)
 
     first = await trace.append(_event(agent="Lexicon"))
-    second = await trace.append(_event(agent="Statute"))
-    third = await trace.append(_event(agent="Praxis"))
+    second = await trace.append(_event(agent="RegulationsExpert"))
+    third = await trace.append(_event(agent="PHIMethodsExpert"))
 
     assert [e.seq for e in (first, second, third)] == [1, 2, 3]
     assert first.prev_hash == ""
@@ -167,7 +167,7 @@ async def test_seal_and_archive_range_registers_a_trace_archive_artifact_before_
     store = MemoryControlStore()
     await store.insert("workflow_runs", WorkflowRun(run_id=hex_run_id, session_id=hex_session_id))
     trace = TraceEventStore(store, run_id=hex_run_id, session_id=hex_session_id)
-    for agent in ("Lexicon", "Statute", "Praxis"):
+    for agent in ("Lexicon", "RegulationsExpert", "PHIMethodsExpert"):
         await trace.append(TraceEvent(
             run_id=hex_run_id, seq=0, session_id=hex_session_id, agent=agent,
             input_class="internal", output_class="internal",

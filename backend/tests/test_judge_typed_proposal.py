@@ -39,10 +39,10 @@ async def test_extra_fields_like_justification_survive_the_typed_boundary():
     judge = _judge()
     judge.call_json = AsyncMock(return_value={"decisions": [
         {"file_id": "f1", "column": "mrn", "action": "pseudonymize",
-         "justification": "already reviewed against Statute, not a false positive"},
+         "justification": "already reviewed against RegulationsExpert, not a false positive"},
     ]})
     result = await judge.run(schema={"columns": [{"name": "mrn"}]}, instrument={}, lexicon={}, statute={})
-    assert result["decisions"][0]["justification"] == "already reviewed against Statute, not a false positive"
+    assert result["decisions"][0]["justification"] == "already reviewed against RegulationsExpert, not a false positive"
 
 
 @pytest.mark.asyncio

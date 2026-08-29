@@ -442,7 +442,7 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
         async def close_run(self, outcome):
             return {"outcome": outcome}
 
-    class FakeStatute:
+    class FakeRegulationsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
@@ -455,7 +455,7 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
 
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {"columns": []})
-    class FakePraxis:
+    class FakePHIMethodsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
@@ -482,9 +482,9 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
                                 "detail": "unresolved leak"}]})
 
     monkeypatch.setattr(orchestrator, "ExecutionHealthSupervisor", FakeManager)
-    monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
+    monkeypatch.setattr(orchestrator, "RegulationsExpert", FakeRegulationsExpert)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
-    monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
+    monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
     monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
 
@@ -550,7 +550,7 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
             return {}
 
 
-    class FakeStatute:
+    class FakeRegulationsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
@@ -564,7 +564,7 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {"columns": []})
 
-    class FakePraxis:
+    class FakePHIMethodsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
@@ -625,9 +625,9 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
             return {}
 
     monkeypatch.setattr(orchestrator, "ExecutionHealthSupervisor", FakeManager)
-    monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
+    monkeypatch.setattr(orchestrator, "RegulationsExpert", FakeRegulationsExpert)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
-    monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
+    monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
     monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)

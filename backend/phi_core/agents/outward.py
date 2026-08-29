@@ -23,7 +23,7 @@ from .base import Agent
 # heuristic beyond "this is a plausible project/vendor home"), and any
 # citation whose domain is absent from it simply never reaches VERIFIED
 # and is dropped rather than shown as fact -- see D12 in
-# phi_core.agents.experts for the same pattern applied to Statute/Praxis.
+# phi_core.agents.experts for the same pattern applied to RegulationsExpert/PHIMethodsExpert.
 _AUTHORITATIVE_VENDOR_DOMAINS: frozenset[str] = frozenset({
     "github.com", "readthedocs.io", "pypi.org", "aws.amazon.com",
     "azure.microsoft.com", "microsoft.com", "johnsnowlabs.com",

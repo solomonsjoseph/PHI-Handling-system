@@ -15,14 +15,14 @@ from typing import Any
 from .records import TraceEvent
 
 # agent -> friendly display name, per v3 #64's own example list
-# ("Regulations Expert" for Statute, "PHI Methods Expert" for Praxis).
+# ("Regulations Expert" for RegulationsExpert, "PHI Methods Expert" for PHIMethodsExpert).
 _AGENT_DISPLAY_NAME: dict[str, str] = {
     "Schema": "Schema",
     "Lexicon": "Lexicon",
     "Instrument": "Instrument",
     "Judge": "Judge",
-    "Statute": "Regulations Expert",
-    "Praxis": "PHI Methods Expert",
+    "RegulationsExpert": "Regulations Expert",
+    "PHIMethodsExpert": "PHI Methods Expert",
     "Reviewer": "Reviewer",
     "Executor": "Executor",
     "HumanReview": "Human Review",
@@ -35,8 +35,8 @@ _PHASE_MESSAGE: dict[tuple[str, str], str] = {
     ("Lexicon", ""): "Interpreting dictionary",
     ("Instrument", ""): "Reviewing study forms",
     ("Judge", ""): "Classifying study variables",
-    ("Statute", ""): "Checking regulatory evidence",
-    ("Praxis", ""): "Evaluating handling method",
+    ("RegulationsExpert", ""): "Checking regulatory evidence",
+    ("PHIMethodsExpert", ""): "Evaluating handling method",
     ("Reviewer", ""): "Reviewing classification",
     ("Reviewer", "final"): "Performing final review",
     ("Executor", ""): "Applying verified transformation plan",

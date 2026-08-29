@@ -333,7 +333,7 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {})
 
-    class FakePraxis(EmptyAgent):
+    class FakePHIMethodsExpert(EmptyAgent):
         async def method_for(self, _category):
             return {}
 
@@ -349,8 +349,8 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {"exports": {}})
 
-    monkeypatch.setattr(orchestrator, "Statute", EmptyAgent)
-    monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
+    monkeypatch.setattr(orchestrator, "RegulationsExpert", EmptyAgent)
+    monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
     monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
