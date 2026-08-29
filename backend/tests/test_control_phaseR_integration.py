@@ -390,3 +390,49 @@ async def test_executor_dataset_read_happens_only_inside_sandbox_never_in_parent
     )
     out = Path(result["exports"]["f1"]).read_text(encoding="utf-8")
     assert "Jane Doe" not in out
+
+
+# ==========================================================================
+# Step 5: wire MethodRegistry
+# ==========================================================================
+
+
+@pytest.mark.asyncio
+async def test_praxis_falls_back_when_recommended_method_is_only_researched_not_approved() -> None:
+    """Verified source evidence is not execution authorization (spec
+    section 38): once a context carries the ``ctx.methods`` facade,
+    ``Praxis.method_for`` additionally checks
+    ``ctx.methods.get_approved_methods``. A category whose only
+    registered ``MethodRecord`` sits at lifecycle ``"researched"``
+    (never promoted to ``"approved"``) falls back to the deterministic
+    method instead of shipping the unapproved one, even though its
+    reported source is genuinely tool-backed and on an authoritative
+    domain (D12 verification alone is not enough)."""
+    import dataclasses
+    from unittest.mock import AsyncMock
+
+    from phi_core.agents.experts import Praxis
+    from phi_core.control.context import StoreMethodRegistryReader
+    from phi_core.control.methods import register_method
+
+    store = MemoryControlStore()
+    await register_method(store, hipaa_category="E", name="researched_only_method")
+
+    ctx = make_ctx("Praxis")
+    ctx = dataclasses.replace(ctx, methods=StoreMethodRegistryReader(store))
+    agent = Praxis(ctx)
+    agent._log = AsyncMock()
+    real_url = "https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164"
+    agent.call_json_with_web_search = AsyncMock(return_value=(
+        {"methods": [{
+            "name": "researched_only_method", "how_to_apply": "x", "why": "y",
+            "params": {}, "utility_preserving": True, "clinical_impact": "z",
+            "reference_paper": "", "sources": [{"url": real_url}],
+        }]},
+        [{"url": real_url}],
+    ))
+
+    reply = await agent.method_for("E")
+
+    assert reply["methods"] == [Praxis._fallback("E")["methods"][0]]
+    assert reply["methods"][0]["name"] != "researched_only_method"
