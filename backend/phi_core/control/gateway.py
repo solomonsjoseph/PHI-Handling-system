@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from phi_core.anonymizer import scrub_for_prompt
 from phi_core.security import scrub_persisted_text, validate_llm_base_url, validate_llm_provider
 
-from . import limits
+from . import authorization, limits
 from .egress import _STRUCTURAL_KEYS, canonical_payload, egress_digest
 from .policy import BudgetExceeded, CapabilityDenied, CapabilityPolicy
 from .records import CapabilityGrant, DataClass, TraceEvent
@@ -326,8 +326,15 @@ class ProviderGateway:
     async def _validate_request(self, req: GatewayRequest, grant: CapabilityGrant) -> None:
         if req.policy_version != grant.policy_version or req.agent != grant.agent:
             raise CapabilityDenied("request identity does not match grant")
-        self._policy.check_provider(grant, req.provider, req.model, req.endpoint)
-        self._policy.check_data_class(grant, req.input_class)
+        # Wave R-c Step 7: `authorization.authorize_capability` names the
+        # spec's AuthorizationService boundary; it composes exactly the
+        # same `policy.check_provider`/`policy.check_data_class` pair
+        # this call site invoked directly before -- a pure rename with
+        # no new security check.
+        authorization.authorize_capability(
+            self._policy, grant,
+            provider=req.provider, model=req.model, endpoint=req.endpoint, data_class=req.input_class,
+        )
         validate_llm_provider(req.provider)
         validate_llm_base_url(req.endpoint, req.provider)
         if req.max_tokens <= 0 or req.max_tokens > grant.budget.max_tokens:
