@@ -331,7 +331,7 @@ def token_principals() -> dict[str, str]:
     return out
 
 
-REVIEWER_ROLES = frozenset({"reviewer", "lead_reviewer"})
+REVIEWER_ROLES = frozenset({"reviewer", "lead_reviewer", "expert_determination"})
 
 
 def reviewer_principals() -> dict[str, str]:
