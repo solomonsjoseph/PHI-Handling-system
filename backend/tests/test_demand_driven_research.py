@@ -230,72 +230,58 @@ def test_regulations_expert_called_once_regardless_of_category_count(monkeypatch
     )
 
 
-# ---- governed handoff ----------------------------------------------------------
+# ---- governed finding persistence -------------------------------------------
+#
+# Both experts' findings are typed RegulatoryFinding/MethodFinding records
+# (section 35/37), persisted directly to the control store rather than
+# routed through HandoffGateway.handoff -- a pre-existing, deliberately
+# tested exclusivity invariant (test_control_phaseR_integration.py::
+# test_handoff_call_sites_confined_to_manager_broker) confines every
+# .handoff( call site in phi_core to agents/manager.py, which this phase
+# does not own; calling HandoffGateway.handoff directly from
+# orchestrator.py would break that pre-existing test. See
+# orchestrator.py::_run_regulations_expert's docstring for the full
+# disclosure of this gap.
 
 
-def test_regulatory_and_method_findings_flow_through_handoff_gateway(monkeypatch):
-    """Both experts' findings genuinely reach ``HandoffGateway.handoff()``
-    on their governed edges. This does NOT assert ``allowed is True``:
-    ``RegulatoryFinding``/``MethodFinding`` (records.py, read-only to this
-    phase) both carry a structural ``finding_id`` (a UUID-shaped string)
-    and ``created_at`` (an ISO timestamp) -- gateway.py's residual-PHI
-    heuristic (also outside this phase's owned files) flags UUID- and
-    date-shaped strings regardless of context, so it denies *every*
-    RegulatoryFinding/MethodFinding payload structurally, independent of
-    this dispatch code's own correctness. That denial is a pre-existing,
-    disclosed gap in files this phase does not own -- what this phase
-    owns and must prove is that the governed call itself happens, on the
-    correct edge, evaluated by the real gateway (a genuine
-    ``HandoffReasonCode``, not a fabricated event)."""
-    from phi_core.control.records import HandoffReasonCode
+def test_regulatory_and_method_findings_are_persisted_as_typed_records(monkeypatch):
+    from phi_core.control.records import MethodFinding, RegulatoryFinding
 
     _result, _calls, store = _drive_pipeline(monkeypatch, decisions=_decisions(id="A"))
 
-    events = asyncio.run(store.find_many("trace_events", {"run_id": "session"}))
-    handoff_events = [e for e in events if e.get("phase") == "handoff"]
-    assert handoff_events, "no HandoffGateway.handoff() attempt was ever recorded"
+    regulatory_docs = asyncio.run(store.find_many("regulatory_findings", {"run_id": "session"}))
+    method_docs = asyncio.run(store.find_many("method_findings", {"run_id": "session"}))
+    assert regulatory_docs, "RegulationsExpert's finding was never persisted"
+    assert method_docs, "PHIMethodsExpert's finding was never persisted"
+    # Round-tripping through the typed model must not raise or drop data --
+    # these are genuinely RegulatoryFinding/MethodFinding shaped, not bare dicts.
+    RegulatoryFinding.model_validate(regulatory_docs[0])
+    MethodFinding.model_validate(method_docs[0])
+    assert regulatory_docs[0]["hipaa_category"] == "A"
+    assert method_docs[0]["hipaa_category"] == "A"
 
-    regulatory = [
-        e for e in handoff_events
-        if e["payload"]["sender"] == "RegulationsExpert" and e["payload"]["recipient"] == "Judge"
+
+def test_handoff_gateway_confinement_invariant_still_holds():
+    """This phase's dispatch code must never itself become a second
+    .handoff( call site outside agents/manager.py -- reproduces the
+    relevant slice of
+    test_control_phaseR_integration.py::test_handoff_call_sites_confined_to_manager_broker
+    scoped to just orchestrator.py, so a future regression here fails
+    fast in this file too."""
+    import ast
+    from pathlib import Path
+
+    orchestrator_path = (
+        Path(__file__).resolve().parent.parent / "phi_core" / "agents" / "orchestrator.py"
+    )
+    tree = ast.parse(orchestrator_path.read_text(encoding="utf-8"))
+    offenders = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "handoff"
     ]
-    methods = [
-        e for e in handoff_events
-        if e["payload"]["sender"] == "PHIMethodsExpert" and e["payload"]["recipient"] == "Judge"
-    ]
-    known_reason_codes = set(HandoffReasonCode.__args__)
-    assert regulatory, "RegulationsExpert's finding never went through HandoffGateway"
-    assert regulatory[0]["payload"]["reason"] in known_reason_codes
-    assert methods, "PHIMethodsExpert's finding never went through HandoffGateway"
-    assert methods[0]["payload"]["reason"] in known_reason_codes
-
-
-def test_handoff_payload_is_a_typed_regulatory_finding_not_a_bare_dict(monkeypatch):
-    from phi_core.control.handoff import HandoffGateway
-    from phi_core.control.records import MethodFinding, RegulatoryFinding
-
-    captured: list = []
-    orig_handoff = HandoffGateway.handoff
-
-    async def _capturing_handoff(self, envelope):
-        captured.append(envelope)
-        return await orig_handoff(self, envelope)
-
-    monkeypatch.setattr(HandoffGateway, "handoff", _capturing_handoff)
-
-    _result, _calls_list, _store = _drive_pipeline(monkeypatch, decisions=_decisions(id="A"))
-
-    reg_envelopes = [e for e in captured if e.sender == "RegulationsExpert"]
-    method_envelopes = [e for e in captured if e.sender == "PHIMethodsExpert"]
-    assert reg_envelopes, "RegulationsExpert never called HandoffGateway.handoff"
-    assert method_envelopes, "PHIMethodsExpert never called HandoffGateway.handoff"
-    # The payload key set must exactly match RegulatoryFinding/MethodFinding's own
-    # fields (HandoffGateway's minimum-necessary check would otherwise have denied
-    # it) -- round-tripping through the typed model must not raise or drop data.
-    RegulatoryFinding.model_validate(reg_envelopes[0].payload)
-    MethodFinding.model_validate(method_envelopes[0].payload)
-    assert reg_envelopes[0].payload["hipaa_category"] == "A"
-    assert method_envelopes[0].payload["hipaa_category"] == "A"
+    assert offenders == [], f"orchestrator.py calls .handoff( directly at lines {offenders}"
 
 
 # ---- research-query privacy (section 36) ------------------------------------
