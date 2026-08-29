@@ -103,6 +103,23 @@ def decrypt_display_name(stored: str) -> str:
     return decrypt_api_key(stored)
 
 
+def encrypt_opaque_value(plaintext: str) -> str:
+    """Encrypt one run-scoped opaque map entry's canonical value (D5).
+
+    Same Fernet primitive as :func:`encrypt_api_key`, matching the
+    existing per-use-case-wrapper convention ``encrypt_display_name``
+    already sets. ``control.opaque.OpaqueMap`` calls this so
+    ``WorkflowRun.opaque_map`` never holds a sensitive header/dataset
+    identifier in cleartext at rest -- only the token generation
+    (HMAC-SHA256 digest, collision check) stays unchanged."""
+    return encrypt_api_key(plaintext)
+
+
+def decrypt_opaque_value(stored: str) -> str:
+    """Reverse :func:`encrypt_opaque_value` without a plaintext fallback."""
+    return decrypt_api_key(stored)
+
+
 def encrypt_reversal_map(payload: dict) -> str:
     """Encrypt the study's reversal key (pseudonym map + salt) at rest.
 

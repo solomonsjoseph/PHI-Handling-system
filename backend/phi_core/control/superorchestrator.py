@@ -565,6 +565,19 @@ class SuperOrchestrator:
                 return updated
         raise WorkflowError(f"could not record opaque map for run_id={run_id!r} after retries")
 
+    async def erase_opaque_map(self, *, run_id: str) -> WorkflowRun:
+        """D5 right-to-erasure/retention capability: clear ``run_id``'s
+        sensitive-header vault to empty through the same CAS boundary
+        ``record_opaque_map`` uses. Idempotent: erasing an
+        already-empty map is a no-op success, not an error.
+
+        This method exists so a session-erasure or retention-sweep
+        caller has something to call; it is not itself wired to one --
+        server.py's ``session_delete`` route and
+        ``_purge_settled_sessions_loop`` are outside this module's
+        scope."""
+        return await self.record_opaque_map(run_id=run_id, opaque_map={})
+
     # ---- recover ------------------------------------------------------
 
     async def recover(self, *, run_id: str, cause: str) -> WorkflowRun:

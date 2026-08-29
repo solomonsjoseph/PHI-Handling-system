@@ -5,7 +5,7 @@ import hashlib
 import hmac
 from collections.abc import MutableMapping
 
-from phi_core.crypto import egress_digest_key
+from phi_core.crypto import decrypt_opaque_value, egress_digest_key, encrypt_opaque_value
 
 
 class OpaqueLookupError(LookupError):
@@ -13,7 +13,12 @@ class OpaqueLookupError(LookupError):
 
 
 class OpaqueMap:
-    """Maps canonical identifiers to deterministic, run-scoped opaque tokens."""
+    """Maps canonical identifiers to deterministic, run-scoped opaque
+    tokens. Token generation (HMAC-SHA256 digest, run-scoped, collision
+    check) is unchanged; what gets stored under each token is now the
+    Fernet-encrypted canonical value (D5), never cleartext -- decrypted
+    only in-memory by ``from_opaque`` and by the collision check in
+    ``to_opaque``."""
 
     def __init__(self, run_id: str, opaque_map: MutableMapping[str, str]) -> None:
         self._opaque_map = opaque_map
@@ -29,13 +34,16 @@ class OpaqueMap:
         ).hexdigest()[:16]
         token = f"{kind}_{digest}"
         existing = self._opaque_map.get(token)
-        if existing is not None and existing != canonical:
-            raise OpaqueLookupError("opaque identifier collision")
-        self._opaque_map[token] = canonical
+        if existing is not None:
+            if decrypt_opaque_value(existing) != canonical:
+                raise OpaqueLookupError("opaque identifier collision")
+        else:
+            self._opaque_map[token] = encrypt_opaque_value(canonical)
         return token
 
     def from_opaque(self, token: str) -> str:
         try:
-            return self._opaque_map[token]
+            stored = self._opaque_map[token]
         except KeyError as exc:
             raise OpaqueLookupError(f"unknown opaque identifier {token!r}") from exc
+        return decrypt_opaque_value(stored)
