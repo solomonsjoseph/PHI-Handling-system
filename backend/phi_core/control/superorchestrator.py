@@ -46,6 +46,7 @@ from .context import StoreTraceWriter
 from .policy import MANIFESTS, POLICY_VERSION, CapabilityDenied, _bounded_budget
 from .records import (
     CapabilityGrant,
+    CleanupManifest,
     ExecutionTask,
     HandoffResult,
     HumanReviewEvent,
@@ -980,6 +981,62 @@ class SuperOrchestrator:
             ):
                 return updated
         raise WorkflowError(f"could not confirm export for run_id={run_id!r} after retries")
+
+    # ---- begin_cleanup / confirm_cleanup --------------------------------------
+
+    async def begin_cleanup(self, *, run_id: str) -> WorkflowRun:
+        """The cleanup-lifecycle responsibility (D9/docs #77, #87): advance
+        ``workflow_runs.state`` to ``destroying``. Section 77's
+        :class:`~.records.CleanupManifest` invariant -- "never transitions
+        a run to SESSION_DESTROYED until this reports verified" -- is
+        ``confirm_cleanup``'s job, below; entering ``destroying`` is only
+        the announcement that cleanup has begun, gated on nothing beyond
+        the run existing, since cleanup may need to run even on a run
+        that never reached a normal terminal node (a ``blocked`` or
+        ``cancelled`` run still needs its sandbox/session destroyed).
+        Idempotent, CAS-guarded."""
+        for _ in range(10):
+            run = await self._load_run(run_id)
+            if run.state == "destroying":
+                return run
+            updated = run.model_copy(update={"state": "destroying", "updated_at": _now()})
+            if await self._store.compare_and_set(
+                "workflow_runs", {"run_id": run_id}, {"updated_at": run.updated_at}, updated
+            ):
+                return updated
+        raise WorkflowError(f"could not begin cleanup for run_id={run_id!r} after retries")
+
+    async def confirm_cleanup(self, *, run_id: str, manifest: CleanupManifest) -> WorkflowRun:
+        """The sole path to ``session_destroyed`` (docs #77): refuses
+        unless ``manifest.run_id`` matches ``run_id``, unless
+        ``manifest.verification_status == "verified"`` (section 77's own
+        "never transitions ... until this reports verified" invariant),
+        and unless the run already entered ``destroying`` via
+        ``begin_cleanup`` -- there is no path to confirming a cleanup
+        that was never begun."""
+        if manifest.run_id != run_id:
+            raise WorkflowError(
+                f"manifest.run_id {manifest.run_id!r} does not match run_id {run_id!r}"
+            )
+        if manifest.verification_status != "verified":
+            raise WorkflowError(
+                f"cleanup for run_id={run_id!r} is not verified: {manifest.verification_status!r}"
+            )
+        for _ in range(10):
+            run = await self._load_run(run_id)
+            if run.state == "session_destroyed":
+                return run
+            if run.state != "destroying":
+                raise WorkflowError(
+                    f"run_id={run_id!r} must be destroying before it can be session_destroyed, "
+                    f"is {run.state!r}"
+                )
+            updated = run.model_copy(update={"state": "session_destroyed", "updated_at": _now()})
+            if await self._store.compare_and_set(
+                "workflow_runs", {"run_id": run_id}, {"updated_at": run.updated_at}, updated
+            ):
+                return updated
+        raise WorkflowError(f"could not confirm cleanup for run_id={run_id!r} after retries")
 
     # ---- authorize_publication ---------------------------------------------
 
