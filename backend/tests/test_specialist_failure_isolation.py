@@ -64,6 +64,7 @@ def _drive_pipeline_with_crashing_lexicon(monkeypatch):
     class SucceedingInstrument:
         def __init__(self, ctx=None, *_a, **_kw):
             self.ctx = ctx
+            self.scrub_count = 0
 
         async def run(self, **_kw):
             return await complete_fake_task(self.ctx, {"fields": [{"label": "f1"}]})

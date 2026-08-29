@@ -1000,58 +1000,114 @@ async def _dispatch_research(state: _PipelineDriverState) -> str:
     return "ok"
 
 
+_SPECIALIST_DEGRADED_RESULT: dict[str, dict[str, Any]] = {
+    "Lexicon": {"columns": [], "notes": ""},
+    "Schema": {"columns": []},
+    "Instrument": {"fields": []},
+}
+
+
 async def _dispatch_specialists(state: _PipelineDriverState) -> "str | dict[str, Any]":
     """The ``specialists`` node: await the Lexicon/Schema/Instrument
-    tasks ``_dispatch_research`` already launched."""
-    try:
-        lexicon, schema, instrument = await asyncio.gather(state.lex_task, state.schema_task, state.inst_task)
-    except UncertainHeaderCeilingExceeded as exc:
-        # v3 section 7: past the per-run uncertain-header ceiling, an
-        # unresolved ambiguous-header population is itself evidence the
-        # review process is not keeping up for this run -- block, same
-        # "blocked" shape Publish Guard's own scan uses further down. No
-        # TRANSITIONS edge models "specialists -> blocked": this
-        # short-circuit bypasses advance() entirely, exactly as the
-        # pre-Wave-4b pipeline already did.
-        await state.close_last_phase()
-        manager_report = await state.manager.close_run("blocked")
-        await state.db.sessions.update_one(
-            state.session_filter,
-            {"$set": {
-                "status": "blocked",
-                "failure_class": exc.failure_class,
-                "phase_timings": state.phase_timings,
-                "run_elapsed_s": round(time.perf_counter() - state.run_started, 3),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "manager_report": manager_report,
-            }},
-        )
-        cleanup_session_unpacked(state.sid)
-        return {"status": "blocked", "failure_class": exc.failure_class,
-                "detail": str(exc), "phase_timings": state.phase_timings}
-    if state.lexicon_agent:
-        await state.require_accepted(state.lexicon_ctx, lexicon, "Lexicon")
-    if state.schema_agent:
-        await state.require_accepted(state.schema_ctx, schema, "Schema")
-    if state.instrument_agent:
-        await state.require_accepted(state.instrument_ctx, instrument, "Instrument")
+    tasks ``_dispatch_research`` already launched.
+
+    Section 27 (failure isolation): ``return_exceptions=True`` on the
+    gather means one specialist crashing never discards its siblings'
+    already-successful results -- the pre-existing bare
+    ``asyncio.gather`` (no ``return_exceptions``) would propagate the
+    first exception immediately, losing whatever the other two tasks
+    already produced. ``UncertainHeaderCeilingExceeded`` is still
+    checked first and short-circuits to the same 'blocked' response
+    exactly as before -- it names a run-wide ceiling, not one
+    specialist's own failure, so it is never treated as a "degrade and
+    continue" case. Any OTHER exception is logged via ``state.on_phase``
+    (never silent) and degrades just that one specialist to its own
+    "did not run" empty shape (the same shape ``_dispatch_research``
+    already substitutes when the specialist has no matching input
+    files -- ``_SPECIALIST_DEGRADED_RESULT`` above), letting the other
+    two specialists' real results flow through unchanged. Task
+    lifecycle: ``Agent.__init_subclass__``'s completion
+    wrap (``agents/base.py``) already calls ``ctx.tasks.fail(...)`` on
+    an unhandled exception inside ``Lexicon.run``/``Schema.run``/
+    ``Instrument.run`` before it ever reaches this function -- confirmed
+    by reading that wrap -- so nothing here needs to fail the task a
+    second time; ``return_exceptions=True`` only changes how the
+    already-failed task's exception propagates to this caller, not
+    what already happened to the task before it was raised."""
+    results = await asyncio.gather(
+        state.lex_task, state.schema_task, state.inst_task, return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, UncertainHeaderCeilingExceeded):
+            exc = result
+            # v3 section 7: past the per-run uncertain-header ceiling, an
+            # unresolved ambiguous-header population is itself evidence the
+            # review process is not keeping up for this run -- block, same
+            # "blocked" shape Publish Guard's own scan uses further down. No
+            # TRANSITIONS edge models "specialists -> blocked": this
+            # short-circuit bypasses advance() entirely, exactly as the
+            # pre-Wave-4b pipeline already did.
+            await state.close_last_phase()
+            manager_report = await state.manager.close_run("blocked")
+            await state.db.sessions.update_one(
+                state.session_filter,
+                {"$set": {
+                    "status": "blocked",
+                    "failure_class": exc.failure_class,
+                    "phase_timings": state.phase_timings,
+                    "run_elapsed_s": round(time.perf_counter() - state.run_started, 3),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "manager_report": manager_report,
+                }},
+            )
+            cleanup_session_unpacked(state.sid)
+            return {"status": "blocked", "failure_class": exc.failure_class,
+                    "detail": str(exc), "phase_timings": state.phase_timings}
+    names = ("Lexicon", "Schema", "Instrument")
+    agents = (state.lexicon_agent, state.schema_agent, state.instrument_agent)
+    ctxs = (state.lexicon_ctx, state.schema_ctx, state.instrument_ctx)
+    outputs: dict[str, dict[str, Any]] = {}
+    crashed: set[str] = set()
+    for name, agent, ctx, result in zip(names, agents, ctxs, results, strict=True):
+        if isinstance(result, BaseException):
+            crashed.add(name)
+            await state.on_phase("specialist_crashed", {
+                "specialist": name,
+                "error": f"{type(result).__name__}: {scrub_persisted_text(str(result))}",
+            })
+            outputs[name] = dict(_SPECIALIST_DEGRADED_RESULT[name])
+            continue
+        outputs[name] = result
+        if agent:
+            await state.require_accepted(ctx, result, name)
+    lexicon, schema, instrument = outputs["Lexicon"], outputs["Schema"], outputs["Instrument"]
     # Deterministic guardian query broker: the ExecutionHealthSupervisor
     # holds the only reference to each specialist for targeted
     # ask_schema/ask_instrument/ask_lexicon lookups, attached only when
-    # that specialist actually ran.
-    if state.lexicon_agent:
+    # that specialist actually ran (and did not crash -- a crashed
+    # specialist's own instance is left half-initialized; attaching it
+    # would just move the failure to a later, harder-to-diagnose broker
+    # query instead of the "did not run" degraded shape already
+    # substituted for it above).
+    if state.lexicon_agent and "Lexicon" not in crashed:
         state.manager.attach_lexicon(state.lexicon_agent)
-    if state.schema_agent:
+    if state.schema_agent and "Schema" not in crashed:
         state.manager.attach_schema(state.schema_agent)
-    if state.instrument_agent:
+    if state.instrument_agent and "Instrument" not in crashed:
         state.manager.attach_instrument(state.instrument_agent)
     # Carried forward for the site/facility cardinality rule. Fakes/mocks
     # in tests never set `_stats`, so default to empty rather than assume
-    # a real Schema instance ran.
-    state.schema_stats = getattr(state.schema_agent, "_stats", {}) if state.schema_agent else {}
+    # a real Schema instance ran (or a crashed one whose partial state
+    # cannot be trusted).
+    state.schema_stats = (
+        getattr(state.schema_agent, "_stats", {})
+        if (state.schema_agent and "Schema" not in crashed) else {}
+    )
     state.prompt_scrub_counts = {
-        "lexicon": state.lexicon_agent.scrub_count if state.lexicon_agent else 0,
-        "instrument": state.instrument_agent.scrub_count if state.instrument_agent else 0,
+        "lexicon": (state.lexicon_agent.scrub_count
+                    if (state.lexicon_agent and "Lexicon" not in crashed) else 0),
+        "instrument": (state.instrument_agent.scrub_count
+                       if (state.instrument_agent and "Instrument" not in crashed) else 0),
     }
     state.lexicon, state.schema, state.instrument = lexicon, schema, instrument
     return "ok"
