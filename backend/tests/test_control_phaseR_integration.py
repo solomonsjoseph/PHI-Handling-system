@@ -51,7 +51,7 @@ from phi_core.control.methods import get_approved_methods
 from phi_core.control.opaque import OpaqueMap
 from phi_core.control.records import MethodRecord, SandboxRecord
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.testing import make_ctx
+from phi_core.control.testing import FakeGateway, make_ctx
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 PHI_CORE_ROOT = BACKEND_ROOT / "phi_core"
@@ -208,3 +208,124 @@ async def test_super_orchestrator_can_erase_a_runs_opaque_map() -> None:
 
     doc = await store.get_one("workflow_runs", {"run_id": run.run_id})
     assert doc["opaque_map"] == {}
+
+
+# ==========================================================================
+# Step 3: wire the header safety gate (2E)
+# ==========================================================================
+
+
+def test_classify_header_uncertain_for_ambiguous_embedded_digit_run() -> None:
+    """``classify_header`` gains a real ``uncertain`` outcome: a header
+    carrying an embedded numeric run not already caught by a strict rule
+    (SSN/phone/NPI/MRN) is ambiguous -- it could be a coincidental
+    site/version/sequence code, or a real identifier fragment typed into
+    a header by mistake -- and is deliberately noisy (real false
+    positives on ordinary numeric-suffixed columns are expected; that
+    noise is exactly why ``uncertain`` routes to non-blocking review
+    rather than a hard block). Ordinary digit-free column names are
+    unaffected."""
+    from phi_core.control.source_projection import classify_header
+
+    disposition, reasons = classify_header("site_02139")
+    assert disposition == "uncertain"
+    assert reasons
+
+    disposition, reasons = classify_header("id_1234")
+    assert disposition == "uncertain"
+
+    assert classify_header("visit_date") == ("safe", [])
+    assert classify_header("patient_id")[0] == "safe"
+
+
+@pytest.mark.asyncio
+async def test_schema_projects_sensitive_header_to_opaque_token_never_raw_text() -> None:
+    """A header carrying a typed-in SSN never reaches Schema's
+    agent-facing/LLM-facing ``columns`` output under its literal text --
+    only the opaque token does."""
+    from phi_core.agents.specialists import Schema
+
+    ctx = make_ctx("Schema")
+    schema = Schema(ctx)
+    out = await schema.run(dataset_files=[
+        {"file_id": "f1", "columns": ["patient_id", "123-45-6789"]},
+    ])
+    names = [c["name"] for c in out["columns"]]
+    assert "123-45-6789" not in names
+    assert "patient_id" in names
+    assert any(n.startswith("header_") for n in names)
+
+
+@pytest.mark.asyncio
+async def test_schema_uncertain_header_is_projected_not_blocked_and_raises_review() -> None:
+    """An ``uncertain``-disposition header is projected exactly like a
+    ``sensitive`` one (opaque token, run continues) and additionally
+    raises a non-blocking review item -- a recorded trace event, never a
+    ``HumanReviewRequest`` (which pauses the run; confirmed by reading
+    ``SuperOrchestrator.request_human_review``, the wrong tool for a
+    non-blocking flag)."""
+    from phi_core.agents.specialists import Schema
+
+    ctx = make_ctx("Schema")
+    schema = Schema(ctx)
+    out = await schema.run(dataset_files=[
+        {"file_id": "f1", "columns": ["patient_id", "site_02139"]},
+    ])
+    names = [c["name"] for c in out["columns"]]
+    assert "site_02139" not in names
+    assert "patient_id" in names
+    review_events = [m for m in ctx.trace.legacy_messages if m.phase == "schema.header_uncertain_review"]
+    assert review_events, "expected a non-blocking review trace event for the uncertain header"
+
+
+@pytest.mark.asyncio
+async def test_schema_exceeding_uncertain_header_ceiling_blocks_with_failure_class(monkeypatch) -> None:
+    """Past ``limits.MAX_UNCERTAIN_HEADERS_PER_RUN`` uncertain headers in
+    one run, Schema refuses with the ``HEADER_SENSITIVE_CONTENT``
+    ``FailureClass`` rather than silently continuing to accumulate
+    unresolved ambiguous headers."""
+    from phi_core.agents import specialists
+
+    monkeypatch.setattr(specialists.limits, "MAX_UNCERTAIN_HEADERS_PER_RUN", 1)
+    ctx = make_ctx("Schema")
+    schema = specialists.Schema(ctx)
+    with pytest.raises(specialists.UncertainHeaderCeilingExceeded) as excinfo:
+        await schema.run(dataset_files=[
+            {"file_id": "f1", "columns": ["site_02139", "id_1234"]},
+        ])
+    assert excinfo.value.failure_class == "HEADER_SENSITIVE_CONTENT"
+
+
+@pytest.mark.asyncio
+async def test_lexicon_routes_dictionary_rows_through_source_projection(tmp_path) -> None:
+    """Lexicon's extracted dictionary-row text is routed through
+    ``source_projection`` before any provider call: a secret-shaped value
+    typed into a dictionary row never reaches the LLM prompt."""
+    from phi_core.agents.specialists import Lexicon
+
+    src = tmp_path / "dict.csv"
+    src.write_text("variable,description\nssn_col,sk-ant-" + "a" * 30 + "\n", encoding="utf-8")
+    gateway = FakeGateway()
+    ctx = make_ctx("Lexicon", gateway=gateway)
+    lexicon = Lexicon(ctx)
+    await lexicon.run(dict_files=[{"file_id": "f1", "stored_path": str(src)}])
+    for req in gateway.requests:
+        assert "sk-ant-" not in req.user_prompt
+
+
+@pytest.mark.asyncio
+async def test_instrument_routes_form_text_through_source_projection(tmp_path, monkeypatch) -> None:
+    """Instrument's extracted Tier-2 form text is routed through
+    ``source_projection`` before any provider call: a secret-shaped value
+    embedded in form text never reaches the LLM prompt."""
+    from phi_core.agents import specialists
+
+    monkeypatch.setattr(specialists, "_read_form_text", lambda path: "Contact sk-ant-" + "a" * 30)
+    src = tmp_path / "form.docx"
+    src.write_bytes(b"stub")
+    gateway = FakeGateway()
+    ctx = make_ctx("Instrument", gateway=gateway)
+    instrument = specialists.Instrument(ctx)
+    await instrument.run(form_files=[{"file_id": "f1", "stored_path": str(src), "subtype": "docx"}])
+    for req in gateway.requests:
+        assert "sk-ant-" not in req.user_prompt
