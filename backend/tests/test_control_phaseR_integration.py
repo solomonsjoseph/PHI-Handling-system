@@ -436,3 +436,51 @@ async def test_praxis_falls_back_when_recommended_method_is_only_researched_not_
 
     assert reply["methods"] == [Praxis._fallback("E")["methods"][0]]
     assert reply["methods"][0]["name"] != "researched_only_method"
+
+
+# ==========================================================================
+# Step 6: wire HandoffGateway for the three broker edges
+# ==========================================================================
+
+
+@pytest.mark.asyncio
+async def test_manager_broker_edges_route_through_handoff_gateway_in_order() -> None:
+    """``Manager``'s guardian query broker (``ask_schema``/
+    ``ask_instrument``/``ask_lexicon``) additionally records each query
+    as a Judge -> specialist handoff attempt through ``ctx.handoff`` once
+    a context carries the facade: exactly three ``phase == "handoff"``
+    trace events land, on the (Judge, Schema)/(Judge, Instrument)/
+    (Judge, Lexicon) edges, in the same order the three broker calls
+    were made."""
+    import dataclasses
+
+    from phi_core.agents.manager import Manager
+
+    class _FakeSchema:
+        def verify(self, column, file_id=None):
+            return {"present": True, "file_id": file_id or "f1"}
+
+    class _FakeInstrument:
+        def verify(self, field_or_variable, file_id=None):
+            return {"present": True, "file_id": file_id or "f1", "field": {}}
+
+    class _FakeLexicon:
+        async def answer(self, column, assumption, reasoning):
+            return {"verdict": "confirmed"}
+
+    store = MemoryControlStore()
+    ctx = make_ctx("Manager")
+    ctx = dataclasses.replace(ctx, handoff=HandoffGateway(store, session_id=ctx.session_id))
+    manager = Manager(ctx)
+    manager.attach_schema(_FakeSchema())
+    manager.attach_instrument(_FakeInstrument())
+    manager.attach_lexicon(_FakeLexicon())
+
+    await manager.ask_schema("Judge", "mrn")
+    await manager.ask_instrument("Judge", "dob")
+    await manager.ask_lexicon("Judge", "mrn", "direct identifier", "looks like an MRN")
+
+    events = await store.find_many("trace_events", {"phase": "handoff"})
+    assert len(events) == 3
+    assert [e["direction"] for e in events] == ["Judge->Schema", "Judge->Instrument", "Judge->Lexicon"]
+    assert all(e["run_id"] == ctx.run_id for e in events)
