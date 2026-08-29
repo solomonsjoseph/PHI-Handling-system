@@ -619,7 +619,7 @@ async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
     threaded through ``work_item.input_ref``.
     """
     from phi_core.agents import orchestrator
-    from phi_core.agents.manager import Manager
+    from phi_core.agents.manager import ExecutionHealthSupervisor
     from phi_core.control.activation import ActivationFactory
 
     sid = work_item.session_id
@@ -654,7 +654,7 @@ async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
     phase_timings: dict[str, dict[str, float]] = {}
     last_phase: dict[str, str | float | None] = {"key": None, "t0": 0.0}
     run_started = time.perf_counter()
-    manager_box: dict[str, "Manager | None"] = {"value": None}
+    manager_box: dict[str, "ExecutionHealthSupervisor | None"] = {"value": None}
 
     async def timed_on_phase(phase: str, payload: dict) -> None:
         now = time.perf_counter()
@@ -701,7 +701,7 @@ async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
         return await _factory.complete_and_accept(ctx, result)
 
     async def _run_resume() -> dict[str, Any]:
-        manager = Manager(await _actx("Manager"), db=db)
+        manager = ExecutionHealthSupervisor(await _actx("Manager"), db=db)
         manager_box["value"] = manager
         await manager.run(
             roster=["Executor", "Operator", "Reviewer", "Auditor", "Scout", "Ledger", "Herald"],

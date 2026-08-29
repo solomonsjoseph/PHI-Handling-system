@@ -572,18 +572,17 @@ class ExecutionHealthSupervisor(Agent):
         return ManagerDecision(action=action, note=note)
 
 
-# Wave 4b compatibility name: `server.py`'s independent human-review-resume
-# path (`from phi_core.agents.manager import Manager` around its own
-# `session_human_review` handler) constructs this class directly, outside
-# this wave's owns list -- `server.py` is explicitly out of scope this
-# wave. A bare rename would leave that live, tested HTTP path
-# (`test_agent_pipeline.py::test_human_review_and_export`) broken with no
-# way for this wave to fix it, which is worse than a one-line compat
-# export. `phi_core/agents/__init__.py`'s own `from .manager import
-# Manager` and `phi_core/agents/base.py`'s `TYPE_CHECKING`-only reference
-# both resolve through this alias too, unchanged.
-#
-# GAP for the orchestrator to close (see the wave report): once
-# `server.py` imports `ExecutionHealthSupervisor` directly, delete this
-# alias.
+# Wave 4b compatibility name, partially resolved by the orchestrator after
+# landing: `server.py`'s independent human-review-resume path now imports
+# and constructs `ExecutionHealthSupervisor` directly (it no longer needs
+# this alias). The alias remains load-bearing for three lower-risk
+# consumers, none of which construct production runtime behavior through
+# it: `phi_core/agents/__init__.py`'s public `from .manager import
+# Manager` re-export, `phi_core/agents/base.py`'s `TYPE_CHECKING`-only
+# reference, and three test files
+# (`test_architecture_boundaries.py`, `test_control_phaseR_integration.py`,
+# `test_manager.py`) that import the name `Manager` directly. A full
+# rename across those is a genuine, low-risk-but-multi-file cleanup,
+# appropriately scoped to Phase 17's whole-repo `cleanup-audit`, not an ad
+# hoc patch here.
 Manager = ExecutionHealthSupervisor
