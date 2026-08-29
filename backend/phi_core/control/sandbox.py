@@ -6,9 +6,15 @@ Genuine gap this closes: today ``Executor`` (``agents/reasoning.py``) reads
 raw dataset rows as a plain in-process ``async`` coroutine, in the same
 process, event loop, and class hierarchy as every LLM-calling agent, with no
 network-deny, no resource ceiling, and no dedicated workspace of its own.
-This module is deliberately *not* wired into ``agents/`` yet -- that is a
-later phase's scope (per this session's established precedent) -- but
-provides the typed contract and enforcement primitives that phase will call.
+This module is wired into ``agents/`` as of Wave R-c step 4:
+``Executor`` (``agents/reasoning.py``) routes its four raw-row-work call
+sites (``apply_column_actions_to_dataset``, ``_redact_metadata_file``,
+``_read_dataset_headers``, ``read_narrative``) through ``run_isolated``
+when ``ctx.sandbox`` is attached (``ActivationFactory.activate(...,
+needs_sandbox=True)``). Contexts built via ``control.testing.make_ctx``
+(every pre-existing unit test) leave ``ctx.sandbox`` unset and keep
+calling the four functions in-process, a documented permanent
+compatibility path, not a retiring debt.
 
 ``create_sandbox`` allocates a per-run directory under
 ``phi_core.paths.SANDBOX_DIR`` (mode 0700) and a :class:`SandboxRecord`.

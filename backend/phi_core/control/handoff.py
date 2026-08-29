@@ -10,10 +10,12 @@ Judge, Reviewer, Regulations Expert (``Statute``), PHI Methods Expert
 (``Praxis``), Schema, Lexicon, and Instrument exchange a bounded, typed
 message directly instead of solely relaying through Manager.
 
-Deterministic, no-LLM, and **not wired into ``phi_core/agents/`` yet** --
-a later phase's scope, matching the precedent Phase 2's ``sandbox.py`` and
-``source_projection.py`` set: build the standalone, fully-tested
-control-plane module first, wire callers in afterward.
+Deterministic, no-LLM. Wired into ``phi_core/agents/`` by Wave R-c step 6:
+``agents/manager.py``'s guardian query broker (``ask_schema``,
+``ask_instrument``, ``ask_lexicon``) records each Judge query as a
+governed handoff through ``handoff()`` on the fixed ``(Judge, Schema)``,
+``(Judge, Instrument)``, ``(Judge, Lexicon)`` edges. Remaining edges
+arrive with their agents in Phases 6 to 8.
 
 Composes existing controls rather than reimplementing them:
 ``authorization.get_contract`` (contract lookup), ``secrets_scan.
