@@ -865,3 +865,44 @@ Second and final full run: Phase 4's own test files -> **134 passed**. Full back
 gate baseline. `ruff check .` -> **All checks passed!**
 
 **Phase 4 is complete.** `PHASE_4_STATUS = PASS` stands. Proceeding to Phase 5/6-rename.
+
+## Phase 5/6-rename (solo) — COMPLETE
+
+One commit (`06e2bcc`), 38 files: pure mechanical rename, `Statute -> RegulationsExpert`,
+`Praxis -> PHIMethodsExpert`, every case-sensitive occurrence outside the read-only
+`control/records.py` (confirmed by repo-wide grep, zero hits). **Gate criterion literally
+met: unchanged suite counts.** Independently re-verified by the orchestrator: **3 failed,
+1482 passed, 3 skipped, 1 xfailed, 66.72s** vs the immediately-prior state's 3 failed, 1481
+passed -- delta is exactly the one additive test. Nodeid check: 1506 collected, `comm -23`
+against Step 0 baseline empty.
+
+**Renamed:** class names, `NAME` identity attributes, every `MANIFESTS`/`TEAMS`/
+`allowed_child_task_types`/`ROLES`/`BUDGET_S` dict key, `handoff.py`'s
+`REGULATIONS_EXPERT`/`METHODS_EXPERT` role constants, `trace_projection.py`'s display-name
+lookup keys, every import and constructor call, every LLM-facing `PROMPT` self-identification
+string, every test `Fake*`/monkeypatch-target reference (confirmed against every test file
+Phase R and Phase 4 added, not just the master prompt's original list). **Deliberately left
+unchanged** (documented, not oversight): lowercase, non-case-sensitive identifiers with real
+cross-boundary risk if renamed -- `state.statute`/`state.praxis_methods` fields, the
+`agent_statute`/`agent_praxis` MongoDB session-document field names, the `statute`/`praxis`
+keyword-argument names on `Judge.run`/`Sentinel.run`/`Auditor.run`/`run_decision_gates`, the
+`on_phase("statute")`/`on_phase("praxis")` phase-name strings.
+
+**One additive item, real RED block:** `control/policy.py`'s `OUTPUT_SCHEMAS` gained a
+`study_knowledge_package` entry (Phase 5's reserved schema, pre-added so Phase 5 never
+touches this now-closed file). The second additive item (manifest completeness) was
+correctly declined after reading master-spec sections 33-38: the current manifests
+accurately describe what `RegulationsExpert`/`PHIMethodsExpert` do TODAY (untargeted,
+whole-category research), and adding fields implying the future demand-driven
+`HandoffGateway`-mediated flow would invent behavior the code does not have yet.
+
+**One genuine rename-induced correctness issue found and fixed** (required for the rename
+itself to be behavior-preserving, not scope creep): 5 test call sites hardcoded
+`task_type="statute"` for `policy.issue_grant`; `CapabilityPolicy._task_type()` derives the
+task type from `agent.lower()`, which now produces `"regulationsexpert"`, not `"statute"`.
+Left unfixed, these 5 grants would raise `CapabilityDenied`. Fixed in the same commit.
+
+`control/policy.py` is now reserved: neither Phase 5 nor Phase 6 touches it again.
+
+Next: Phase 5 (study specialists) and Phase 6 (targeted experts), one two-subagent batch,
+disjoint on `agents/specialists.py` versus `agents/experts.py`.
