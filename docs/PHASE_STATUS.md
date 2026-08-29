@@ -542,3 +542,34 @@ corrected lifecycle/records contracts) are consumed directly by Phase 4 and beyo
 continuing in this same session.
 
 Next: Phase 4 (Manager / Super Orchestrator), waves 4a then 4b.
+
+### Post-phase-R simplification — no changes needed
+
+Ran the `simplify-code` skill scoped to `git diff 9e633a1..HEAD` (45 files, 6188 diff
+lines). `scripts/cleanup.py` (dry run) proposed 971 paths, all gitignored/untracked build
+artifacts outside Phase R's committed diff (`__pycache__`, `.ruff_cache`, `.remember/`,
+`.logs/`, `tmp/`, `data/uploads/*`, `docs/MASTER_ARCHITECTURE_V2.md`); none applied. Manual
+sweep for debug artifacts, commented-out code, duplicate definitions, stale wiring claims,
+D1/D7 denylist leftovers, orphaned pre-adds, bridge/shim patterns, and test debris found
+nothing in scope — the gate's own lint pass had already caught the two real findings
+(`Session.status` dup field, `zip()` `strict=`). No files modified, no commit made (a
+legitimate outcome per the ground rule against fabricating a commit).
+
+Second and final full run, per the gate procedure: `test_control_phaseR_*` +
+`test_control_workflow.py` + `test_control_records_policy.py` -> **365 passed, 1 xfailed**.
+Full backend suite (serial, canonical per Step 0's `-n auto` nondeterminism finding): **8
+failed, 1427 passed, 4 skipped, 1 xfailed, 2 errors, 83.05s** — exact match to the Phase R
+gate baseline. `ruff check .` -> **All checks passed!**
+
+`-n auto` was also tried three times as literally specified and each run showed extra
+nondeterministic failures; investigated rather than accepted at face value:
+`test_control_migrate.py` (untouched by Phase R, passes 8/8 in isolation) hit an
+xdist-worker-vs-shared-Mongo unique-index collision unrelated to this phase; extra 429s
+matched the already-documented Step 0 `-n auto` nondeterminism; one transient 409
+(`KeyRotated`) was self-inflicted by the simplification pass's own required server restart
+regenerating a dev key against a stale settings document — the exact disclosed
+`crypto.py` dev-key-orphaning residual risk, self-resolved. None touch Phase R's diff. The
+serial re-run above reproduced the exact baseline with zero deviation, confirming the
+regression rule holds.
+
+**Phase R is complete.** `PHASE_R_STATUS = PASS` stands. Proceeding to Phase 4.
