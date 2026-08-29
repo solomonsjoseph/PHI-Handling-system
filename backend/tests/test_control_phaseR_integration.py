@@ -484,3 +484,61 @@ async def test_manager_broker_edges_route_through_handoff_gateway_in_order() -> 
     assert len(events) == 3
     assert [e["direction"] for e in events] == ["Judge->Schema", "Judge->Instrument", "Judge->Lexicon"]
     assert all(e["run_id"] == ctx.run_id for e in events)
+
+
+# ==========================================================================
+# Step 7: route the gateway through the named AuthorizationService
+# ==========================================================================
+
+
+@pytest.mark.asyncio
+async def test_provider_gateway_routes_validation_through_authorization_service(monkeypatch) -> None:
+    """``ProviderGateway._validate_request`` now calls
+    ``authorization.authorize_capability`` -- the same
+    ``policy.check_provider``/``policy.check_data_class`` pair it
+    already called internally, renamed for naming consistency with the
+    spec's AuthorizationService boundary; a pure rename with no new
+    security check -- exactly once per completion attempt. A request
+    whose ``max_tokens`` exceeds its grant is denied later in
+    ``_validate_request``, before any provider call, so this proves the
+    routing without a live or mocked LLM call."""
+    from types import MappingProxyType, SimpleNamespace
+
+    from phi_core.control import authorization
+    from phi_core.control import policy as policy_module
+    from phi_core.control.gateway import GatewayRequest, ProviderGateway
+    from phi_core.control.policy import MANIFESTS, POLICY_VERSION, CapabilityPolicy
+
+    calls: list[tuple] = []
+    real = authorization.authorize_capability
+
+    def _spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(authorization, "authorize_capability", _spy)
+
+    pipeline = MANIFESTS["Pipeline"].model_copy(update={"allowed_providers": frozenset({"anthropic"})})
+    monkeypatch.setattr(policy_module, "MANIFESTS", MappingProxyType({**MANIFESTS, "Pipeline": pipeline}))
+
+    store = MemoryControlStore()
+    run_id, task_id, session_id = "d" * 32, "e" * 32, "f" * 32
+    policy = CapabilityPolicy(SimpleNamespace(provider="anthropic", model="claude-test", base_url=""))
+    grant = policy.issue_grant(run_id=run_id, task_id=task_id, agent="Pipeline", task_type="pipeline_run")
+    await store.insert("capability_grants", grant)
+
+    req = GatewayRequest(
+        session_id=session_id, run_id=run_id, task_id=task_id, agent="Pipeline", attempt=1,
+        purpose="pipeline", input_class="internal", grant_id=grant.grant_id,
+        provider="anthropic", model="claude-test", endpoint="",
+        system_prompt="system", user_prompt="user", coaching_note=None, tool_results=(),
+        allowed_tools={}, response_schema="no_provider_output",
+        timeout_s=30.0, max_tokens=grant.budget.max_tokens + 1, max_cost_usd=0.01,
+        policy_version=POLICY_VERSION,
+    )
+
+    result = await ProviderGateway(store).complete(req)
+
+    assert result.status == "denied"
+    assert "MAX_TOKENS_PER_TASK" in result.denial_reason
+    assert len(calls) == 1
