@@ -677,14 +677,24 @@ def test_sandboxed_raw_reader_call_sites_confined_to_reasoning_and_operator_read
 
 def test_handoff_call_sites_confined_to_manager_broker() -> None:
     """Exclusivity: ``HandoffGateway.handoff`` is only ever called from
-    ``manager.py``'s guardian query broker (Step 6) -- no other module
-    hands off directly."""
+    ``manager.py``'s guardian query broker (Step 6) and, since 2026-08-29
+    (Phase 5/6 orchestrator follow-up item 1), ``agents/orchestrator.py``'s
+    ``_run_regulations_expert``/``_run_phi_methods_expert_method`` -- the
+    (RegulationsExpert, Judge) and (PHIMethodsExpert, Judge) finding-report
+    edges. Phase 6 originally persisted those findings directly to the
+    control store to avoid this exclusivity scan (see git history around
+    commit 542f5af); this follow-up found ``HandoffGateway.ALLOWED_EDGES``/
+    ``EDGE_SCHEMAS`` already registered both edges and their
+    ``RegulatoryFinding``/``MethodFinding`` payload schemas (Wave R-c Step
+    6 / Phase R-a), so the workaround was unnecessary -- the findings now
+    travel the governed path like every other edge, and this scan's
+    allowlist is widened by one file, not disabled. No other module hands
+    off directly."""
     sites = _call_sites(PHI_CORE_ROOT, {"handoff"})
-    allowed = PHI_CORE_ROOT / "agents" / "manager.py"
-    offenders = [(p, ln) for p, ln in sites if p != allowed]
-    assert offenders == [], f".handoff( called outside manager.py: {offenders}"
+    allowed = {PHI_CORE_ROOT / "agents" / "manager.py", PHI_CORE_ROOT / "agents" / "orchestrator.py"}
+    offenders = [(p, ln) for p, ln in sites if p not in allowed]
+    assert offenders == [], f".handoff( called outside manager.py/orchestrator.py: {offenders}"
     assert sites, "the scan itself found nothing"
-
 
 # Behavioral: test_manager_broker_edges_route_through_handoff_gateway_in_order (Step 6, above).
 

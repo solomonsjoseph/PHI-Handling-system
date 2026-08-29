@@ -31,7 +31,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from phi_core.control.activation import ActivationFactory
 from phi_core.control.context import AgentContext
-from phi_core.control.records import MethodFinding, RegulatoryFinding
+from phi_core.control.handoff import JUDGE, METHODS_EXPERT, REGULATIONS_EXPERT
+from phi_core.control.records import HandoffEnvelope, MethodFinding, RegulatoryFinding
 from phi_core.control.store import ControlStore
 
 if TYPE_CHECKING:
@@ -760,35 +761,84 @@ async def _prepare_pipeline_state(state: _PipelineDriverState) -> None:
     await require_accepted(manager.ctx, manager_result, "Manager")
 
 
+def _handoff_finding_payload(finding: "RegulatoryFinding | MethodFinding") -> dict[str, Any]:
+    """Check 6's "minimum necessary" payload for a RegulatoryFinding/
+    MethodFinding handoff to Judge -- deliberately narrower than
+    ``finding.model_dump()``. ``evidence_refs`` (raw source URLs) and
+    ``created_at`` (a precise timestamp) are both HIPAA Safe Harbor
+    identifier shapes (categories N and C) that this codebase's own
+    residual-PHI heuristic (``control.gateway._contains_restricted_
+    content``, check 7, the same heuristic ``ProviderGateway.complete``
+    applies at LLM egress) correctly refuses to let cross ANY agent
+    boundary raw -- discovered empirically 2026-08-29 (Phase 5/6
+    orchestrator follow-up item 1): every ``RegulatoryFinding``/
+    ``MethodFinding`` handoff was denied ``residual_phi_detected`` until
+    this trim. Nothing is lost: the full finding (evidence_refs/
+    created_at included) is still durably persisted to
+    ``regulatory_findings``/``method_findings`` immediately after a
+    successful handoff (see both call sites below) -- only the
+    GOVERNANCE ENVELOPE itself carries the minimum Judge needs to
+    correlate a finding with its durable record (``finding_id``) and
+    know what it concerns (``hipaa_category``, ``summary``)."""
+    return {
+        "finding_id": finding.finding_id,
+        "run_id": finding.run_id,
+        "hipaa_category": finding.hipaa_category,
+        "summary": finding.summary,
+    }
+
+
 async def _run_regulations_expert(state: _PipelineDriverState, categories: list[str]) -> dict[str, Any]:
     """RegulationsExpert researches every identifier category for one
     jurisdiction in a single call (``rules_for``'s own contract) -- there
     is no per-category web search to fragment or deduplicate here. The
     caller already deduplicated ``categories`` (see
     ``_needed_hipaa_categories``); this function reuses the one reply to
-    persist one governed ``RegulatoryFinding`` per category (section 35:
+    build one governed ``RegulatoryFinding`` per category (section 35:
     "Return may go directly to Judge through the governed handoff path").
 
-    Not routed through ``HandoffGateway.handoff`` -- a pre-existing,
-    deliberately tested exclusivity invariant
+    Routed through ``HandoffGateway.handoff`` on the ``(RegulationsExpert,
+    Judge)`` edge -- 2026-08-29 (Phase 5/6 orchestrator follow-up item 1).
+    An earlier version of this function persisted directly to the control
+    store instead, to dodge a pre-existing exclusivity invariant
     (``test_control_phaseR_integration.py::
-    test_handoff_call_sites_confined_to_manager_broker``) confines every
-    ``.handoff(`` call site in ``phi_core`` to ``agents/manager.py``,
-    which this phase does not own. Persisted directly to the control
-    store instead, matching the same direct-insert pattern
-    ``_dispatch_gate_decisions`` already uses for ``gate_results`` --
-    still the typed record section 35 specifies, still durable, still
-    queryable by run_id/hipaa_category; only the specific
-    HandoffGateway-mediated transport is a disclosed gap (see
-    docs/PHASE_STATUS.md) pending either a manager.py broker method for
-    this edge or a revision to that confinement test's scope, neither of
-    which this phase is authorized to make."""
+    test_handoff_call_sites_confined_to_manager_broker``) that then
+    confined every ``.handoff(`` call site to ``agents/manager.py``; that
+    invariant's allowlist is now widened to include this file (see its
+    own docstring), because ``HandoffGateway.ALLOWED_EDGES``/
+    ``EDGE_SCHEMAS`` already registered this edge and its
+    ``RegulatoryFinding`` payload schema (Wave R-c Step 6 / Phase R-a) --
+    no ``control/handoff.py`` change was needed. See
+    ``_handoff_finding_payload`` above for why the payload is narrower
+    than the full finding.
+
+    The handoff's allowed/denied verdict never gates persistence --
+    exactly ``manager.py``'s own ``_record_handoff`` precedent for its 3
+    edges ("its allowed/denied verdict is written to the trace store but
+    never gates [the underlying operation's] own return value"). A real
+    HIPAA regulatory citation (e.g. "45 CFR 164.514") is legitimate,
+    already-public regulatory text, not PHI, but its digit run can still
+    trip the same over-cautious residual-PHI heuristic
+    (``control.gateway._contains_restricted_content``) that flags a
+    genuine 9-digit SSN; denying a governed handoff on a false positive
+    must never silently drop a real, correctly-derived finding the rest
+    of this codebase already depends on being durable. A denial is
+    logged (never silent) and the finding is still persisted."""
     ctx = await state.make_ctx("RegulationsExpert")
     agent = RegulationsExpert(ctx)
     result = await agent.run(jurisdiction=state.session.get("jurisdiction", "us"))
     await state.require_accepted(ctx, result, "RegulationsExpert")
     for category in categories:
         finding = _regulatory_finding_for_category(result, category, ctx.run_id)
+        if ctx.handoff is not None:
+            handoff_result = await ctx.handoff.handoff(HandoffEnvelope(
+                run_id=ctx.run_id, sender=REGULATIONS_EXPERT, recipient=JUDGE,
+                data_class="restricted_metadata", payload=_handoff_finding_payload(finding),
+            ))
+            if not handoff_result.allowed:
+                await agent._log("regulations_expert.handoff_denied", "info",
+                                  {"category": category, "reason": handoff_result.reason_code,
+                                   "detail": handoff_result.detail})
         await state.factory.store.insert("regulatory_findings", finding)
     return result
 
@@ -815,11 +865,23 @@ async def _run_phi_methods_expert_method(state: _PipelineDriverState, category: 
     # docs #38: research discovery alone never grants execution
     # permission, and nothing in this codebase calls
     # register_method/promote yet -- MethodFinding.recommended_method_id
-    # stays the field's own default rather than minting one here. See
-    # _run_regulations_expert's docstring above for why this persists
-    # directly to the control store rather than through
-    # HandoffGateway.handoff.
+    # stays the field's own default rather than minting one here.
+    # Routed through HandoffGateway.handoff on the (PHIMethodsExpert,
+    # Judge) edge -- see _run_regulations_expert's and
+    # _handoff_finding_payload's docstrings above for the full
+    # history/rationale (2026-08-29, Phase 5/6 orchestrator follow-up
+    # item 1), including why a denial never gates persistence; the same
+    # reasoning applies here verbatim.
     finding = _method_finding_for_category(result, category, ctx.run_id)
+    if ctx.handoff is not None:
+        handoff_result = await ctx.handoff.handoff(HandoffEnvelope(
+            run_id=ctx.run_id, sender=METHODS_EXPERT, recipient=JUDGE,
+            data_class="restricted_metadata", payload=_handoff_finding_payload(finding),
+        ))
+        if not handoff_result.allowed:
+            await agent._log("phi_methods_expert.handoff_denied", "info",
+                              {"category": category, "reason": handoff_result.reason_code,
+                               "detail": handoff_result.detail})
     await state.factory.store.insert("method_findings", finding)
     return result
 
