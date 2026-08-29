@@ -573,3 +573,74 @@ serial re-run above reproduced the exact baseline with zero deviation, confirmin
 regression rule holds.
 
 **Phase R is complete.** `PHASE_R_STATUS = PASS` stands. Proceeding to Phase 4.
+
+## Phase 4: Manager / Super Orchestrator
+
+### Wave 4a (solo): SuperOrchestrator absorbs the lifecycle — COMPLETE
+
+24 commits (12 test-then-implementation pairs), 2 files touched
+(`control/superorchestrator.py` +467 lines / 14 new public methods, new
+`tests/test_control_superorchestrator_lifecycle.py` 787 lines / 45 tests). No pre-existing
+method's behavior changed; `agents/manager.py` and `agents/orchestrator.py` untouched
+(Wave 4b's job).
+
+**All 13-14 section 9/87 responsibilities addressed**, each explicitly marked full or
+forward-compatible hook: run lifecycle/workflow state (full, pre-existing), dependency state
+(full, new `dependencies_satisfied`), task supervision (full for what's exercisable today,
+`resume()` calls `TaskService.reconcile_leases`), handoff supervision (forward-compatible
+hook — `observe_handoff` records a durable denial counter; `HandoffGateway` has no live
+caller yet per its own docstring, so a fixed escalation policy would be invented), artifact
+validity (full, `require_artifacts_current` via the `MANIFEST_COLLECTION` convention),
+retry/correction budgets (full, `evaluate_handoff_budget` + `route_budget_exceeded`),
+human-review lifecycle (full, pre-existing), manifest freeze authorization (full,
+`authorize_manifest_freeze`), execution authorization (forward-compatible hook,
+`authorize_execution` — deliberately narrow since Executor isn't a governed flow yet),
+rewind routing (full for the routing decision; re-execution itself is out of scope per
+spec section 56), final release authorization (full), export lifecycle (full state-machine
+gate, `begin_export`/`confirm_export`), cleanup lifecycle (full state-machine gate,
+`begin_cleanup`/`confirm_cleanup`, enforcing section 77's "never `SESSION_DESTROYED` until
+verified"), run closure section 9 (full read/verify authority, `close_run`).
+
+**Exit criterion (durable resume after restart), proven, not inferred:** `resume()`
+composes `recover()`'s checkpoint re-entry with `TaskService.reconcile_leases`.
+`SuperOrchestrator`/`TaskService` were already fully stateless (only a store reference, no
+cached run state), so resumability is architectural; the tests make it explicit and
+regression-proof by constructing a fresh `SuperOrchestrator`/`TaskService` pair sharing only
+the store, simulating a real process restart with zero carried-over Python state.
+**In-flight sandbox child on restart:** `SandboxRecord` lives only in the caller's
+in-memory `ActivationFactory._sandboxes` dict, never persisted — a restarted process cannot
+distinguish "child still running" from "child crashed," and there is no channel to recover
+a dead child's result once its multiprocessing result queue is gone with it. The only
+fail-closed correct behavior is "mark it for retry once the lease expires, fail once
+`max_attempts` is exhausted" — never guess completion. Two dedicated tests prove this
+across a single orphaned lease and a full three-cycle claim/expire/restart/fail sequence.
+
+One genuine bug caught and fixed before commit: `begin_export`'s idempotency check
+initially re-ran `authorize_final_release` on a second call, spuriously failing because
+state had already moved to `ready_for_export` away from `complete`/`partially_complete` —
+fixed by checking the idempotent case first.
+
+Own tests: **82 passed**. Regression sweep across every plausibly-affected pre-existing
+file (SuperOrchestrator, Manager, ArtifactService/lineage, HandoffGateway, TaskService,
+workflow table): **535 passed**.
+
+**Wave-landing check** (server restarted first): **4 failed, 1467 passed, 3 skipped, 1
+xfailed, 66.00s**. 3 are the pre-existing `test_human_review_invariant.py` failures. The
+4th, `test_security_llm_and_auth.py::test_get_settings_never_returns_api_key_plaintext`
+(409 `KeyRotated`), is the same recurring test-environment artifact first seen at the Phase
+R gate: `test_agent_pipeline.py::test_llm_settings_post_persist` "resets" the LLM api_key by
+POSTing an empty string, which this server's settings endpoint treats as "leave unchanged"
+rather than "clear" — so the real test key it set persists in Mongo until a later server
+restart (regenerating the dev encryption key, per the disclosed `crypto.py` dev-key-orphan
+residual risk) orphans it. This is an artifact of this session's restart-heavy
+orchestration workflow, not a product defect a normal deployment or CI run would hit
+(neither restarts the server mid-suite); confirmed by re-reading the test and the endpoint,
+not just inferred. Cleared the stale `settings` document again (same remediation as the
+Phase R gate). Not fixed in product code: doing so would risk changing real "leave API key
+unchanged" UX behavior to fix a symptom of this session's own workflow, which is out of
+scope and the wrong instrument for the actual cause.
+
+Nodeid check: 1492 collected, `comm -23` against baseline empty.
+
+Next: Wave 4b (solo, after 4a): `run_pipeline` rewrite, `Manager` demoted to
+`ExecutionHealthSupervisor`.
