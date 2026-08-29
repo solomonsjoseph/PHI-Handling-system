@@ -63,20 +63,23 @@ async def test_clean_run_reports_no_hits_and_scans_every_surface() -> None:
 
 @pytest.mark.asyncio
 async def test_detects_hit_in_trace_events_status_text() -> None:
+    from phi_core.control.events import TraceEventStore
+    from phi_core.control.records import TraceEvent
+
     literal = "ZZZTRACESTATUSCANARY1"
     store = MemoryControlStore()
-    await store.insert("trace_events", {
-        "event_id": "evt-1", "run_id": RUN_ID, "seq": 1, "session_id": SESSION_ID,
-        "phase": "judge", "status_text": f"decision note mentions {literal} inline",
-        "payload": {}, "retry_category": "", "sanitized_rationale": "",
-    })
+    written = await TraceEventStore(store, run_id=RUN_ID, session_id=SESSION_ID).append(TraceEvent(
+        run_id=RUN_ID, seq=0, session_id=SESSION_ID, phase="judge",
+        input_class="internal", output_class="internal",
+        status_text=f"decision note mentions {literal} inline",
+    ))
 
     report = await scan_run_surfaces_for_leaks(store, _ground_truth(literal), run_id=RUN_ID, session_id=SESSION_ID)
 
     assert report["status"] == "leaked"
     hit = next(h for h in report["hits"] if h["surface"] == "trace_events")
     assert hit["plant_id"] == "p1"
-    assert hit["location"] == "evt-1"
+    assert hit["location"] == written.event_id
     _assert_never_raw(report, literal)
 
 
@@ -85,18 +88,21 @@ async def test_detects_hit_in_trace_events_payload_field() -> None:
     """The write-time scrub (trace_sanitizer) is signature-based, not
     literal-aware -- a canary token embedded in a nested payload value must
     still be caught by this independent scan."""
+    from phi_core.control.events import TraceEventStore
+    from phi_core.control.records import TraceEvent
+
     literal = "ZZZPAYLOADFIELDCANARY2"
     store = MemoryControlStore()
-    await store.insert("trace_events", {
-        "event_id": "evt-2", "run_id": RUN_ID, "seq": 2, "session_id": SESSION_ID,
-        "phase": "executor", "status_text": "",
-        "payload": {"nested": {"detail": f"value was {literal}"}},
-    })
+    written = await TraceEventStore(store, run_id=RUN_ID, session_id=SESSION_ID).append(TraceEvent(
+        run_id=RUN_ID, seq=0, session_id=SESSION_ID, phase="executor",
+        input_class="internal", output_class="internal",
+        payload={"nested": {"detail": f"value was {literal}"}},
+    ))
 
     report = await scan_run_surfaces_for_leaks(store, _ground_truth(literal), run_id=RUN_ID, session_id=SESSION_ID)
 
     assert report["status"] == "leaked"
-    assert any(h["surface"] == "trace_events" and h["location"] == "evt-2" for h in report["hits"])
+    assert any(h["surface"] == "trace_events" and h["location"] == written.event_id for h in report["hits"])
     _assert_never_raw(report, literal)
 
 
@@ -158,20 +164,23 @@ async def test_detects_hit_in_handoff_envelope_payload_via_trace_events_phase() 
     folded anonymously into "trace_events", so a future regression that
     started copying the envelope payload into trace is attributed
     correctly, not merged into general trace noise."""
+    from phi_core.control.events import TraceEventStore
+    from phi_core.control.records import TraceEvent
+
     literal = "ZZZHANDOFFCANARY5"
     store = MemoryControlStore()
-    await store.insert("trace_events", {
-        "event_id": "evt-handoff-1", "run_id": RUN_ID, "seq": 3, "session_id": SESSION_ID,
-        "phase": "handoff", "status_text": "",
-        "payload": {"handoff_id": "h1", "sender": "Judge", "recipient": "Schema",
-                     "allowed": False, "reason": f"blocked: contains {literal}"},
-    })
+    written = await TraceEventStore(store, run_id=RUN_ID, session_id=SESSION_ID).append(TraceEvent(
+        run_id=RUN_ID, seq=0, session_id=SESSION_ID, phase="handoff",
+        input_class="restricted_metadata", output_class="restricted_metadata",
+        payload={"handoff_id": "h1", "sender": "Judge", "recipient": "Schema",
+                 "allowed": False, "reason": f"blocked: contains {literal}"},
+    ))
 
     report = await scan_run_surfaces_for_leaks(store, _ground_truth(literal), run_id=RUN_ID, session_id=SESSION_ID)
 
     assert report["status"] == "leaked"
     hit = next(h for h in report["hits"] if h["surface"] == "handoff_envelope_payload")
-    assert hit["location"] == "evt-handoff-1"
+    assert hit["location"] == written.event_id
     assert not any(h["surface"] == "trace_events" for h in report["hits"])
     _assert_never_raw(report, literal)
 
