@@ -44,7 +44,15 @@ from . import limits
 from .artifacts import ArtifactService
 from .context import StoreTraceWriter
 from .policy import MANIFESTS, POLICY_VERSION, CapabilityDenied, _bounded_budget
-from .records import CapabilityGrant, HumanReviewEvent, HumanReviewRequest, ResourceBudget, WorkflowRun, WorkItem
+from .records import (
+    CapabilityGrant,
+    HandoffResult,
+    HumanReviewEvent,
+    HumanReviewRequest,
+    ResourceBudget,
+    WorkflowRun,
+    WorkItem,
+)
 from .runs import check_run_budget
 from .store import ControlStore
 from .tasks import TaskService
@@ -667,6 +675,48 @@ class SuperOrchestrator:
             "work_items", {"run_id": run_id, "parent_task_id": task_id}
         )
         return all(child.get("state") in _TERMINAL_TASK_STATES for child in children)
+
+    # ---- observe_handoff ----------------------------------------------------
+
+    async def observe_handoff(self, *, run_id: str, result: HandoffResult) -> None:
+        """The handoff-supervision responsibility (D9/docs #87): the point
+        a caller reports one ``HandoffGateway.handoff`` verdict back to
+        the run's supervising authority.
+
+        ``HandoffGateway`` already records its own ``TraceEvent`` for
+        every attempt, allowed or denied -- this is not a second copy of
+        that record. An allowed handoff needs no supervisory reaction and
+        is a no-op here. A denied handoff increments a durable per-run
+        denial counter on the run's checkpoint (the same dict every other
+        method in this class already extends for run-scoped bookkeeping,
+        e.g. ``recover``'s ``recovery_cause``): no live caller invokes
+        ``HandoffGateway`` yet (its own module docstring: "not called from
+        phi_core/agents/ yet"), so a fixed escalation policy tied to a
+        rule that has never fired against real data would be invented,
+        not derived; recording the observable count here is the
+        authoritative, forward-compatible hook a later phase's escalation
+        policy attaches to without changing this method's signature.
+        """
+        if result.run_id != run_id:
+            raise WorkflowError(
+                f"result.run_id {result.run_id!r} does not match run_id {run_id!r}"
+            )
+        if result.allowed:
+            return
+        for _ in range(10):
+            run = await self._load_run(run_id)
+            denials = int(run.checkpoint.get("handoff_denials", 0)) + 1
+            updated = run.model_copy(
+                update={
+                    "checkpoint": {**run.checkpoint, "handoff_denials": denials},
+                    "updated_at": _now(),
+                }
+            )
+            if await self._store.compare_and_set(
+                "workflow_runs", {"run_id": run_id}, {"updated_at": run.updated_at}, updated
+            ):
+                return
+        raise WorkflowError(f"could not record handoff denial for run_id={run_id!r} after retries")
 
     # ---- authorize_publication ---------------------------------------------
 
