@@ -60,6 +60,7 @@ from .store import ControlStore
 from .tasks import TaskService
 from .workflow import (
     CHECKPOINT_VERSION,
+    NON_TERMINAL_NODES,
     Checkpoint,
     WorkflowError,
     is_terminal,
@@ -863,6 +864,55 @@ class SuperOrchestrator:
         if is_terminal(run.node) or run.state == "awaiting_human_review":
             return False
         return True
+
+    # ---- rewind ---------------------------------------------------------
+
+    async def rewind(self, *, run_id: str, to_node: str, reason: str) -> WorkflowRun:
+        """The rewind-routing responsibility (D9/docs #56, #87): route a
+        run back to an earlier checkpoint node.
+
+        Section 56 ("final failure rewind") explicitly scopes the actual
+        re-execution that follows a rewind to a later phase ("do not
+        implement" there) -- this method is the routing decision alone.
+        It fails closed on an unknown ``to_node`` (``validate_node``'s own
+        table lookup), refuses a terminal target (``advance`` is the only
+        path to a terminal node, never ``rewind``), and refuses a target
+        that is not strictly earlier than the run's current node using
+        ``NON_TERMINAL_NODES``'s own canonical checkpoint order -- a
+        "rewind" to the same or a later node is not a rewind. Commits a
+        fresh checkpoint at ``to_node`` under the same CAS boundary
+        ``advance`` uses, and resumes the run to ``running`` (a rewind out
+        of ``awaiting_human_review`` is itself the resolution, not a
+        second pending review)."""
+        target = validate_node(to_node)
+        if is_terminal(target):
+            raise WorkflowError(f"rewind refuses a terminal target node: {to_node!r}")
+        run = await self._load_run(run_id)
+        if is_terminal(run.node):
+            raise WorkflowError(f"run_id={run_id!r} is already terminal at node {run.node!r}")
+        if NON_TERMINAL_NODES.index(target) > NON_TERMINAL_NODES.index(run.node):
+            raise WorkflowError(
+                f"rewind target {to_node!r} is not earlier than current node {run.node!r}"
+            )
+        now = _now()
+        updated = run.model_copy(
+            update={
+                "node": target,
+                "state": "running",
+                "checkpoint": {
+                    "node": target, "checkpoint_version": CHECKPOINT_VERSION,
+                    "payload_refs": [], "rewind_reason": reason,
+                },
+                "checkpoint_version": CHECKPOINT_VERSION,
+                "updated_at": now,
+            }
+        )
+        matched = await self._store.compare_and_set(
+            "workflow_runs", {"run_id": run_id}, {"updated_at": run.updated_at, "node": run.node}, updated
+        )
+        if not matched:
+            raise WorkflowError(f"lost the race rewinding run_id={run_id!r}")
+        return updated
 
     # ---- authorize_publication ---------------------------------------------
 
