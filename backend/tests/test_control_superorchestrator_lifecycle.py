@@ -247,3 +247,59 @@ async def test_observe_handoff_refuses_a_result_from_another_run() -> None:
 
     with pytest.raises(WorkflowError):
         await orch.observe_handoff(run_id=run.run_id, result=mismatched)
+
+
+# ---- require_artifacts_current: artifact-validity responsibility ----
+
+
+@pytest.mark.asyncio
+async def test_require_artifacts_current_passes_for_a_freshly_staged_artifact() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    service = ArtifactService(store, session_id=SESSION_ID, run_id=run.run_id)
+    artifact_id, _tmp_path = await service.stage("export", "study.csv", "internal", "standard")
+
+    await orch.require_artifacts_current(run_id=run.run_id, artifact_ids=[artifact_id])
+
+
+@pytest.mark.asyncio
+async def test_require_artifacts_current_refuses_a_superseded_artifact() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    service = ArtifactService(store, session_id=SESSION_ID, run_id=run.run_id)
+    parent_id, _tmp = await service.stage("export", "parent.csv", "internal", "standard")
+    child_id, _tmp2 = await service.stage(
+        "export", "child.csv", "internal", "standard", parents=[parent_id],
+    )
+    await service.invalidate_descendants(parent_id)
+
+    with pytest.raises(WorkflowError):
+        await orch.require_artifacts_current(run_id=run.run_id, artifact_ids=[child_id])
+
+
+@pytest.mark.asyncio
+async def test_require_artifacts_current_refuses_an_invalidated_linked_manifest() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    service = ArtifactService(store, session_id=SESSION_ID, run_id=run.run_id)
+    parent_id, _tmp = await service.stage("export", "parent.csv", "internal", "standard")
+    child_id, _tmp2 = await service.stage(
+        "export", "child.csv", "internal", "standard", parents=[parent_id],
+    )
+    manifest = VerifiedClassificationManifest(run_id=run.run_id, preview_review_id="pr1")
+    document = manifest.model_dump(mode="python")
+    document["artifact_id"] = child_id
+    await store.insert(MANIFEST_COLLECTION, document)
+    await service.invalidate_descendants(parent_id)
+
+    with pytest.raises(WorkflowError):
+        await orch.require_artifacts_current(run_id=run.run_id, artifact_ids=[child_id])
+
+
+@pytest.mark.asyncio
+async def test_require_artifacts_current_refuses_an_unknown_artifact_id() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+
+    with pytest.raises(WorkflowError):
+        await orch.require_artifacts_current(run_id=run.run_id, artifact_ids=["ghost"])
