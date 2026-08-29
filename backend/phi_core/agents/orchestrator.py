@@ -1,9 +1,10 @@
 """Orchestrator: run the full agent pipeline for a session.
 
 Pipeline:
-  1. Specialists (Lexicon, Schema, Instrument) + RegulationsExpert + PHIMethodsExpert ALL in
-     parallel (RegulationsExpert/PHIMethodsExpert don't read file content, so they overlap
-     with specialists rather than serialising after them).
+  1. Specialists (Lexicon, Schema, Instrument) launch immediately. RegulationsExpert
+     and PHIMethodsExpert do NOT launch here (section 33: no broad research at run
+     start) -- they launch on demand, once, from the decide loop, right after
+     Judge's first (triage) pass names which HIPAA categories the dataset contains.
   2. Judge <-> Sentinel loop (short-circuits on 0 blocking issues; capped at ITERATION_CAP=2)
   3. Human review gate if Sentinel still has blocking issues
   4. Executor applies decisions
@@ -31,6 +32,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from phi_core.control.activation import ActivationFactory
 from phi_core.control.context import AgentContext
 from phi_core.control.store import ControlStore
+from phi_core.control.handoff import JUDGE, METHODS_EXPERT, REGULATIONS_EXPERT
+from phi_core.control.records import HandoffEnvelope, MethodFinding, RegulatoryFinding
 
 if TYPE_CHECKING:
     from phi_core.control.superorchestrator import SuperOrchestrator
@@ -758,11 +761,26 @@ async def _prepare_pipeline_state(state: _PipelineDriverState) -> None:
     await require_accepted(manager.ctx, manager_result, "Manager")
 
 
-async def _run_regulations_expert(state: _PipelineDriverState) -> dict[str, Any]:
+async def _run_regulations_expert(state: _PipelineDriverState, categories: list[str]) -> dict[str, Any]:
+    """RegulationsExpert researches every identifier category for one
+    jurisdiction in a single call (``rules_for``'s own contract) -- there
+    is no per-category web search to fragment or deduplicate here. The
+    caller already deduplicated ``categories`` (see
+    ``_needed_hipaa_categories``); this function reuses the one reply to
+    report one governed ``RegulatoryFinding`` per category through
+    ``HandoffGateway`` (section 35: "Return may go directly to Judge
+    through the governed handoff path")."""
     ctx = await state.make_ctx("RegulationsExpert")
     agent = RegulationsExpert(ctx)
     result = await agent.run(jurisdiction=state.session.get("jurisdiction", "us"))
     await state.require_accepted(ctx, result, "RegulationsExpert")
+    if ctx.handoff is not None:
+        for category in categories:
+            finding = _regulatory_finding_for_category(result, category, ctx.run_id)
+            await ctx.handoff.handoff(HandoffEnvelope(
+                run_id=ctx.run_id, sender=REGULATIONS_EXPERT, recipient=JUDGE,
+                data_class="internal", payload=finding.model_dump(),
+            ))
     return result
 
 
@@ -785,31 +803,116 @@ async def _run_phi_methods_expert_method(state: _PipelineDriverState, category: 
     if ctx.tasks is not None:
         await ctx.tasks.complete(result)
     await state.require_accepted(ctx, result, "PHIMethodsExpert")
+    if ctx.handoff is not None:
+        # docs #38: research discovery alone never grants execution
+        # permission, and nothing in this codebase calls
+        # register_method/promote yet -- MethodFinding.recommended_method_id
+        # stays the field's own default rather than minting one here.
+        finding = _method_finding_for_category(result, category, ctx.run_id)
+        await ctx.handoff.handoff(HandoffEnvelope(
+            run_id=ctx.run_id, sender=METHODS_EXPERT, recipient=JUDGE,
+            data_class="internal", payload=finding.model_dump(),
+        ))
     return result
 
 
-async def _dispatch_research(state: _PipelineDriverState) -> str:
-    """The ``research`` node: RegulationsExpert + PHIMethodsExpert, launched alongside --
-    not serialised before -- Lexicon/Schema/Instrument. Neither RegulationsExpert
-    nor PHIMethodsExpert reads file content, so overlapping their runtime with
-    specialist file parsing is a wall-clock optimisation the pre-Wave-4b
-    pipeline already made; this handler preserves it by creating the
-    specialist tasks here and stashing them on ``state`` for
-    ``_dispatch_specialists`` to await, even though the state machine's
-    own node order is research-then-specialists.
-    """
-    await _prepare_pipeline_state(state)
-    await state.on_phase("specialists", {"agents": ["Lexicon", "Schema", "Instrument"]})
+# ---- section 33/89: demand-driven RegulationsExpert/PHIMethodsExpert research
+#
+# The pre-Phase-6 pipeline launched both experts unconditionally at t=0
+# (RegulationsExpert once, PHIMethodsExpert once per every one of 17 fixed
+# HIPAA categories, regardless of what the dataset actually contains) --
+# exactly the pattern section 33 forbids. Research is now requested by
+# the dispatch handler (acting on Judge's behalf, since Judge's own
+# `reasoning.py` is out of this file's scope to restructure) once,
+# from `_dispatch_decide`, right after Judge's own first pass -- its
+# triage -- names which HIPAA categories the dataset actually contains.
+
+_KNOWN_HIPAA_CATEGORY_LETTERS: frozenset[str] = frozenset(chr(c) for c in range(ord("A"), ord("R") + 1))
+
+
+def _needed_hipaa_categories(decisions: list[dict[str, Any]]) -> list[str]:
+    """Deduplicated (a ``set`` comprehension), sorted list of the real
+    HIPAA identifier-category letters Judge's own decisions name -- never
+    every possible category, never zero regardless of what is in the
+    data. Two columns tagged with the same category still produce exactly
+    one entry, so ``_dispatch_demand_driven_research`` below makes exactly
+    one ``PHIMethodsExpert.method_for`` call per distinct category and
+    reuses its result for every column that needs it. Anything Judge
+    proposed outside the real A-R letter vocabulary (``"NONE"``,
+    ``"QUASI"``, ``None``, a malformed model reply) is silently excluded,
+    never sent on to an expert call."""
+    return sorted({
+        category for d in decisions
+        if (category := d.get("phi_category")) in _KNOWN_HIPAA_CATEGORY_LETTERS
+    })
+
+
+def _regulatory_finding_for_category(reply: dict[str, Any], category: str, run_id: str) -> RegulatoryFinding:
+    """Section 35's typed output, sliced from RegulationsExpert's one
+    jurisdiction-wide reply for the one category this finding is about.
+    Never reads anything but the expert's own reply -- no decision text,
+    column name, or dataset value ever reaches this construction (section
+    36: a research finding is built from research, not from the data)."""
+    rule = next(
+        (hr for hr in (reply.get("handling_rules") or []) if hr.get("category") == category), None,
+    )
+    evidence_refs = sorted({s.get("url") for s in (reply.get("sources") or []) if s.get("url")})
+    if rule:
+        summary = f"{reply.get('regulation', '')}: {rule.get('rule', '')}".strip(": ")
+    else:
+        summary = reply.get("citation") or reply.get("regulation") or ""
+    return RegulatoryFinding(run_id=run_id, hipaa_category=category, evidence_refs=evidence_refs, summary=summary)
+
+
+def _method_finding_for_category(reply: dict[str, Any], category: str, run_id: str) -> MethodFinding:
+    """Section 37's typed output for one ``PHIMethodsExpert.method_for``
+    reply. Never reads anything but the expert's own reply, for the same
+    reason as ``_regulatory_finding_for_category`` above."""
+    methods = reply.get("methods") or []
+    evidence_refs = sorted({
+        s.get("url") for m in methods for s in (m.get("sources") or []) if s.get("url")
+    })
+    summary = "; ".join(m.get("name", "") for m in methods if m.get("name"))
+    return MethodFinding(run_id=run_id, hipaa_category=category, evidence_refs=evidence_refs, summary=summary)
+
+
+async def _dispatch_demand_driven_research(state: _PipelineDriverState, categories: list[str]) -> None:
+    """Replaces the removed t=0 broad launch. Called exactly once, from
+    ``_dispatch_decide``, right after Judge's triage pass names which
+    categories the dataset contains -- never before, and never at all
+    when `categories` is empty (nothing in the data needs regulatory or
+    method grounding, so no research is requested). RegulationsExpert
+    and PHIMethodsExpert still run concurrently with each other, exactly
+    as the removed t=0 code did -- only the trigger condition and timing
+    changed, not the underlying concurrency."""
+    if not categories:
+        return
     await state.on_phase("statute", {})
     await state.on_phase("praxis", {})
-
-    state.hipaa_cats = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K",
-                        "L", "M", "N", "O", "P", "Q", "R"]
-    regulations_expert_task = asyncio.create_task(_run_regulations_expert(state))
+    regulations_expert_task = asyncio.create_task(_run_regulations_expert(state, categories))
     phi_methods_expert_gather_task = asyncio.gather(
-        *[_run_phi_methods_expert_method(state, category) for category in state.hipaa_cats],
+        *[_run_phi_methods_expert_method(state, category) for category in categories],
         return_exceptions=True,
     )
+    state.statute = await regulations_expert_task
+    method_results = await phi_methods_expert_gather_task
+    praxis_methods: dict[str, Any] = {}
+    for category, res in zip(categories, method_results, strict=True):
+        if isinstance(res, Exception):
+            continue
+        praxis_methods[category] = res
+    state.praxis_methods = praxis_methods
+
+
+async def _dispatch_research(state: _PipelineDriverState) -> str:
+    """The ``research`` node: launches only the Lexicon/Schema/Instrument
+    specialist tasks (stashed on ``state`` for ``_dispatch_specialists``
+    to await). RegulationsExpert and PHIMethodsExpert no longer launch
+    here -- section 33 forbids an unconditional broad research call at
+    run start. See ``_dispatch_demand_driven_research`` for where and
+    when they now launch instead."""
+    await _prepare_pipeline_state(state)
+    await state.on_phase("specialists", {"agents": ["Lexicon", "Schema", "Instrument"]})
 
     dataset_files, form_files, dict_files = state.dataset_files, state.form_files, state.dict_files
     state.lexicon_ctx = await state.make_ctx("Lexicon") if dict_files else None
@@ -824,15 +927,6 @@ async def _dispatch_research(state: _PipelineDriverState) -> str:
                           if state.schema_agent else _empty({"columns": []}))
     state.inst_task = (state.instrument_agent.run(form_files=form_files)
                         if state.instrument_agent else _empty({"fields": []}))
-
-    state.statute = await regulations_expert_task
-    praxis_results = await phi_methods_expert_gather_task
-    praxis_methods: dict[str, Any] = {}
-    for cat, res in zip(state.hipaa_cats, praxis_results, strict=True):
-        if isinstance(res, Exception):
-            continue
-        praxis_methods[cat] = res
-    state.praxis_methods = praxis_methods
     return "ok"
 
 
@@ -917,6 +1011,7 @@ async def _dispatch_decide(state: _PipelineDriverState) -> str:
     # 'blocking' on a column BLOCKING_ISSUE_FLOOR times.
     blocking_attempts: dict[tuple[str, str], int] = {}
     max_iterations = max(state.iteration_cap, BLOCKING_ISSUE_FLOOR)
+    research_dispatched = False
     s: dict[str, Any] = {}
     for iteration in range(1, max_iterations + 1):
         await _check_cancel(state.db, state.sid, state.on_phase)
@@ -935,6 +1030,18 @@ async def _dispatch_decide(state: _PipelineDriverState) -> str:
         # table or Sentinel ever see it.
         decisions, rejections = validate_decisions(decisions)
         all_model_output_rejections.extend(rejections)
+        if not research_dispatched:
+            # Section 33/89: Judge's first pass through this loop *is*
+            # its triage (docs section 32) -- schema/instrument/lexicon
+            # only, no regulatory/method grounding yet. Its own initial
+            # decisions name exactly which HIPAA categories the dataset
+            # contains; that is what "demand-driven" research is
+            # triggered from, once, here -- never before Judge has
+            # produced this first proposal, never again on a later
+            # iteration (state.statute/state.praxis_methods, once
+            # populated, are reused for the rest of this loop).
+            research_dispatched = True
+            await _dispatch_demand_driven_research(state, _needed_hipaa_categories(decisions))
         # Sentinel deterministic hard-rules: force known direct identifiers off
         # 'human_review' before invoking the LLM Sentinel.
         decisions, overrides = apply_sentinel_hard_rules(decisions)
