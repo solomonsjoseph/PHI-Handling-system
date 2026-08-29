@@ -54,6 +54,18 @@ async def _started_run(orch: SuperOrchestrator):
     return await orch.start_run(session_id=SESSION_ID, principal="operator-1")
 
 
+_COMPLETE_OUTCOMES = (
+    "ok", "ok", "ok", "ok", "proceed", "ok", "ok", "ok", "clean", "ok", "ok", "ok", "complete",
+)
+
+
+async def _completed_run(orch: SuperOrchestrator, run_id: str):
+    run = None
+    for outcome in _COMPLETE_OUTCOMES:
+        run = await orch.advance(run_id=run_id, outcome=outcome)
+    return run
+
+
 # ---- resume: durable resume after restart (the load-bearing exit criterion) ----
 
 
@@ -513,3 +525,54 @@ async def test_rewind_refuses_once_the_run_is_already_terminal() -> None:
 
     with pytest.raises(WorkflowError):
         await orch.rewind(run_id=run.run_id, to_node="research", reason="x")
+
+
+# ---- authorize_final_release: final-release-authorization responsibility ----
+
+
+@pytest.mark.asyncio
+async def test_authorize_final_release_is_true_for_a_completed_run_with_no_open_review() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    run = await _completed_run(orch, run.run_id)
+    assert run.node == "complete"
+
+    assert await orch.authorize_final_release(run_id=run.run_id) is True
+
+
+@pytest.mark.asyncio
+async def test_authorize_final_release_is_false_for_a_run_still_in_progress() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+
+    assert await orch.authorize_final_release(run_id=run.run_id) is False
+
+
+@pytest.mark.asyncio
+async def test_authorize_final_release_is_false_while_a_human_review_request_is_open() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    run = await _completed_run(orch, run.run_id)
+    # Simulate a request that outlived the run reaching complete (e.g. a
+    # concurrent escalation) directly on the store, since request_human_review
+    # itself refuses to open one on an already-terminal run.
+    from phi_core.control.records import HumanReviewRequest
+    stray = HumanReviewRequest(
+        run_id=run.run_id, session_id=SESSION_ID, workflow_version="wf/1",
+        task_id="", node="human_review_decisions", state="open",
+    )
+    await store.insert("human_review_requests", stray)
+
+    assert await orch.authorize_final_release(run_id=run.run_id) is False
+
+
+@pytest.mark.asyncio
+async def test_authorize_final_release_is_true_for_partially_complete() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    outcomes = ["ok", "ok", "ok", "ok", "proceed", "ok", "ok", "ok", "clean", "ok", "ok", "ok", "partially_complete"]
+    for outcome in outcomes:
+        run = await orch.advance(run_id=run.run_id, outcome=outcome)
+    assert run.node == "partially_complete"
+
+    assert await orch.authorize_final_release(run_id=run.run_id) is True
