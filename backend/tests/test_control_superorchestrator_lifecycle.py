@@ -403,3 +403,54 @@ async def test_authorize_manifest_freeze_refuses_while_awaiting_human_review() -
 
     with pytest.raises(WorkflowError):
         await orch.authorize_manifest_freeze(run_id=run.run_id, artifact_id="artifact-1", manifest=manifest)
+
+
+# ---- authorize_execution: execution-authorization responsibility ----
+#
+# No live caller submits an ExecutionTask through a governed path yet
+# (Executor's real wiring through this gate is a later phase's job) --
+# this hook covers exactly the checks that ARE exercisable today: the
+# task's own run_id must match, and the run must be in an executable
+# lifecycle state (not terminal, not paused for human review).
+
+
+@pytest.mark.asyncio
+async def test_authorize_execution_allows_a_matching_task_on_a_running_run() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    task = ExecutionTask(run_id=run.run_id, manifest_id="m1")
+
+    assert await orch.authorize_execution(run_id=run.run_id, task=task) is True
+
+
+@pytest.mark.asyncio
+async def test_authorize_execution_refuses_a_task_from_another_run() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    task = ExecutionTask(run_id="some-other-run", manifest_id="m1")
+
+    assert await orch.authorize_execution(run_id=run.run_id, task=task) is False
+
+
+@pytest.mark.asyncio
+async def test_authorize_execution_refuses_once_the_run_is_terminal() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    outcomes = ["ok", "ok", "ok", "ok", "proceed", "ok", "ok", "ok", "clean", "ok", "ok", "ok", "complete"]
+    for outcome in outcomes:
+        run = await orch.advance(run_id=run.run_id, outcome=outcome)
+    task = ExecutionTask(run_id=run.run_id, manifest_id="m1")
+
+    assert await orch.authorize_execution(run_id=run.run_id, task=task) is False
+
+
+@pytest.mark.asyncio
+async def test_authorize_execution_refuses_while_awaiting_human_review() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    await orch.request_human_review(
+        run_id=run.run_id, node="human_review_decisions", reason_codes=[], decision_version=1,
+    )
+    task = ExecutionTask(run_id=run.run_id, manifest_id="m1")
+
+    assert await orch.authorize_execution(run_id=run.run_id, task=task) is False
