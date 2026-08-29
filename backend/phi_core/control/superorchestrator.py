@@ -46,6 +46,7 @@ from .context import StoreTraceWriter
 from .policy import MANIFESTS, POLICY_VERSION, CapabilityDenied, _bounded_budget
 from .records import (
     CapabilityGrant,
+    ExecutionTask,
     HandoffResult,
     HumanReviewEvent,
     HumanReviewRequest,
@@ -838,6 +839,30 @@ class SuperOrchestrator:
         else:
             await self._store.replace_one(MANIFEST_COLLECTION, {"artifact_id": artifact_id}, document)
         return manifest
+
+    # ---- authorize_execution ---------------------------------------------
+
+    async def authorize_execution(self, *, run_id: str, task: ExecutionTask) -> bool:
+        """The execution-authorization responsibility (D9/docs #50, #87):
+        the gate a caller consults before an :class:`~.records.ExecutionTask`
+        may actually run.
+
+        Forward-compatible hook: no live caller submits an
+        ``ExecutionTask`` through a governed path yet (Executor's real
+        wiring through this gate is a later phase's job -- see this
+        wave's report), so this method's contract stays deliberately
+        narrow to what is exercisable today with what already exists:
+        the task's own ``run_id`` must match ``run_id``, and the run must
+        be in an executable lifecycle state (not terminal, not paused for
+        human review). Returns ``False`` rather than raising, matching
+        ``accept_result``'s "a caller checks the boolean" contract, since
+        an authorization query is not itself an error condition."""
+        if task.run_id != run_id:
+            return False
+        run = await self._load_run(run_id)
+        if is_terminal(run.node) or run.state == "awaiting_human_review":
+            return False
+        return True
 
     # ---- authorize_publication ---------------------------------------------
 
