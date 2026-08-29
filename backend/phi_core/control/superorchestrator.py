@@ -609,6 +609,65 @@ class SuperOrchestrator:
             raise WorkflowError(f"lost the race recovering run_id={run_id!r}")
         return updated
 
+    # ---- resume ---------------------------------------------------------
+
+    async def resume(self, *, run_id: str) -> dict[str, Any]:
+        """The sole authority for what a process restart should do next
+        for ``run_id`` (D9/docs #87 "Manager can safely resume supported
+        states after process restart").
+
+        ``recover`` alone only re-enters the run's checkpoint node -- it
+        never touches ``work_items``. A restarted process's former
+        workers are gone, and a sandboxed ``run_isolated`` dispatch keeps
+        no independent durable record of its own (``control/sandbox.py``'s
+        ``SandboxRecord`` lives only in the caller's in-memory
+        ``ActivationFactory._sandboxes``, never in ``ControlStore``): the
+        only durable trace that a worker -- sandboxed or not -- was
+        mid-task is the ``WorkItem`` lease it held. ``TaskService
+        .reconcile_leases`` is this codebase's existing, sole authority
+        for what an expired lease means next: return it to ``ready`` for
+        retry while attempts remain, or fail it once ``max_attempts`` is
+        reached. There is no channel to recover a dead sandboxed child's
+        actual result once its result queue is gone with it, so "mark for
+        retry" (never "guess it completed") is the only fail-closed
+        choice available, and it is that lease-based mechanism, not an
+        invented sandbox-specific one, that resume() calls into.
+
+        Never re-dispatches a task itself -- claiming and running work is
+        ``control/worker.py``'s job, out of this class's scope. Returns a
+        read/plan summary a caller acts on.
+        """
+        run = await self.recover(run_id=run_id, cause="process_restart")
+        reconciled = await self._tasks.reconcile_leases(run_id=run_id)
+        tasks = await self._store.find_many("work_items", {"run_id": run_id})
+        live_task_ids = sorted(
+            t["task_id"] for t in tasks if t.get("state") not in _TERMINAL_TASK_STATES
+        )
+        return {
+            "run_id": run.run_id,
+            "node": run.node,
+            "state": run.state,
+            "is_terminal": is_terminal(run.node),
+            "reconciled_task_ids": sorted(item.task_id for item in reconciled),
+            "retried_task_ids": sorted(item.task_id for item in reconciled if item.state == "ready"),
+            "retry_failed_task_ids": sorted(item.task_id for item in reconciled if item.state == "failed"),
+            "live_task_ids": live_task_ids,
+        }
+
+    # ---- dependencies_satisfied -------------------------------------------
+
+    async def dependencies_satisfied(self, *, run_id: str, task_id: str) -> bool:
+        """The dependency-state responsibility (D9/docs #87): whether
+        every direct child ``task_id`` dispatched via ``create_child_work``
+        has reached a terminal ``TaskState``. A parent task's own next
+        step is blocked exactly while this is ``False`` -- callers that
+        need to know whether a task can proceed past its fan-out consult
+        this rather than re-deriving live-sibling logic themselves."""
+        children = await self._store.find_many(
+            "work_items", {"run_id": run_id, "parent_task_id": task_id}
+        )
+        return all(child.get("state") in _TERMINAL_TASK_STATES for child in children)
+
     # ---- authorize_publication ---------------------------------------------
 
     async def authorize_publication(
