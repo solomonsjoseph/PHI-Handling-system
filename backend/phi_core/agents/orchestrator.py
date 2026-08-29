@@ -24,7 +24,7 @@ import hashlib
 import json
 import time
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -37,7 +37,7 @@ from ..security import scrub_decision, scrub_persisted_text
 from .base import ITERATION_CAP, AgentMessage
 from .experts import Praxis, Statute
 from .llm import LlmConfig
-from .manager import Manager
+from .manager import ExecutionHealthSupervisor
 from .operator import Operator
 from .outward import Herald, Ledger, Scout
 from .reasoning import (
@@ -128,7 +128,7 @@ async def _escalate_to_human_review(
     reasons_plain: list[str], close_last_phase: Callable[[], Awaitable[None]],
     phase_timings: dict[str, Any], run_elapsed_s: float,
     approved_decisions: list[dict[str, Any]], sentinel_report: dict[str, Any] | None,
-    manager: Manager, store: "ControlStore | None", run_id: str, node: str,
+    manager: ExecutionHealthSupervisor, store: "ControlStore | None", run_id: str, node: str,
     audit_version: str = "",
 ) -> dict[str, Any]:
     """The single path by which a run becomes 'awaiting_human_review' (D10).
@@ -209,7 +209,7 @@ async def execute_decisions(
     make_ctx: Callable[[str], Awaitable[AgentContext]],
     make_child_ctx: Callable[[str, str], Awaitable[AgentContext]],
     complete_and_accept: Callable[[AgentContext, dict[str, Any]], Awaitable[bool]],
-    manager: Manager,
+    manager: ExecutionHealthSupervisor,
     on_phase: PhaseCb,
     close_last_phase: Callable[[], Awaitable[None]],
     phase_timings: dict[str, dict[str, float]],
@@ -577,104 +577,177 @@ async def execute_decisions(
     return result
 
 
-async def run_pipeline(
-    session: dict[str, Any],
-    db: AsyncIOMotorDatabase,
-    llm_cfg: LlmConfig,
-    emit: Callable[[AgentMessage], Awaitable[None]],
-    on_phase: PhaseCb,
-    run_id: str | None = None,
-    control_store: "ControlStore | None" = None,
-    root_task_id: str | None = None,
-) -> dict[str, Any]:
-    from phi_core.control.gates import DecisionGateFailure, run_decision_gates
+class _PipelineDriverState:
+    """Mutable state shared across one ``run_pipeline`` invocation's
+    registry-dispatched node handlers (Wave 4b, docs #87).
 
-    sid = session["id"]
-    session_filter = {"id": sid}
-    if run_id is not None:
-        session_filter["_pipeline_run_id"] = run_id
+    Replaces the closures and local variables the pre-Wave-4b
+    ``run_pipeline`` captured directly in its own function body: each
+    ``_dispatch_*`` handler below reads and writes fields here exactly
+    as that body once read and wrote its own locals. Construction has
+    no side effects -- ``_prepare_pipeline_state`` (skipped entirely
+    when a caller injects its own ``dispatch_registry``, the mechanism-
+    only test seam) does the actual ``ActivationFactory``/
+    ``ExecutionHealthSupervisor`` setup work.
+    """
+
+    def __init__(
+        self, *, session: dict[str, Any], db: AsyncIOMotorDatabase, llm_cfg: LlmConfig,
+        emit: Callable[[AgentMessage], Awaitable[None]], on_phase: PhaseCb,
+        run_id: str | None, control_store: "ControlStore | None", root_task_id: str | None,
+        sid: str, effective_run_id: str,
+    ) -> None:
+        self.session = session
+        self.db = db
+        self.llm_cfg = llm_cfg
+        self.emit = emit
+        self.on_phase = on_phase
+        self.run_id = run_id
+        self.control_store = control_store
+        self.root_task_id = root_task_id
+        self.sid = sid
+        self.effective_run_id = effective_run_id
+        self.session_filter: dict[str, Any] = {"id": sid}
+        self.files: list[dict[str, Any]] = []
+        self.dataset_files: list[dict[str, Any]] = []
+        self.form_files: list[dict[str, Any]] = []
+        self.dict_files: list[dict[str, Any]] = []
+        self.phase_timings: dict[str, dict[str, float]] = {}
+        self.run_started: float = time.perf_counter()
+        self.close_last_phase: Callable[[], Awaitable[None]] = _noop_close_last_phase
+        self.iteration_cap: int = ITERATION_CAP
+        self.factory: "ActivationFactory | None" = None
+        self.manager: "ExecutionHealthSupervisor | None" = None
+        self.make_ctx: Callable[[str], Awaitable[AgentContext]] | None = None
+        self.make_child_ctx: Callable[[str, str], Awaitable[AgentContext]] | None = None
+        self.complete_and_accept: Callable[[AgentContext, dict[str, Any]], Awaitable[bool]] | None = None
+        self.require_accepted: Callable[[AgentContext, dict[str, Any], str], Awaitable[None]] | None = None
+        self.hipaa_cats: list[str] = []
+        self.lexicon_ctx: AgentContext | None = None
+        self.schema_ctx: AgentContext | None = None
+        self.instrument_ctx: AgentContext | None = None
+        self.lexicon_agent: Any = None
+        self.schema_agent: Any = None
+        self.instrument_agent: Any = None
+        self.lex_task: Any = None
+        self.schema_task: Any = None
+        self.inst_task: Any = None
+        self.statute: dict[str, Any] = {}
+        self.praxis_methods: dict[str, Any] = {}
+        self.lexicon: dict[str, Any] = {}
+        self.schema: dict[str, Any] = {}
+        self.instrument: dict[str, Any] = {}
+        self.schema_stats: dict[str, Any] = {}
+        self.prompt_scrub_counts: dict[str, int] = {}
+        self.decisions: list[dict[str, Any]] = []
+        self.approved_decisions: list[dict[str, Any]] = []
+        self.judge_call_failures: int = 0
+        self.sentinel_call_failures: int = 0
+        self.advisory_issues: list[dict[str, Any]] = []
+        self.all_sentinel_overrides: list[dict[str, Any]] = []
+        self.all_model_output_rejections: list[dict[str, Any]] = []
+        self.manager_early_escalation: bool = False
+        self.blocking_attempts: dict[tuple[str, str], int] = {}
+        self.sentinel_report: dict[str, Any] = {}
+        self.dictionary_by_column: dict[str, str] = {}
+        self.reasons: list[str] = []
+
+
+async def _noop_close_last_phase() -> None:
+    return None
+
+
+DispatchFn = Callable[[_PipelineDriverState], Awaitable["str | dict[str, Any]"]]
+
+
+async def _prepare_pipeline_state(state: _PipelineDriverState) -> None:
+    """Populate every shared field the production ``_dispatch_*`` handlers
+    need: dataset file partitioning, phase-timing instrumentation, the
+    durable ``ActivationFactory``, and the ``ExecutionHealthSupervisor``
+    (opened with its charter) -- exactly the setup the pre-Wave-4b
+    ``run_pipeline`` did inline before its first phase. Skipped entirely
+    when a caller supplies its own ``dispatch_registry``."""
+    session = state.session
+    state.session_filter = {"id": state.sid}
+    if state.run_id is not None:
+        state.session_filter["_pipeline_run_id"] = state.run_id
     files = session.get("files", [])
-    dataset_files = [f for f in files if f["kind"] == "dataset"]
-    form_files = [f for f in files if f["kind"] == "narrative"]
-    dict_files = [f for f in files if f["kind"] == "metadata"]
+    state.files = files
+    state.dataset_files = [f for f in files if f["kind"] == "dataset"]
+    state.form_files = [f for f in files if f["kind"] == "narrative"]
+    state.dict_files = [f for f in files if f["kind"] == "metadata"]
 
-    _phase_timings: dict[str, dict[str, float]] = {}
-    _last_phase: dict[str, str | None] = {"key": None, "t0": 0.0}
-    _run_started = time.perf_counter()
-    _original_on_phase = on_phase
+    state.run_started = time.perf_counter()
+    original_on_phase = state.on_phase
+    _last_phase: dict[str, str | None | float] = {"key": None, "t0": 0.0}
 
     async def timed_on_phase(phase: str, payload: dict[str, Any]) -> None:
         now = time.perf_counter()
         prev = _last_phase["key"]
         if prev and prev not in ("cancelled", "complete", "__end__") and prev != phase:
-            row = _phase_timings.setdefault(prev, {"start_s": _last_phase["t0"] - _run_started})
-            row["end_s"] = now - _run_started
+            row = state.phase_timings.setdefault(prev, {"start_s": _last_phase["t0"] - state.run_started})
+            row["end_s"] = now - state.run_started
             row["duration_ms"] = (now - _last_phase["t0"]) * 1000
-        _phase_timings.setdefault(phase, {"start_s": now - _run_started})
+        state.phase_timings.setdefault(phase, {"start_s": now - state.run_started})
         _last_phase["key"] = phase
         _last_phase["t0"] = now
         payload = dict(payload or {})
-        payload["_elapsed_s"] = round(now - _run_started, 3)
-        await manager.note_phase(phase, now - _run_started)
-        await _original_on_phase(phase, payload)
+        payload["_elapsed_s"] = round(now - state.run_started, 3)
+        await state.manager.note_phase(phase, now - state.run_started)
+        await original_on_phase(phase, payload)
 
     async def close_last_phase() -> None:
         prev = _last_phase["key"]
         if not prev:
             return
         now = time.perf_counter()
-        row = _phase_timings.setdefault(prev, {"start_s": _last_phase["t0"] - _run_started})
-        row.setdefault("end_s", now - _run_started)
+        row = state.phase_timings.setdefault(prev, {"start_s": _last_phase["t0"] - state.run_started})
+        row.setdefault("end_s", now - state.run_started)
         row.setdefault("duration_ms", (now - _last_phase["t0"]) * 1000)
 
-    on_phase = timed_on_phase
-    iteration_cap = int(session.get("iteration_cap") or ITERATION_CAP)
-    iteration_cap = max(1, min(iteration_cap, ITERATION_CAP))
+    state.on_phase = timed_on_phase
+    state.close_last_phase = close_last_phase
 
-    factory = ActivationFactory(db, llm_cfg, store=control_store)
-    effective_run_id = run_id or session.get("_pipeline_run_id") or sid
-    _manager_box: dict[str, "Manager | None"] = {"value": None}
+    iteration_cap = int(session.get("iteration_cap") or ITERATION_CAP)
+    state.iteration_cap = max(1, min(iteration_cap, ITERATION_CAP))
+
+    state.factory = ActivationFactory(state.db, state.llm_cfg, store=state.control_store)
+    manager_box: dict[str, "ExecutionHealthSupervisor | None"] = {"value": None}
 
     async def make_ctx(agent: str) -> AgentContext:
-        if root_task_id:
-            return await factory.activate_child(
-                session_id=sid,
-                run_id=effective_run_id,
-                parent_task_id=root_task_id,
-                agent=agent,
-                emit=emit,
-                manager=_manager_box["value"],
-                lease_owner=f"pipeline:{effective_run_id}",
+        if state.root_task_id:
+            return await state.factory.activate_child(
+                session_id=state.sid, run_id=state.effective_run_id,
+                parent_task_id=state.root_task_id, agent=agent, emit=state.emit,
+                manager=manager_box["value"], lease_owner=f"pipeline:{state.effective_run_id}",
             )
-        return await factory.activate(
-            session_id=sid,
-            run_id=effective_run_id,
-            agent=agent,
-            emit=emit,
-            manager=_manager_box["value"],
-            lease_owner=f"pipeline:{effective_run_id}",
+        return await state.factory.activate(
+            session_id=state.sid, run_id=state.effective_run_id, agent=agent,
+            emit=state.emit, manager=manager_box["value"], lease_owner=f"pipeline:{state.effective_run_id}",
         )
 
     async def make_child_ctx(agent: str, parent_task_id: str) -> AgentContext:
-        return await factory.activate_child(
-            session_id=sid,
-            run_id=effective_run_id,
-            parent_task_id=parent_task_id,
-            agent=agent,
-            emit=emit,
-            manager=_manager_box["value"],
-            lease_owner=f"pipeline:{effective_run_id}",
+        return await state.factory.activate_child(
+            session_id=state.sid, run_id=state.effective_run_id, parent_task_id=parent_task_id,
+            agent=agent, emit=state.emit, manager=manager_box["value"],
+            lease_owner=f"pipeline:{state.effective_run_id}",
         )
 
     async def complete_and_accept(ctx: AgentContext, result: dict[str, Any]) -> bool:
-        return await factory.complete_and_accept(ctx, result)
+        return await state.factory.complete_and_accept(ctx, result)
 
     async def require_accepted(ctx: AgentContext, result: dict[str, Any], agent: str) -> None:
         if not await complete_and_accept(ctx, result):
             raise ResultAcceptanceError(f"{agent} result was not accepted")
 
-    manager = Manager(await make_ctx("Manager"), db=db)
-    _manager_box["value"] = manager
+    state.make_ctx = make_ctx
+    state.make_child_ctx = make_child_ctx
+    state.complete_and_accept = complete_and_accept
+    state.require_accepted = require_accepted
+
+    manager = ExecutionHealthSupervisor(await make_ctx("Manager"), db=state.db)
+    manager_box["value"] = manager
+    state.manager = manager
     manager_result = await manager.run(
         roster=["Lexicon", "Schema", "Instrument", "Statute", "Praxis", "Judge",
                 "Sentinel", "Executor", "Auditor", "Scout", "Ledger", "Herald"],
@@ -683,125 +756,146 @@ async def run_pipeline(
     )
     await require_accepted(manager.ctx, manager_result, "Manager")
 
-    # 1+2+2b. Specialists, Statute, and Praxis kicked off IN PARALLEL.
-    #
-    # Speedup rationale (Sir Q "the entire process is very slow"):
-    #  - Statute only needs the jurisdiction string from the session.
-    #  - Praxis only needs the hardcoded HIPAA category list.
-    #  - Neither reads file content, so they don't have to wait on
-    #    Lexicon/Schema/Instrument. Launching them at t=0 overlaps all
-    #    of their runtime (10 web searches on cold cache) with the
-    #    specialist file parsing.
-    await on_phase("specialists", {"agents": ["Lexicon", "Schema", "Instrument"]})
-    await on_phase("statute", {})
-    await on_phase("praxis", {})
 
-    hipaa_cats = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K",
-                  "L", "M", "N", "O", "P", "Q", "R"]
-    async def _praxis_method(category: str) -> dict[str, Any]:
-        # Praxis is called per-category via `method_for`, never `run` --
-        # `Agent.__init_subclass__`'s completion wrap only ever sees `run`,
-        # so this path completes/fails its own task explicitly, matching
-        # what that wrap does for every other agent.
-        ctx = await make_ctx("Praxis")
-        agent = Praxis(ctx)
-        try:
-            result = await agent.method_for(category)
-        except Exception as exc:
-            await agent._log("praxis.category_failed", "info",
-                              {"category": category, "error": f"{type(exc).__name__}: {exc}"})
-            if ctx.tasks is not None:
-                await ctx.tasks.fail(f"agent_crashed:{type(exc).__name__}")
-            raise
-        result = result if isinstance(result, dict) else {}
+async def _run_statute(state: _PipelineDriverState) -> dict[str, Any]:
+    ctx = await state.make_ctx("Statute")
+    agent = Statute(ctx)
+    result = await agent.run(jurisdiction=state.session.get("jurisdiction", "us"))
+    await state.require_accepted(ctx, result, "Statute")
+    return result
+
+
+async def _run_praxis_method(state: _PipelineDriverState, category: str) -> dict[str, Any]:
+    # Praxis is called per-category via `method_for`, never `run` --
+    # `Agent.__init_subclass__`'s completion wrap only ever sees `run`,
+    # so this path completes/fails its own task explicitly, matching
+    # what that wrap does for every other agent.
+    ctx = await state.make_ctx("Praxis")
+    agent = Praxis(ctx)
+    try:
+        result = await agent.method_for(category)
+    except Exception as exc:
+        await agent._log("praxis.category_failed", "info",
+                          {"category": category, "error": f"{type(exc).__name__}: {exc}"})
         if ctx.tasks is not None:
-            await ctx.tasks.complete(result)
-        await require_accepted(ctx, result, "Praxis")
-        return result
+            await ctx.tasks.fail(f"agent_crashed:{type(exc).__name__}")
+        raise
+    result = result if isinstance(result, dict) else {}
+    if ctx.tasks is not None:
+        await ctx.tasks.complete(result)
+    await state.require_accepted(ctx, result, "Praxis")
+    return result
 
-    async def _statute_run() -> dict[str, Any]:
-        ctx = await make_ctx("Statute")
-        agent = Statute(ctx)
-        result = await agent.run(jurisdiction=session.get("jurisdiction", "us"))
-        await require_accepted(ctx, result, "Statute")
-        return result
 
-    statute_task = asyncio.create_task(_statute_run())
+async def _dispatch_research(state: _PipelineDriverState) -> str:
+    """The ``research`` node: Statute + Praxis, launched alongside --
+    not serialised before -- Lexicon/Schema/Instrument. Neither Statute
+    nor Praxis reads file content, so overlapping their runtime with
+    specialist file parsing is a wall-clock optimisation the pre-Wave-4b
+    pipeline already made; this handler preserves it by creating the
+    specialist tasks here and stashing them on ``state`` for
+    ``_dispatch_specialists`` to await, even though the state machine's
+    own node order is research-then-specialists.
+    """
+    await _prepare_pipeline_state(state)
+    await state.on_phase("specialists", {"agents": ["Lexicon", "Schema", "Instrument"]})
+    await state.on_phase("statute", {})
+    await state.on_phase("praxis", {})
+
+    state.hipaa_cats = ["A", "B", "C", "D", "F", "G", "H", "I", "J", "K",
+                        "L", "M", "N", "O", "P", "Q", "R"]
+    statute_task = asyncio.create_task(_run_statute(state))
     praxis_gather_task = asyncio.gather(
-        *[_praxis_method(category) for category in hipaa_cats],
+        *[_run_praxis_method(state, category) for category in state.hipaa_cats],
         return_exceptions=True,
     )
 
-    # Specialists: independent of each other now that Schema no longer
-    # enriches its prompt from Lexicon's dictionary columns (Task 6 made
-    # Schema deterministic) -- Lexicon, Schema and Instrument all launch
-    # under one gather instead of Schema waiting on Lexicon.
-    lexicon_ctx = await make_ctx("Lexicon") if dict_files else None
-    schema_ctx = await make_ctx("Schema") if dataset_files else None
-    instrument_ctx = await make_ctx("Instrument") if form_files else None
-    lexicon_agent = Lexicon(lexicon_ctx) if lexicon_ctx else None
-    schema_agent = Schema(schema_ctx) if schema_ctx else None
-    instrument_agent = Instrument(instrument_ctx) if instrument_ctx else None
-    lex_task = lexicon_agent.run(dict_files=dict_files) if lexicon_agent else _empty({"columns": [], "notes": ""})
-    schema_task = schema_agent.run(dataset_files=dataset_files) if schema_agent else _empty({"columns": []})
-    inst_task = instrument_agent.run(form_files=form_files) if instrument_agent else _empty({"fields": []})
+    dataset_files, form_files, dict_files = state.dataset_files, state.form_files, state.dict_files
+    state.lexicon_ctx = await state.make_ctx("Lexicon") if dict_files else None
+    state.schema_ctx = await state.make_ctx("Schema") if dataset_files else None
+    state.instrument_ctx = await state.make_ctx("Instrument") if form_files else None
+    state.lexicon_agent = Lexicon(state.lexicon_ctx) if state.lexicon_ctx else None
+    state.schema_agent = Schema(state.schema_ctx) if state.schema_ctx else None
+    state.instrument_agent = Instrument(state.instrument_ctx) if state.instrument_ctx else None
+    state.lex_task = (state.lexicon_agent.run(dict_files=dict_files)
+                       if state.lexicon_agent else _empty({"columns": [], "notes": ""}))
+    state.schema_task = (state.schema_agent.run(dataset_files=dataset_files)
+                          if state.schema_agent else _empty({"columns": []}))
+    state.inst_task = (state.instrument_agent.run(form_files=form_files)
+                        if state.instrument_agent else _empty({"fields": []}))
+
+    state.statute = await statute_task
+    praxis_results = await praxis_gather_task
+    praxis_methods: dict[str, Any] = {}
+    for cat, res in zip(state.hipaa_cats, praxis_results, strict=True):
+        if isinstance(res, Exception):
+            continue
+        praxis_methods[cat] = res
+    state.praxis_methods = praxis_methods
+    return "ok"
+
+
+async def _dispatch_specialists(state: _PipelineDriverState) -> "str | dict[str, Any]":
+    """The ``specialists`` node: await the Lexicon/Schema/Instrument
+    tasks ``_dispatch_research`` already launched."""
     try:
-        lexicon, schema, instrument = await asyncio.gather(lex_task, schema_task, inst_task)
+        lexicon, schema, instrument = await asyncio.gather(state.lex_task, state.schema_task, state.inst_task)
     except UncertainHeaderCeilingExceeded as exc:
         # v3 section 7: past the per-run uncertain-header ceiling, an
         # unresolved ambiguous-header population is itself evidence the
         # review process is not keeping up for this run -- block, same
-        # "blocked" shape Publish Guard's own scan uses further down.
-        await close_last_phase()
-        manager_report = await manager.close_run("blocked")
-        await db.sessions.update_one(
-            session_filter,
+        # "blocked" shape Publish Guard's own scan uses further down. No
+        # TRANSITIONS edge models "specialists -> blocked": this
+        # short-circuit bypasses advance() entirely, exactly as the
+        # pre-Wave-4b pipeline already did.
+        await state.close_last_phase()
+        manager_report = await state.manager.close_run("blocked")
+        await state.db.sessions.update_one(
+            state.session_filter,
             {"$set": {
                 "status": "blocked",
                 "failure_class": exc.failure_class,
-                "phase_timings": _phase_timings,
-                "run_elapsed_s": round(time.perf_counter() - _run_started, 3),
+                "phase_timings": state.phase_timings,
+                "run_elapsed_s": round(time.perf_counter() - state.run_started, 3),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "manager_report": manager_report,
             }},
         )
-        cleanup_session_unpacked(sid)
+        cleanup_session_unpacked(state.sid)
         return {"status": "blocked", "failure_class": exc.failure_class,
-                "detail": str(exc), "phase_timings": _phase_timings}
-    if lexicon_agent:
-        await require_accepted(lexicon_ctx, lexicon, "Lexicon")
-    if schema_agent:
-        await require_accepted(schema_ctx, schema, "Schema")
-    if instrument_agent:
-        await require_accepted(instrument_ctx, instrument, "Instrument")
-    # Deterministic guardian query broker: Manager holds the only reference
-    # to each specialist for targeted ask_schema/ask_instrument/ask_lexicon
-    # lookups, attached only when that specialist actually ran.
-    if lexicon_agent:
-        manager.attach_lexicon(lexicon_agent)
-    if schema_agent:
-        manager.attach_schema(schema_agent)
-    if instrument_agent:
-        manager.attach_instrument(instrument_agent)
+                "detail": str(exc), "phase_timings": state.phase_timings}
+    if state.lexicon_agent:
+        await state.require_accepted(state.lexicon_ctx, lexicon, "Lexicon")
+    if state.schema_agent:
+        await state.require_accepted(state.schema_ctx, schema, "Schema")
+    if state.instrument_agent:
+        await state.require_accepted(state.instrument_ctx, instrument, "Instrument")
+    # Deterministic guardian query broker: the ExecutionHealthSupervisor
+    # holds the only reference to each specialist for targeted
+    # ask_schema/ask_instrument/ask_lexicon lookups, attached only when
+    # that specialist actually ran.
+    if state.lexicon_agent:
+        state.manager.attach_lexicon(state.lexicon_agent)
+    if state.schema_agent:
+        state.manager.attach_schema(state.schema_agent)
+    if state.instrument_agent:
+        state.manager.attach_instrument(state.instrument_agent)
     # Carried forward for the site/facility cardinality rule. Fakes/mocks
     # in tests never set `_stats`, so default to empty rather than assume
     # a real Schema instance ran.
-    schema_stats = getattr(schema_agent, "_stats", {}) if schema_agent else {}
-    prompt_scrub_counts = {
-        "lexicon": lexicon_agent.scrub_count if lexicon_agent else 0,
-        "instrument": instrument_agent.scrub_count if instrument_agent else 0,
+    state.schema_stats = getattr(state.schema_agent, "_stats", {}) if state.schema_agent else {}
+    state.prompt_scrub_counts = {
+        "lexicon": state.lexicon_agent.scrub_count if state.lexicon_agent else 0,
+        "instrument": state.instrument_agent.scrub_count if state.instrument_agent else 0,
     }
+    state.lexicon, state.schema, state.instrument = lexicon, schema, instrument
+    return "ok"
 
-    # Now await the parallel experts.
-    statute = await statute_task
-    praxis_results = await praxis_gather_task
-    praxis_methods: dict[str, Any] = {}
-    for cat, res in zip(hipaa_cats, praxis_results, strict=True):
-        if isinstance(res, Exception):
-            continue
-        praxis_methods[cat] = res
 
-    # 3. Judge <-> Sentinel loop -- short-circuits on 0 blocking issues.
+async def _dispatch_decide(state: _PipelineDriverState) -> str:
+    """The ``decide`` node: the Judge <-> Sentinel loop (short-circuits
+    on 0 blocking issues; capped at ``state.iteration_cap``, floored at
+    ``BLOCKING_ISSUE_FLOOR``)."""
     judge_call_failures = 0
     sentinel_call_failures = 0
     last_judge_message_id: str | None = None
@@ -815,27 +909,23 @@ async def run_pipeline(
     # Anti-loop rule: (file_id, column) -> action that Sentinel rejected as
     # blocking in a prior iteration. If Judge's revision proposes the exact
     # same action again, it isn't a real revision -- escalate immediately
-    # instead of burning another iteration on a repeated proposal. Praxis
-    # multi-method scoring can later refine this to (action, method) so a
-    # differently-keyed hash doesn't get treated as a repeat.
+    # instead of burning another iteration on a repeated proposal.
     prior_blocking_actions: dict[tuple[str, str], dict[str, Any]] = {}
-    # Blocking-issue floor (Task 19/20): a dedicated per-column counter,
-    # independent of iteration_cap, that forces human_review once Sentinel
-    # has raised 'blocking' on a column BLOCKING_ISSUE_FLOOR times. This
-    # keeps a low rigor setting from letting a genuinely contested column
-    # ship without review -- the loop runs up to max_iterations even when
-    # iteration_cap is lower, but never further than Thorough already did.
+    # Blocking-issue floor: a dedicated per-column counter, independent of
+    # iteration_cap, that forces human_review once Sentinel has raised
+    # 'blocking' on a column BLOCKING_ISSUE_FLOOR times.
     blocking_attempts: dict[tuple[str, str], int] = {}
-    max_iterations = max(iteration_cap, BLOCKING_ISSUE_FLOOR)
+    max_iterations = max(state.iteration_cap, BLOCKING_ISSUE_FLOOR)
+    s: dict[str, Any] = {}
     for iteration in range(1, max_iterations + 1):
-        await _check_cancel(db, sid, on_phase)
-        await on_phase(f"judge_iter_{iteration}", {"iteration": iteration})
-        judge_ctx = await make_ctx("Judge")
+        await _check_cancel(state.db, state.sid, state.on_phase)
+        await state.on_phase(f"judge_iter_{iteration}", {"iteration": iteration})
+        judge_ctx = await state.make_ctx("Judge")
         judge = Judge(judge_ctx)
-        j = await judge.run(schema=schema, instrument=instrument, lexicon=lexicon,
-                            statute=statute, praxis=praxis_methods,
+        j = await judge.run(schema=state.schema, instrument=state.instrument, lexicon=state.lexicon,
+                            statute=state.statute, praxis=state.praxis_methods,
                             prior_feedback=prior_feedback)
-        await require_accepted(judge_ctx, j, "Judge")
+        await state.require_accepted(judge_ctx, j, "Judge")
         judge_call_failures += judge.call_failures
         last_judge_message_id = judge.last_message_id
         decisions = j.get("decisions", [])
@@ -845,36 +935,25 @@ async def run_pipeline(
         decisions, rejections = validate_decisions(decisions)
         all_model_output_rejections.extend(rejections)
         # Sentinel deterministic hard-rules: force known direct identifiers off
-        # 'human_review' before invoking the LLM Sentinel. Closes the accuracy
-        # gap where Judge routes obvious PHI to human review out of caution.
+        # 'human_review' before invoking the LLM Sentinel.
         decisions, overrides = apply_sentinel_hard_rules(decisions)
         if overrides:
             all_sentinel_overrides.extend(overrides)
-            await on_phase(f"sentinel_hard_rules_iter_{iteration}",
-                           {"iteration": iteration, "overrides": overrides})
-        # Cross-column rule: a retained age column means DOB must be dropped,
-        # not transformed. Deterministic, so it runs before Sentinel rather
-        # than relying on the LLM to catch it and spend an iteration.
+            await state.on_phase(f"sentinel_hard_rules_iter_{iteration}",
+                                 {"iteration": iteration, "overrides": overrides})
+        # Cross-column rule: a retained age column means DOB must be dropped.
         decisions, age_dob_overrides = apply_age_dob_rule(decisions)
         if age_dob_overrides:
             all_sentinel_overrides.extend(age_dob_overrides)
-            await on_phase(f"age_dob_rule_iter_{iteration}",
-                           {"iteration": iteration, "overrides": age_dob_overrides})
-        # Site/facility cardinality rule (Task 22, Sentinel plan item 4): a
-        # confidently wrong 'keep' on a low-cardinality site or facility
-        # column passes both the confidence floor and Sentinel's LLM
-        # judgment, because the risk is knowable from the column's shape,
-        # not from Judge's confidence score. Schema-driven and
-        # deterministic, so it runs before the anti-loop check and before
-        # Sentinel ever sees the column.
-        decisions, cardinality_overrides = apply_site_cardinality_rule(decisions, schema_stats)
+            await state.on_phase(f"age_dob_rule_iter_{iteration}",
+                                 {"iteration": iteration, "overrides": age_dob_overrides})
+        # Site/facility cardinality rule: deterministic, so it runs before
+        # the anti-loop check and before Sentinel ever sees the column.
+        decisions, cardinality_overrides = apply_site_cardinality_rule(decisions, state.schema_stats)
         if cardinality_overrides:
             all_sentinel_overrides.extend(cardinality_overrides)
-            await on_phase(f"site_cardinality_iter_{iteration}",
-                           {"iteration": iteration, "overrides": cardinality_overrides})
-        # Anti-loop: a decision repeating a previously-rejected action isn't
-        # a real revision. Force it straight to human review rather than
-        # resubmitting it to Sentinel for the same rejection.
+            await state.on_phase(f"site_cardinality_iter_{iteration}",
+                                 {"iteration": iteration, "overrides": cardinality_overrides})
         anti_loop_forced: list[dict[str, Any]] = []
         if prior_blocking_actions:
             forced_decisions = []
@@ -885,11 +964,6 @@ async def run_pipeline(
                     forced = dict(d)
                     forced.update(
                         action="human_review",
-                        # Fixed, compile-time prefix `_escalation_reason_phrase`
-                        # (reasoning.py) matches on to classify this as an
-                        # anti-loop escalation in the plain-English reviewer
-                        # prompt. The free text after the colon is never read
-                        # by that classifier and never surfaces to a reviewer.
                         reason=(
                             f"Anti-loop: Judge repeated the previously-rejected "
                             f"action {prior.get('action')!r} without a substantive "
@@ -913,42 +987,33 @@ async def run_pipeline(
                     forced_decisions.append(d)
             decisions = forced_decisions
             if anti_loop_forced:
-                await on_phase(f"anti_loop_iter_{iteration}",
-                               {"iteration": iteration, "forced": anti_loop_forced})
-        # Confidence floor: below 0.80 always goes to human review, whether
-        # or not Sentinel would agree with it. Deterministic, so it runs
-        # before the LLM review rather than costing a review call on a
-        # decision that is going to human review regardless.
+                await state.on_phase(f"anti_loop_iter_{iteration}",
+                                     {"iteration": iteration, "forced": anti_loop_forced})
+        # Confidence floor: below 0.80 always goes to human review.
         decisions, floor_overrides = apply_confidence_floor(decisions)
         if floor_overrides:
             all_sentinel_overrides.extend(floor_overrides)
-            await on_phase(f"confidence_floor_iter_{iteration}",
-                           {"iteration": iteration, "overrides": floor_overrides})
-        await _check_cancel(db, sid, on_phase)
-        await on_phase(f"sentinel_iter_{iteration}", {"iteration": iteration, "decision_count": len(decisions)})
-        sentinel_ctx = await make_ctx("Sentinel")
+            await state.on_phase(f"confidence_floor_iter_{iteration}",
+                                 {"iteration": iteration, "overrides": floor_overrides})
+        await _check_cancel(state.db, state.sid, state.on_phase)
+        await state.on_phase(f"sentinel_iter_{iteration}", {"iteration": iteration, "decision_count": len(decisions)})
+        sentinel_ctx = await state.make_ctx("Sentinel")
         sentinel = Sentinel(sentinel_ctx)
-        s = await sentinel.run(decisions=decisions, statute=statute, instrument=instrument,
+        s = await sentinel.run(decisions=decisions, statute=state.statute, instrument=state.instrument,
                                parent_id=last_judge_message_id)
-        await require_accepted(sentinel_ctx, s, "Sentinel")
+        await state.require_accepted(sentinel_ctx, s, "Sentinel")
         sentinel_call_failures += sentinel.call_failures
         # Sentinel-originated escalation: genuine ambiguity Sentinel can't
-        # correct itself. Applied immediately -- these columns skip the
-        # remaining Judge iterations rather than looping.
+        # correct itself. Applied immediately.
         escalations = _escalation_issues(s)
         if escalations:
             decisions, escalation_overrides = apply_sentinel_escalations(decisions, escalations)
             if escalation_overrides:
                 all_sentinel_overrides.extend(escalation_overrides)
-                await on_phase(f"sentinel_escalation_iter_{iteration}",
-                               {"iteration": iteration, "overrides": escalation_overrides})
+                await state.on_phase(f"sentinel_escalation_iter_{iteration}",
+                                     {"iteration": iteration, "overrides": escalation_overrides})
         blocking = _blocking_issues(s)
-        # Record this iteration's blocking columns/actions so the next
-        # iteration's anti-loop check can compare against them.
         blocking_by_column = {(b.get("file_id"), b.get("column")): b for b in blocking if b.get("column")}
-        # Blocking-issue floor: increment the per-column counter for every
-        # column Sentinel raised 'blocking' on this iteration, independent
-        # of iteration_cap.
         for key in blocking_by_column:
             blocking_attempts[key] = blocking_attempts.get(key, 0) + 1
         for d in decisions:
@@ -959,47 +1024,35 @@ async def run_pipeline(
                     "issue_text": blocking_by_column[key].get("problem") or "",
                 }
         # Every advisory issue stays in the audit trail even after early
-        # approval (Sir Q1: 'nitpicks logged where required').
+        # approval.
         advisory_issues.extend(
             i for i in (s.get("issues") or [])
             if str(i.get("severity", "")).lower() == "advisory"
         )
-        # A column at the floor never gets a fourth Judge iteration: force
-        # it to human_review now, before the next iteration's Judge call.
+        # A column at the floor never gets a fourth Judge iteration.
         decisions, blocking_floor_overrides = apply_blocking_floor(decisions, blocking_attempts)
         if blocking_floor_overrides:
             all_sentinel_overrides.extend(blocking_floor_overrides)
-            await on_phase(f"blocking_floor_iter_{iteration}",
-                           {"iteration": iteration, "overrides": blocking_floor_overrides})
+            await state.on_phase(f"blocking_floor_iter_{iteration}",
+                                 {"iteration": iteration, "overrides": blocking_floor_overrides})
         approved_decisions = decisions
         if not blocking:
-            # Sir Q1: iterate only when required. No blocking issues means
-            # Sentinel has nothing PHI-critical to complain about, so we
-            # approve and skip the remaining iterations.
-            await on_phase(f"sentinel_short_circuit_iter_{iteration}",
-                           {"iteration": iteration,
-                            "advisory_issues": len(advisory_issues)})
+            # Iterate only when required. No blocking issues means Sentinel
+            # has nothing PHI-critical to complain about.
+            await state.on_phase(f"sentinel_short_circuit_iter_{iteration}",
+                                 {"iteration": iteration,
+                                  "advisory_issues": len(advisory_issues)})
             s["verdict"] = "approved"
             break
-        if blocking_by_column and iteration >= iteration_cap and all(
+        if blocking_by_column and iteration >= state.iteration_cap and all(
             blocking_attempts.get(key, 0) >= BLOCKING_ISSUE_FLOOR for key in blocking_by_column
         ):
-            # Every still-blocking column has already been forced to
-            # human_review by apply_blocking_floor above -- the cap is
-            # passed and the floor is satisfied, so looping further would
-            # only re-litigate columns already settled. `blocking_by_column`
-            # must be non-empty here: `all()` over an empty generator is
-            # vacuously True, which would let a malformed Sentinel reply
-            # (blocking issues with no `column` key, so nothing was ever
-            # tracked toward the floor) short-circuit the loop after a
-            # single iteration under a low iteration_cap, well before any
-            # column actually earned three tries.
             break
         prior_feedback = _summarise_issues(blocking)
         if iteration < max_iterations:
-            advice = await manager.consult(
+            advice = await state.manager.consult(
                 agent_name="Judge", phase=f"judge_sentinel_iter_{iteration}",
-                signal={"iteration": iteration, "iteration_cap": iteration_cap,
+                signal={"iteration": iteration, "iteration_cap": state.iteration_cap,
                         "blocking_count": len(blocking),
                         "advisory_count": len(advisory_issues),
                         "decision_count": len(decisions),
@@ -1009,71 +1062,69 @@ async def run_pipeline(
                 manager_early_escalation = True
                 break
 
-    llm_failures = {
-        "judge": judge_call_failures,
-        "sentinel": sentinel_call_failures,
-        "empty_decisions": not decisions,
-    }
+    state.decisions = decisions
+    state.approved_decisions = approved_decisions if approved_decisions else []
+    state.judge_call_failures = judge_call_failures
+    state.sentinel_call_failures = sentinel_call_failures
+    state.advisory_issues = advisory_issues
+    state.all_sentinel_overrides = all_sentinel_overrides
+    state.all_model_output_rejections = all_model_output_rejections
+    state.manager_early_escalation = manager_early_escalation
+    state.blocking_attempts = blocking_attempts
+    state.sentinel_report = s
+    return "ok"
 
-    if not approved_decisions:
-        approved_decisions = []
-    # SEC-006: scrub any PHI substrings the LLM may have echoed into the
-    # `reason`/`citation` fields before we persist. The audit found a real
-    # patient name in a stored decision reason on the live deployment.
-    approved_decisions = [scrub_decision(d) for d in approved_decisions]
+
+async def _dispatch_gate_decisions(state: _PipelineDriverState) -> str:
+    """The ``gate_decisions`` node: the D11 gate sequence's final,
+    authoritative pass over whatever the Judge/Sentinel loop converged
+    on, then the human-review-required computation. Returns
+    ``"proceed"`` or ``"human_review_needed"`` -- both modeled
+    ``TRANSITIONS`` outcomes from this node. ``run_decision_gates``
+    raising ``DecisionGateFailure`` (the unmodeled ``"coverage_failed"``
+    edge) propagates as an exception exactly as the pre-Wave-4b pipeline
+    already did -- a disclosed, forward-compatible gap; teaching
+    ``run_decision_gates`` to report a clean outcome instead of raising
+    would change a contract this wave does not own.
+    """
+    from phi_core.control.gates import DecisionGateFailure, run_decision_gates
+
+    approved_decisions = [scrub_decision(d) for d in state.approved_decisions]
     dictionary_by_column = {c.get("name"): c.get("description", "")
-                            for c in lexicon.get("columns", []) if c.get("name")}
-    # Final, authoritative decision-mutation event before this decision set
-    # is allowed anywhere near Executor: the full canonical D11 gate
-    # sequence, re-run one last time over whatever the Judge/Sentinel loop
-    # converged on. Every gate above already ran per-iteration for cost
-    # reasons (Sentinel review is a paid call, so cheap deterministic
-    # gates run before it); this pass is idempotent over already-settled
-    # decisions and its only NEW contribution is `assert_exact_coverage`,
-    # the fail-closed proof that Executor must never receive a duplicate,
-    # missing, or invented decision.
+                            for c in state.lexicon.get("columns", []) if c.get("name")}
+    # A fresh real activation, not a captured ctx: a test double can (and
+    # does) stand in for `Judge` without retaining `.ctx`, and this stamp
+    # is bookkeeping only -- `run_decision_gates` never calls the gateway
+    # this context carries.
     gate_outcome = await run_decision_gates(
         decisions=approved_decisions,
-        files=dataset_files,
-        statute=statute,
-        instrument=instrument,
-        schema_stats=schema_stats,
-        jurisdiction=session.get("jurisdiction", "us"),
-        blocking_attempts=blocking_attempts,
-        sentinel_report=s if isinstance(s, dict) else None,
+        files=state.dataset_files,
+        statute=state.statute,
+        instrument=state.instrument,
+        schema_stats=state.schema_stats,
+        jurisdiction=state.session.get("jurisdiction", "us"),
+        blocking_attempts=state.blocking_attempts,
+        sentinel_report=state.sentinel_report if isinstance(state.sentinel_report, dict) else None,
         stage="orchestrator.final_decision",
-        # A fresh real activation, not `judge.ctx`: a test double can
-        # (and does) stand in for `Judge` without retaining `.ctx`, and
-        # this stamp is bookkeeping only -- `run_decision_gates` never
-        # calls the gateway this context carries. Deliberately calls
-        # `factory.activate` directly rather than `make_ctx` (which would
-        # otherwise route it through `activate_child` under the root
-        # Pipeline task): this stamp has no root task to be a child of
-        # and is intentionally out of scope for the D5 child-of-root
-        # wiring in this step.
-        ctx=await factory.activate(
-            session_id=sid,
-            run_id=effective_run_id,
-            agent="Judge",
-            emit=emit,
-            manager=_manager_box["value"],
-            lease_owner=f"pipeline:{effective_run_id}",
+        ctx=await state.factory.activate(
+            session_id=state.sid, run_id=state.effective_run_id, agent="Judge",
+            emit=state.emit, manager=state.manager, lease_owner=f"pipeline:{state.effective_run_id}",
         ),
     )
     for gate_result in gate_outcome.gate_results:
-        await factory.store.insert("gate_results", gate_result)
+        await state.factory.store.insert("gate_results", gate_result)
     if gate_outcome.overrides:
-        all_sentinel_overrides.extend(gate_outcome.overrides)
+        state.all_sentinel_overrides.extend(gate_outcome.overrides)
     keep_demotions = gate_outcome.demotions
     if keep_demotions:
-        await on_phase("keep_verification", {"demotions": keep_demotions})
+        await state.on_phase("keep_verification", {"demotions": keep_demotions})
     # Re-annotate with the real lexicon-derived dictionary: the gate
-    # sequence's own internal annotate_pending_review pass has no
-    # dictionary context, so this overwrite is purely additive (same
-    # action/confidence/coverage, richer reviewer_prompt text).
+    # sequence's own internal pass has no dictionary context, so this
+    # overwrite is purely additive.
     approved_decisions = annotate_pending_review(gate_outcome.decisions, dictionary_by_column)
     if not gate_outcome.ok:
         raise DecisionGateFailure(gate_outcome)
+    s = state.sentinel_report
     if isinstance(s, dict):
         s = dict(s)
         if isinstance(s.get("issues"), list):
@@ -1083,70 +1134,188 @@ async def run_pipeline(
                 s[k] = scrub_persisted_text(s[k])
     # Human review is required when a decision routes to human_review, an
     # agent exhausted supervised retries, Sentinel still has unresolved
-    # BLOCKING issues after the iteration cap, or the Manager advises early
-    # escalation because the Judge/Sentinel loop is not converging.
+    # BLOCKING issues after the iteration cap, or the ExecutionHealthSupervisor
+    # advises early escalation because the Judge/Sentinel loop is not
+    # converging.
     reasons: list[str] = []
     human_needed = any(d.get("action") == "human_review" for d in approved_decisions)
     if human_needed:
         reasons.append("decision_routed_human_review")
-    if judge_call_failures or sentinel_call_failures or not decisions:
+    if state.judge_call_failures or state.sentinel_call_failures or not state.decisions:
         human_needed = True
-        if judge_call_failures:
+        if state.judge_call_failures:
             reasons.append("judge_call_failure")
-        if sentinel_call_failures:
+        if state.sentinel_call_failures:
             reasons.append("sentinel_call_failure")
-        if not decisions:
+        if not state.decisions:
             reasons.append("empty_decisions")
     if _blocking_issues(s):
         human_needed = True
         reasons.append("sentinel_blocking_after_cap")
-        await on_phase("human_review_required",
-                       {"reason": "sentinel still has blocking issues after cap",
-                        "blocking_count": len(_blocking_issues(s))})
-    if manager_early_escalation:
+        await state.on_phase("human_review_required",
+                             {"reason": "sentinel still has blocking issues after cap",
+                              "blocking_count": len(_blocking_issues(s))})
+    if state.manager_early_escalation:
         human_needed = True
         reasons.append("manager_advisory_early_escalation")
 
-    # 4. Human review gate (persist and pause if needed)
-    await db.sessions.update_one(
-        session_filter,
+    await state.db.sessions.update_one(
+        state.session_filter,
         {"$set": {
             "agent_decisions": approved_decisions,
             "agent_sentinel_last": s,
-            "agent_statute": statute,
-            "agent_specialists": {"schema": schema, "instrument": instrument, "lexicon": lexicon},
-            "agent_praxis": praxis_methods,
-            "sentinel_overrides": all_sentinel_overrides,
+            "agent_statute": state.statute,
+            "agent_specialists": {"schema": state.schema, "instrument": state.instrument, "lexicon": state.lexicon},
+            "agent_praxis": state.praxis_methods,
+            "sentinel_overrides": state.all_sentinel_overrides,
             "keep_demotions": keep_demotions,
-            "prompt_scrub_counts": prompt_scrub_counts,
-            "llm_failures": llm_failures,
-            "model_output_rejections": all_model_output_rejections,
+            "prompt_scrub_counts": state.prompt_scrub_counts,
+            "llm_failures": {
+                "judge": state.judge_call_failures,
+                "sentinel": state.sentinel_call_failures,
+                "empty_decisions": not state.decisions,
+            },
+            "model_output_rejections": state.all_model_output_rejections,
             "human_review_required": human_needed,
         }},
     )
-    if human_needed:
-        return await _escalate_to_human_review(
-            db=db, session_filter=session_filter, reasons=reasons,
-            reasons_plain=plain_human_review_reasons(reasons),
-            close_last_phase=close_last_phase, phase_timings=_phase_timings,
-            run_elapsed_s=time.perf_counter() - _run_started,
-            approved_decisions=approved_decisions, sentinel_report=s,
-            manager=manager, store=control_store, run_id=effective_run_id,
-            node="human_review_decisions")
+    state.approved_decisions = approved_decisions
+    state.sentinel_report = s
+    state.dictionary_by_column = dictionary_by_column
+    state.reasons = reasons
+    return "human_review_needed" if human_needed else "proceed"
 
+
+async def _dispatch_human_review_decisions(state: _PipelineDriverState) -> dict[str, Any]:
+    """The ``human_review_decisions`` node reached via
+    ``gate_decisions``'s ``"human_review_needed"`` outcome: persist and
+    pause. Resuming happens through a separate entry path
+    (``server.py``'s human-review-resume route calling
+    ``execute_decisions`` directly, not by continuing this same
+    ``run_pipeline`` invocation), so this handler always returns a
+    final dict -- there is no ``"resolved"`` outcome for this node to
+    report back into ``advance()`` from inside this call."""
+    return await _escalate_to_human_review(
+        db=state.db, session_filter=state.session_filter, reasons=state.reasons,
+        reasons_plain=plain_human_review_reasons(state.reasons),
+        close_last_phase=state.close_last_phase, phase_timings=state.phase_timings,
+        run_elapsed_s=time.perf_counter() - state.run_started,
+        approved_decisions=state.approved_decisions, sentinel_report=state.sentinel_report,
+        manager=state.manager, store=state.control_store, run_id=state.effective_run_id,
+        node="human_review_decisions")
+
+
+async def _dispatch_execute(state: _PipelineDriverState) -> dict[str, Any]:
+    """The ``execute`` node onward: delegates to ``execute_decisions``,
+    which already covers -- by its own docstring -- "Executor, Operator,
+    Reviewer, Publish Guard, Auditor/Scout, Ledger, Herald, and the
+    terminal completion write" as one unit. This registry entry's
+    granularity matches that existing, natural function boundary rather
+    than re-decomposing it onto the state machine's finer per-node
+    vocabulary (verify_operator/verify_reviewer/publish_guard/audit/
+    human_review_audit/report_ledger/report_herald/publish) -- none of
+    that internal sequencing is itself a governed agent handoff Wave 4b
+    is asked to arbitrate; it is deterministic verification chaining
+    ``execute_decisions`` already owns unchanged.
+    """
     return await execute_decisions(
-        db=db, sid=sid, session=session, session_filter=session_filter,
-        files=files, decisions=approved_decisions,
-        statute=statute, praxis_methods=praxis_methods,
-        dictionary_by_column=dictionary_by_column,
-        make_ctx=make_ctx, make_child_ctx=make_child_ctx, complete_and_accept=complete_and_accept,
-        manager=manager, on_phase=on_phase,
-        close_last_phase=close_last_phase, phase_timings=_phase_timings,
-        run_started=_run_started, sentinel_report=s,
-        extra_completion_fields={"advisory_issues": advisory_issues, "iteration_cap": iteration_cap},
-        extra_result_fields={"advisory_issues": advisory_issues, "iteration_cap": iteration_cap},
-        run_id=effective_run_id, store=control_store,
+        db=state.db, sid=state.sid, session=state.session, session_filter=state.session_filter,
+        files=state.files, decisions=state.approved_decisions,
+        statute=state.statute, praxis_methods=state.praxis_methods,
+        dictionary_by_column=state.dictionary_by_column,
+        make_ctx=state.make_ctx, make_child_ctx=state.make_child_ctx,
+        complete_and_accept=state.complete_and_accept,
+        manager=state.manager, on_phase=state.on_phase,
+        close_last_phase=state.close_last_phase, phase_timings=state.phase_timings,
+        run_started=state.run_started, sentinel_report=state.sentinel_report,
+        extra_completion_fields={"advisory_issues": state.advisory_issues, "iteration_cap": state.iteration_cap},
+        extra_result_fields={"advisory_issues": state.advisory_issues, "iteration_cap": state.iteration_cap},
+        run_id=state.effective_run_id, store=state.control_store,
     )
+
+
+_DEFAULT_DISPATCH_REGISTRY: "Mapping[str, DispatchFn]" = {
+    "research": _dispatch_research,
+    "specialists": _dispatch_specialists,
+    "decide": _dispatch_decide,
+    "gate_decisions": _dispatch_gate_decisions,
+    "human_review_decisions": _dispatch_human_review_decisions,
+    "execute": _dispatch_execute,
+}
+
+
+async def run_pipeline(
+    session: dict[str, Any],
+    db: AsyncIOMotorDatabase,
+    llm_cfg: LlmConfig,
+    emit: Callable[[AgentMessage], Awaitable[None]],
+    on_phase: PhaseCb,
+    run_id: str | None = None,
+    control_store: "ControlStore | None" = None,
+    root_task_id: str | None = None,
+    *,
+    dispatch_registry: "Mapping[str, DispatchFn] | None" = None,
+    super_orchestrator: "SuperOrchestrator | None" = None,
+) -> dict[str, Any]:
+    """Thin driver (Wave 4b, docs #87): asks
+    ``SuperOrchestrator.advance()`` for sequencing on every iteration and
+    dispatches exclusively through a registry -- never decides what runs
+    next on its own, and never constructs an agent class directly (see
+    ``tests/test_control_run_pipeline_driver.py``'s AST invariant).
+
+    ``dispatch_registry``/``super_orchestrator`` are an injectable test
+    seam: supplying either skips the production ``ActivationFactory``/
+    ``ExecutionHealthSupervisor`` setup entirely (see
+    ``_prepare_pipeline_state``), so a test can drive the mechanism
+    itself against stub node names/handlers with no production
+    infrastructure required. Every existing positional/keyword caller is
+    unaffected -- both new parameters are keyword-only and default to
+    the real registry and a freshly constructed ``SuperOrchestrator``.
+    """
+    from phi_core.control.policy import CapabilityPolicy
+    from phi_core.control.superorchestrator import SuperOrchestrator as _SuperOrchestrator
+    from phi_core.control.tasks import TaskService
+    from phi_core.control.workflow import TERMINAL_NODES
+
+    sid = session["id"]
+    effective_run_id = run_id or session.get("_pipeline_run_id") or sid
+    orchestrator = (
+        super_orchestrator if super_orchestrator is not None
+        else _SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(llm_cfg)))
+    )
+    registry: "Mapping[str, DispatchFn]" = (
+        dispatch_registry if dispatch_registry is not None else _DEFAULT_DISPATCH_REGISTRY
+    )
+
+    state = _PipelineDriverState(
+        session=session, db=db, llm_cfg=llm_cfg, emit=emit, on_phase=on_phase,
+        run_id=run_id, control_store=control_store, root_task_id=root_task_id,
+        sid=sid, effective_run_id=effective_run_id,
+    )
+
+    outcome = "ok"  # charter (session admission) is satisfied by the caller
+                    # (server.py's session_handle route) before run_pipeline
+                    # is ever invoked -- this first outcome is what carries
+                    # the run past the "charter" node's own transition.
+    while True:
+        run = await orchestrator.advance(run_id=effective_run_id, outcome=outcome)
+        node = run.node
+        # A membership check against TERMINAL_NODES, not workflow.is_terminal
+        # (which additionally validates `node` against the full NODES
+        # vocabulary and raises on anything outside it): every production
+        # `node` value already came from a real advance() call, which
+        # guarantees membership via its own next_node() validation, so this
+        # check is redundant safety there -- but the injectable
+        # dispatch_registry test seam intentionally uses node names outside
+        # that closed vocabulary (see test_control_run_pipeline_driver.py),
+        # and workflow.is_terminal would wrongly raise for those instead of
+        # just answering "not terminal, keep going".
+        if node in TERMINAL_NODES:
+            return {"status": node, "phase_timings": state.phase_timings}
+        step = await registry[node](state)
+        if isinstance(step, dict):
+            return step
+        outcome = step
 
 
 def _summarise_issues(issues: list[dict[str, Any]]) -> str:

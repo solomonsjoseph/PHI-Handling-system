@@ -481,7 +481,7 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
             return await complete_fake_task(self.ctx, {"issues": [{"column": "c", "severity": "blocking",
                                 "detail": "unresolved leak"}]})
 
-    monkeypatch.setattr(orchestrator, "Manager", FakeManager)
+    monkeypatch.setattr(orchestrator, "ExecutionHealthSupervisor", FakeManager)
     monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
@@ -624,7 +624,7 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
             await asyncio.sleep(300)  # never legitimately reached
             return {}
 
-    monkeypatch.setattr(orchestrator, "Manager", FakeManager)
+    monkeypatch.setattr(orchestrator, "ExecutionHealthSupervisor", FakeManager)
     monkeypatch.setattr(orchestrator, "Statute", FakeStatute)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "Praxis", FakePraxis)
