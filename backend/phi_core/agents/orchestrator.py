@@ -715,24 +715,23 @@ async def _prepare_pipeline_state(state: _PipelineDriverState) -> None:
     state.iteration_cap = max(1, min(iteration_cap, ITERATION_CAP))
 
     state.factory = ActivationFactory(state.db, state.llm_cfg, store=state.control_store)
-    manager_box: dict[str, "ExecutionHealthSupervisor | None"] = {"value": None}
 
     async def make_ctx(agent: str) -> AgentContext:
         if state.root_task_id:
             return await state.factory.activate_child(
                 session_id=state.sid, run_id=state.effective_run_id,
                 parent_task_id=state.root_task_id, agent=agent, emit=state.emit,
-                manager=manager_box["value"], lease_owner=f"pipeline:{state.effective_run_id}",
+                manager=state.manager, lease_owner=f"pipeline:{state.effective_run_id}",
             )
         return await state.factory.activate(
             session_id=state.sid, run_id=state.effective_run_id, agent=agent,
-            emit=state.emit, manager=manager_box["value"], lease_owner=f"pipeline:{state.effective_run_id}",
+            emit=state.emit, manager=state.manager, lease_owner=f"pipeline:{state.effective_run_id}",
         )
 
     async def make_child_ctx(agent: str, parent_task_id: str) -> AgentContext:
         return await state.factory.activate_child(
             session_id=state.sid, run_id=state.effective_run_id, parent_task_id=parent_task_id,
-            agent=agent, emit=state.emit, manager=manager_box["value"],
+            agent=agent, emit=state.emit, manager=state.manager,
             lease_owner=f"pipeline:{state.effective_run_id}",
         )
 
@@ -749,7 +748,6 @@ async def _prepare_pipeline_state(state: _PipelineDriverState) -> None:
     state.require_accepted = require_accepted
 
     manager = ExecutionHealthSupervisor(await make_ctx("Manager"), db=state.db)
-    manager_box["value"] = manager
     state.manager = manager
     manager_result = await manager.run(
         roster=["Lexicon", "Schema", "Instrument", "Statute", "Praxis", "Judge",
