@@ -329,3 +329,64 @@ async def test_instrument_routes_form_text_through_source_projection(tmp_path, m
     await instrument.run(form_files=[{"file_id": "f1", "stored_path": str(src), "subtype": "docx"}])
     for req in gateway.requests:
         assert "sk-ant-" not in req.user_prompt
+
+
+# ==========================================================================
+# Step 4: put raw-row work behind the sandbox
+# ==========================================================================
+
+
+@pytest.mark.asyncio
+async def test_executor_dataset_read_happens_only_inside_sandbox_never_in_parent(tmp_path, monkeypatch) -> None:
+    """``Executor.run``'s four raw-data call sites (exercised here via
+    ``apply_column_actions_to_dataset``) route through
+    ``control.sandbox.run_isolated`` once a run has opted into a sandbox
+    (``ActivationFactory.activate(..., needs_sandbox=True)``): the raw
+    dataset file is opened only inside that separate process, never
+    directly in the parent. A ``builtins.open``/``io.open`` spy in this
+    (parent) test process can only ever observe parent-process opens -- a
+    ``multiprocessing.spawn`` child re-imports everything fresh, so any
+    open the child performs is invisible here by construction. Proving
+    the source path never appears in the spy's log, while the export
+    still lands with the expected transformed content, demonstrates the
+    read genuinely happened in the isolated child."""
+    import builtins
+    import dataclasses
+    import io
+    import os
+
+    from phi_core.agents.reasoning import Executor
+    from phi_core.control.sandbox import create_sandbox, destroy_sandbox
+
+    os.environ["PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY"] = "1"
+
+    src = tmp_path / "data.csv"
+    src.write_text("name\nJane Doe\n", encoding="utf-8")
+
+    ctx = make_ctx("Executor")
+    sandbox = create_sandbox(ctx.run_id)
+    ctx = dataclasses.replace(ctx, sandbox=sandbox)
+    executor = Executor(ctx)
+
+    opened_paths: list[str] = []
+    real_open = builtins.open
+
+    def _spy(file, *args, **kwargs):
+        opened_paths.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _spy)
+    monkeypatch.setattr(io, "open", _spy)
+
+    files = [{"file_id": "f1", "kind": "dataset", "stored_path": str(src), "subtype": "csv", "columns": ["name"]}]
+    decisions = [{"file_id": "f1", "column": "name", "action": "drop"}]
+    try:
+        result = await executor.run(files, decisions)
+    finally:
+        destroy_sandbox(sandbox)
+
+    assert str(src) not in opened_paths, (
+        "raw dataset file must never be opened directly in the parent process when the run has a sandbox"
+    )
+    out = Path(result["exports"]["f1"]).read_text(encoding="utf-8")
+    assert "Jane Doe" not in out
