@@ -737,3 +737,105 @@ directly (same pattern as Wave R-c's `erase_opaque_map`):**
 collected, `comm -23` against baseline empty.
 
 Next: Phase 4 gate.
+
+## Phase 4 gate — PHASE_4_STATUS = PASS
+
+Full per-phase gate procedure run against `8372cf6` (Phase R's final commit, immediately
+before Wave 4a's first commit) as the phase base.
+
+**1-2. Acceptance, checked against real evidence:** Manager (`ExecutionHealthSupervisor`)
+owns the lifecycle (`SuperOrchestrator` absorbs run lifecycle, dependency state, task
+supervision, handoff supervision, artifact validity, retry/correction budgets, human-review
+lifecycle, manifest freeze, execution authorization, rewind routing, final release
+authorization, export lifecycle, cleanup lifecycle, run closure -- Wave 4a). Manager is not
+a routine payload courier (`run_pipeline` dispatches exclusively through a registry,
+AST-proven zero direct agent construction -- Wave 4b). `HandoffGateway` enforces
+communication policy (wired since Wave R-c step 6; `ExecutionHealthSupervisor` now observes
+every handoff and can ALLOW/BLOCK/CANCEL/ESCALATE/LIMIT, 5 of 9 section-10 actions, 4
+disclosed hooks -- Wave 4b). Manager resumes supported states after restart, including a
+restart with a sandbox child in flight (Wave 4a's `resume()`, proven with real
+fresh-instance-against-persisted-state tests, not inferred).
+
+**2a. Test-first ordering check:** all 3 new test files added during Phase 4
+(`test_control_run_pipeline_driver.py`, `test_control_store_effect_key.py`,
+`test_control_superorchestrator_lifecycle.py`) were created by a `test(...)`-prefixed
+commit as their first commit (`git diff --diff-filter=A`). The full ordered commit log (31
+commits, `git log --reverse`) shows consistent test-then-feat/fix pairing throughout; every
+wave's report additionally supplied verbatim RED blocks. No implementation commit precedes
+its own test commit.
+
+**3. Full backend suite** (`-n auto`, server restarted first): **8 failed, 1490 passed, 4
+skipped, 1 xfailed, 2 errors, 63.92s**. Exact nodeid match to the Step 0 baseline set minus
+the 4 sandbox failures Wave R-b fixed: 5 failed + 2 errors in `test_agent_pipeline.py`, 3
+failed in `test_human_review_invariant.py` (Phase 8 scope). **Zero new failures by nodeid.**
+
+**Investigated a message-text change in the `test_agent_pipeline.py` failures** (same
+nodeids, different underlying error than earlier in this session) rather than assuming it
+was benign: `test_handle_pipeline_run`/`test_agent_trace`/`test_results_decisions` now fail
+with `phi_core.control.policy.CapabilityDenied: parent '<root_task_id>' already has N live
+children (MAX_PARALLEL_TASKS_PER_PARENT=4)`, reproducible on every fresh session. Traced to
+root cause: `_dispatch_research`'s Praxis call (`_run_praxis_method`, one `make_ctx("Praxis")`
+call per HIPAA category, 17 categories, all sharing `root_task_id` as parent via
+`ActivationFactory.activate_child` -> `SuperOrchestrator.create_child_work`) plus Statute
+plus the 3 specialists routinely exceeds the pre-existing `MAX_PARALLEL_TASKS_PER_PARENT=4`
+cap. Confirmed via `git show 8372cf6` that this exact `make_ctx`/`activate_child` call
+pattern (17 Praxis calls under one flat parent) is unchanged since before Wave 4a --
+**this is not a Wave 4 regression.** It is the same pre-existing, documented,
+out-of-scope pipeline-execution defect Step 0's baseline already recorded (test names
+identical), now surfacing a more specific, more useful root cause because Wave 4a/4b's
+lifecycle wiring is the first code to actually exercise `SuperOrchestrator`/`TaskService`'s
+admission control end to end for the live pipeline path -- previously this defect
+manifested as a generic 500/`"unexpected error"`.
+**This finding independently corroborates a fix already planned, not open-ended debt:**
+master prompt section 33 forbids exactly this pattern ("broad research at t=0"), and Phase
+6's own plan text says so explicitly: *"Remove the broad-research-at-t=0 behavior: today
+both experts fire in parallel with specialists at t=0, which section 33 forbids. Research
+becomes demand-driven, requested by Judge after triage, with deduplication."* Phase 6
+replacing Praxis's 17-way broad call with a demand-driven, deduplicated pattern will retire
+this `MAX_PARALLEL_TASKS_PER_PARENT` collision as a side effect of its own planned work, not
+as a new fix this gate needs to invent. Not fixed here: out of Phase 4's scope, and a hasty
+cap bump or ad hoc restructuring now would risk conflicting with Phase 6's already-decided
+design.
+
+**4. Lint:** `ruff check .` found 3 errors, all fixed. Two cosmetic (import sorting,
+`ruff --fix`). One real: `F821 Undefined name SuperOrchestrator` in
+`agents/orchestrator.py`'s `run_pipeline` -- a string type annotation
+(`super_orchestrator: "SuperOrchestrator | None"`) referencing a name only imported inside
+the function body under an alias (`as _SuperOrchestrator`). Harmless at runtime (string
+annotations under `from __future__ import annotations` are never evaluated unless
+introspected), fixed with a `TYPE_CHECKING` import matching the codebase's established
+pattern (`agents/base.py`'s `Manager` import). `ruff check .` now reports **All checks
+passed!**
+
+**5. Root suite:** **85 failed, 909 passed, 3 skipped, 64.24s** -- exact match to the Step 0
+baseline, all failures confined to `phi_engine` (out of scope).
+
+**6. Architectural invariant check:** Phase 4's own named invariant,
+`test_control_run_pipeline_driver.py` (order dictated not chosen; nothing runs unbidden; no
+agent construction in the driver) -> **3 passed**. Accumulated invariant set
+(`test_architecture_boundaries.py`, `test_control_gateway_egress.py`,
+`test_control_phaseR_integration.py`) -> **32 passed**.
+
+**6a. Canary scan:** `test_control_phaseR_canary.py` + `test_phi_corpus_verify_run_surfaces.py`
+-> **21 passed**, zero unexpected hits; Phase 4 introduced no new canary-relevant surfaces
+(no new provider-egress or tool-search call sites).
+
+**7. Regression rule:** zero silent nodeid disappearance (`comm -23` against the Step 0
+baseline empty, 1505 nodeids collected vs 1039 at Step 0); no skip inflation (4 skips,
+identical composition to every prior wave-landing check); one `xfail(strict=True)`, already
+recorded in `KNOWN_XFAIL` with its resolving phase (Phase 7).
+
+**PHASE_4_STATUS = PASS.**
+
+**Two gaps this phase's waves flagged, both closed by the orchestrator directly (small,
+targeted, no conflict with any wave's ownership):** the `work_items.effect_key` sparse-index
+collision (`control/store.py`, commits `eb6e14c`/`f7d80aa`) and the
+`Manager`/`ExecutionHealthSupervisor` compat alias's production half (`server.py`, commit
+`1f5650b`). Both documented in Wave 4b's section above.
+
+**Checkpoint: COMPACT.** Phase 4's artifacts (`SuperOrchestrator`'s full lifecycle
+authority, the thin `run_pipeline` driver, `ExecutionHealthSupervisor`) are consumed
+directly by Phases 5 through 10 (Judge, Reviewer, Executor all route through this
+machinery); continuing in this same session.
+
+Next: Phase 5/6-rename (solo), then Phases 5 and 6 in parallel.
