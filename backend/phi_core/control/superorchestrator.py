@@ -1038,6 +1038,40 @@ class SuperOrchestrator:
                 return updated
         raise WorkflowError(f"could not confirm cleanup for run_id={run_id!r} after retries")
 
+    # ---- close_run ------------------------------------------------------
+
+    async def close_run(self, *, run_id: str) -> dict[str, Any]:
+        """The formal-run-closure responsibility (docs section 9, #87): the
+        read/verify authority for whether ``run_id`` may actually be
+        considered closed.
+
+        Composes ``terminal_outcome``'s existing node/state read with the
+        two closure preconditions this class alone can see across:
+        no ``HumanReviewRequest`` still ``open`` (a run cannot close with
+        an outstanding human decision), and no ``WorkItem`` this run ever
+        created still in a non-terminal ``TaskState`` (nothing left for
+        ``TaskService``/``control/worker.py`` to still be supervising).
+        Does not itself destroy or export anything -- the cleanup and
+        export lifecycle methods above are the actuators; this is the
+        formal confirmation step section 9 calls "closure"."""
+        run = await self._load_run(run_id)
+        open_requests = await self._store.find_many(
+            "human_review_requests", {"run_id": run_id, "state": "open"}
+        )
+        tasks = await self._store.find_many("work_items", {"run_id": run_id})
+        live_task_ids = sorted(
+            t["task_id"] for t in tasks if t.get("state") not in _TERMINAL_TASK_STATES
+        )
+        closeable = is_terminal(run.node) and not open_requests and not live_task_ids
+        return {
+            "run_id": run_id,
+            "closeable": closeable,
+            "node": run.node,
+            "state": run.state,
+            "open_human_review_request_ids": sorted(r["request_id"] for r in open_requests),
+            "live_task_ids": live_task_ids,
+        }
+
     # ---- authorize_publication ---------------------------------------------
 
     async def authorize_publication(
