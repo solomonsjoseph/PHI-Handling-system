@@ -624,6 +624,30 @@ class Praxis(Agent):
                     # alone. Deterministic, documented, non-LLM fallback.
                     reply = fallback
                     cache_source = "deterministic"
+                elif self.ctx.methods is not None and not await self.ctx.methods.get_approved_methods(
+                    hipaa_category=category
+                ):
+                    # Wave R-c Step 5 / spec section 38: verified source
+                    # evidence is not execution authorization.
+                    # `MethodRegistry.get_approved_methods`
+                    # (control/methods.py) is the sole execution-time
+                    # query surface -- it never returns a record whose
+                    # lifecycle is anything but "approved". Nothing in
+                    # this codebase calls `register_method`/`promote`
+                    # yet, so this branch is conservative by
+                    # construction today: the web-search call and D12
+                    # evidence verification above still ran and are
+                    # still cached (research is never disabled), only
+                    # the *output* trusted for actual PHI transformation
+                    # is gated behind formal approval. `ctx.methods is
+                    # None` (every pre-existing unit test built via
+                    # `control.testing.make_ctx`) skips this gate
+                    # entirely rather than treating "no facade" the same
+                    # as "not approved" -- a context that never opted
+                    # into the governance facade is not what this gate
+                    # defends.
+                    reply = fallback
+                    cache_source = "deterministic"
                 else:
                     cache_source = "web_search"
         except Exception as e:  # pragma: no cover
