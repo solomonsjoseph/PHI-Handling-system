@@ -328,4 +328,108 @@ See `docs/THREAT_MODEL_BACKEND.md` for full detail. Summary pointers:
 - `crypto.py` dev-key auto-generation orphans existing ciphertext; see
   `docs/RUNBOOK.md`'s new "Encryption-key rotation" section.
 
-Next: Wave R-c (solo): integration.
+### Wave R-c (solo): integration — COMPLETE
+
+22 commits across 3 subagent dispatches (the first crashed at the infra level during
+research, zero commits, clean retry; the second completed Steps 1-3 and honestly reported
+running out of budget; the third completed Steps 4-8). All 8 steps landed in the mandated
+order, verified: Step 2 (opaque map encryption) precedes Step 3 (header gate wiring) with no
+intermediate commit where the gate is wired and the map still cleartext.
+
+**Step 1:** `AgentContext` (control/context.py) gained `handoff` (always attached),
+`sandbox` (attached only when `ActivationFactory.activate(..., needs_sandbox=True)`),
+`opaque` and `methods` facades (extension beyond the brief's literal two fields, disclosed:
+Steps 3 and 5 structurally require store-backed access to OpaqueMap/MethodRegistry).
+`ActivationFactory._claim_and_build` is the single wiring point.
+
+**Step 2 (fixes D5):** `OpaqueMap.to_opaque`/`from_opaque` encrypt/decrypt the stored
+canonical value via new `crypto.encrypt_opaque_value`/`decrypt_opaque_value` (thin wrappers
+over `encrypt_api_key`/`decrypt_api_key`'s Fernet primitive). Token-generation logic
+untouched. `SuperOrchestrator.erase_opaque_map(run_id=...)` added as the erasure capability;
+its caller was a gap Wave R-c flagged and the orchestrator closed directly (see below).
+
+**Step 3:** `classify_header` gained a real `uncertain` disposition (ambiguous embedded
+digit run, 3-9 chars). `Schema.run` routes every header through `classify_header`;
+sensitive/uncertain headers are opaque-projected via `ctx.opaque`, never reaching the
+agent-facing output under their literal text. Uncertain headers raise a non-blocking review
+item via a trace event (`schema.header_uncertain_review`) — deliberately not
+`HumanReviewRequest`, which pauses the run and allows only one open request per run_id, the
+wrong tool for a non-blocking per-header flag. Exceeding
+`limits.MAX_UNCERTAIN_HEADERS_PER_RUN` raises `UncertainHeaderCeilingExceeded`
+(`failure_class="HEADER_SENSITIVE_CONTENT"`), blocking the run. Lexicon's dictionary-row
+text and Instrument's Tier-2 form text now route through `source_projection()` before any
+provider call.
+
+**Step 4:** Executor's four raw-row-work call sites
+(`apply_column_actions_to_dataset`, `_redact_metadata_file`, `_read_dataset_headers`,
+`read_narrative`) route through `run_isolated` via new `_sandboxed_*` wrapper functions,
+activating only when `ctx.sandbox` is attached. The four functions' own signatures and
+direct callability are unchanged (every `make_ctx`-built unit test has `ctx.sandbox=None`
+and calls them in-process, a documented permanent compatibility path). `PseudonymRegistry`
+state crosses the `multiprocessing.spawn` boundary as plain `(salt, map-dict)` args in, a
+workspace-relative JSON artifact filename out.
+
+**Step 5:** `Praxis.method_for`'s existing evidence-verification fallback gate gained a
+narrower condition: once D12 verification passes, a category whose
+`ctx.methods.get_approved_methods(hipaa_category=...)` returns empty also falls back to the
+deterministic method (research still runs and is cached; only the *trusted output* is gated
+behind formal approval, per spec section 38).
+
+**Step 6:** Manager's guardian query broker (`ask_schema`/`ask_instrument`/`ask_lexicon`)
+records each query as a governed `(Judge, Schema)`/`(Judge, Instrument)`/`(Judge, Lexicon)`
+handoff via `ctx.handoff.handoff(...)`; the verdict is recorded to trace but never gates the
+broker's already-working return value.
+
+**Step 7:** `ProviderGateway._validate_request`'s two direct `policy.check_provider`/
+`policy.check_data_class` calls replaced by one `authorization.authorize_capability(...)`
+call. Pure rename, identical composed calls, no security effect.
+
+**Step 8:** `tests/test_control_phaseR_integration.py` has all 5 invariants (10 tests: 5 AST
+exclusivity scans each with a positive control, 5 behavioral). Final run: `pytest
+tests/test_control_phaseR_integration.py -q -p no:cacheprovider -p no:xdist` -> **20 passed**.
+
+**Two gaps Wave R-c flagged rather than working around, both closed by the orchestrator
+directly (small, targeted, no conflict with any subagent's ownership):**
+- `erase_opaque_map` had no caller. `server.py`'s `session_delete` route and both erasure
+  sites in `_purge_settled_sessions_loop` now call it via a new
+  `_erase_opaque_map_best_effort(db, run_id)` helper, tolerating the legacy
+  no-durable-WorkflowRun case identically to the existing `cancel_run` handling. A test-stub
+  gap this surfaced (`FakeSuperOrchestrator` missing the method; a `_StubDB` missing
+  `workflow_runs` item-access) was fixed in `test_production_readiness.py`.
+- `PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY` needed a suite-wide decision before Step 4 could
+  land safely. `conftest.py` gained a suite-default autouse fixture setting it to `"1"` for
+  every test except `test_create_sandbox_fails_closed_when_memory_limit_is_unenforceable_
+  without_override`, mirroring R-Sandbox's own local exclusion pattern at the suite level.
+
+**Stale docstrings corrected** (both in Wave-R-b-owned files, closed to R-c subagents,
+fixed by the orchestrator directly after confirming the wiring they described was now true):
+`control/handoff.py`'s "not wired into `phi_core/agents/` yet" (Step 6 made it wired) and
+`control/sandbox.py`'s equivalent claim (Step 4 made it wired).
+
+**One genuine test regression investigated and correctly resolved as a strengthening, not a
+bug:** `test_instrument_guardian.py::test_scanned_form_routes_through_shared_read_pdf_and_
+scrubs_before_prompt` asserted the pre-R-c behavior where a bare name in scanned-form text
+reached the LLM prompt (only rule-detectable PHI was redacted first). Step 3's
+`source_projection()` routing applies the same post-scrub residual-content check every
+outbound provider payload gets (full presidio+rule, regardless of content type), so a bare
+name is now correctly caught and the call blocked entirely. Fixed the test's content to
+preserve its original intent (rule-detectable content redacted, call proceeds) and added
+`test_scanned_form_with_residual_phi_after_rule_scrub_is_blocked_not_sent` to lock in and
+document the new, stricter, correct behavior explicitly.
+
+**Wave-landing check** (server restarted first): `cd backend && .venv/bin/python -m pytest
+tests -q -p no:cacheprovider -n auto --deselect tests/test_agent_pipeline.py --deselect
+tests/test_ocr_pdf.py --deselect tests/test_corpus_researcher.py` -> **3 failed, 1397
+passed, 3 skipped, 1 xfailed, 62.51s**. All 3 remaining failures are the pre-existing
+`test_human_review_invariant.py` failures (Phase 8 scope). Investigated and fixed one
+environment-state false failure along the way:
+`test_security_llm_and_auth.py::test_get_settings_never_returns_api_key_plaintext` returned
+409 due to a stale `settings` document (`_id: "llm"`) in the shared long-running test Mongo
+instance whose `api_key` predated the current encryption key state (`KeyRotated`, the
+intended production behavior for a genuinely rotated key) — cleared the stale document, not
+a code fix.
+
+**Nodeid regression check:** 1421 nodeids collected vs 1039 at Step 0 baseline. `comm -23`
+against the baseline nodeid set is **empty** — no silent test disappearance.
+
+Next: Wave R-d (solo): the leak-canary harness.
