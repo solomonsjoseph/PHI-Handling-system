@@ -24,13 +24,16 @@ import hashlib
 import json
 import time
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from phi_core.control.activation import ActivationFactory
 from phi_core.control.context import AgentContext
 from phi_core.control.store import ControlStore
+
+if TYPE_CHECKING:
+    from phi_core.control.superorchestrator import SuperOrchestrator
 
 from ..paths import cleanup_session_unpacked
 from ..security import scrub_decision, scrub_persisted_text

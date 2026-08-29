@@ -15,7 +15,6 @@ below) rather than being covered by test_control_tasks.py's in-memory suite.
 from __future__ import annotations
 
 import pytest
-
 from phi_core.db import get_db
 
 
@@ -71,10 +70,9 @@ async def test_an_explicit_real_effect_key_still_enforces_uniqueness() -> None:
     effect-based deduplication: a second insert with the SAME non-empty
     effect_key must still be rejected, proving the fix only widens what
     counts as "no effect key intended", not the index's real purpose."""
-    from pymongo.errors import DuplicateKeyError
-
     from phi_core.control.records import CapabilityGrant, WorkItem
     from phi_core.control.store import MongoControlStore
+    from pymongo.errors import DuplicateKeyError
 
     db = get_db()
     store = MongoControlStore(db)
