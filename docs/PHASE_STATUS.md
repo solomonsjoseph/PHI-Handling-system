@@ -970,6 +970,36 @@ now surfacing at a different point in the pipeline than before. The 5 FAILED + 2
 `test_agent_pipeline.py` nodeids are byte-identical to the Step 0 baseline set, so the
 regression rule holds; this is not treated as a new required fix for this gate.
 
-**`PHASE_5_6_STATUS = PASS`. Phase 5/Phase 6 are complete.** Proceeding to Phase 7 per
-plan order, pausing first per the user's explicit "pause before moving to phase 7"
-instruction from this session.
+### Post-phase-5/6 simplification — one safe simplification applied
+
+Ran the `simplify-code` skill scoped to `git diff fb858d2..HEAD -- backend/` (44 files).
+Removed one dead instance attribute, `self.hipaa_cats: list[str] = []`, from
+`_PipelineDriverState.__init__` in `orchestrator.py` -- Phase 6's demand-driven-research
+rewrite removed the attribute's only assignment but left the declaration; confirmed
+unread anywhere else in `backend/`. Committed as `536ca89`.
+
+`scripts/cleanup.py`'s dry run proposed only gitignored/untracked filesystem paths
+(`.logs/`, `__pycache__/`, `data/cache/`, `data/uploads/<uuid>/`, etc.) -- entirely
+outside the diff scope and correctly declined. Also declined: extracting a shared
+helper between `_run_regulations_expert`/`_run_phi_methods_expert_method` (their
+duplication is intentional and documented, an architectural call not a mechanical
+simplification), and touching stale `Statute`/`Praxis` docstring mentions in
+`records.py` (outside the 44-file diff scope).
+
+Verified with the canonical serial full-suite run (matches the Phase 5/6 gate exactly):
+**8 failed, 1512 passed, 4 skipped, 1 xfailed, 2 errors, 85.76s.** `ruff check .` ->
+all checks passed.
+
+**Additional finding during verification:** re-running `-n auto` after the simplification
+showed one extra failure, `test_operator.py::test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor`
+(`AttributeError: 'FakeRegulationsExpert' object has no attribute '_log'`), not present
+in the established 8-item gate baseline. Confirmed via isolated + serial re-runs: this
+test passes cleanly alone and in the full serial suite. This is the same class of
+`-n auto` cross-test order-sensitivity already documented at Step 0 (parallel workers
+sharing rate-limit/concurrency state produce non-deterministic counts run to run); the
+canonical baseline of record has always been the serial run, which matches exactly.
+Not a regression, not caused by the simplification commit.
+
+**Phase 5/Phase 6 are complete.** `PHASE_5_6_STATUS = PASS` stands. Proceeding to
+Phase 7 per plan order, pausing first per the user's explicit "pause before moving
+to phase 7" instruction from this session.
