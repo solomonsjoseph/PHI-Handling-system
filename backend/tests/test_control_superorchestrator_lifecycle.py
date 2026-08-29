@@ -347,3 +347,59 @@ async def test_route_budget_exceeded_opens_a_human_review_request_and_pauses_the
     stored = await store.get_one("workflow_runs", {"run_id": run.run_id})
     assert stored["state"] == "awaiting_human_review"
     assert stored["node"] == "human_review_decisions"
+
+
+# ---- authorize_manifest_freeze: manifest-freeze-authorization responsibility ----
+
+
+@pytest.mark.asyncio
+async def test_authorize_manifest_freeze_writes_to_the_manifest_collection() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    await orch.advance(run_id=run.run_id, outcome="ok")
+    manifest = VerifiedClassificationManifest(run_id=run.run_id, preview_review_id="pr1")
+
+    returned = await orch.authorize_manifest_freeze(
+        run_id=run.run_id, artifact_id="artifact-1", manifest=manifest,
+    )
+
+    assert returned.manifest_id == manifest.manifest_id
+    stored = await store.get_one(MANIFEST_COLLECTION, {"artifact_id": "artifact-1"})
+    assert stored["status"] == "verified_for_execution"
+    assert stored["manifest_id"] == manifest.manifest_id
+
+
+@pytest.mark.asyncio
+async def test_authorize_manifest_freeze_refuses_a_manifest_from_another_run() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    manifest = VerifiedClassificationManifest(run_id="some-other-run", preview_review_id="pr1")
+
+    with pytest.raises(WorkflowError):
+        await orch.authorize_manifest_freeze(run_id=run.run_id, artifact_id="artifact-1", manifest=manifest)
+
+
+@pytest.mark.asyncio
+async def test_authorize_manifest_freeze_refuses_once_the_run_is_terminal() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    outcomes = ["ok", "ok", "ok", "ok", "proceed", "ok", "ok", "ok", "clean", "ok", "ok", "ok", "complete"]
+    for outcome in outcomes:
+        run = await orch.advance(run_id=run.run_id, outcome=outcome)
+    manifest = VerifiedClassificationManifest(run_id=run.run_id, preview_review_id="pr1")
+
+    with pytest.raises(WorkflowError):
+        await orch.authorize_manifest_freeze(run_id=run.run_id, artifact_id="artifact-1", manifest=manifest)
+
+
+@pytest.mark.asyncio
+async def test_authorize_manifest_freeze_refuses_while_awaiting_human_review() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    await orch.request_human_review(
+        run_id=run.run_id, node="human_review_decisions", reason_codes=[], decision_version=1,
+    )
+    manifest = VerifiedClassificationManifest(run_id=run.run_id, preview_review_id="pr1")
+
+    with pytest.raises(WorkflowError):
+        await orch.authorize_manifest_freeze(run_id=run.run_id, artifact_id="artifact-1", manifest=manifest)
