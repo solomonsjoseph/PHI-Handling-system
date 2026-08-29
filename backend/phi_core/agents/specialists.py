@@ -152,7 +152,21 @@ class Lexicon(Agent):
         per_file: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
         for f in dict_files:
             path = Path(f["stored_path"])
-            header, rows = _dict_rows(path)
+            try:
+                header, rows = _dict_rows(path)
+            except Exception as exc:
+                # docs #27: a malformed or unreadable dictionary file
+                # degrades Lexicon to an empty index for that file rather
+                # than crashing the whole run (and, via the orchestrator's
+                # structured-only gather, discarding Schema/Instrument's
+                # successful output alongside it). Mirrors Schema's
+                # log-and-skip of a file with no headers.
+                await self._log(f"lexicon.unreadable:{f['file_id']}", "info",
+                                {"file": _opaque_file_id(f),
+                                 "error": "unreadable_dictionary_file",
+                                 "kind": type(exc).__name__})
+                per_file.append((f, []))
+                continue
             if not header:
                 await self._log(f"lexicon.empty:{f['file_id']}", "info",
                                 {"file": _opaque_file_id(f)})
