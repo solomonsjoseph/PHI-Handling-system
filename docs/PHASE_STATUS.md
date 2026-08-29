@@ -644,3 +644,96 @@ Nodeid check: 1492 collected, `comm -23` against baseline empty.
 
 Next: Wave 4b (solo, after 4a): `run_pipeline` rewrite, `Manager` demoted to
 `ExecutionHealthSupervisor`.
+
+### Wave 4b (solo, after 4a): run_pipeline rewrite and Manager demotion — COMPLETE
+
+4 commits (2 test-then-implementation pairs): `run_pipeline` (agents/orchestrator.py) is a
+genuine thin driver of `SuperOrchestrator.advance()`; `Manager` (agents/manager.py) is
+renamed `ExecutionHealthSupervisor`, its existing retry/extend-timeout/grant-web-search/
+escalate logic (`run_supervised`, `consult`, the guardian broker, `close_run`) unchanged in
+behavior.
+
+**`run_pipeline` thin driver:** loops `run = await orchestrator.advance(run_id, outcome)` ->
+terminal node returns, else `step = await registry[run.node](state)` -> a dict return is the
+final result, else it's the outcome fed to the next `advance()` call. 6 real dispatch keys
+(research/specialists/decide/gate_decisions/human_review_decisions/execute), each a
+module-level `_dispatch_*` function; all pre-existing domain logic (specialist parallel
+launch, the Judge<->Sentinel loop, the D11 gate sequence, human-review escalation,
+`execute_decisions`) relocated verbatim, not redesigned. Gained keyword-only
+`dispatch_registry`/`super_orchestrator` override params (default `None` -> real
+registry/instance) purely as a test seam; every existing caller (including `server.py`'s
+`_handle_pipeline_run`) is unaffected.
+**Disclosed forward-compatible gaps** (none changing pre-Wave-4b observed behavior):
+`gate_decisions`'s `coverage_failed` edge and every node's `cancelled` edge still raise
+exceptions rather than reporting a clean `advance()` outcome; `specialists`'s
+`UncertainHeaderCeilingExceeded` short-circuit still bypasses `advance()` and returns a
+dict directly. Driving these through `advance()` needs either invented policy or edits to
+`workflow.py`/`gates.py`, both outside this wave's owns list.
+
+**`Manager` demotion + handoff response, 5 of 9 section-10 actions fully implemented, 4
+disclosed as forward-compatible hooks** (matching Wave 4a's disclosure discipline exactly):
+`respond_to_handoff(result)` gives ALLOW (result.allowed), BLOCK (any other denial -- the
+deterministic gateway's verdict stands), CANCEL (`residual_phi_detected`/`secret_detected`
+reason codes -- a genuine leak signal), ESCALATE (same edge denied
+`HANDOFF_DENIAL_ESCALATION_THRESHOLD=3` times in one run, mirroring `run_supervised`'s own
+repeated-failure philosophy); `respond_to_handoff_budget(category)` gives LIMIT (a
+`HandoffGateway` budget refusal, a distinct channel since `BudgetExceeded` is raised, never
+returned as a `HandoffResult`). PAUSE/REDIRECT/RETRY/INVALIDATE are named, disclosed,
+not-yet-triggerable hooks (no context to know if a human should be looped in; no derivable
+alternate recipient; every `HandoffGateway` check is deterministic so retrying unchanged
+can never succeed; no derivable link from a handoff denial to a specific artifact_id for
+`ArtifactService.invalidate_descendants`).
+
+**Three replacement invariant tests** (new `tests/test_control_run_pipeline_driver.py`),
+each with a captured RED against the pre-wave orchestrator.py: order is dictated not chosen
+(injected non-obvious node sequence, dispatch order matches exactly); nothing runs unbidden
+(terminal/blocked first `advance()` call, zero dispatches); no agent construction in the
+driver (AST scan of `run_pipeline`'s body, positive control, found and then eliminated 7
+direct constructions: Praxis/Statute/Lexicon/Schema/Instrument/Judge/Sentinel).
+
+Own tests: `test_control_run_pipeline_driver.py` + `test_manager_broker.py` (9 new handoff-
+response tests) + `test_manager.py` + `test_manager_checkpoints.py` -> **50 passed**.
+Broader regression sweep (blocking-floor, cardinality, certification, confidence-floor,
+keep-verification, operator, speed/UX, architecture-boundaries, handoff-gateway,
+superorchestrator x2): **277 passed**, zero regressions.
+
+**Live smoke test found a genuine, pre-existing, unrelated production bug** (not Wave 4b's
+own defect, not fixed by the subagent per its owns-list scope, closed by the orchestrator
+below): `TaskService.enqueue`'s `WorkItem.effect_key` defaults to `""`
+(`control/records.py`), and `migrate.py`'s index on it is `unique+sparse` -- but Mongo's
+sparse semantics skip a document from the uniqueness check only when the field is
+genuinely **absent**, not merely empty. Every `WorkItem` without a real effect key
+serialized with the key present and equal to `""`, so the very first insert into a
+persistent Mongo collided with every subsequent one: a live `DuplicateKeyError` blocking
+pipeline task enqueueing entirely (confirmed present after Wave 4a's own session activity).
+`run_pipeline`'s own new mechanism was independently proven sound against real
+infrastructure regardless (a direct smoke test inserting a real `WorkflowRun` and driving
+`run_pipeline`'s `advance()` loop with a stub registry produced the exact `workflow.py`
+`TRANSITIONS` order end to end, reaching `status="complete"`).
+
+**Orchestrator closed two gaps this wave flagged, both outside its owns list, both fixed
+directly (same pattern as Wave R-c's `erase_opaque_map`):**
+- **`effect_key` sparse-index collision (commits `eb6e14c`/`f7d80aa`):** `control/store.py`'s
+  shared `_document()` serialization helper now drops the `effect_key` key entirely when it
+  equals the default `""`, restoring true sparse semantics (`WorkItem.model_validate` still
+  supplies `""` correctly on read for a missing key). New
+  `tests/test_control_store_effect_key.py` (real Mongo, added to `conftest.py`'s
+  `_MONGO_GUARDED_MODULES`): two default-effect-key `WorkItem`s no longer collide; a genuine
+  duplicate explicit effect_key still correctly raises `DuplicateKeyError`, proving the
+  index's real purpose is intact, not just widened. RED verified by temporarily reverting
+  the fix: `pymongo.errors.DuplicateKeyError: ... dup key: { effect_key: "" }`.
+- **`Manager`/`ExecutionHealthSupervisor` compat-alias, production half (commit `1f5650b`):**
+  `server.py`'s human-review-resume path now imports and constructs
+  `ExecutionHealthSupervisor` directly instead of the compat name. The alias itself
+  (`manager.py`) stays, since it remains load-bearing for `agents/__init__.py`'s public
+  re-export and three test files (`test_architecture_boundaries.py`,
+  `test_control_phaseR_integration.py`, `test_manager.py`) -- a genuine, low-risk,
+  multi-file rename appropriately scoped to Phase 17's whole-repo `cleanup-audit`, not an
+  ad hoc patch here.
+
+**Wave-landing check** (server restarted first, stale settings doc pre-emptively cleared):
+**3 failed, 1481 passed, 3 skipped, 1 xfailed, 66.09s** -- exactly the 3 pre-existing
+`test_human_review_invariant.py` failures (Phase 8 scope), zero new. Nodeid check: 1505
+collected, `comm -23` against baseline empty.
+
+Next: Phase 4 gate.
