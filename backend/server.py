@@ -1065,6 +1065,7 @@ async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
             if not str(exc).startswith("unknown run_id:"):
                 raise
     run_id = doc.get("_pipeline_run_id") or sid
+    await _erase_opaque_map_best_effort(db, run_id)
     await ArtifactService(control_store, session_id=sid, run_id=run_id).erase_session_records(sid)
     errors = _erase_session_from_disk(sid, doc.get("export_paths"))
     if errors:
@@ -2566,6 +2567,31 @@ async def _run_hold(db, run_id: str | None) -> str:
     return (run_doc or {}).get("hold") or ""
 
 
+async def _erase_opaque_map_best_effort(db, run_id: str | None) -> None:
+    """D5 right-to-erasure/retention: clear ``run_id``'s encrypted opaque
+    map (see ``SuperOrchestrator.erase_opaque_map``). Best-effort by
+    design, mirroring every other step in this purge path: a session
+    whose only identifier is the legacy ``_pipeline_run_id`` token (no
+    durable ``WorkflowRun``) has nothing to erase here, and that is not
+    an error condition for the caller."""
+    if not run_id:
+        return
+    from phi_core.control.policy import CapabilityPolicy
+    from phi_core.control.store import MongoControlStore
+    from phi_core.control.superorchestrator import SuperOrchestrator
+    from phi_core.control.tasks import TaskService
+    from phi_core.control.workflow import WorkflowError
+
+    control_store = MongoControlStore(db)
+    try:
+        await SuperOrchestrator(
+            control_store, TaskService(control_store, CapabilityPolicy(None))
+        ).erase_opaque_map(run_id=run_id)
+    except WorkflowError as exc:
+        if not str(exc).startswith("unknown run_id:"):
+            raise
+
+
 async def _purge_settled_sessions_loop():
     """Hourly: four independent retention sweeps, each backed off and
     retried rather than allowed to kill the loop on a bad iteration.
@@ -2620,6 +2646,7 @@ async def _purge_settled_sessions_loop():
                         "updated_at": datetime.now(timezone.utc).isoformat(),
                     }})
                     continue
+                await _erase_opaque_map_best_effort(db, doc.get("_pipeline_run_id") or sid)
                 await db.agent_log.delete_many({"session_id": sid})  # pre-migration rows, if any remain
                 await db.trace_events.delete_many({"session_id": sid})
                 await db.sessions.delete_one({"id": sid})
@@ -2675,6 +2702,7 @@ async def _purge_settled_sessions_loop():
                         "updated_at": datetime.now(timezone.utc).isoformat(),
                     }})
                     continue
+                await _erase_opaque_map_best_effort(db, doc.get("_pipeline_run_id") or sid)
                 await db.agent_log.delete_many({"session_id": sid})  # pre-migration rows, if any remain
                 await db.trace_events.delete_many({"session_id": sid})
                 await db.sessions.delete_one({"id": sid})

@@ -99,3 +99,28 @@ def _reset_pipeline_admission_control():
         srv._active_pipeline_count = 0
     except Exception:
         pass
+
+
+# Wave R-c Step 4 makes sandboxing implicit across many previously-plain
+# Executor-exercising tests (dataset transforms, metadata redaction, header
+# reads, narrative export). On a platform that cannot enforce RLIMIT_AS
+# (this includes macOS/Darwin, see docs/THREAT_MODEL_BACKEND.md),
+# create_sandbox() fails closed unless PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY=1
+# is explicitly set, per phi_core/control/sandbox.py's documented fail-closed
+# switch. Set it as the test-session default so the wide majority of tests
+# exercise real sandboxed *behavior* (isolation, env stripping, return-value
+# shape) rather than universally hitting SandboxError on this platform.
+# Excluded by exact test name: the one test whose entire point is to prove
+# the fail-closed behavior fires when the override is genuinely absent
+# (test_control_phase2_sandbox_and_raw_data_boundary.py already has its own
+# local, file-scoped version of this same exclusion; this mirrors it at the
+# suite level now that sandboxing is no longer confined to that one file).
+_SANDBOX_FAIL_CLOSED_TEST_NAME = (
+    "test_create_sandbox_fails_closed_when_memory_limit_is_unenforceable_without_override"
+)
+
+
+@pytest.fixture(autouse=True)
+def _suite_default_allow_unenforced_sandbox_memory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    if request.node.name != _SANDBOX_FAIL_CLOSED_TEST_NAME:
+        monkeypatch.setenv("PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY", "1")

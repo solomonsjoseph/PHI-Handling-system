@@ -189,6 +189,9 @@ async def test_session_delete_removes_document_files_and_agent_log(tmp_path, mon
         async def cancel_run(self, **kwargs):
             cancel_calls.append(kwargs)
 
+        async def erase_opaque_map(self, **kwargs):
+            pass
+
 
     sid = "a" * 32  # a real session id is always a bare uuid4().hex token
     export = tmp_path / "export.csv"
@@ -272,6 +275,9 @@ async def test_session_delete_records_erasure_pending_on_a_filesystem_failure(tm
             pass
 
         async def cancel_run(self, **kwargs):
+            pass
+
+        async def erase_opaque_map(self, **kwargs):
             pass
 
     sid = "beef" * 8
@@ -393,11 +399,25 @@ async def test_retention_purge_removes_expired_partially_complete_session(tmp_pa
         async def delete_many(self, query):
             self.deleted.append(query)
 
+    class _EmptyCollection:
+        """Matches ``MongoControlStore``'s ``self._db[collection]`` access
+        pattern (Motor's real ``AsyncIOMotorDatabase`` supports the same
+        item-style lookup for any collection name, even an unused one).
+        Empty by design: this session predates any durable ``WorkflowRun``,
+        so ``_load_run`` must see nothing and raise its own tolerated
+        ``unknown run_id`` error, exactly like a real down-level Mongo."""
+
+        async def find_one(self, _query):
+            return None
+
     class _StubDB:
         def __init__(self):
             self.sessions = _Sessions()
             self.agent_log = _AgentLog()
             self.trace_events = _AgentLog()
+
+        def __getitem__(self, _name):
+            return _EmptyCollection()
 
     async def stop_after_one_pass(_seconds):
         raise asyncio.CancelledError
