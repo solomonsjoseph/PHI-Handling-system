@@ -64,14 +64,15 @@ def _mongo_up() -> bool:
 
 needs_mongo = pytest.mark.skipif(not _mongo_up(), reason="mongod not reachable")
 
-# D8: the exact three modules that call phi_core.db.get_db() directly
-# (confirmed via `grep -rl "from phi_core.db import get_db" tests/`), guarded
-# here rather than with a `pytestmark` line in each file so this mechanism
-# stays entirely inside this file's ownership boundary.
+# D8: modules that call phi_core.db.get_db() directly (confirmed via
+# `grep -rl "from phi_core.db import get_db" tests/`), guarded here rather
+# than with a `pytestmark` line in each file so this mechanism stays
+# entirely inside this file's ownership boundary.
 _MONGO_GUARDED_MODULES = {
     "test_admin_assurance.py",
     "test_admin_hold.py",
     "test_control_migrate.py",
+    "test_control_store_effect_key.py",
 }
 
 
