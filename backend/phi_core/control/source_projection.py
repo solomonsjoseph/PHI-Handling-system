@@ -17,8 +17,10 @@ egress). Sensitive headers are projected as an opaque token via
 ``control.opaque.OpaqueMap`` (kind ``"header"``), matching the doc's own
 ``SENSITIVE_HEADER_004`` example.
 
-Deterministic, no-LLM, not wired into ``phi_core/agents/`` yet -- a later
-phase's scope, per this session's established Phase 1 precedent.
+Deterministic, no-LLM. Wired into ``phi_core/agents/`` by Wave R-c:
+``Schema.run`` routes every header through ``classify_header``/opaque
+projection, ``Lexicon``/``Instrument`` route extracted dictionary/form
+text through ``source_projection`` before any provider call.
 """
 from __future__ import annotations
 
@@ -46,16 +48,28 @@ _LABEL_LIKE_CONTENT: frozenset[SourceContentType] = frozenset({"header", "form",
 _WHITESPACE_RE = re.compile(r"[ \t]+")
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
 
+# Wave R-c (v3 section 7 "uncertain" outcome, now real): a header
+# carrying an embedded digit run of 3-9 characters not already caught by
+# a strict rule (SSN/phone/NPI/MRN, all handled above via `scrub_for_
+# prompt`) is ambiguous, not confidently safe or confidently sensitive --
+# it could be a coincidental site/version/sequence code ("site_02139",
+# "id_1234") or a real identifier fragment typed into a header by
+# mistake. This heuristic is deliberately noisy (it will also flag
+# ordinary numeric-suffixed columns like "visit_1"): that noise is
+# exactly why `uncertain` routes to non-blocking review rather than a
+# hard block -- see `agents/specialists.py::Schema.run`.
+_AMBIGUOUS_DIGIT_RUN_RE = re.compile(r"(?<!\d)\d{3,9}(?!\d)")
+
 
 def classify_header(header: str) -> tuple[str, list[str]]:
     """Deterministically classify one header string's disposition.
 
     Returns ``(disposition, reasons)``. ``sensitive`` when the header text
     itself trips PHI detection or a credential-shape pattern (a study team
-    can and does type a real value into a column name by mistake); ``safe``
-    otherwise. There is no ``uncertain`` outcome here -- the rule-based
-    detector is binary -- but the type allows a future probabilistic check
-    to add one without a signature change.
+    can and does type a real value into a column name by mistake).
+    ``uncertain`` when neither strict check fires but the header carries
+    an ambiguous embedded digit run (see ``_AMBIGUOUS_DIGIT_RUN_RE``
+    above). ``safe`` otherwise.
     """
     reasons: list[str] = []
     _, span_count = scrub_for_prompt(header, detectors=_HEADER_DETECTORS)
@@ -63,7 +77,11 @@ def classify_header(header: str) -> tuple[str, list[str]]:
         reasons.append(f"header text matched {span_count} PHI detector span(s)")
     if contains_secret(header):
         reasons.append("header text matched a credential/secret pattern")
-    return ("sensitive" if reasons else "safe"), reasons
+    if reasons:
+        return "sensitive", reasons
+    if _AMBIGUOUS_DIGIT_RUN_RE.search(header):
+        return "uncertain", ["header text contains an unclassified numeric run that may be a real identifier fragment"]
+    return "safe", reasons
 
 
 def header_safety_gate(
