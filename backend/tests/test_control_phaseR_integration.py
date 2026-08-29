@@ -20,12 +20,6 @@ Allowlist rationale (Step 8 invariant 2, sandboxed raw reads):
   ``_read_dataset_headers`` directly as a real on-disk-header fallback.
   ``operator.py`` is outside this wave's owns list (Phase 10 retires the
   whole module per docs/PHASE_STATUS.md); allowlisted here, not edited.
-- ``phi_core/agents/reasoning.py::verify_keep_decisions`` reads real
-  dataset row values directly via ``iter_dataset_rows`` (not one of the
-  four relocated readers, so it never matches this scan's call-site
-  pattern at all, but is named here for the same reason: it is a real,
-  accepted, unsandboxed raw-data read, retired only in Phase 9 per
-  docs/PHASE_STATUS.md, not touched by Wave R-c).
 - ``phi_core/agents/reasoning.py::Executor.run``'s own direct-call
   fallback (used only when ``ctx.sandbox is None``, i.e. a context built
   without ``ActivationFactory``'s ``needs_sandbox=True`` opt-in, such as
