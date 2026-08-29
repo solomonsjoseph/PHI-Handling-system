@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
+from ..control.handoff import INSTRUMENT, JUDGE, LEXICON, SCHEMA, InstrumentQuestion, LexiconQuestion, SchemaQuestion
+from ..control.records import ControlRecord, HandoffEnvelope
 from ..security import scrub_persisted_text
 from .base import Agent
 
@@ -328,6 +330,14 @@ class Manager(Agent):
     # run. The Manager holds the only reference for querying purposes so
     # Judge/Sentinel ask through one place, and every query is logged the
     # same way regardless of which specialist answered.
+    #
+    # Wave R-c Step 6: each successful query is additionally recorded as
+    # a Judge -> specialist handoff attempt through ``ctx.handoff``, the
+    # only broker topology ``HandoffGateway.ALLOWED_EDGES`` registers
+    # for these three edges (``requesting_agent`` above stays a free-
+    # text logging field only -- it is never what the handoff envelope
+    # names as sender). See ``_record_handoff`` below for why a denied
+    # handoff never blocks the broker's own already-working answer.
 
     def attach_schema(self, schema) -> None:
         self._schema = schema
@@ -338,11 +348,32 @@ class Manager(Agent):
     def attach_lexicon(self, lexicon) -> None:
         self._lexicon = lexicon
 
+    async def _record_handoff(self, recipient: str, payload: ControlRecord) -> None:
+        """Fire-and-record one Judge -> specialist handoff attempt through
+        ``ctx.handoff`` (Wave R-c Step 6), when this context carries the
+        facade. ``HandoffGateway.handoff`` is a validating audit rail
+        alongside this broker's already-authorized in-process relay --
+        its ``allowed``/``denied`` verdict is written to the trace store
+        but never gates ``ask_schema``/``ask_instrument``/``ask_lexicon``'s
+        own return value, so a future policy tightening on the handoff
+        edge cannot silently break the guardian query broker this wave
+        did not otherwise change. ``ctx.handoff is None`` (every pre-
+        existing unit test built via ``control.testing.make_ctx``) is a
+        no-op, matching every other optional facade guard in this class
+        (``ctx.cache``, ``ctx.artifacts``, ...)."""
+        if self.ctx.handoff is None:
+            return
+        await self.ctx.handoff.handoff(HandoffEnvelope(
+            run_id=self.ctx.run_id, sender=JUDGE, recipient=recipient,
+            data_class="restricted_metadata", payload=payload.model_dump(),
+        ))
+
     async def ask_schema(self, requesting_agent: str, column: str,
                           file_id: str | None = None) -> dict[str, Any]:
         if self._schema is None:
             return {"available": False, "reason": "schema_not_attached"}
         result = self._schema.verify(column, file_id)
+        await self._record_handoff(SCHEMA, SchemaQuestion(column=column, file_id=file_id or ""))
         await self._log("manager.ask_schema", "info",
                         {"requesting_agent": requesting_agent,
                          "present": result.get("present")})
@@ -353,6 +384,9 @@ class Manager(Agent):
         if self._instrument is None:
             return {"available": False, "reason": "instrument_not_attached"}
         result = self._instrument.verify(field_or_variable, file_id)
+        await self._record_handoff(
+            INSTRUMENT, InstrumentQuestion(field_or_variable=field_or_variable, file_id=file_id or ""),
+        )
         await self._log("manager.ask_instrument", "info",
                         {"requesting_agent": requesting_agent,
                          "present": result.get("present")})
@@ -366,6 +400,9 @@ class Manager(Agent):
             return {"available": False, "reason": "budget_exhausted"}
         self._lexicon_queries += 1
         result = await self._lexicon.answer(column, assumption, reasoning)
+        await self._record_handoff(
+            LEXICON, LexiconQuestion(column=column, assumption=assumption, reasoning=reasoning),
+        )
         await self._log("manager.ask_lexicon", "info",
                         {"requesting_agent": requesting_agent,
                          "verdict": result.get("verdict"),
