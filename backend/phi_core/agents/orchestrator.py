@@ -634,7 +634,6 @@ class _PipelineDriverState:
         self.make_child_ctx: Callable[[str, str], Awaitable[AgentContext]] | None = None
         self.complete_and_accept: Callable[[AgentContext, dict[str, Any]], Awaitable[bool]] | None = None
         self.require_accepted: Callable[[AgentContext, dict[str, Any], str], Awaitable[None]] | None = None
-        self.hipaa_cats: list[str] = []
         self.lexicon_ctx: AgentContext | None = None
         self.schema_ctx: AgentContext | None = None
         self.instrument_ctx: AgentContext | None = None
