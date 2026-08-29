@@ -124,7 +124,6 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
         "RegulationsExpert": _manifest("RegulationsExpert", purpose="Research jurisdictional rules.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
         "PHIMethodsExpert": _manifest("PHIMethodsExpert", purpose="Research de-identification practice.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
         "Judge": _manifest("Judge", purpose="Propose column decisions.", input_class="restricted_metadata", output_schema="column_decision"),
-        "Sentinel": _manifest("Sentinel", purpose="Challenge proposed decisions.", input_class="restricted_metadata", output_schema="decision_proposal"),
         "Executor": _manifest(
             "Executor",
             purpose="Apply deterministic decisions.",
@@ -145,10 +144,12 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
         "Herald.Sections": _manifest("Herald.Sections", purpose="Prepare report sections.", input_class="internal", output_schema="report"),
         "Manager": _manifest("Manager", purpose="Supervise bounded calls.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),
         "Operator": _manifest("Operator", purpose="Verify deterministic transformations.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),
-        "Reviewer": _manifest("Reviewer", purpose="Review export coverage.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),
+        "Reviewer": _manifest("Reviewer", purpose="Preview Judge's decisions before execution "
+                              "(PREVIEW mode); review export coverage after execution (FINAL "
+                              "mode).", input_class="restricted_metadata", output_schema="decision_proposal"),
         "CorpusResearcher": _manifest("CorpusResearcher", purpose="Research corpus sources.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
         # Pipeline is the durable root for a fixed sequence of up to 35
-        # direct child executions: 17 PHIMethodsExpert methods, three Judge/Sentinel
+        # direct child executions: 17 PHIMethodsExpert methods, three Judge/Reviewer
         # iterations each, and the remaining fixed pipeline steps. Its 48
         # child ceiling leaves bounded headroom without opening recursive
         # agent-to-agent delegation.
@@ -173,7 +174,7 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
             allowed_child_task_types=frozenset(
                 _task_type(agent) for agent in (
                     "Manager", "PHIMethodsExpert", "RegulationsExpert", "Lexicon", "Schema", "Instrument",
-                    "Judge", "Sentinel", "Executor", "Scout", "Operator", "Reviewer",
+                    "Judge", "Executor", "Scout", "Operator", "Reviewer",
                     "Auditor", "Ledger", "Herald",
                 )
             ),
@@ -187,7 +188,7 @@ TEAMS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "regulatory_evidence": frozenset({"RegulationsExpert", "PHIMethodsExpert", "CorpusResearcher"}),
         "data_and_instrument": frozenset({"Lexicon", "Schema", "Instrument"}),
-        "proposal_and_challenge": frozenset({"Judge", "Sentinel"}),
+        "proposal_and_challenge": frozenset({"Judge", "Reviewer"}),
         "verification_and_audit": frozenset({"Executor", "Operator", "Reviewer", "Auditor"}),
         "publication_and_reporting": frozenset(
             {"Scout", "Ledger", "Ledger.Compare", "Ledger.Aggregate", "Herald", "Herald.Abstract", "Herald.Sections"}

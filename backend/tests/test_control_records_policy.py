@@ -66,7 +66,7 @@ def test_d3_records_have_only_the_planned_fields() -> None:
 
 def test_policy_has_the_exact_manifest_roles_and_web_search_research_boundary() -> None:
     assert set(MANIFESTS) == {
-        "Lexicon", "Schema", "Instrument", "RegulationsExpert", "PHIMethodsExpert", "Judge", "Sentinel", "Executor", "Auditor", "Scout", "Ledger", "Ledger.Compare", "Ledger.Aggregate", "Herald", "Herald.Abstract", "Herald.Sections", "Manager", "Operator", "Reviewer", "CorpusResearcher",
+        "Lexicon", "Schema", "Instrument", "RegulationsExpert", "PHIMethodsExpert", "Judge", "Executor", "Auditor", "Scout", "Ledger", "Ledger.Compare", "Ledger.Aggregate", "Herald", "Herald.Abstract", "Herald.Sections", "Manager", "Operator", "Reviewer", "CorpusResearcher",
         "Pipeline",  # Phase 4 step 2/4: the TaskService-enqueued top-level pipeline_run/pipeline_resume unit
     }
     web_enabled = {name for name, manifest in MANIFESTS.items() if manifest.allowed_tools}

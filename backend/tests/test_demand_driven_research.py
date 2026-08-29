@@ -128,12 +128,15 @@ def _drive_pipeline(monkeypatch, *, decisions: list[dict], regulations_expert_cl
                 }],
             }
 
-    class FakeSentinel:
+    class FakeReviewer:
         def __init__(self, ctx=None, *_a, **_kw):
             self.ctx = ctx
             self.call_failures = 0
 
-        async def run(self, **_kw):
+        async def _log(self, *_a, **_kw):
+            return None
+
+        async def preview(self, **_kw):
             first_column = decisions[0]["column"] if decisions else "col"
             return await complete_fake_task(self.ctx, {"issues": [{
                 "file_id": "f1", "column": first_column,
@@ -146,7 +149,7 @@ def _drive_pipeline(monkeypatch, *, decisions: list[dict], regulations_expert_cl
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
     monkeypatch.setattr(orchestrator, "RegulationsExpert", regulations_expert_cls or FakeRegulationsExpert)
     monkeypatch.setattr(orchestrator, "PHIMethodsExpert", phi_methods_expert_cls or FakePHIMethodsExpert)
-    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
 
     class FakeSessions:
         async def find_one(self, *_a, **_kw):
@@ -304,15 +307,17 @@ def test_regulatory_and_method_findings_route_through_handoff_gateway(monkeypatc
 
 def test_handoff_call_sites_still_confined_to_manager_broker_and_orchestrator():
     """This file's own findings-persistence dispatch code
-    (_run_regulations_expert/_run_phi_methods_expert_method) is now a
-    second legitimate .handoff( call site alongside agents/manager.py --
-    reproduces the relevant slice of test_control_phaseR_integration.py::
+    (_run_regulations_expert/_run_phi_methods_expert_method) is a second
+    legitimate .handoff( call site alongside agents/manager.py; Phase 8's
+    Reviewer<->Judge correction edge (_dispatch_decide, docs #44/#48) adds
+    a third -- reproduces the relevant slice of
+    test_control_phaseR_integration.py::
     test_handoff_call_sites_confined_to_manager_broker's widened
     allowlist, scoped to just orchestrator.py, so a future regression
-    (a THIRD, unreviewed call site appearing here) fails fast in this
+    (a FOURTH, unreviewed call site appearing here) fails fast in this
     file too. This replaces the earlier version of this test, which
     asserted orchestrator.py never calls .handoff( at all -- true before
-    this follow-up, no longer true or desired now."""
+    the original follow-up, no longer true or desired now."""
     import ast
     from pathlib import Path
 
@@ -326,9 +331,10 @@ def test_handoff_call_sites_still_confined_to_manager_broker_and_orchestrator():
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "handoff"
     ]
-    assert len(offenders) == 2, (
-        f"expected exactly 2 .handoff( call sites in orchestrator.py "
-        f"(_run_regulations_expert, _run_phi_methods_expert_method), found {len(offenders)} "
+    assert len(offenders) == 3, (
+        f"expected exactly 3 .handoff( call sites in orchestrator.py "
+        f"(_run_regulations_expert, _run_phi_methods_expert_method, "
+        f"_dispatch_decide's Reviewer->Judge correction edge), found {len(offenders)} "
         f"at lines {offenders}"
     )
 

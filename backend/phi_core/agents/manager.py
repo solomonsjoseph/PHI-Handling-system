@@ -87,10 +87,10 @@ class ExecutionHealthSupervisor(Agent):
         "RegulationsExpert": "returns the rulebook for the run's jurisdiction",
         "PHIMethodsExpert": "returns the current best-practice technique for one HIPAA category",
         "Judge": "returns exactly one handling decision per dataset column",
-        "Sentinel": "reviews Judge's decisions for zero leak; returns issues",
         "Executor": "deterministic; applies approved decisions, makes no LLM call",
         "Operator": "deterministic; self-verifies what Executor wrote against decisions",
-        "Reviewer": "deterministic; confirms Operator covered every decision",
+        "Reviewer": "PREVIEW: challenges Judge's decisions before execution, zero leak/100% "
+                    "accuracy; FINAL: confirms Operator covered every decision",
         "Auditor": "verifies executor output against decisions; returns metrics",
         "Scout": "returns the competitive landscape",
         "Ledger.Compare": "returns per-competitor delta notes",
@@ -105,7 +105,7 @@ class ExecutionHealthSupervisor(Agent):
     # would burn the very wall-clock the budget exists to protect. An overrun is
     # recorded, and is shown to the Manager when that call also fails.
     BUDGET_S = {
-        "Judge": 40.0, "Sentinel": 40.0, "Lexicon": 40.0, "Schema": 25.0,
+        "Judge": 40.0, "Reviewer": 40.0, "Lexicon": 40.0, "Schema": 25.0,
         "Auditor": 25.0, "Scout": 40.0, "Instrument": 40.0,
         "Ledger.Compare": 35.0, "Ledger.Aggregate": 35.0,
         "Herald.Abstract": 75.0, "Herald.Sections": 75.0,

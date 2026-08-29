@@ -446,6 +446,9 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
+        async def _log(self, *_a, **_kw):
+            return None
+
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {})
 
@@ -458,6 +461,9 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
     class FakePHIMethodsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
+
+        async def _log(self, *_a, **_kw):
+            return None
 
         async def method_for(self, _category):
             return {}
@@ -472,12 +478,15 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
                                    "action": "keep", "reason": "r",
                                    "subject": "participant"}]})
 
-    class FakeSentinel:
+    class FakeReviewer:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
             self.call_failures = 0
 
-        async def run(self, **_kwargs):
+        async def _log(self, *_a, **_kw):
+            return None
+
+        async def preview(self, **_kwargs):
             return await complete_fake_task(self.ctx, {"issues": [{"column": "c", "severity": "blocking",
                                 "detail": "unresolved leak"}]})
 
@@ -486,7 +495,7 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
-    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
 
     db = FakeDb()
 
@@ -554,6 +563,9 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
+        async def _log(self, *_a, **_kw):
+            return None
+
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {})
 
@@ -567,6 +579,9 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
     class FakePHIMethodsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
+
+        async def _log(self, *_a, **_kw):
+            return None
 
         async def method_for(self, _category):
             return {}
@@ -583,14 +598,6 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
                                    "phi_category": "NONE", "citation": "",
                                    "reason": "r", "subject": "participant"}]})
 
-    class FakeSentinel:
-        def __init__(self, ctx=None, *_a, **_kwargs):
-            self.ctx = ctx
-            self.call_failures = 0
-
-        async def run(self, **_kwargs):
-            return await complete_fake_task(self.ctx, {"issues": []})
-
     class FakeExecutor:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
@@ -606,8 +613,19 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
             return await complete_fake_task(self.ctx, {"failed_file_ids": [], "verdicts": []})
 
     class FakeReviewer:
+        """Merges the decide-loop's former Sentinel preview double with
+        the post-Executor coverage-audit double this same test already
+        needed: both call sites now go through the single Reviewer
+        role/symbol, so one fake must answer to both method names."""
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
+            self.call_failures = 0
+
+        async def _log(self, *_a, **_kw):
+            return None
+
+        async def preview(self, **_kwargs):
+            return await complete_fake_task(self.ctx, {"issues": []})
 
         async def run(self, decisions, operator_result, exports, omit_by_file=None):
             return await complete_fake_task(self.ctx, {"exports": exports, "findings": []})
@@ -629,7 +647,6 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
-    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
     monkeypatch.setattr(orchestrator, "Operator", FakeOperator)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)

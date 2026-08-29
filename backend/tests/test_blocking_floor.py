@@ -142,12 +142,12 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
                 "phi_category": "NONE",
             }]})
 
-    class FakeSentinel:
+    class FakeReviewer:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
             self.call_failures = 0
 
-        async def run(self, **_kwargs):
+        async def preview(self, **_kwargs):
             issue = {
                 "file_id": "dataset.csv",
                 "severity": "blocking",
@@ -163,7 +163,7 @@ def _run_blocking_floor_pipeline(tmp_path, monkeypatch, iteration_cap, sentinel_
     monkeypatch.setattr(orchestrator, "Instrument", FakeInstrument)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
-    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
 
     async def emit(_message):
         return None

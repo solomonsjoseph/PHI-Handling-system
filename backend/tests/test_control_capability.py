@@ -20,7 +20,7 @@ from phi_core.control.policy import MANIFESTS, CapabilityDenied, CapabilityPolic
 from phi_core.control.testing import _TestLlmConfig
 from pydantic import ValidationError
 
-_NON_RESEARCH_AGENTS = ["Judge", "Sentinel", "Auditor", "Ledger", "Herald", "Lexicon", "Instrument", "Manager"]
+_NON_RESEARCH_AGENTS = ["Judge", "Reviewer", "Auditor", "Ledger", "Herald", "Lexicon", "Instrument", "Manager"]
 
 
 def _issue(agent: str):

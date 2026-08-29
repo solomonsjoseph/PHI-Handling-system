@@ -31,7 +31,7 @@ def test_teams_are_the_exact_five_non_authoritative_budget_groups() -> None:
     assert TEAMS == {
         "regulatory_evidence": frozenset({"RegulationsExpert", "PHIMethodsExpert", "CorpusResearcher"}),
         "data_and_instrument": frozenset({"Lexicon", "Schema", "Instrument"}),
-        "proposal_and_challenge": frozenset({"Judge", "Sentinel"}),
+        "proposal_and_challenge": frozenset({"Judge", "Reviewer"}),
         "verification_and_audit": frozenset({"Executor", "Operator", "Reviewer", "Auditor"}),
         "publication_and_reporting": frozenset(
             {"Scout", "Ledger", "Ledger.Compare", "Ledger.Aggregate", "Herald", "Herald.Abstract", "Herald.Sections"}

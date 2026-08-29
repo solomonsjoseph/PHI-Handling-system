@@ -31,7 +31,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from phi_core.control.activation import ActivationFactory
 from phi_core.control.context import AgentContext
-from phi_core.control.handoff import JUDGE, METHODS_EXPERT, REGULATIONS_EXPERT
+from phi_core.control.handoff import JUDGE, METHODS_EXPERT, REGULATIONS_EXPERT, REVIEWER, ReviewerHandoff
+from phi_core.control.policy import BudgetExceeded
 from phi_core.control.records import HandoffEnvelope, MethodFinding, RegulatoryFinding, StudyKnowledgePackage
 from phi_core.control.store import ControlStore
 
@@ -51,7 +52,6 @@ from .reasoning import (
     Auditor,
     Executor,
     Judge,
-    Sentinel,
     annotate_pending_review,
     apply_age_dob_rule,
     apply_blocking_floor,
@@ -760,7 +760,7 @@ async def _prepare_pipeline_state(state: _PipelineDriverState) -> None:
     state.manager = manager
     manager_result = await manager.run(
         roster=["Lexicon", "Schema", "Instrument", "RegulationsExpert", "PHIMethodsExpert", "Judge",
-                "Sentinel", "Executor", "Auditor", "Scout", "Ledger", "Herald"],
+                "Reviewer", "Executor", "Auditor", "Scout", "Ledger", "Herald"],
         phase_plan=["specialists", "statute", "praxis", "judge_iter", "sentinel_iter",
                     "executor", "publish_guard", "auditor_scout", "ledger", "herald"],
     )
@@ -1247,11 +1247,11 @@ async def _dispatch_decide(state: _PipelineDriverState) -> str:
                                  {"iteration": iteration, "overrides": floor_overrides})
         await _check_cancel(state.db, state.sid, state.on_phase)
         await state.on_phase(f"sentinel_iter_{iteration}", {"iteration": iteration, "decision_count": len(decisions)})
-        sentinel_ctx = await state.make_ctx("Sentinel")
-        sentinel = Sentinel(sentinel_ctx)
-        s = await sentinel.run(decisions=decisions, statute=state.statute, instrument=state.instrument,
-                               parent_id=last_judge_message_id)
-        await state.require_accepted(sentinel_ctx, s, "Sentinel")
+        sentinel_ctx = await state.make_ctx("Reviewer")
+        sentinel = Reviewer(sentinel_ctx)
+        s = await sentinel.preview(decisions=decisions, statute=state.statute, instrument=state.instrument,
+                                   files=state.dataset_files, parent_id=last_judge_message_id)
+        await state.require_accepted(sentinel_ctx, s, "Reviewer")
         sentinel_call_failures += sentinel.call_failures
         # Sentinel-originated escalation: genuine ambiguity Sentinel can't
         # correct itself. Applied immediately.
@@ -1263,6 +1263,36 @@ async def _dispatch_decide(state: _PipelineDriverState) -> str:
                 await state.on_phase(f"sentinel_escalation_iter_{iteration}",
                                      {"iteration": iteration, "overrides": escalation_overrides})
         blocking = _blocking_issues(s)
+        # docs #44/#48: send the structured correction directly to Judge
+        # through HandoffGateway on the (Reviewer, Judge) edge, so the
+        # attempt is durably recorded and counted against
+        # limits.HANDOFF_ATTEMPT_BUDGET["judge_reviewer"] -- the same
+        # gateway-tracked budget category `control/handoff.py`'s
+        # `_EDGE_ATTEMPT_CATEGORY` already registers this edge under.
+        # Exhausting it must never fabricate certainty (docs #48): it
+        # breaks the loop immediately rather than trying Judge again,
+        # and `_dispatch_gate_decisions`' own final `run_decision_gates`
+        # pass re-applies the confidence/blocking floors as the
+        # authoritative last word on whatever decisions this loop
+        # converged on, so nothing blocking silently ships.
+        budget_exhausted = False
+        if blocking and sentinel_ctx.handoff is not None:
+            correction_payload = ReviewerHandoff(
+                decision_ids=[f"{b.get('file_id', '')}:{b.get('column', '')}" for b in blocking],
+                note=_summarise_issues(blocking)[:2000],
+            )
+            try:
+                handoff_result = await sentinel_ctx.handoff.handoff(HandoffEnvelope(
+                    run_id=sentinel_ctx.run_id, sender=REVIEWER, recipient=JUDGE,
+                    data_class="restricted_metadata", payload=correction_payload.model_dump(),
+                ))
+                if not handoff_result.allowed:
+                    await sentinel._log("reviewer.correction_handoff_denied", "info",
+                                        {"reason": handoff_result.reason_code, "detail": handoff_result.detail})
+            except BudgetExceeded as exc:
+                budget_exhausted = True
+                await sentinel._log("reviewer.correction_budget_exhausted", "info",
+                                    {"detail": str(exc), "iteration": iteration})
         blocking_by_column = {(b.get("file_id"), b.get("column")): b for b in blocking if b.get("column")}
         for key in blocking_by_column:
             blocking_attempts[key] = blocking_attempts.get(key, 0) + 1
@@ -1286,6 +1316,14 @@ async def _dispatch_decide(state: _PipelineDriverState) -> str:
             await state.on_phase(f"blocking_floor_iter_{iteration}",
                                  {"iteration": iteration, "overrides": blocking_floor_overrides})
         approved_decisions = decisions
+        if budget_exhausted:
+            # docs #48: the correction/retry budget is exhausted -- never
+            # fabricate certainty by trying Judge again. `_dispatch_gate_
+            # decisions`' final `run_decision_gates` pass forces every
+            # still-blocking column to human_review from here.
+            await state.on_phase(f"reviewer_correction_budget_exhausted_iter_{iteration}",
+                                 {"iteration": iteration})
+            break
         if not blocking:
             # Iterate only when required. No blocking issues means Sentinel
             # has nothing PHI-critical to complain about.

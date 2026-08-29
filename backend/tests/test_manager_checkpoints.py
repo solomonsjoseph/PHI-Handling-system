@@ -157,6 +157,9 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
             self.call_failures = 0
             self.last_message_id = None
 
+        async def _log(self, *_a, **_kw):
+            return None
+
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {})
 
@@ -186,8 +189,8 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
                  "confidence": 0.95, "reason": "direct identifier"},
             ]})
 
-    class FakeSentinel(FakeAgent):
-        async def run(self, **_kwargs):
+    class FakeReviewer(FakeAgent):
+        async def preview(self, **_kwargs):
             return await complete_fake_task(self.ctx, {"issues": []})
 
     class FakeExecutor(FakeAgent):
@@ -197,7 +200,7 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
     monkeypatch_targets = {
         "RegulationsExpert": FakeRegulationsExpert, "PHIMethodsExpert": FakePHIMethodsExpert, "Lexicon": FakeLexicon,
         "Instrument": FakeInstrument, "Schema": FakeSchema, "Judge": FakeJudge,
-        "Sentinel": FakeSentinel, "Executor": FakeExecutor,
+        "Reviewer": FakeReviewer, "Executor": FakeExecutor,
     }
     originals = {name: getattr(orchestrator, name) for name in monkeypatch_targets}
     for name, fake in monkeypatch_targets.items():

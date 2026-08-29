@@ -79,12 +79,15 @@ def _drive_pipeline_with_crashing_lexicon(monkeypatch):
             judge_calls.append(kwargs)
             return await complete_fake_task(self.ctx, {"decisions": _decisions()})
 
-    class FakeSentinel:
+    class FakeReviewer:
         def __init__(self, ctx=None, *_a, **_kw):
             self.ctx = ctx
             self.call_failures = 0
 
-        async def run(self, **_kw):
+        async def _log(self, *_a, **_kw):
+            return None
+
+        async def preview(self, **_kw):
             return await complete_fake_task(self.ctx, {"issues": [{
                 "file_id": "f1", "column": "col1",
                 "severity": "blocking", "problem": "policy review needed",
@@ -94,7 +97,7 @@ def _drive_pipeline_with_crashing_lexicon(monkeypatch):
     monkeypatch.setattr(orchestrator, "Schema", SucceedingSchema)
     monkeypatch.setattr(orchestrator, "Instrument", SucceedingInstrument)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
-    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
 
     class FakeSessions:
         async def find_one(self, *_a, **_kw):

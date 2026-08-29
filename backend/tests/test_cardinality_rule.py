@@ -212,16 +212,16 @@ def _run_cardinality_pipeline(tmp_path, monkeypatch):
                 "phi_category": "NONE",
             }]})
 
-    class FakeSentinel:
+    class FakeReviewer:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
             # Forces the pipeline into human review right after this
             # iteration's short-circuit, so the test never needs to mock
             # Executor/Auditor/Ledger/Herald -- the loop-ordering proof
-            # only needs the Judge<->Sentinel iteration itself.
+            # only needs the Judge<->Reviewer iteration itself.
             self.call_failures = 1
 
-        async def run(self, **_kwargs):
+        async def preview(self, **_kwargs):
             return await complete_fake_task(self.ctx, {"issues": []})
 
     monkeypatch.setattr(orchestrator, "RegulationsExpert", FakeRegulationsExpert)
@@ -230,7 +230,7 @@ def _run_cardinality_pipeline(tmp_path, monkeypatch):
     monkeypatch.setattr(orchestrator, "Instrument", FakeInstrument)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
-    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
 
     async def emit(_message):
         return None

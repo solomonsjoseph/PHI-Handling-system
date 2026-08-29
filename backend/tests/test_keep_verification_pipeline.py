@@ -37,12 +37,18 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
+        async def _log(self, *_a, **_kw):
+            return None
+
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {})
 
     class FakePHIMethodsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
+
+        async def _log(self, *_a, **_kw):
+            return None
 
         async def method_for(self, _category):
             return {}
@@ -74,12 +80,12 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
                 "reason": "Judge decision",
             }]})
 
-    class FakeSentinel:
+    class FakeReviewer:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
             self.call_failures = 0
 
-        async def run(self, **_kwargs):
+        async def preview(self, **_kwargs):
             return await complete_fake_task(self.ctx, {"issues": []})
 
     class FakeExecutor:
@@ -96,7 +102,7 @@ def test_keep_verification_routes_to_human_review_without_executing(tmp_path, mo
     monkeypatch.setattr(orchestrator, "Instrument", FakeInstrument)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
-    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
 
     async def emit(_message):

@@ -165,12 +165,15 @@ def test_assembled_package_reaches_judges_actual_call(monkeypatch):
                 "subject": "participant", "citation": "45 CFR 164.514(b)(2)(i)(A)",
             }]})
 
-    class FakeSentinel:
+    class FakeReviewer:
         def __init__(self, ctx=None, *_a, **_kw):
             self.ctx = ctx
             self.call_failures = 0
 
-        async def run(self, **_kw):
+        async def _log(self, *_a, **_kw):
+            return None
+
+        async def preview(self, **_kw):
             return await complete_fake_task(self.ctx, {"issues": [{
                 "file_id": "f1", "column": "mrn",
                 "severity": "blocking", "problem": "policy review needed",
@@ -180,7 +183,7 @@ def test_assembled_package_reaches_judges_actual_call(monkeypatch):
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "Instrument", FakeInstrument)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
-    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
 
     class FakeSessions:
         async def find_one(self, *_a, **_kw):

@@ -855,6 +855,7 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
     leave the run `partially_complete`, not `complete`.
     """
     from phi_core.agents import orchestrator
+    from phi_core.agents.reviewer import Reviewer as _RealReviewer
 
     bad_export = tmp_path / "f1_export.csv"
     _write_csv(bad_export, ["age"], [["96"]])  # cap_age_90 shape violation
@@ -888,6 +889,9 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
         def __init__(self, ctx=None, *_a, **_kwargs):
             self._ctx = ctx
 
+        async def _log(self, *_a, **_kw):
+            return None
+
         async def run(self, **_kwargs):
             await _complete(self._ctx, {})
             return {}
@@ -895,6 +899,9 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
     class FakePHIMethodsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self._ctx = ctx
+
+        async def _log(self, *_a, **_kw):
+            return None
 
         async def method_for(self, _category):
             await _complete(self._ctx, {})
@@ -936,12 +943,17 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
             await _complete(self._ctx, result)
             return result
 
-    class FakeSentinel:
+    class FakeReviewer(_RealReviewer):
+        """Overrides only PREVIEW mode (the decide-loop's former Sentinel
+        call); FINAL mode (``run``, the post-Executor coverage audit this
+        test actually exercises against ``bad_export``/``good_export``)
+        is inherited from the real class unchanged."""
         def __init__(self, ctx=None, *_a, **_kwargs):
+            super().__init__(ctx)
             self._ctx = ctx
             self.call_failures = 0
 
-        async def run(self, **_kwargs):
+        async def preview(self, **_kwargs):
             result = {"issues": []}
             await _complete(self._ctx, result)
             return result
@@ -999,7 +1011,7 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
     monkeypatch.setattr(orchestrator, "Instrument", FakeInstrument)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
-    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
     monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
     monkeypatch.setattr(orchestrator, "Scout", FakeScout)
@@ -1105,12 +1117,18 @@ def test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor(tmp_
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
+        async def _log(self, *_a, **_kw):
+            return None
+
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {})
 
     class FakePHIMethodsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
+
+        async def _log(self, *_a, **_kw):
+            return None
 
         async def method_for(self, _category):
             return {}
@@ -1148,12 +1166,12 @@ def test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor(tmp_
                  "confidence": 0.95, "reason": "Judge decision"},
             ]})
 
-    class FakeSentinel:
+    class FakeReviewer:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
             self.call_failures = 0
 
-        async def run(self, **_kwargs):
+        async def preview(self, **_kwargs):
             return await complete_fake_task(self.ctx, {"issues": []})
 
     executor_calls: list[int] = []
@@ -1207,7 +1225,7 @@ def test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor(tmp_
     monkeypatch.setattr(orchestrator, "Instrument", FakeInstrument)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
-    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
     monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
     monkeypatch.setattr(orchestrator, "Scout", FakeScout)
