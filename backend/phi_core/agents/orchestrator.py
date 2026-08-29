@@ -32,7 +32,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from phi_core.control.activation import ActivationFactory
 from phi_core.control.context import AgentContext
 from phi_core.control.handoff import JUDGE, METHODS_EXPERT, REGULATIONS_EXPERT
-from phi_core.control.records import HandoffEnvelope, MethodFinding, RegulatoryFinding
+from phi_core.control.records import HandoffEnvelope, MethodFinding, RegulatoryFinding, StudyKnowledgePackage
 from phi_core.control.store import ControlStore
 
 if TYPE_CHECKING:
@@ -65,7 +65,13 @@ from .reasoning import (
     validate_decisions,
 )
 from .reviewer import Reviewer
-from .specialists import Instrument, Lexicon, Schema, UncertainHeaderCeilingExceeded
+from .specialists import (
+    Instrument,
+    Lexicon,
+    Schema,
+    UncertainHeaderCeilingExceeded,
+    assemble_study_knowledge_package,
+)
 
 PhaseCb = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -643,6 +649,7 @@ class _PipelineDriverState:
         self.lexicon: dict[str, Any] = {}
         self.schema: dict[str, Any] = {}
         self.instrument: dict[str, Any] = {}
+        self.study_knowledge_package: "StudyKnowledgePackage | None" = None
         self.schema_stats: dict[str, Any] = {}
         self.prompt_scrub_counts: dict[str, int] = {}
         self.decisions: list[dict[str, Any]] = []
@@ -1009,7 +1016,11 @@ _SPECIALIST_DEGRADED_RESULT: dict[str, dict[str, Any]] = {
 
 async def _dispatch_specialists(state: _PipelineDriverState) -> "str | dict[str, Any]":
     """The ``specialists`` node: await the Lexicon/Schema/Instrument
-    tasks ``_dispatch_research`` already launched.
+    tasks ``_dispatch_research`` already launched, then assemble their
+    (possibly-degraded, see section 27 below) outputs into one
+    ``StudyKnowledgePackage`` (section 28) for ``_dispatch_decide`` to
+    hand Judge, instead of Judge reading three separate specialist
+    dicts.
 
     Section 27 (failure isolation): ``return_exceptions=True`` on the
     gather means one specialist crashing never discards its siblings'
@@ -1110,6 +1121,11 @@ async def _dispatch_specialists(state: _PipelineDriverState) -> "str | dict[str,
                        if (state.instrument_agent and "Instrument" not in crashed) else 0),
     }
     state.lexicon, state.schema, state.instrument = lexicon, schema, instrument
+    state.study_knowledge_package = assemble_study_knowledge_package(
+        run_id=state.effective_run_id,
+        datasets=[f.get("file_id", "") for f in state.dataset_files],
+        schema=schema, lexicon=lexicon, instrument=instrument,
+    )
     return "ok"
 
 
@@ -1146,7 +1162,8 @@ async def _dispatch_decide(state: _PipelineDriverState) -> str:
         judge = Judge(judge_ctx)
         j = await judge.run(schema=state.schema, instrument=state.instrument, lexicon=state.lexicon,
                             statute=state.statute, praxis=state.praxis_methods,
-                            prior_feedback=prior_feedback)
+                            prior_feedback=prior_feedback,
+                            study_knowledge_package=state.study_knowledge_package)
         await state.require_accepted(judge_ctx, j, "Judge")
         judge_call_failures += judge.call_failures
         last_judge_message_id = judge.last_message_id

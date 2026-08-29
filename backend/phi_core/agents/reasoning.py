@@ -22,7 +22,7 @@ import openpyxl as _openpyxl
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..anonymizer import apply_to_text
-from ..control.records import EvidenceClaim, GateResult
+from ..control.records import EvidenceClaim, GateResult, StudyKnowledgePackage
 from ..control.sandbox import run_isolated
 from ..crypto import pseudonym_salt
 from ..detectors import detect_text
@@ -958,7 +958,25 @@ class Judge(Agent):
     )
 
     async def run(self, schema: dict, instrument: dict, lexicon: dict, statute: dict,
-                  praxis: dict[str, dict] | None = None, prior_feedback: str = "") -> dict[str, Any]:
+                  praxis: dict[str, dict] | None = None, prior_feedback: str = "",
+                  study_knowledge_package: "StudyKnowledgePackage | None" = None) -> dict[str, Any]:
+        # section 28: a StudyKnowledgePackage unifies Schema/Lexicon/
+        # Instrument output into one versioned record instead of Judge
+        # reading three separately-concatenated dicts. When the live
+        # dispatch path (orchestrator.py::_dispatch_decide) supplies
+        # one, its schema_findings/lexicon_findings/instrument_findings
+        # ARE schema['columns']/lexicon['columns']/instrument['fields']
+        # -- assemble_study_knowledge_package (agents/specialists.py)
+        # derives them from exactly those three dicts -- so reading from
+        # the package instead of the raw dicts changes the SOURCE, never
+        # the CONTENT of what reaches this prompt. Callers exercising
+        # this method directly (every existing unit test) that do not
+        # build a package keep working unchanged: the raw dicts remain
+        # the fallback source below.
+        if study_knowledge_package is not None:
+            schema = {"columns": study_knowledge_package.schema_findings}
+            lexicon = {"columns": study_knowledge_package.lexicon_findings}
+            instrument = {"fields": study_knowledge_package.instrument_findings}
         prompt = (
             f"RegulationsExpert rules (jurisdictional regulations): {statute}\n\n"
             f"Schema columns (dataset headers -- rows never shown): {schema}\n\n"
