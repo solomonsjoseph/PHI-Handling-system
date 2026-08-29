@@ -143,7 +143,7 @@ def test_no_inline_pdf_parsing_left_in_specialists_module():
 
 def test_scanned_form_routes_through_shared_read_pdf_and_scrubs_before_prompt(monkeypatch):
     calls: list[Path] = []
-    phi_text = "Patient Name: James Smith, 415-555-1234\nSite of Disease: pulmonary"
+    phi_text = "Reference Phone: 415-555-1234\nSite of Disease: pulmonary"
 
     def stub_read_pdf(path):
         calls.append(Path(path))
@@ -157,12 +157,37 @@ def test_scanned_form_routes_through_shared_read_pdf_and_scrubs_before_prompt(mo
     assert len(inst.call_json_calls) == 1
     prompt = inst.call_json_calls[0]["user_prompt"]
     # detectors=("rule",) catches structurally-shaped PHI (phone numbers,
-    # SSNs, dates, emails); it deliberately does not run NER over free
-    # text, so a bare name is Judge/Sentinel's downstream concern, not
-    # Instrument's prompt-scrub responsibility -- this is the same
-    # rule-only tradeoff every other agent's call() makes.
+    # SSNs, dates, emails) on the first pass; that is sufficient here
+    # because this content has no NER-detectable residual PHI (no bare
+    # name, no free-prose PHI) to trip Wave R-c's post-scrub
+    # source_projection() safety net -- see the sibling test below for
+    # content that does trip it.
     assert "415-555-1234" not in prompt
     assert "[REDACTED:D:PHONE]" in prompt
+
+
+def test_scanned_form_with_residual_phi_after_rule_scrub_is_blocked_not_sent(monkeypatch):
+    """Wave R-c step 3: Instrument's extracted form text routes through
+    ``source_projection()``, whose post-scrub residual-content check
+    (the same one ``ProviderGateway.complete`` applies to every outbound
+    payload) uses full presidio+rule detection regardless of content
+    type. A bare name that the form's own rule-only first pass does not
+    catch (rule-only deliberately does not run NER over label-like
+    content) is still caught by that residual check and blocks the
+    provider call entirely -- the LLM must never see it, redacted or
+    otherwise. This supersedes this file's older assumption that "a
+    bare name is Judge/Sentinel's downstream concern"."""
+    phi_text = "Patient Name: James Smith, 415-555-1234\nSite of Disease: pulmonary"
+
+    def stub_read_pdf(path):
+        return phi_text
+
+    monkeypatch.setattr(specialists, "read_pdf", stub_read_pdf)
+    inst = _instrument(reply={"fields": [{"label": "Site of Disease", "collected_variable": None}]})
+    result = asyncio.run(inst.run(form_files=[_form_file("f1", SCANNED_PDF)]))
+
+    assert inst.call_json_calls == []
+    assert result["fields"] == []
 
 
 def _ocr_stack_available() -> bool:
