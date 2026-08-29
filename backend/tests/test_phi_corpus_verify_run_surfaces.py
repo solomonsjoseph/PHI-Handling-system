@@ -265,7 +265,7 @@ async def test_detects_hit_in_zip_metadata_filename_and_comment(tmp_path: Path) 
     zip_path = tmp_path / "bundle.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
         zf.comment = f"archive built with {comment_literal}".encode("utf-8")
-        zf.writestr(f"datasets/{filename_literal}.csv", "col\nvalue\n")
+        zf.writestr(f"datasets/{filename_literal}/data.csv", "col\nvalue\n")
 
     ground_truth = {
         "planted": [
