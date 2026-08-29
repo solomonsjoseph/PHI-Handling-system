@@ -54,9 +54,20 @@ def _plain(value: Any) -> Any:
 
 
 def _document(value: BaseModel | Mapping[str, Any]) -> Document:
-    if isinstance(value, BaseModel):
-        return _plain(value.model_dump(mode="python"))
-    return _plain(dict(value))
+    doc = _plain(value.model_dump(mode="python")) if isinstance(value, BaseModel) else _plain(dict(value))
+    # migrate.py's work_items.effect_key index is unique+sparse: Mongo skips
+    # a document from the uniqueness check only when the field is genuinely
+    # ABSENT, not merely falsy. WorkItem.effect_key defaults to "" (records.py),
+    # so every WorkItem without a real effect key was serialized with the key
+    # present and equal to "", making the very first WorkItem ever inserted
+    # collide with every subsequent one on that shared empty value -- a live
+    # DuplicateKeyError blocking task enqueueing entirely (found during Wave
+    # 4b's live smoke test). Dropping the key when it's the default empty
+    # string restores true sparse semantics; WorkItem.model_validate(doc)
+    # still supplies the "" default correctly on read for a missing key.
+    if doc.get("effect_key") == "":
+        del doc["effect_key"]
+    return doc
 
 
 def _matches(document: Mapping[str, Any], query: Query) -> bool:
