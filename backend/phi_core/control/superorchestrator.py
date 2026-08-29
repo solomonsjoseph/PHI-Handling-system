@@ -935,6 +935,52 @@ class SuperOrchestrator:
         )
         return not open_requests
 
+    # ---- begin_export / confirm_export ---------------------------------------
+
+    async def begin_export(self, *, run_id: str) -> WorkflowRun:
+        """The export-lifecycle responsibility (D9/docs #75, #87): advance
+        ``workflow_runs.state`` to ``ready_for_export`` -- the first of
+        the two lifecycle states :data:`~.workflow.RUN_LIFECYCLE_STATES`
+        (docs section 78) reserves for export, distinct from the D9
+        workflow-node table's own terminal set. Refuses unless
+        ``authorize_final_release`` already clears the run. Idempotent
+        and CAS-guarded like every other run-metadata write in this
+        class."""
+        current = await self._load_run(run_id)
+        if current.state != "ready_for_export" and not await self.authorize_final_release(run_id=run_id):
+            raise WorkflowError(f"run_id={run_id!r} is not authorized for export")
+        for _ in range(10):
+            run = await self._load_run(run_id)
+            if run.state == "ready_for_export":
+                return run
+            updated = run.model_copy(update={"state": "ready_for_export", "updated_at": _now()})
+            if await self._store.compare_and_set(
+                "workflow_runs", {"run_id": run_id}, {"updated_at": run.updated_at}, updated
+            ):
+                return updated
+        raise WorkflowError(f"could not begin export for run_id={run_id!r} after retries")
+
+    async def confirm_export(self, *, run_id: str) -> WorkflowRun:
+        """Advance to ``export_confirmed`` once ``begin_export``'s gate has
+        already been cleared. Refuses (``WorkflowError``) if the run never
+        actually reached ``ready_for_export`` -- there is no path to
+        confirming an export that was never begun."""
+        for _ in range(10):
+            run = await self._load_run(run_id)
+            if run.state == "export_confirmed":
+                return run
+            if run.state != "ready_for_export":
+                raise WorkflowError(
+                    f"run_id={run_id!r} must be ready_for_export before it can be "
+                    f"export_confirmed, is {run.state!r}"
+                )
+            updated = run.model_copy(update={"state": "export_confirmed", "updated_at": _now()})
+            if await self._store.compare_and_set(
+                "workflow_runs", {"run_id": run_id}, {"updated_at": run.updated_at}, updated
+            ):
+                return updated
+        raise WorkflowError(f"could not confirm export for run_id={run_id!r} after retries")
+
     # ---- authorize_publication ---------------------------------------------
 
     async def authorize_publication(
