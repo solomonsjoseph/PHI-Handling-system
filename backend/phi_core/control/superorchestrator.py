@@ -41,7 +41,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import limits
-from .artifacts import ArtifactService
+from .artifacts import MANIFEST_COLLECTION, ArtifactService
 from .context import StoreTraceWriter
 from .policy import MANIFESTS, POLICY_VERSION, CapabilityDenied, _bounded_budget
 from .records import (
@@ -717,6 +717,41 @@ class SuperOrchestrator:
             ):
                 return
         raise WorkflowError(f"could not record handoff denial for run_id={run_id!r} after retries")
+
+    # ---- require_artifacts_current ------------------------------------------
+
+    async def require_artifacts_current(self, *, run_id: str, artifact_ids: list[str]) -> None:
+        """The artifact-validity responsibility (D9/docs #87): refuse
+        (``WorkflowError``) when any ``artifact_id`` in ``run_id`` names
+        an artifact ``ArtifactService.invalidate_descendants`` (docs #30)
+        has already flipped to ``superseded``, or that is linked (via
+        :data:`MANIFEST_COLLECTION`) to a
+        :class:`~.records.VerifiedClassificationManifest` already flipped
+        to ``invalidated``. Also refuses on an artifact_id this run has
+        no record of at all, matching ``ArtifactService.open_for_download``'s
+        own ``artifact_missing``/``artifact_superseded``/
+        ``artifact_invalidated`` ordering (missing first would hide a
+        stale-lineage refusal behind a not-found one on a genuinely
+        existing but wrong-run artifact_id; here the artifact is looked
+        up scoped to ``run_id`` directly, so the two cases stay distinct).
+
+        A caller (a later phase's execution/export gate) consults this
+        before it lets a run advance past a step that depends on one of
+        these artifacts still being the current version -- it does not
+        itself walk or re-derive the lineage, which stays
+        ``ArtifactService``'s exclusive authority.
+        """
+        for artifact_id in artifact_ids:
+            doc = await self._store.get_one("artifacts", {"artifact_id": artifact_id, "run_id": run_id})
+            if doc is None:
+                raise WorkflowError(f"unknown artifact_id {artifact_id!r} for run_id={run_id!r}")
+            if doc.get("state") == "superseded":
+                raise WorkflowError(f"artifact_id {artifact_id!r} has been superseded and is no longer current")
+            manifest_doc = await self._store.get_one(MANIFEST_COLLECTION, {"artifact_id": artifact_id})
+            if manifest_doc is not None and manifest_doc.get("status") == "invalidated":
+                raise WorkflowError(
+                    f"artifact_id {artifact_id!r} is linked to an invalidated VerifiedClassificationManifest"
+                )
 
     # ---- authorize_publication ---------------------------------------------
 
