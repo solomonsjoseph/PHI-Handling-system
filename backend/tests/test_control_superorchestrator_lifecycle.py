@@ -202,3 +202,48 @@ async def test_dependencies_satisfied_is_false_while_a_child_is_still_live() -> 
     await tasks.complete(task_id=child.task_id, lease_owner="w1", fence=claimed.fence, output_ref={})
 
     assert await orch.dependencies_satisfied(run_id=run.run_id, task_id=root["task_id"]) is True
+
+
+# ---- observe_handoff: handoff-supervision responsibility ----
+
+
+@pytest.mark.asyncio
+async def test_observe_handoff_ignores_an_allowed_result() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    allowed = HandoffResult(
+        handoff_id="h1", run_id=run.run_id, sender="Judge", recipient="Schema", allowed=True,
+    )
+
+    await orch.observe_handoff(run_id=run.run_id, result=allowed)
+
+    stored = await store.get_one("workflow_runs", {"run_id": run.run_id})
+    assert stored["checkpoint"].get("handoff_denials", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_observe_handoff_records_a_denial_on_the_runs_checkpoint() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    denied = HandoffResult(
+        handoff_id="h1", run_id=run.run_id, sender="Judge", recipient="Schema",
+        allowed=False, reason_code="topology_blocked", detail="blocked",
+    )
+
+    await orch.observe_handoff(run_id=run.run_id, result=denied)
+    await orch.observe_handoff(run_id=run.run_id, result=denied)
+
+    stored = await store.get_one("workflow_runs", {"run_id": run.run_id})
+    assert stored["checkpoint"]["handoff_denials"] == 2
+
+
+@pytest.mark.asyncio
+async def test_observe_handoff_refuses_a_result_from_another_run() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    mismatched = HandoffResult(
+        handoff_id="h1", run_id="some-other-run", sender="Judge", recipient="Schema", allowed=False,
+    )
+
+    with pytest.raises(WorkflowError):
+        await orch.observe_handoff(run_id=run.run_id, result=mismatched)
