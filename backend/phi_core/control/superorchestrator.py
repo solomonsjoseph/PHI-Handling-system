@@ -50,6 +50,7 @@ from .records import (
     HumanReviewEvent,
     HumanReviewRequest,
     ResourceBudget,
+    VerifiedClassificationManifest,
     WorkflowRun,
     WorkItem,
 )
@@ -796,6 +797,47 @@ class SuperOrchestrator:
             reason_codes=["budget_exceeded", reason],
             decision_version=0,
         )
+
+    # ---- authorize_manifest_freeze -------------------------------------------
+
+    async def authorize_manifest_freeze(
+        self, *, run_id: str, artifact_id: str, manifest: VerifiedClassificationManifest,
+    ) -> VerifiedClassificationManifest:
+        """The manifest-freeze-authorization responsibility (D9/docs #49,
+        #87): the authority that lets a
+        :class:`~.records.VerifiedClassificationManifest` actually be
+        recorded as ``verified_for_execution``.
+
+        The model's own validator already refuses ``unresolved_items !=
+        0`` at ``status="verified_for_execution"`` construction time; what
+        this method adds is the *run-lifecycle* eligibility check the
+        model cannot see -- refuses (``WorkflowError``) once the run is
+        terminal or paused for human review, and refuses a manifest whose
+        own ``run_id`` does not match ``run_id`` (never freeze a manifest
+        into a run it does not belong to). Writes into Wave R-b's
+        :data:`MANIFEST_COLLECTION`, keyed by ``artifact_id`` plus a
+        ``status`` field -- the exact shape
+        ``ArtifactService.invalidate_descendants``/``open_for_download``
+        already read from, per that wave's documented convention for any
+        future code creating a manifest.
+        """
+        if manifest.run_id != run_id:
+            raise WorkflowError(
+                f"manifest.run_id {manifest.run_id!r} does not match run_id {run_id!r}"
+            )
+        run = await self._load_run(run_id)
+        if is_terminal(run.node) or run.state == "awaiting_human_review":
+            raise WorkflowError(
+                f"cannot authorize a manifest freeze for run_id={run_id!r} in state {run.state!r}"
+            )
+        document = manifest.model_dump(mode="python")
+        document["artifact_id"] = artifact_id
+        existing = await self._store.get_one(MANIFEST_COLLECTION, {"artifact_id": artifact_id})
+        if existing is None:
+            await self._store.insert(MANIFEST_COLLECTION, document)
+        else:
+            await self._store.replace_one(MANIFEST_COLLECTION, {"artifact_id": artifact_id}, document)
+        return manifest
 
     # ---- authorize_publication ---------------------------------------------
 
