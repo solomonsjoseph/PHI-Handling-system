@@ -1020,6 +1020,84 @@ sharing rate-limit/concurrency state produce non-deterministic counts run to run
 canonical baseline of record has always been the serial run, which matches exactly.
 Not a regression, not caused by the simplification commit.
 
-**Phase 5/Phase 6 are complete.** `PHASE_5_6_STATUS = PASS` stands. Proceeding to
-Phase 7 per plan order, pausing first per the user's explicit "pause before moving
-to phase 7" instruction from this session.
+**Phase 5/Phase 6 are complete.** `PHASE_5_6_STATUS = PASS` stands.
+
+## Phase 7 (Judge) — COMPLETE
+
+Four commits (`65dd6c3`, `39a9753`, `a96bb05`, `82d81df`), landed by a solo subagent.
+
+**Two-stage Judge built.** `triage_columns` (`reasoning.py:102`) classifies every Schema
+column into exactly one of KNOWN/DERIVED/CONFLICTED/UNVERIFIED/UNKNOWN, deterministic and
+never guessing (never touches an LLM). `_OPERATION_FROM_ACTION` (`reasoning.py:164`) maps
+the model action vocabulary to section 41's `ColumnOperation` vocabulary. `Judge.run`
+now builds one `ColumnDecision` per logical column (100 percent coverage) using the
+section 40 provenance class its triage state maps to (`_TRIAGE_PROVENANCE`).
+
+**R-a debt flipped.** `JudgeDecision`/`JudgeProposal` (was `reasoning.py:52`/`:75`)
+deleted outright, not aliased. `policy.py:39`/`:126` registers `output_schema='column_decision'`
+and `OUTPUT_SCHEMAS` gains `'column_decision'`. The `xfail(strict=True)` marker
+(`test_control_phaseR_contracts.py::test_judge_output_schema_matches_column_decision_contract`)
+removed in the same commit; it now passes (0 xfailed in the gate run, was 1 at baseline).
+
+**Scope decision (accepted):** the plan's "migrate validate_decisions and run_decision_gates
+to ColumnDecision" was read as "ensure they carry no stray JudgeDecision/JudgeProposal
+reference and migrate their tests that named the old schema," not "rewrite the whole
+gate/execution pipeline onto ColumnDecision's vocabulary." This is correct here and
+independent verification agrees: `ColumnDecision` uses `extra='forbid'` and the
+`operation`/`column_id`/`decision_status` vocabulary with no `confidence`/`subject`/
+`action` fields, while `validate_decisions` and every D11 gate function
+(`apply_sentinel_hard_rules`, `apply_age_dob_rule`, `apply_site_cardinality_rule`,
+`apply_sentinel_escalations`) plus `Executor`/`Reviewer`/the orchestrator loop all run
+on the loose `action`/`column`/`confidence`/`subject` dict shape. A literal cutover is
+the phased work of Phase 8 (Sentinel rules migrate to Reviewer Preview), Phase 9
+(Executor), and Phase 10 (DeterministicVerifier retires Operator) per sections 90-93.
+Judge now emits both its still-live executable `decisions` list (unchanged, on which the
+pipeline keeps running) and a typed `column_decisions` list of real `ColumnDecision`
+records (the currency Phase 9's manifest freeze consumes).
+
+**Contract tests** (`test_control_phase7_handoff_contracts.py`, 9 parametrized cases, one
+per `ALLOWED_EDGES` edge): each constructs the producer's real output record, passes it
+through `HandoffGateway.handoff()`, and asserts the consumer accepts with no
+`ValidationError` and no read of an unpopulated field, parametrized over `EDGE_SCHEMAS`.
+
+**Coverage invariant** (`test_control_phase7_coverage_invariant.py`, 3 tests): a two-file
+fixture both carrying a column literally named `notes` still produces exactly one
+decision per (file, column) identity (4 decisions, not 2 deduplicated by name), plus a
+negative control proving a missing `(f2, notes)` decision fails coverage.
+
+**DELETED_TESTS:** the entire `tests/test_judge_typed_proposal.py` (5 nodeids) recorded,
+whose premise (Judge.run returning a JudgeDecision/JudgeProposal-typed value) is gone.
+
+**Gate (canonical serial, `PHI_TEST_BASE_URL` set):** 8 failed, 1520 passed, 4 skipped,
+2 errors, 0 xfailed, 83.71s. The failed/error set is byte-identical to the Step 0
+baseline (3 `test_human_review_invariant.py` + 5 `test_agent_pipeline.py` FAILED;
+2 `test_agent_pipeline.py` ERROR); the single baseline xfail is resolved. `ruff check .`
+clean. Root suite unchanged (85 failed / 909 passed / 3 skipped, all `phi_engine`, out
+of scope). Invariant + canary + the two new Phase 7 test files: 33 passed. Nodeid
+regression: the only disappeared nodeids are the 5 deliberately deleted ones; 1534
+collected. No functional `JudgeDecision`/`JudgeProposal` reference remains (only two
+explanatory docstring comments and the unrelated `JudgeDecisionSet` lineage artifact
+name).
+
+**Residual risks / notes recorded (not Phase 7 blockers):**
+
+1. **`provenance_status` has no dedicated `ColumnDecision` field.** Section 41 lists it;
+   the frozen `records.py` `ColumnDecision` (`records.py:626`, closed after R-a) does not
+   carry it. The section 40 provenance class is computed and attached per column via
+   `technical_rationale` (`reasoning.py:1198-1200`) instead of a structured field. This
+   is a pre-existing R-a schema discrepancy, not a Phase 7 regression; records.py is
+   must-not-touch. Recorded for Phase 17's defect-resolution pass.
+
+2. **`verify_keep_decisions` allowlist "tightening" is documentary only.** The plan
+   contradicts itself: Phase R line 754 ("Phase 9 takes the former") and line 787
+   ("Phase 9 removes verify_keep_decisions") assign the relocation to Phase 9, while
+   Phase 7's own line ("tighten the raw-reader allowlist by removing verify_keep_decisions")
+   implies Phase 7. The invariant scan's `targets` set (`test_control_phaseR_integration.py:651`)
+   has always enumerated only the four relocated readers; `verify_keep_decisions` was
+   never one of them. Phase 7 removed its docstring-allowlist bullet (which itself said
+   "retired only in Phase 9"); `check` no behavior change. The substantive relocation of
+   `verify_keep_decisions` (still calling `iter_dataset_rows` at `reasoning.py:883`)
+   remains Phase 9's task.
+
+**`PHASE_7_STATUS = PASS`. Phase 7 is complete.** Proceeding to Phase 8 (Reviewer
+Preview and Human Review, solo, sections 42-48/91).
