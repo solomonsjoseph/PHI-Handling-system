@@ -15,10 +15,19 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from .artifacts import ArtifactService
-from .context import AgentContext, StoreResearchCache, StoreTaskCompleter, StoreTraceWriter
+from .context import (
+    AgentContext,
+    StoreMethodRegistryReader,
+    StoreOpaqueWriter,
+    StoreResearchCache,
+    StoreTaskCompleter,
+    StoreTraceWriter,
+)
 from .gateway import ProviderGateway, ToolGateway
+from .handoff import HandoffGateway
 from .policy import CapabilityPolicy
-from .records import CapabilityGrant
+from .records import CapabilityGrant, SandboxRecord
+from .sandbox import create_sandbox
 from .store import ControlStore, MongoControlStore
 from .tasks import TaskService
 from .writer import ArtifactWriter
@@ -47,6 +56,11 @@ class ActivationFactory:
         self.policy = CapabilityPolicy(llm_cfg)
         self.gateway = ProviderGateway(self.store, self.policy)
         self.task_service = TaskService(self.store, self.policy)
+        # Phase R-c: at most one sandbox workspace per run, shared across
+        # every agent activated for it (real filesystem/platform work --
+        # never created unless a caller actually asks for one via
+        # `needs_sandbox=True`).
+        self._sandboxes: dict[str, SandboxRecord] = {}
 
     async def activate(
         self,
@@ -57,6 +71,7 @@ class ActivationFactory:
         emit: Optional[Callable[[Any], Awaitable[None]]] = None,
         manager: Any = None,
         lease_owner: str | None = None,
+        needs_sandbox: bool = False,
     ) -> AgentContext:
         task = await self.task_service.enqueue(
             run_id=run_id,
@@ -68,6 +83,7 @@ class ActivationFactory:
         return await self._claim_and_build(
             task_id=task.task_id, session_id=session_id, agent=agent,
             emit=emit, manager=manager, lease_owner=lease_owner or f"activation:{run_id}",
+            needs_sandbox=needs_sandbox,
         )
 
     async def activate_child(
@@ -80,6 +96,7 @@ class ActivationFactory:
         emit: Optional[Callable[[Any], Awaitable[None]]] = None,
         manager: Any = None,
         lease_owner: str | None = None,
+        needs_sandbox: bool = False,
     ) -> AgentContext:
         """Like ``activate``, but the task is created as
         ``SuperOrchestrator``-owned durable child work under
@@ -101,11 +118,23 @@ class ActivationFactory:
         return await self._claim_and_build(
             task_id=task.task_id, session_id=session_id, agent=agent,
             emit=emit, manager=manager, lease_owner=lease_owner or f"activation:{run_id}",
+            needs_sandbox=needs_sandbox,
         )
+
+    def _sandbox_for(self, run_id: str) -> SandboxRecord:
+        """Lazily create (once per run_id, then reuse) the run-scoped
+        sandbox workspace. Never called unless a caller opted the run
+        into one via ``needs_sandbox=True``."""
+        record = self._sandboxes.get(run_id)
+        if record is None:
+            record = create_sandbox(run_id)
+            self._sandboxes[run_id] = record
+        return record
 
     async def _claim_and_build(
         self, *, task_id: str, session_id: str, agent: str,
         emit: Optional[Callable[[Any], Awaitable[None]]], manager: Any, lease_owner: str,
+        needs_sandbox: bool = False,
     ) -> AgentContext:
         claimed = await self.task_service.claim(task_id=task_id, lease_owner=lease_owner)
         if claimed is None:
@@ -135,6 +164,15 @@ class ActivationFactory:
                 self.task_service, task_id=claimed.task_id,
                 lease_owner=claimed.lease_owner, fence=claimed.fence,
             ),
+            # Phase R-c: every claimed context gains the control plane.
+            # `handoff`/`opaque`/`methods` are cheap store-backed facades,
+            # attached unconditionally like `trace`/`cache` above; `sandbox`
+            # does real filesystem/platform work and is attached only when
+            # `needs_sandbox=True` was requested for this activation.
+            handoff=HandoffGateway(self.store, session_id=session_id),
+            sandbox=self._sandbox_for(claimed.run_id) if needs_sandbox else None,
+            opaque=StoreOpaqueWriter(self.store, self.task_service, run_id=claimed.run_id),
+            methods=StoreMethodRegistryReader(self.store),
         )
 
     async def complete_and_accept(self, ctx: AgentContext, result: dict[str, Any]) -> bool:

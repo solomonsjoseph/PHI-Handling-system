@@ -5,11 +5,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
 
 from .gateway import ProviderGateway, ToolGateway
-from .records import CapabilityGrant, DataClass, TraceEvent
+from .records import CapabilityGrant, DataClass, MethodRecord, SandboxRecord, TraceEvent
+from .store import ControlStore
+from .tasks import TaskService
 
 if TYPE_CHECKING:
     from phi_core.agents.base import AgentMessage
     from phi_core.agents.manager import Manager
+
+    from .handoff import HandoffGateway
 
 
 class TraceWriter(Protocol):
@@ -40,6 +44,28 @@ class TaskCompleter(Protocol):
     async def fail(self, error_category: str) -> None: ...
 
 
+class OpaqueWriter(Protocol):
+    """Async, store-backed counterpart to ``opaque.OpaqueMap`` (Phase R-c):
+    an agent never touches the run's opaque map dict directly, only mints
+    and resolves tokens through this facade, which persists every mint
+    through ``SuperOrchestrator.record_opaque_map`` (the sole
+    ``workflow_runs.opaque_map`` writer) before the caller's output can
+    reach an LLM-facing structure."""
+
+    async def to_opaque(self, kind: str, canonical: str) -> str: ...
+
+    async def from_opaque(self, token: str) -> str: ...
+
+
+class MethodRegistryReader(Protocol):
+    """Read-only facade onto ``methods.get_approved_methods`` (Phase R-c,
+    docs #38): the sole query surface an agent may use to check whether a
+    researched method recommendation has actually cleared the
+    MethodRegistry lifecycle before treating it as safe to execute."""
+
+    async def get_approved_methods(self, hipaa_category: str | None = None) -> list[MethodRecord]: ...
+
+
 @dataclass(frozen=True)
 class AgentContext:
     session_id: str
@@ -61,6 +87,18 @@ class AgentContext:
     # backing `WorkItem` to complete (most unit tests build one via
     # `control.testing.make_ctx` without wiring a real `TaskService`).
     tasks: TaskCompleter | None = None
+    # Phase R-c: the control-plane fields every agent needs to reach the
+    # previously-inert Phase 2/3 modules. `handoff`/`opaque`/`methods` are
+    # store-backed facades (matching `cache`/`artifacts`/`evidence` above);
+    # `sandbox` is the run-scoped `SandboxRecord` `control.sandbox
+    # .run_isolated` takes directly, not a facade. `sandbox` stays `None`
+    # unless the caller opted the run into one (`ActivationFactory
+    # .activate(..., needs_sandbox=True)`) -- real filesystem/platform
+    # work, never created for every context automatically.
+    handoff: "HandoffGateway | None" = None
+    sandbox: SandboxRecord | None = None
+    opaque: OpaqueWriter | None = None
+    methods: MethodRegistryReader | None = None
 
 
 class StoreResearchCache:
@@ -210,3 +248,65 @@ class StoreTaskCompleter:
         await self._tasks.fail(
             task_id=self._task_id, lease_owner=self._lease_owner, fence=self._fence, error_category=error_category,
         )
+
+
+class StoreOpaqueWriter:
+    """The task-facing ``OpaqueWriter``: mints a run-scoped opaque token
+    via the pure, deterministic :class:`~.opaque.OpaqueMap` (HMAC digest,
+    collision check unchanged) and durably persists the enlarged map
+    through ``SuperOrchestrator.record_opaque_map`` -- encrypted at rest
+    by ``OpaqueMap`` itself (D5) -- before returning the token, so a
+    sensitive value projected by any agent this run is recorded before
+    that agent's output can reach an LLM-facing structure.
+
+    Retries the load-mutate-persist cycle to absorb a lost race against a
+    concurrent writer in the same run (e.g. Schema and Lexicon minting
+    different tokens at the same time under section 27's specialist
+    concurrency): ``record_opaque_map`` itself already retries its own
+    CAS internally, but a *different* concurrent addition landing between
+    this class's read and its call to ``record_opaque_map`` would
+    otherwise still overwrite that addition outright (last-writer-wins is
+    ``record_opaque_map``'s own, pre-existing, unchanged semantics); the
+    outer retry here re-reads and re-applies this mint on top of
+    whatever the other writer landed, rather than clobbering it.
+    """
+
+    def __init__(self, store: ControlStore, tasks: TaskService, *, run_id: str) -> None:
+        from .superorchestrator import SuperOrchestrator
+
+        self._orchestrator = SuperOrchestrator(store, tasks)
+        self._run_id = run_id
+
+    async def to_opaque(self, kind: str, canonical: str) -> str:
+        from .opaque import OpaqueMap
+
+        for _ in range(10):
+            run = await self._orchestrator._load_run(self._run_id)
+            current = dict(run.opaque_map)
+            token = OpaqueMap(self._run_id, current).to_opaque(kind, canonical)
+            if current == run.opaque_map:
+                return token  # this exact (kind, canonical) was already minted
+            updated = await self._orchestrator.record_opaque_map(run_id=self._run_id, opaque_map=current)
+            if updated.opaque_map == current:
+                return token
+        raise RuntimeError(f"unable to persist opaque token for run_id={self._run_id!r} after retries")
+
+    async def from_opaque(self, token: str) -> str:
+        from .opaque import OpaqueMap
+
+        run = await self._orchestrator._load_run(self._run_id)
+        return OpaqueMap(self._run_id, dict(run.opaque_map)).from_opaque(token)
+
+
+class StoreMethodRegistryReader:
+    """The task-facing ``MethodRegistryReader``: delegates to
+    ``methods.get_approved_methods``, the sole query surface that never
+    returns a record whose lifecycle is anything but ``approved``."""
+
+    def __init__(self, store: ControlStore) -> None:
+        self._store = store
+
+    async def get_approved_methods(self, hipaa_category: str | None = None) -> list[MethodRecord]:
+        from .methods import get_approved_methods
+
+        return await get_approved_methods(self._store, hipaa_category)
