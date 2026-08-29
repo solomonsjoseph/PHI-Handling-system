@@ -432,4 +432,113 @@ a code fix.
 **Nodeid regression check:** 1421 nodeids collected vs 1039 at Step 0 baseline. `comm -23`
 against the baseline nodeid set is **empty** — no silent test disappearance.
 
-Next: Wave R-d (solo): the leak-canary harness.
+### Wave R-d (solo): leak-canary harness — COMPLETE
+
+5 commits. New `control/canary.py` (`CanarySet`, process-local, never persisted, populated
+from `CorpusArtifact.ground_truth`). `phi_corpus/verify.py` gained `scan_run_surfaces_for_
+leaks()` covering the 8 non-export section-72 surfaces (trace_events including status_text,
+workflow_runs.opaque_map, agent logs, HandoffEnvelope payloads, learning store, research
+queries, errors, ZIP metadata), reusing the existing planted-literal set and leak-hit record
+shape from `scan_exports_for_leaks`. `gateway.py`'s outbound-payload path scans against the
+active `CanarySet` immediately after the existing scrub/restricted-content checks and before
+the provider call: a hit raises `SECURITY_BOUNDARY_VIOLATION` and records
+`{canary_scan: "violation", canary_id, hit_count}` on the `TraceEvent`, never the matched
+value; a clean scan records `{canary_scan: "clean"}` alongside the existing `egress_digest`.
+`ToolGateway.search`'s `query` argument gets the identical treatment.
+
+**Genuine architectural finding, correctly resolved:** `HandoffEnvelope.payload` (a
+required Part-1 surface) is never persisted anywhere by the existing, unmodified
+`handoff.py`. Resolved by labelling hits on handoff-phase `trace_events` rows as
+`surface=handoff_envelope_payload` (the only place such a leak could actually manifest),
+plus a dedicated test driving the real `HandoffGateway.handoff` proving the payload
+genuinely never persists, rather than building new persistence just to satisfy a test.
+
+Own tests: `tests/test_control_phaseR_canary.py tests/test_phi_corpus_verify_run_surfaces.py`
+-> **21 passed**. Re-verified zero regressions across 260 pre-existing tests spanning
+gateway/egress, corpus, handoff, and architecture-boundary suites.
+
+**Wave-landing check:** **3 failed, 1418 passed, 3 skipped, 1 xfailed, 63.26s** — same 3
+pre-existing `test_human_review_invariant.py` failures, zero regressions. Nodeid check:
+1442 collected, `comm -23` against baseline empty.
+
+## Phase R gate — PHASE_R_STATUS = PASS
+
+Full per-phase gate procedure run against `9e633a1` (the commit immediately before Wave
+R-a's first commit) as the phase base.
+
+**1-2. Acceptance R, checked against real evidence:**
+- Every Phase 1, 2, 3 exit criterion in master-prompt sections 84, 85, 86 is met, including
+  "independently tested and integrated": all 25 section-84 contracts typed and field-exact
+  (Wave R-a); lifecycle single-sourced; state transitions and versioning/invalidation
+  tested; `SandboxManager`, `HeaderSafetyGate`/`SourceProjectionGateway`, `MethodRegistry`,
+  `HandoffGateway` all have live call sites with behavioral proof, not just exclusivity
+  scans (Wave R-c step 8); artifact lineage invalidation built and tested (Wave R-b
+  R-Lineage).
+- D1 through D9: D1/D2/D3/D7/D9 fixed with dedicated tests (Wave R-b R-Sandbox); D3 parent
+  half and D4 fixed (Wave R-b R-Trace); D5 fixed, opaque map encrypted at rest with a wired
+  erasure caller (Wave R-c step 2 plus the orchestrator's `server.py` wiring); D6 disclosed
+  as open until Phase 8 (`docs/THREAT_MODEL_BACKEND.md`); D8 fixed (Wave R-b R-Docs).
+- The 4 macOS sandbox failures pass (Wave R-b R-Sandbox; confirmed absent from every
+  wave-landing check since).
+- The canary harness runs and is clean (Wave R-d; 21 passed, zero unexpected hits).
+
+**2a. Test-first ordering check:** every one of the 6 new test files added during Phase R
+(`test_control_phaseR_canary.py`, `test_control_phaseR_contracts.py`,
+`test_control_phaseR_integration.py`, `test_control_phaseR_lineage.py`,
+`test_control_phaseR_trace.py`, `test_phi_corpus_verify_run_surfaces.py`) was created by a
+`test(...)`-prefixed commit as its first commit, verified via `git diff --diff-filter=A`.
+The full ordered commit log (`git log --reverse`, 70 commits) shows a consistent
+test-then-feat/fix pairing throughout; every subagent's report additionally supplied
+verbatim RED blocks confirming this per unit of work. No implementation commit precedes its
+own test commit.
+
+**3. Full backend suite** (`pytest tests -q -p no:cacheprovider -n auto`, server restarted
+first): **8 failed, 1427 passed, 4 skipped, 1 xfailed, 2 errors, 65.02s**. The 8 failed + 2
+errors are an **exact match** to Step 0's baseline failure set, minus the 4 sandbox failures
+Wave R-b fixed: 5 failed + 2 errors in `test_agent_pipeline.py` (deep pipeline-execution
+integration, not attributed to any D1-D9 defect or listed in Phase R's acceptance criteria;
+depends on Phase 4's Manager/SuperOrchestrator build-out) and 3 failed in
+`test_human_review_invariant.py` (explicitly Phase 8's scope). **Zero new failures beyond
+baseline.** The 4th skip (up from 3 in every wave-landing check) is `test_corpus_researcher.py`
+skipping for a missing `ANTHROPIC_API_KEY` — that file is deselected in the wave-landing
+subset but included in the full gate run; not a new condition.
+
+**4. Lint:** `ruff check .` found 19 errors. 17 were cosmetic (import sorting, unused
+imports), auto-fixed. One real finding: `phi_core/models.py`'s `Session` class had a dead
+duplicate `status` field (`status: SessionStatus = "created"`) left over from Wave R-c's
+lifecycle single-sourcing, which replaced `SessionStatus` with `RunState` but added the new
+field instead of editing the old one in place; `from __future__ import annotations` deferred
+evaluation meant the undefined-name reference never raised at runtime, but ruff's static AST
+check caught it. Removed the dead line; `Session.status: RunState` is now the sole
+definition. One `B905 zip() without strict=` in `specialists.py`'s header-projection code:
+confirmed the 1:1 length invariant genuinely holds and added `strict=True` to enforce it.
+`ruff check .` now reports **All checks passed!**
+
+**5. Root suite** (`PYTHONDONTWRITEBYTECODE=1 backend/.venv/bin/python -m pytest -q -p
+no:cacheprovider tests`, from repo root): **85 failed, 909 passed, 3 skipped, 63.75s** —
+exact match to the Step 0 baseline (85/909/3), all failures confined to `phi_engine`
+(out of scope, never edited), a pre-existing macOS platform gap.
+
+**6. Architectural invariant check:** `test_control_phaseR_integration.py` -> **20 passed**.
+Grep for `"not wired into phi_core/agents/ yet"` across `control/` -> **zero hits**.
+
+**6a. Canary scan:** the canary harness's own test suite (21 passed) proves detection on
+every surface Phase R introduced and zero false hits on a clean run. No live acceptance
+corpus run exists yet to scan in production conditions (that is Phase 20's job); this gate
+step is satisfied by the harness's own verified correctness.
+
+**7. Regression rule:** zero silent nodeid disappearance (`comm -23` against the Step 0
+baseline is empty across every wave-landing check and this final gate run); no skip
+inflation (all 4 skips are either the same 3 already present at every wave landing, plus the
+1 additional skip explained above as an artifact of including a previously-deselected file,
+not a new condition, and every skip has an inline `pytest.skip`/`skipif` reason string); one
+`xfail(strict=True)` exists, recorded in `KNOWN_XFAIL` above with its resolving phase
+(Phase 7) and exact reason string.
+
+**PHASE_R_STATUS = PASS.**
+
+**Checkpoint: COMPACT.** Phase R's artifacts (control-plane wiring, the canary harness, the
+corrected lifecycle/records contracts) are consumed directly by Phase 4 and beyond;
+continuing in this same session.
+
+Next: Phase 4 (Manager / Super Orchestrator), waves 4a then 4b.
