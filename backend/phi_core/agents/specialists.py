@@ -19,6 +19,7 @@ import openpyxl
 
 from ..control import limits
 from ..control.opaque import OpaqueMap
+from ..control.records import StudyKnowledgePackage
 from ..control.source_projection import classify_header, source_projection
 from ..file_readers import (
     column_value_stats,
@@ -67,6 +68,56 @@ class UncertainHeaderCeilingExceeded(Exception):
 
 def _opaque_file_id(file_record: dict[str, Any]) -> str:
     return str(file_record.get("opaque_file_id") or file_record.get("file_id") or "")
+
+def assemble_study_knowledge_package(
+    *,
+    run_id: str,
+    datasets: list[str],
+    schema: dict[str, Any],
+    lexicon: dict[str, Any] | None = None,
+    instrument: dict[str, Any] | None = None,
+) -> StudyKnowledgePackage:
+    """Assemble Lexicon/Schema/Instrument outputs into one versioned
+    ``StudyKnowledgePackage`` (docs #28) instead of concatenating
+    specialist prose into a single prompt.
+
+    ``schema``, ``lexicon``, and ``instrument`` are the raw ``run()`` return
+    dicts each specialist already produces: ``{"columns": [...]}`` for
+    Schema and Lexicon, ``{"fields": [...]}`` for Instrument. Schema is
+    mandatory (docs #24) and is the sole source of the package's
+    per-column identity; Lexicon and Instrument contribute their findings
+    only when their source material (a dictionary or forms) actually
+    exists, mirroring how the orchestrator skips a specialist with no
+    matching input files. The flat ``columns`` list is the ordered,
+    de-duplicated set of Schema's column names; ``schema_findings`` keeps
+    the per-file detail (``name`` + ``_file_id``) intact.
+
+    Versioning follows the record's own convention: every assembly mints a
+    fresh ``package_id`` (the record carries no monotonic ``version``
+    integer; identity plus the ``superseded_by`` supersede-chain is the
+    versioning mechanism, and ``created_at`` orders successive instances).
+    A caller holding a prior package marks it ``superseded_by`` the newer
+    package's id; this function never mutates an existing package."""
+    schema_findings = list(schema.get("columns") or [])
+    lexicon_findings = list((lexicon or {}).get("columns") or [])
+    instrument_findings = list((instrument or {}).get("fields") or [])
+
+    columns: list[str] = []
+    seen: set[str] = set()
+    for finding in schema_findings:
+        name = finding.get("name") if isinstance(finding, dict) else None
+        if isinstance(name, str) and name and name not in seen:
+            seen.add(name)
+            columns.append(name)
+
+    return StudyKnowledgePackage(
+        run_id=run_id,
+        datasets=list(datasets),
+        columns=columns,
+        schema_findings=schema_findings,
+        lexicon_findings=lexicon_findings,
+        instrument_findings=instrument_findings,
+    )
 
 
 class Lexicon(Agent):
