@@ -261,6 +261,31 @@ def test_regulatory_and_method_findings_are_persisted_as_typed_records(monkeypat
     assert method_docs[0]["hipaa_category"] == "A"
 
 
+def test_regulatory_and_method_findings_route_through_handoff_gateway(monkeypatch):
+    """RegulatoryFinding/MethodFinding must reach Judge through the same
+    ``HandoffGateway.handoff`` governance every other inter-agent finding
+    in this codebase goes through -- not merely persisted directly to
+    the control store as a workaround for the (now-widened) confinement
+    invariant (see test_control_phaseR_integration.py::
+    test_handoff_call_sites_confined_to_manager_broker and this file's
+    own test_handoff_call_sites_still_confined_to_manager_broker_and_
+    orchestrator, below). A real ``phase == "handoff"`` trace event must
+    exist on both the (RegulationsExpert, Judge) and (PHIMethodsExpert,
+    Judge) edges, allowed, for a run that actually triggers research."""
+    _result, _calls, store = _drive_pipeline(monkeypatch, decisions=_decisions(id="A"))
+
+    events = asyncio.run(store.find_many("trace_events", {"phase": "handoff"}))
+    directions = {e["direction"]: e for e in events}
+    assert "RegulationsExpert->Judge" in directions, (
+        f"no governed handoff trace event for RegulationsExpert->Judge; saw {sorted(directions)}"
+    )
+    assert "PHIMethodsExpert->Judge" in directions, (
+        f"no governed handoff trace event for PHIMethodsExpert->Judge; saw {sorted(directions)}"
+    )
+    assert directions["RegulationsExpert->Judge"]["payload"]["allowed"] is True
+    assert directions["PHIMethodsExpert->Judge"]["payload"]["allowed"] is True
+
+
 def test_handoff_gateway_confinement_invariant_still_holds():
     """This phase's dispatch code must never itself become a second
     .handoff( call site outside agents/manager.py -- reproduces the
