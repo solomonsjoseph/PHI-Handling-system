@@ -576,3 +576,65 @@ async def test_authorize_final_release_is_true_for_partially_complete() -> None:
     assert run.node == "partially_complete"
 
     assert await orch.authorize_final_release(run_id=run.run_id) is True
+
+
+# ---- begin_export / confirm_export: export-lifecycle responsibility ----
+
+
+@pytest.mark.asyncio
+async def test_begin_export_advances_state_to_ready_for_export() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    run = await _completed_run(orch, run.run_id)
+
+    updated = await orch.begin_export(run_id=run.run_id)
+
+    assert updated.state == "ready_for_export"
+    stored = await store.get_one("workflow_runs", {"run_id": run.run_id})
+    assert stored["state"] == "ready_for_export"
+
+
+@pytest.mark.asyncio
+async def test_begin_export_refuses_a_run_not_yet_authorized_for_release() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+
+    with pytest.raises(WorkflowError):
+        await orch.begin_export(run_id=run.run_id)
+
+
+@pytest.mark.asyncio
+async def test_begin_export_is_idempotent() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    run = await _completed_run(orch, run.run_id)
+    first = await orch.begin_export(run_id=run.run_id)
+
+    second = await orch.begin_export(run_id=run.run_id)
+
+    assert second.state == "ready_for_export"
+    assert second.updated_at == first.updated_at
+
+
+@pytest.mark.asyncio
+async def test_confirm_export_advances_state_to_export_confirmed() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+    run = await _completed_run(orch, run.run_id)
+    await orch.begin_export(run_id=run.run_id)
+
+    updated = await orch.confirm_export(run_id=run.run_id)
+
+    assert updated.state == "export_confirmed"
+    stored = await store.get_one("workflow_runs", {"run_id": run.run_id})
+    assert stored["state"] == "export_confirmed"
+
+
+@pytest.mark.asyncio
+async def test_confirm_export_refuses_before_begin_export() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    run = await _completed_run(orch, run.run_id)
+
+    with pytest.raises(WorkflowError):
+        await orch.confirm_export(run_id=run.run_id)
