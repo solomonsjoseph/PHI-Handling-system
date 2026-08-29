@@ -542,3 +542,192 @@ async def test_provider_gateway_routes_validation_through_authorization_service(
     assert result.status == "denied"
     assert "MAX_TOKENS_PER_TASK" in result.denial_reason
     assert len(calls) == 1
+
+
+# ==========================================================================
+# Step 8: invariant tests -- 5 exclusivity scans + behavioral proofs
+# ==========================================================================
+#
+# Invariants 2-5's behavioral proof is the corresponding Step's own test
+# above (Step 4/5/6/7), reused verbatim per the wave's own design rather
+# than duplicated: `test_executor_dataset_read_happens_only_inside_
+# sandbox_never_in_parent`, `test_praxis_falls_back_when_recommended_
+# method_is_only_researched_not_approved`, `test_manager_broker_edges_
+# route_through_handoff_gateway_in_order`, `test_provider_gateway_routes_
+# validation_through_authorization_service`. Invariant 1's behavioral
+# proof gets a new test below: Steps 1-3 already proved Schema's own
+# output never carries a raw sensitive header, but not yet that Judge's
+# actual LLM-facing prompt (the real downstream consumer) stays clean.
+
+
+def _call_sites(root: Path, target_names: set[str]) -> list[tuple[Path, int]]:
+    """AST-scan every .py file under `root` (skipping this suite's
+    standard excludes -- see `_exclude` above) for a call whose callee's
+    bare name or attribute name is in `target_names`. Mirrors
+    `test_architecture_boundaries.py`'s call-site-scan convention."""
+    sites: list[tuple[Path, int]] = []
+    for path in root.rglob("*.py"):
+        if _exclude(path):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in target_names:
+                sites.append((path, node.lineno))
+            elif isinstance(func, ast.Attribute) and func.attr in target_names:
+                sites.append((path, node.lineno))
+    return sites
+
+
+def _enclosing_function_name(path: Path, lineno: int) -> str | None:
+    """Name of the innermost function/method definition in `path` whose
+    body spans `lineno`, or ``None`` at module level."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    candidates = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.lineno <= lineno <= getattr(node, "end_lineno", node.lineno)
+    ]
+    if not candidates:
+        return None
+    innermost = min(candidates, key=lambda n: getattr(n, "end_lineno", n.lineno) - n.lineno)
+    return innermost.name
+
+
+# ---- invariant 1: header gate is live --------------------------------------
+
+
+def test_classify_header_call_sites_confined_to_schema_and_source_projection() -> None:
+    """Exclusivity: ``classify_header`` is only ever invoked from
+    ``specialists.py`` (Schema's own header-safety wiring, Step 3) or
+    from ``source_projection.py`` itself (the sibling ``source_
+    projection`` function Lexicon/Instrument route dictionary/form text
+    through) -- never from any other output path."""
+    sites = _call_sites(PHI_CORE_ROOT, {"classify_header"})
+    allowed = {
+        PHI_CORE_ROOT / "agents" / "specialists.py",
+        PHI_CORE_ROOT / "control" / "source_projection.py",
+    }
+    offenders = [(p, ln) for p, ln in sites if p not in allowed]
+    assert offenders == [], f"classify_header called outside its allowed sites: {offenders}"
+    assert sites, "the scan itself found nothing"
+
+
+@pytest.mark.asyncio
+async def test_judge_prompt_never_carries_a_raw_sensitive_header_only_the_opaque_token() -> None:
+    """Behavioral (extends the Step 3 Schema-output test with the actual
+    downstream consumer): Schema's own opaque-projected output is what
+    ``Judge.run``'s prompt embeds (``f"...{schema}..."``) -- an SSN typed
+    into a header never reaches the LLM-facing Judge prompt, only the
+    ``header_...`` opaque token does."""
+    from phi_core.agents.reasoning import Judge
+    from phi_core.agents.specialists import Schema
+
+    schema = Schema(make_ctx("Schema"))
+    schema_out = await schema.run(dataset_files=[
+        {"file_id": "f1", "columns": ["patient_id", "123-45-6789"]},
+    ])
+
+    gateway = FakeGateway()
+    judge = Judge(make_ctx("Judge", gateway=gateway))
+    await judge.run(schema=schema_out, instrument={}, lexicon={}, statute={})
+
+    assert gateway.requests, "Judge never called the gateway"
+    for req in gateway.requests:
+        assert "123-45-6789" not in req.user_prompt
+    assert any("header_" in req.user_prompt for req in gateway.requests)
+
+
+# ---- invariant 2: raw reads are sandboxed ----------------------------------
+
+
+def test_sandboxed_raw_reader_call_sites_confined_to_reasoning_and_operator_read_columns() -> None:
+    """Exclusivity: the four relocated raw-data readers
+    (``_read_dataset_headers``, ``read_narrative``, ``_redact_metadata_
+    file``, ``apply_column_actions_to_dataset``) are only ever called
+    from ``reasoning.py`` (their own definitions, the Step 4 sandboxed
+    dispatch wrappers, and ``Executor``'s sandboxed/direct-call dispatch
+    methods) or from ``operator.py::_read_columns`` (the documented
+    on-disk-header fallback, allowlisted -- ``operator.py`` is outside
+    this wave's owns list and Phase 10 retires the whole module per
+    docs/PHASE_STATUS.md). ``phi_corpus/replay.py``'s direct calls are
+    out of scope by construction: this scan is rooted at ``phi_core/``,
+    a sibling package."""
+    targets = {
+        "_read_dataset_headers", "read_narrative",
+        "_redact_metadata_file", "apply_column_actions_to_dataset",
+    }
+    sites = _call_sites(PHI_CORE_ROOT, targets)
+    reasoning_py = PHI_CORE_ROOT / "agents" / "reasoning.py"
+    operator_py = PHI_CORE_ROOT / "agents" / "operator.py"
+    offenders = [
+        (p, ln) for p, ln in sites
+        if not (p == reasoning_py or (p == operator_py and _enclosing_function_name(p, ln) == "_read_columns"))
+    ]
+    assert offenders == [], f"raw reader called outside its allowed sites: {offenders}"
+    assert sites, "the scan itself found nothing"
+
+
+# Behavioral: test_executor_dataset_read_happens_only_inside_sandbox_never_in_parent (Step 4, above).
+
+
+# ---- invariant 3: HandoffGateway is live -----------------------------------
+
+
+def test_handoff_call_sites_confined_to_manager_broker() -> None:
+    """Exclusivity: ``HandoffGateway.handoff`` is only ever called from
+    ``manager.py``'s guardian query broker (Step 6) -- no other module
+    hands off directly."""
+    sites = _call_sites(PHI_CORE_ROOT, {"handoff"})
+    allowed = PHI_CORE_ROOT / "agents" / "manager.py"
+    offenders = [(p, ln) for p, ln in sites if p != allowed]
+    assert offenders == [], f".handoff( called outside manager.py: {offenders}"
+    assert sites, "the scan itself found nothing"
+
+
+# Behavioral: test_manager_broker_edges_route_through_handoff_gateway_in_order (Step 6, above).
+
+
+# ---- invariant 4: MethodRegistry is live -----------------------------------
+
+
+def test_get_approved_methods_call_sites_confined_to_praxis_and_its_facade() -> None:
+    """Exclusivity: ``get_approved_methods`` is only ever called from
+    ``experts.py`` (Praxis's method-resolution gate, Step 5) or from
+    ``context.py::StoreMethodRegistryReader.get_approved_methods`` (the
+    Step 1 facade's own delegation to the free function of the same
+    name -- the plumbing itself, not a second execution-time caller)."""
+    sites = _call_sites(PHI_CORE_ROOT, {"get_approved_methods"})
+    experts_py = PHI_CORE_ROOT / "agents" / "experts.py"
+    context_py = PHI_CORE_ROOT / "control" / "context.py"
+    offenders = [
+        (p, ln) for p, ln in sites
+        if not (p == experts_py or (p == context_py and _enclosing_function_name(p, ln) == "get_approved_methods"))
+    ]
+    assert offenders == [], f"get_approved_methods called outside its allowed sites: {offenders}"
+    assert sites, "the scan itself found nothing"
+
+
+# Behavioral: test_praxis_falls_back_when_recommended_method_is_only_researched_not_approved (Step 5, above).
+
+
+# ---- invariant 5: authorize_capability is live -----------------------------
+
+
+def test_authorize_capability_call_sites_confined_to_gateway() -> None:
+    """Exclusivity: ``authorization.authorize_capability`` is only ever
+    called from ``gateway.py``'s request validation (Step 7) --
+    ``authorization.py`` itself only defines it."""
+    sites = _call_sites(PHI_CORE_ROOT, {"authorize_capability"})
+    allowed = PHI_CORE_ROOT / "control" / "gateway.py"
+    offenders = [(p, ln) for p, ln in sites if p != allowed]
+    assert offenders == [], f"authorize_capability called outside gateway.py: {offenders}"
+    assert sites, "the scan itself found nothing"
+
+
+# Behavioral: test_provider_gateway_routes_validation_through_authorization_service (Step 7, above).
