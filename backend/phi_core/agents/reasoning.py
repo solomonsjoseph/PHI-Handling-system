@@ -7,19 +7,23 @@ Auditor   - reviews Executor's work and produces the final compliance report.
 """
 from __future__ import annotations
 
+import asyncio
 import csv as _csv
 import hashlib as _hashlib
 import hmac as _hmac
+import json as _json
 import os as _os
 import re as _re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from uuid import uuid4
 
 import openpyxl as _openpyxl
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..anonymizer import apply_to_text
 from ..control.records import EvidenceClaim, GateResult
+from ..control.sandbox import run_isolated
 from ..crypto import pseudonym_salt
 from ..detectors import detect_text
 from ..file_readers import iter_dataset_rows, read_narrative
@@ -1138,6 +1142,38 @@ def _read_dataset_headers(src: Path, ext: str) -> set[str]:
     return set()
 
 
+# --- Wave R-c Step 4: sandboxed dispatch for the four raw-data readers ---
+#
+# These thin, module-level wrappers are the only things `run_isolated`
+# ever calls directly (a `multiprocessing.spawn` worker pickles its
+# target by reference, so a closure or bound method cannot cross the
+# boundary). Each wraps exactly one of `_read_dataset_headers`,
+# `read_narrative`, `_redact_metadata_file`, `apply_column_actions_to_
+# dataset` unchanged -- their own signatures and direct callability stay
+# exactly as before, since several pre-existing tests call them
+# directly.
+#
+# `run_isolated`'s return contract only allows `str`/`int`/`float`/
+# `bool`/`None` to cross back into the parent
+# (`sandbox._validate_return_contract`): a raw `set`/`Path` never can.
+# `_read_dataset_headers`'s `set[str]` therefore crosses JSON-encoded as
+# a sorted list; `_redact_metadata_file`'s `Path` crosses as `str`.
+# `read_narrative`'s `str` is already an allowed type and crosses
+# unchanged. `apply_column_actions_to_dataset`'s wrapper is defined
+# further below, next to `PseudonymRegistry`: its registry argument
+# cannot cross by reference at all (see that wrapper's docstring).
+
+
+def _sandboxed_read_dataset_headers(src: str, ext: str) -> str:
+    """Sandboxed dispatch target for `_read_dataset_headers`."""
+    return _json.dumps(sorted(_read_dataset_headers(Path(src), ext)))
+
+
+def _sandboxed_read_narrative(src: str, ext: str) -> str:
+    """Sandboxed dispatch target for `read_narrative`."""
+    return read_narrative(Path(src), ext)
+
+
 class Executor(Agent):
     NAME = "Executor"
     PROMPT = ""  # deterministic; no LLM call needed for execution
@@ -1174,6 +1210,87 @@ class Executor(Agent):
         _os.link(dst, alias)
         exports[file_id] = str(alias)
         await self._log("executor.wrote", "info", {"file_id": file_id, "path": str(alias)})
+
+    async def _read_dataset_headers_maybe_sandboxed(self, src: Path, ext: str) -> set[str]:
+        """Route `_read_dataset_headers` through the sandbox when this run
+        has one (`ActivationFactory.activate(..., needs_sandbox=True)`);
+        call it in-process otherwise. The in-process branch is a
+        permanent, documented compatibility path: every pre-existing
+        unit test builds its context via `control.testing.make_ctx`,
+        which never attaches a sandbox, and must keep exercising this
+        function exactly as before Wave R-c (see
+        `test_control_phaseR_integration.py`'s Step 8 invariant 2
+        allowlist). `set[str]` is not in `run_isolated`'s return
+        contract, so it crosses the sandbox boundary JSON-encoded as a
+        sorted list. `run_isolated` itself is a blocking call; wrapping
+        it in `asyncio.to_thread` keeps it off the event loop every
+        other agent's provider call shares."""
+        if self.ctx.sandbox is None:
+            return _read_dataset_headers(src, ext)
+        encoded = await asyncio.to_thread(
+            run_isolated, self.ctx.sandbox, _sandboxed_read_dataset_headers, str(src), ext,
+        )
+        return set(_json.loads(encoded))
+
+    async def _read_narrative_maybe_sandboxed(self, src: Path, ext: str) -> str:
+        """Route `read_narrative` through the sandbox when this run has
+        one; call it in-process otherwise (see
+        `_read_dataset_headers_maybe_sandboxed`'s docstring for the
+        direct-call fallback's rationale). `str` is already inside
+        `run_isolated`'s return contract, so the extracted text crosses
+        the boundary unchanged."""
+        if self.ctx.sandbox is None:
+            return read_narrative(src, ext)
+        return await asyncio.to_thread(
+            run_isolated, self.ctx.sandbox, _sandboxed_read_narrative, str(src), ext,
+        )
+
+    async def _redact_metadata_maybe_sandboxed(self, src: Path, dst: Path) -> Path:
+        """Route `_redact_metadata_file` through the sandbox when this run
+        has one; call it in-process otherwise (see
+        `_read_dataset_headers_maybe_sandboxed`'s docstring for the
+        direct-call fallback's rationale). `Path` is not in
+        `run_isolated`'s return contract, so the resolved output path
+        crosses the boundary as `str`."""
+        if self.ctx.sandbox is None:
+            return _redact_metadata_file(src, dst)
+        written = await asyncio.to_thread(
+            run_isolated, self.ctx.sandbox, _sandboxed_redact_metadata_file, str(src), str(dst),
+        )
+        return Path(written)
+
+    async def _apply_column_actions_maybe_sandboxed(
+        self, src: Path, dst: Path, ext: str, decisions: list[dict[str, Any]],
+        registry: "PseudonymRegistry", omit_columns: set[str] | None,
+    ) -> None:
+        """Route `apply_column_actions_to_dataset` through the sandbox
+        when this run has one; call it in-process otherwise (see
+        `_read_dataset_headers_maybe_sandboxed`'s docstring for the
+        direct-call fallback's rationale).
+
+        A live `PseudonymRegistry` mutated by reference cannot cross the
+        `multiprocessing.spawn` pickle boundary: the sandboxed child
+        rebuilds an equivalent registry from `(registry._salt,
+        registry._map)` as plain arguments, runs the real transform, and
+        writes its updated map to a workspace-relative JSON artifact,
+        handing back only that filename (`run_isolated`'s return
+        contract never allows an arbitrary payload). This method reads
+        that artifact back and merges it into the caller's own registry,
+        so the pseudonym map keeps accumulating across every file in
+        this run exactly as it does on the direct-call path."""
+        if self.ctx.sandbox is None:
+            apply_column_actions_to_dataset(src, dst, ext, decisions, registry, omit_columns=omit_columns)
+            return
+        out_name = await asyncio.to_thread(
+            run_isolated, self.ctx.sandbox, _sandboxed_apply_column_actions_to_dataset,
+            self.ctx.sandbox.workspace_path, registry._salt, dict(registry._map),
+            str(src), str(dst), ext, decisions, sorted(omit_columns or ()),
+        )
+        updated_map = _json.loads(
+            (Path(self.ctx.sandbox.workspace_path) / out_name).read_text(encoding="utf-8")
+        )
+        registry._map.clear()
+        registry._map.update(updated_map)
 
     async def run(self, files: list[dict[str, Any]], decisions: list[dict[str, Any]],
                   omit_by_file: dict[str, set[str]] | None = None) -> dict[str, Any]:
@@ -1221,7 +1338,7 @@ class Executor(Agent):
                 artifact_id, tmp_path = await self.ctx.artifacts.stage(
                     "metadata_export", f"{f['file_id']}__export", "restricted_metadata", "export",
                 )
-                written = _redact_metadata_file(src, tmp_path)
+                written = await self._redact_metadata_maybe_sandboxed(src, tmp_path)
                 export_suffix = written.name[len(tmp_path.name):]
                 if written != tmp_path:
                     # `_redact_metadata_file` names its own output by
@@ -1244,7 +1361,7 @@ class Executor(Agent):
                     # of falling through to a near-empty, zero-surviving-
                     # column export that leaks nothing but row-count
                     # metadata.
-                    known_cols = _read_dataset_headers(src, f["subtype"])
+                    known_cols = await self._read_dataset_headers_maybe_sandboxed(src, f["subtype"])
                 if omit_cols and known_cols and known_cols <= omit_cols:
                     await self._log("executor.dataset_fully_deferred", "info",
                                     {"file_id": f["file_id"], "column_count": len(known_cols)})
@@ -1254,8 +1371,9 @@ class Executor(Agent):
                     "dataset_export", f"{f['file_id']}__export{export_suffix}", "restricted_metadata", "export",
                 )
                 try:
-                    apply_column_actions_to_dataset(src, tmp_path, f["subtype"], by_file.get(f["file_id"], []),
-                                                    registry, omit_columns=omit_cols)
+                    await self._apply_column_actions_maybe_sandboxed(
+                        src, tmp_path, f["subtype"], by_file.get(f["file_id"], []), registry, omit_cols,
+                    )
                 except Exception as e:
                     # Mirrors the narrative branch below: a write failure must
                     # not crash the whole run or leave a partial file counted
@@ -1272,7 +1390,7 @@ class Executor(Agent):
                     "narrative_export", f"{f['file_id']}__export", "restricted_metadata", "export",
                 )
                 try:
-                    text = read_narrative(src, f["subtype"])
+                    text = await self._read_narrative_maybe_sandboxed(src, f["subtype"])
                 except Exception as e:
                     await self._log("executor.narrative_read_failed", "info",
                                     {"file_id": f["file_id"], "error": type(e).__name__})
@@ -1785,3 +1903,36 @@ def _redact_metadata_file(src: Path, dst: Path) -> Path:
         encoding="utf-8",
     )
     return withheld
+
+
+def _sandboxed_redact_metadata_file(src: str, dst: str) -> str:
+    """Sandboxed dispatch target for `_redact_metadata_file`. `Path` is
+    not in `run_isolated`'s return contract, so the resolved output path
+    crosses the boundary as `str` (see
+    `Executor._redact_metadata_maybe_sandboxed`)."""
+    return str(_redact_metadata_file(Path(src), Path(dst)))
+
+
+def _sandboxed_apply_column_actions_to_dataset(
+    workspace_path: str, salt: str, initial_map: dict[str, str],
+    src: str, dst: str, ext: str, decisions: list[dict[str, Any]], omit_columns: list[str],
+) -> str:
+    """Sandboxed dispatch target for `apply_column_actions_to_dataset`.
+
+    A live `PseudonymRegistry` object mutated by reference cannot cross
+    the `multiprocessing.spawn` pickle boundary, so this rebuilds an
+    equivalent registry from plain `(salt, initial_map)` arguments
+    instead of receiving one directly. After the real transform runs,
+    the updated map is written to a workspace-relative JSON artifact and
+    only its filename is returned -- `run_isolated`'s return contract
+    never allows an arbitrary payload to cross back into the parent (see
+    `Executor._apply_column_actions_maybe_sandboxed`, which reads this
+    artifact back and merges it into the caller's own registry)."""
+    registry = PseudonymRegistry(salt=salt)
+    registry._map.update(initial_map)
+    apply_column_actions_to_dataset(
+        Path(src), Path(dst), ext, decisions, registry, omit_columns=set(omit_columns),
+    )
+    out_name = f"pseudonym_map_{uuid4().hex}.json"
+    (Path(workspace_path) / out_name).write_text(_json.dumps(registry._map), encoding="utf-8")
+    return out_name
