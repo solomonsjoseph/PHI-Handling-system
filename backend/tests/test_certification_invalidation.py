@@ -341,8 +341,8 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
         async def run(self, **_kwargs):
             return await complete_fake_task(self.ctx, {"decisions": []})
 
-    class FakeSentinel(EmptyAgent):
-        async def run(self, **_kwargs):
+    class FakeReviewer(EmptyAgent):
+        async def preview(self, **_kwargs):
             return await complete_fake_task(self.ctx, {"issues": []})
 
     class FakeExecutor(EmptyAgent):
@@ -352,7 +352,7 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
     monkeypatch.setattr(orchestrator, "RegulationsExpert", EmptyAgent)
     monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
-    monkeypatch.setattr(orchestrator, "Sentinel", FakeSentinel)
+    monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
     monkeypatch.setattr(orchestrator, "Auditor", EmptyAgent)
     monkeypatch.setattr(orchestrator, "Scout", EmptyAgent)
@@ -503,7 +503,7 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
         principal="reviewer",
     )
 
-    assert response == {"status": "resuming"}
+    assert response["status"] == "resuming"  # Phase 8: also carries typed human_decisions
     assert db.doc["status"] == "anonymizing"
     assert db.doc["_pipeline_run_id"] == "classification-claim"
     assert len(db["work_items"].docs) == 1
@@ -560,12 +560,12 @@ async def test_a_successful_submission_persists_its_event_and_resolves_the_durab
         principal="reviewer",
     )
 
-    assert result == {"status": "resuming"}
+    assert result["status"] == "resuming"  # Phase 8: also carries typed human_decisions
     events = db["human_review_events"].docs
     assert len(events) == 1
     assert events[0]["request_id"] == request.request_id
     assert events[0]["client_event_id"] == "ce-resolve-1"
-    assert events[0]["result"] == {"status": "resuming"}
+    assert events[0]["result"]["status"] == "resuming"  # Phase 8: also carries typed human_decisions
     assert db["human_review_requests"].docs[0]["state"] == "resolved"
 
 
@@ -610,13 +610,13 @@ async def test_client_event_id_is_idempotent_while_the_request_stays_open(monkey
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
     first = await srv.session_human_review("sid", _defer_body(), principal="reviewer")
-    assert first == {"status": "still_awaiting", "unresolved": 1}
+    assert first["status"] == "still_awaiting" and first["unresolved"] == 1  # Phase 8: also carries human_decisions
     assert len(db["human_review_events"].docs) == 1
     assert db["human_review_requests"].docs[0]["state"] == "open"
 
     # Same key, same body: answered from the stored result, not reprocessed.
     replay = await srv.session_human_review("sid", _defer_body(), principal="reviewer")
-    assert replay == {"status": "still_awaiting", "unresolved": 1}
+    assert replay["status"] == "still_awaiting" and replay["unresolved"] == 1  # Phase 8: also carries human_decisions
     assert len(db["human_review_events"].docs) == 1
 
     # Same key, different body: rejected, not silently accepted as a new event.
@@ -927,7 +927,7 @@ async def test_comment_resolution_never_auto_applies_regardless_of_confidence(mo
         principal="reviewer",
     )
 
-    assert response == {"status": "still_awaiting", "unresolved": 1}
+    assert response["status"] == "still_awaiting" and response["unresolved"] == 1  # Phase 8: also carries human_decisions
     decision = db.doc["agent_decisions"][0]
     assert decision["action"] == "human_review"
     assert decision["pending_confirmation"] == {
@@ -946,7 +946,7 @@ async def test_comment_resolution_never_auto_applies_regardless_of_confidence(mo
         ),
         principal="reviewer",
     )
-    assert response2 == {"status": "resuming"}
+    assert response2["status"] == "resuming"  # Phase 8: also carries typed human_decisions
     decision2 = db.doc["agent_decisions"][0]
     assert decision2["action"] == "drop"
     assert decision2["provenance"] == "human_comment_inferred"
@@ -1104,7 +1104,7 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
     monkeypatch.setattr(orchestrator, "Herald", FakeHerald)
     monkeypatch.setattr(paths, "cleanup_session_unpacked", lambda _sid: None)
 
-    assert (await srv.session_human_review(
+    review_resp = await srv.session_human_review(
         "sid",
         srv.HumanReviewSubmit(
             client_event_id="ce-cancel-check",
@@ -1116,7 +1116,8 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
             }],
         ),
         principal="reviewer",
-    )) == {"status": "resuming"}
+    )
+    assert review_resp["status"] == "resuming"  # Phase 8: also carries typed human_decisions
 
     # `session_human_review` only enqueues now (Phase 4 step 2/4); drive
     # the enqueued `pipeline_resume` task directly through the same

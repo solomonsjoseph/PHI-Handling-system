@@ -205,7 +205,7 @@ def test_human_review_captures_session_review_offline(monkeypatch):
         )
     )
 
-    assert result == {"status": "still_awaiting", "unresolved": 1}
+    assert result["status"] == "still_awaiting" and result["unresolved"] == 1  # Phase 8: also carries human_decisions
     review = session["session_review"][-1]
     assert review["reviewer"] == session["owner"]
     assert review["comment"] == "Needs more review."

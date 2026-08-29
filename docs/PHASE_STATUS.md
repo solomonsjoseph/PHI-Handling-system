@@ -1101,3 +1101,119 @@ name).
 
 **`PHASE_7_STATUS = PASS`. Phase 7 is complete.** Proceeding to Phase 8 (Reviewer
 Preview and Human Review, solo, sections 42-48/91).
+
+---
+
+## Phase 8 (Reviewer Preview and Human Review) — COMPLETE
+
+**Extraction (item 2).** The five deterministic decision-shaping functions
+(`apply_sentinel_hard_rules`, `apply_age_dob_rule`, `apply_site_cardinality_rule`,
+`apply_confidence_floor`, `apply_blocking_floor`, `apply_sentinel_escalations`) plus their
+supporting tables/constants moved verbatim to a new `phi_core/agents/deterministic_rules.py`.
+`reasoning.py` re-imports every name via explicit PEP 484 `import X as X` re-exports so
+every existing `from phi_core.agents.reasoning import X` call site (`control/gates.py`,
+`control/validation.py`, `server.py`, ~10 test files) is unchanged.
+
+**Sentinel retirement (item 3).** `class Sentinel(Agent)` is gone from `reasoning.py`.
+Its LLM prompt and review logic moved into `Reviewer.preview()` (PREVIEW mode, docs #42/
+#43) in `agents/reviewer.py`, alongside a new deterministic checklist
+(`_deterministic_checklist`: unsafe-KEEP against the hard-rule table is
+CORRECTION_REQUIRED; missing-evidence and file-not-yet-accounted are advisory-only to
+avoid false blocks mid-negotiation). `Reviewer.run()` (the pre-existing completeness-audit
+/ FINAL-mode behavior) is untouched. `orchestrator.py`'s decide loop now calls
+`Reviewer(ctx).preview(...)` instead of `Sentinel(ctx).run(...)`; the (Reviewer, Judge)
+correction edge (already registered in `handoff.py`'s `ALLOWED_EDGES`/`EDGE_SCHEMAS`) is
+now actually invoked through `HandoffGateway.handoff`, sending a `ReviewerHandoff` payload
+per iteration with a blocking issue; `BudgetExceeded` (docs #48,
+`limits.HANDOFF_ATTEMPT_BUDGET["judge_reviewer"]`) forces an immediate `break` rather than
+fabricating certainty, leaving the existing `run_decision_gates` final pass to force any
+still-blocking column to `human_review`. `manager.py` (`ROLES`/`BUDGET_S`) and `policy.py`
+(`MANIFESTS`, `TEAMS`, `Pipeline.allowed_child_task_types`) no longer register `Sentinel`;
+`Reviewer`'s manifest now allows provider calls (`output_schema="decision_proposal"`,
+default `allowed_providers`) since PREVIEW mode calls an LLM. Phase-tag telemetry strings
+(`sentinel_iter_N`, `sentinel_escalation_iter_N`, etc.) and the `_PipelineDriverState`
+attribute names (`sentinel_report`, `sentinel_call_failures`, `all_sentinel_overrides`)
+deliberately keep their historical names: they are observability labels, not role
+identity, and multiple tests assert on the literal strings.
+
+**Human Review (item 4).** `session_human_review` already gated on `reviewer_role(principal)`
+(pre-existing, R-a). New: `_human_decisions_for_submission` (server.py) constructs one
+typed `HumanDecision` per resolution (authenticated principal, authorized role, timestamped,
+versioned, `reviewer_principals_sha256` for audit reconstruction) and folds the list into
+the existing `result["human_decisions"]` -- additive, `HumanReviewEvent` remains the
+append-only storage row (`result` is its typed payload field). Mandatory re-review (docs
+#46): `_handle_pipeline_resume`'s `_run_resume` now runs `Reviewer(ctx).preview(...,
+deterministic_only=True)` over the just-resolved decisions before calling
+`orchestrator.execute_decisions`; a `HUMAN_REVIEW_REQUIRED` verdict routes back to
+`awaiting_human_review` via the existing `orchestrator._escalate_to_human_review` rather
+than reaching Executor. `deterministic_only=True` means no LLM call and no configured
+provider dependency on this path. Secure Human Review (docs #47): new
+`GET /api/sessions/{sid}/human-review/source/{file_id}`, gated on `reviewer_role`
+(stricter than the general owner-scoped `dataset-file` download it delegates to), makes no
+provider call and writes nothing to the normal trace.
+
+**Expert Determination (item 5).** (1) `security.py` `REVIEWER_ROLES` gains
+`"expert_determination"`; `reviewer_role`/`reviewer_principals` unchanged (both already
+role-agnostic). (2) `HumanDecision`'s `principal`/`role`/`reviewer_principals_sha256`/
+`decided_at` fields are the pre-existing R-a contract, now actually populated by (4) above.
+(3) `HumanReviewSubmit` gains `expert_name`/`expert_credentials`/`expert_method_statement`;
+`_human_decisions_for_submission` requires all three non-empty (400 if missing) whenever
+the submitting principal's role is `expert_determination`, and attaches them to every
+`HumanDecision` that submission produces. `server.py`'s `_refuse_to_boot_insecure` also now
+requires at least one `expert_determination` `REVIEWER_PRINCIPALS` entry in production. (4)
+new `tests/test_reviewer_preview_and_expert_determination.py::
+test_no_agents_module_constructs_expert_determination_human_decision` -- an AST source scan
+(reusing `test_architecture_boundaries.py`'s `_agents_module_paths` pattern) proving no
+`phi_core/agents/` module constructs a `HumanDecision` with `role='expert_determination'`;
+a companion positive test proves the scan isn't vacuous (`server.py`'s
+`_human_decisions_for_submission` is the one legitimate site, threading `role` from the
+authenticated caller).
+
+**Invariants (item 7).** Both covered by
+`tests/test_reviewer_preview_and_expert_determination.py`: "Expert Determination cannot be
+self-authorized by any agent" is the source-scan test above; "an unresolved Human Review
+item cannot reach execution" is proven structurally by
+`test_reviewer_preview_flags_unsafe_keep_as_correction_required_deterministically` (the
+exact deterministic-only check the mandatory-re-review gate runs before
+`execute_decisions`) plus the passing-path counterpart proving the gate never false-blocks
+a legitimately clean resolution.
+
+**DELETED_TESTS:** none. No test file or test function was removed; three exact-dict-
+equality assertions against `session_human_review`'s result (which now additionally
+carries `human_decisions`) were widened to key-level assertions rather than deleted --
+`tests/test_certification_invalidation.py` (6 assertions across 5 test functions),
+`tests/test_human_review_invariant.py::test_human_review_captures_session_review_offline`,
+`tests/test_human_review_resume_execution.py` (2 assertions). Three test-literal sets that
+enumerated `"Sentinel"` as a still-registered role were corrected to `"Reviewer"`
+(`test_control_bounds.py`, `test_control_capability.py`, `test_control_records_policy.py`)
+-- role renames, not deletions.
+
+**Gate (non-live, DATA_DIR set, no PHI_TEST_BASE_URL):** 4 failed, 1520 passed, 5 skipped,
+0 errors, 0 xfailed, 84.5s. All 4 failures are pre-existing and unrelated to this phase:
+3 are the known `test_human_review_invariant.py` `client_event_id` request-schema-drift
+failures (byte-identical error text to the Step 0 baseline; that endpoint's request
+contract was not touched by this phase's Human Review work); the 4th
+(`test_security_llm_and_auth.py::test_get_settings_never_returns_api_key_plaintext`,
+`assert 409 == 200`) reproduces identically on the pre-Phase-8 code against the same
+long-running local dev server (confirmed via `git stash` + isolated re-run) -- the live
+server's Mongo `settings.llm` document holds an `api_key` ciphertext that no longer
+decrypts under whatever `APP_ENCRYPTION_KEY` that already-running process currently holds,
+unrelated to any code this phase touched. `ruff check .` clean.
+
+**Gate (canonical serial, `PHI_TEST_BASE_URL=http://127.0.0.1:8001` set):** 9 failed, 1524
+passed, 4 skipped, 2 errors, 0 xfailed, 91.8s. This run hits the same long-running local
+dev server the constraints direct never to restart -- `test_agent_trace`'s own failure
+text still lists `'Sentinel'` in the live trace, proving this run is exercising that
+process's pre-Phase-8 code, not this phase's changes, so it validates the live-gate
+environment, not this phase's diff. The failed/error set is otherwise the Step-0/Phase-7
+baseline exactly (3 `test_human_review_invariant.py` FAILED, 5 `test_agent_pipeline.py`
+FAILED, 2 `test_agent_pipeline.py` ERROR, all live-LLM-call-dependent and expected with no
+`ANTHROPIC_API_KEY` configured in this environment) plus one intermittent extra
+(`test_agent_pipeline.py::test_llm_settings_default`, the same stale-live-key `409==200`
+symptom as the non-live gate's 4th failure above -- confirmed non-reproducing when
+`test_agent_pipeline.py` is run in isolation immediately afterward, i.e. genuinely
+order/state-dependent on the shared live Mongo document, not a deterministic regression).
+The baseline's 1 xfailed (judge output_schema marker) does not appear because it was
+already resolved at Phase 7's close, per that phase's own gate note.
+
+**`PHASE_8_STATUS = PASS`. Phase 8 is complete.**

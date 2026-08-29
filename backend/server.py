@@ -132,9 +132,14 @@ def _refuse_to_boot_insecure() -> None:
     problems: list[str] = []
     if not token_principals():
         problems.append("API_TOKENS (or legacy API_TOKEN) must be set")
-    if not reviewer_principals():
+    principals = reviewer_principals()
+    if not principals:
         problems.append("REVIEWER_PRINCIPALS must be set (name:role,... with role in "
-                         "reviewer|lead_reviewer)")
+                         "reviewer|lead_reviewer|expert_determination)")
+    elif not any(role == "expert_determination" for role in principals.values()):
+        problems.append("REVIEWER_PRINCIPALS must include at least one expert_determination "
+                         "principal (45 CFR 164.514(b)(1): Expert Determination cannot be "
+                         "self-authorized by any agent -- a human must hold this role)")
     cors_raw = os.environ.get("CORS_ALLOWED_ORIGINS", "").strip()
     if not cors_raw or "*" in {o.strip() for o in cors_raw.split(",")}:
         problems.append("CORS_ALLOWED_ORIGINS must be set to a specific origin list, not '*'")
@@ -713,6 +718,32 @@ async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
         omit_by_file: dict[str, set[str]] = {}
         for entry in pending_review:
             omit_by_file.setdefault(entry["file_id"], set()).add(entry["column"])
+        # docs #46: "every human decision triggers mandatory re-review" /
+        # "nothing unresolved reaches execution". A deterministic-only
+        # Reviewer Preview pass (no LLM call, so it never depends on a
+        # configured provider and never spends a review budget slot) over
+        # the just-resolved decisions catches a resolution that
+        # reintroduces an obvious hard-rule violation (e.g. approving
+        # 'keep' on a known direct identifier) before Executor ever runs.
+        from phi_core.agents.reviewer import Reviewer as _ReReviewReviewer
+
+        rereview_ctx = await _actx("Reviewer")
+        rereview = await _ReReviewReviewer(rereview_ctx).preview(
+            decisions=scrubbed_decisions, files=files, deterministic_only=True,
+        )
+        if rereview.get("preview_status") == "HUMAN_REVIEW_REQUIRED":
+            from phi_core.agents.reasoning import plain_human_review_reasons
+
+            reasons = ["reviewer_preview_required_after_human_decision"]
+            return await orchestrator._escalate_to_human_review(
+                db=db, session_filter=run_filter, reasons=reasons,
+                reasons_plain=plain_human_review_reasons(reasons),
+                close_last_phase=close_last_phase, phase_timings=phase_timings,
+                run_elapsed_s=time.perf_counter() - run_started,
+                approved_decisions=decisions, sentinel_report=rereview,
+                manager=manager_box["value"], store=store, run_id=run_id,
+                node="human_review_decisions",
+            )
         return await orchestrator.execute_decisions(
             db=db, sid=sid, session=session, session_filter=run_filter,
             files=files, decisions=scrubbed_decisions,
@@ -3001,6 +3032,78 @@ class HumanReviewSubmit(BaseModel):
     # when this submission resolves (approves/comments) at least one column;
     # a submission that only defers makes no actual-knowledge claim.
     actual_knowledge_ack: bool = False
+    # 45 CFR 164.514(b)(1) Expert Determination self-evidencing (docs #91
+    # acceptance item 3): supplied by the human through this authenticated
+    # route, never inferred or defaulted by any agent. Required (non-empty)
+    # exactly when the submitting principal's REVIEWER_PRINCIPALS role is
+    # 'expert_determination' -- see `_human_decisions_for_submission`.
+    expert_name: str = ""
+    expert_credentials: str = ""
+    expert_method_statement: str = ""
+
+
+_HUMAN_DECISION_ACTION_FOR_MODE = {
+    "approve": "APPROVE", "comment": "MODIFY", "defer": "DEFER",
+}
+
+
+def _human_decisions_for_submission(body: "HumanReviewSubmit", *, principal: str, role: str) -> list[dict]:
+    """Phase 8 docs #46: one typed, authoritative ``HumanDecision`` per
+    resolved column this submission carries -- authenticated (``principal``
+    is the resolved credential, never client-supplied), authorized
+    (``role`` is the caller's own ``REVIEWER_PRINCIPALS`` role, already
+    required non-``None`` by the caller before this runs), timestamped
+    (``decided_at``), versioned (``version``, default 1: each HumanDecision
+    is itself an append-only fact about this one submission, distinct from
+    the append-only ``HumanReviewEvent`` sequence that already orders
+    submissions via ``seq``), and reconstructible at audit
+    (``reviewer_principals_sha256`` -- the sha256 of the raw
+    ``REVIEWER_PRINCIPALS`` env value as it stood at decision time).
+
+    docs #91 acceptance item 3: when ``role == 'expert_determination'``,
+    the human's expert name/credentials/method statement are required and
+    carried on every decision this submission produces -- 45 CFR
+    164.514(b)(1) makes Expert Determination self-evidencing, not merely
+    role-gated.
+    """
+    from phi_core.control.records import HumanDecision
+
+    expert_fields: dict[str, str] = {}
+    if role == "expert_determination":
+        missing = [
+            name for name, value in (
+                ("expert_name", body.expert_name),
+                ("expert_credentials", body.expert_credentials),
+                ("expert_method_statement", body.expert_method_statement),
+            ) if not value.strip()
+        ]
+        if missing:
+            raise HTTPException(
+                400,
+                "expert_determination decisions require expert_name, expert_credentials, and "
+                f"expert_method_statement (45 CFR 164.514(b)(1)); missing: {missing}",
+            )
+        expert_fields = {
+            "expert_name": body.expert_name, "expert_credentials": body.expert_credentials,
+            "expert_method_statement": body.expert_method_statement,
+        }
+    principals_sha256 = hashlib.sha256(
+        os.environ.get("REVIEWER_PRINCIPALS", "").encode("utf-8")
+    ).hexdigest()
+    out: list[dict] = []
+    for r in body.resolutions:
+        mode = r.get("mode")
+        action = _HUMAN_DECISION_ACTION_FOR_MODE.get(mode)
+        if action is None:
+            continue
+        decision = HumanDecision(
+            action=action, principal=principal, role=role,
+            reviewer_principals_sha256=principals_sha256,
+        )
+        out.append(decision.model_dump() | {
+            "file_id": r.get("file_id", ""), "column": r.get("column", ""),
+        } | expert_fields)
+    return out
 
 
 async def _build_review_event(
@@ -3097,7 +3200,8 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
 
     db = get_db()
     session = await _owned_session(sid, principal)
-    if reviewer_role(principal) is None:
+    reviewer_role_value = reviewer_role(principal)
+    if reviewer_role_value is None:
         raise HTTPException(403, "principal is not an authorized reviewer (see REVIEWER_PRINCIPALS)")
     prior_run_id = session.get("_pipeline_run_id")
     control_store = MongoControlStore(db)
@@ -3408,7 +3512,9 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
             }},
         )
         if getattr(update, "matched_count", 0):
-            result = {"status": "still_awaiting", "unresolved": len(pending_review)}
+            result = {"status": "still_awaiting", "unresolved": len(pending_review),
+                     "human_decisions": _human_decisions_for_submission(
+                         body, principal=principal, role=reviewer_role_value)}
             review_event = await _build_review_event(
                 control_store, request_id=request_id, run_id=prior_run_id, session_id=sid,
                 principal=principal, body=body, body_hash=body_hash,
@@ -3471,7 +3577,9 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     from phi_core.control.tasks import TaskService
     from phi_core.control.workflow import WorkflowError
 
-    result = {"status": "resuming"}
+    result = {"status": "resuming",
+             "human_decisions": _human_decisions_for_submission(
+                 body, principal=principal, role=reviewer_role_value)}
     review_event = await _build_review_event(
         control_store, request_id=request_id, run_id=resume_run_id, session_id=sid,
         principal=principal, body=body, body_hash=body_hash,
@@ -3618,6 +3726,28 @@ async def session_dataset_file(sid: str, file_id: str, principal: str = Depends(
         }}},
     )
     return FileResponse(path, filename=decrypt_display_name(f.get("original_name_encrypted", "")) or path.name)
+
+
+@app.get("/api/sessions/{sid}/human-review/source/{file_id}")
+async def session_human_review_source(sid: str, file_id: str, principal: str = Depends(resolve_principal)):
+    """docs #47: the protected Human Review source-inspection endpoint.
+
+    If an authorized reviewer must inspect original sensitive content
+    while resolving a human_review column, this is the one path: straight
+    to the session's own sandbox/source artifact on disk, gated on
+    ``reviewer_role`` (not merely session ownership, unlike the general
+    ``dataset-file`` download above), never through an LLM (this handler
+    makes no provider call, no ``call_json``, nothing reaches
+    ``ProviderGateway``), and never written to the normal agent trace
+    (no ``_emit``/``TraceEventStore``/``agent_log`` write on this path --
+    the only side effect is the same ``dataset_file_downloads`` actual-
+    knowledge audit trail the general download endpoint already records,
+    which carries file/timestamp/decision_version metadata only, never
+    file content).
+    """
+    if reviewer_role(principal) is None:
+        raise HTTPException(403, "principal is not an authorized reviewer (see REVIEWER_PRINCIPALS)")
+    return await session_dataset_file(sid, file_id, principal)
 
 
 @app.get("/api/sessions/{sid}/results")

@@ -248,7 +248,7 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
         actual_knowledge_ack=True,
     )
     resp = await srv.session_human_review("a" * 32, body, "alice")
-    assert resp == {"status": "resuming"}
+    assert resp["status"] == "resuming"  # Phase 8: result also carries typed human_decisions (docs #46)
     assert len(db["work_items"].docs) == 1
 
     # `session_human_review` only enqueues now (Phase 4 step 2/4); drive
@@ -408,7 +408,7 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
         actual_knowledge_ack=True,
     )
     resp = await srv.session_human_review("b" * 32, body, "alice")
-    assert resp == {"status": "resuming"}
+    assert resp["status"] == "resuming"  # Phase 8: result also carries typed human_decisions (docs #46)
     assert len(db["work_items"].docs) == 1
     work_item = WorkItem.model_validate(db["work_items"].docs[0])
     await srv._handle_pipeline_resume(MongoControlStore(db), work_item)
