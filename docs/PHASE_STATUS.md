@@ -839,3 +839,29 @@ directly by Phases 5 through 10 (Judge, Reviewer, Executor all route through thi
 machinery); continuing in this same session.
 
 Next: Phase 5/6-rename (solo), then Phases 5 and 6 in parallel.
+
+### Post-phase-4 simplification — one safe simplification applied
+
+Ran the `simplify-code` skill scoped to `git diff 8372cf6..HEAD` (11 files). `scripts/cleanup.py`
+(dry run) proposed 1437 paths, all gitignored/untracked filesystem junk outside Phase 4's
+committed diff (`.venv`, `__pycache__`, `.ruff_cache`, `.logs`, `.remember`, `tmp`, `data/`
+subdirectories, and `docs/MASTER_ARCHITECTURE_V2.md`, the gitignored durable spec); none
+applied, and `--apply` was correctly never run (it would have deleted the durable spec and
+live data).
+
+**One simplification applied** (commit `c577a2f`): removed the redundant `manager_box`
+local from `_prepare_pipeline_state` in `agents/orchestrator.py`. Wave 4b's
+`_PipelineDriverState` already carries a `manager` field, but the pre-Wave-4b `manager_box`
+local was transplanted alongside it, read only by the `make_ctx`/`make_child_ctx` closures,
+while `timed_on_phase` in the same scope already read `state.manager` directly -- both held
+the identical object at every call site. The three read sites now use `state.manager`;
+provably behavior-preserving. `server.py`'s own `manager_box` (a genuinely different case:
+no state object, closures capture it before the manager exists) was correctly left
+unchanged after investigation.
+
+Second and final full run: Phase 4's own test files -> **134 passed**. Full backend suite
+(`-n auto`, `PHI_TEST_BASE_URL` set to match the gate's live-server conditions): **8 failed,
+1490 passed, 4 skipped, 1 xfailed, 2 errors, 66.20s** -- exact nodeid match to the Phase 4
+gate baseline. `ruff check .` -> **All checks passed!**
+
+**Phase 4 is complete.** `PHASE_4_STATUS = PASS` stands. Proceeding to Phase 5/6-rename.
