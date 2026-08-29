@@ -9,9 +9,7 @@ and are asserted verbatim, not inferred.
 from __future__ import annotations
 
 import pytest
-
 from phi_core.control import records
-
 
 # section 105 failure taxonomy: the 26 machine-readable failure classes.
 FAILURE_CLASS_MEMBERS = (

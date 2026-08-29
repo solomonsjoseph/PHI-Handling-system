@@ -72,7 +72,6 @@ class Session(BaseModel):
     id: str = Field(default_factory=_uid)
     created_at: str = Field(default_factory=_now)
     updated_at: str = Field(default_factory=_now)
-    status: SessionStatus = "created"
     owner: str = ""
     jurisdiction: str = "us"
     intake_status: Literal["none", "ready", "review_required", "failed"] = "none"

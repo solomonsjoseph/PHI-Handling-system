@@ -53,6 +53,7 @@ import socket
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
+
 from phi_core.paths import SANDBOX_DIR, is_safe_scoped_id
 from phi_core.security import scrub_persisted_text
 
@@ -276,7 +277,7 @@ def _child_entry(
         result = func(*args, **kwargs)
         _validate_return_contract(result)
         queue.put((True, result))
-    except BaseException as exc:  # noqa: BLE001 - forward any failure to the parent
+    except BaseException as exc:
         message = scrub_persisted_text(str(exc))[:_MAX_FORWARDED_ERROR_CHARS]
         queue.put((False, f"{type(exc).__name__}: {message}"))
 

@@ -15,7 +15,7 @@ and nothing walked it. This module tests the three pieces added to
 from __future__ import annotations
 
 import pytest
-from phi_core.control.artifacts import ArtifactError, ArtifactService, MANIFEST_COLLECTION
+from phi_core.control.artifacts import MANIFEST_COLLECTION, ArtifactError, ArtifactService
 from phi_core.control.store import MemoryControlStore
 
 

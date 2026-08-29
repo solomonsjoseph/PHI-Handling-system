@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
-from phi_core.control.records import CleanupManifest, SandboxRecord
+from phi_core.control.records import CleanupManifest
 from phi_core.control.sandbox import (
     SandboxError,
     SandboxPathViolation,

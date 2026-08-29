@@ -13,6 +13,7 @@ from phi_core.control.records import (
     CapabilityGrant,
     EvidenceClaim,
     EvidenceSource,
+    EvidenceVerificationResult,
     GateResult,
     HumanReviewEvent,
     HumanReviewRequest,
@@ -26,7 +27,6 @@ from phi_core.control.records import (
     ResourceUsage,
     ScopeSpec,
     TraceEvent,
-    EvidenceVerificationResult,
     WorkflowRun,
     WorkItem,
 )

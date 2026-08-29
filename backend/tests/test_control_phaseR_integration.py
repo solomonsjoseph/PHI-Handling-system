@@ -44,12 +44,9 @@ import json
 from pathlib import Path
 
 import pytest
-
-from phi_core.control.context import AgentContext
 from phi_core.control.handoff import HandoffGateway
-from phi_core.control.methods import get_approved_methods
 from phi_core.control.opaque import OpaqueMap
-from phi_core.control.records import MethodRecord, SandboxRecord
+from phi_core.control.records import SandboxRecord
 from phi_core.control.store import MemoryControlStore
 from phi_core.control.testing import FakeGateway, make_ctx
 
@@ -78,7 +75,6 @@ async def test_claimed_agent_context_carries_handoff_and_sandbox() -> None:
 
     os.environ["PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY"] = "1"
     from phi_core.control.activation import ActivationFactory
-    from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.testing import _TestLlmConfig, start_test_run
 
     store = MemoryControlStore()

@@ -18,8 +18,8 @@ from . import authorization, canary, limits
 from .egress import _STRUCTURAL_KEYS, canonical_payload, egress_digest
 from .policy import BudgetExceeded, CapabilityDenied, CapabilityPolicy
 from .records import CapabilityGrant, DataClass, TraceEvent
-from .secrets_scan import contains_secret
 from .runs import check_run_budget, record_grant_tool_usage, record_run_usage
+from .secrets_scan import contains_secret
 from .store import ControlStore
 from .workflow import WorkflowError
 

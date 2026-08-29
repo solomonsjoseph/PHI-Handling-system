@@ -18,7 +18,7 @@ must never reach a provider request body either.
 from __future__ import annotations
 
 import re
-from typing import Mapping, Sequence
+from typing import Mapping
 
 _STRUCTURAL_KEYS = frozenset(
     {

@@ -6,7 +6,6 @@ HeaderSafetyGate, SourceProjectionGateway, UntrustedContentGateway.
 from __future__ import annotations
 
 import pytest
-
 from phi_core.control.opaque import OpaqueMap
 from phi_core.control.records import HeaderClassification, SourceProjectionResult
 from phi_core.control.source_projection import (
@@ -15,6 +14,7 @@ from phi_core.control.source_projection import (
     source_projection,
     untrusted_content_blocked,
 )
+
 
 @pytest.fixture(autouse=True)
 def _stub_presidio(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -17,7 +17,6 @@ from typing import Any
 
 import openpyxl
 
-from ..anonymizer import scrub_for_prompt
 from ..control import limits
 from ..control.opaque import OpaqueMap
 from ..control.source_projection import classify_header, source_projection
@@ -32,7 +31,6 @@ from ..file_readers import (
     read_xlsx_columns,
 )
 from .base import Agent
-
 
 _SPAN_COUNT_RE = re.compile(r"^(\d+) PHI detector span")
 
@@ -368,7 +366,7 @@ class Schema(Agent):
             self._headers[file_id] = [h.lower() for h in projected_headers]
             await self._log(f"schema.headers:{file_id}", "info", {"header_count": len(headers)})
             stats = self._column_stats(f, headers)
-            raw_to_projected = {raw.lower(): proj for raw, proj in zip(headers, projected_headers)}
+            raw_to_projected = {raw.lower(): proj for raw, proj in zip(headers, projected_headers, strict=True)}
             for name, s in stats.items():
                 projected_name = raw_to_projected.get(name.lower(), name)
                 self._stats[(file_id, projected_name.lower())] = s
