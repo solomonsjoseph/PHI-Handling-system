@@ -303,3 +303,47 @@ async def test_require_artifacts_current_refuses_an_unknown_artifact_id() -> Non
 
     with pytest.raises(WorkflowError):
         await orch.require_artifacts_current(run_id=run.run_id, artifact_ids=["ghost"])
+
+
+# ---- evaluate_handoff_budget / route_budget_exceeded: retry and
+# correction budget responsibility ----
+
+
+def test_evaluate_handoff_budget_is_true_within_the_configured_ceiling() -> None:
+    orch, _tasks, _store = _rig()
+
+    assert orch.evaluate_handoff_budget(
+        category="judge_reviewer", attempt_number=1, correction_number=0
+    ) is True
+
+
+def test_evaluate_handoff_budget_is_false_once_attempts_plus_corrections_exceed_the_ceiling() -> None:
+    orch, _tasks, _store = _rig()
+    from phi_core.control import limits
+
+    ceiling = limits.HANDOFF_ATTEMPT_BUDGET["judge_reviewer"]
+
+    assert orch.evaluate_handoff_budget(
+        category="judge_reviewer", attempt_number=ceiling, correction_number=1
+    ) is False
+
+
+def test_evaluate_handoff_budget_is_true_for_an_unbudgeted_category() -> None:
+    orch, _tasks, _store = _rig()
+
+    assert orch.evaluate_handoff_budget(
+        category="not_a_real_category", attempt_number=999, correction_number=999
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_route_budget_exceeded_opens_a_human_review_request_and_pauses_the_run() -> None:
+    orch, _tasks, store = _rig()
+    run = await _started_run(orch)
+
+    request = await orch.route_budget_exceeded(run_id=run.run_id, reason="judge_reviewer retry budget exhausted")
+
+    assert request.reason_codes == ["budget_exceeded", "judge_reviewer retry budget exhausted"]
+    stored = await store.get_one("workflow_runs", {"run_id": run.run_id})
+    assert stored["state"] == "awaiting_human_review"
+    assert stored["node"] == "human_review_decisions"
