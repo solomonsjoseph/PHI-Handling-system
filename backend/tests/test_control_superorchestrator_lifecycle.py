@@ -717,3 +717,71 @@ async def test_confirm_cleanup_refuses_a_manifest_from_another_run() -> None:
 
     with pytest.raises(WorkflowError):
         await orch.confirm_cleanup(run_id=run.run_id, manifest=manifest)
+
+
+# ---- close_run: formal-run-closure responsibility (docs section 9) ----
+
+
+@pytest.mark.asyncio
+async def test_close_run_is_closeable_once_terminal_with_no_open_review_and_no_live_tasks() -> None:
+    orch, tasks, store = _rig()
+    run = await _started_run(orch)
+    root = (await store.find_many("work_items", {"run_id": run.run_id}))[0]
+    claimed = await tasks.claim(task_id=root["task_id"], lease_owner="w1")
+    await tasks.complete(task_id=root["task_id"], lease_owner="w1", fence=claimed.fence, output_ref={})
+    run = await _completed_run(orch, run.run_id)
+
+    summary = await orch.close_run(run_id=run.run_id)
+
+    assert summary["closeable"] is True
+    assert summary["open_human_review_request_ids"] == []
+    assert summary["live_task_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_close_run_is_not_closeable_while_not_yet_terminal() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+
+    summary = await orch.close_run(run_id=run.run_id)
+
+    assert summary["closeable"] is False
+
+
+@pytest.mark.asyncio
+async def test_close_run_is_not_closeable_with_a_live_task_still_outstanding() -> None:
+    orch, tasks, store = _rig()
+    run = await _started_run(orch)
+    root = (await store.find_many("work_items", {"run_id": run.run_id}))[0]
+    claimed = await tasks.claim(task_id=root["task_id"], lease_owner="w1")
+    await tasks.complete(task_id=root["task_id"], lease_owner="w1", fence=claimed.fence, output_ref={})
+    live_child = await tasks.enqueue(
+        run_id=run.run_id, session_id=SESSION_ID, worker="Pipeline", task_type="pipeline_run",
+    )
+    run = await _completed_run(orch, run.run_id)
+
+    summary = await orch.close_run(run_id=run.run_id)
+
+    assert summary["closeable"] is False
+    assert summary["live_task_ids"] == [live_child.task_id]
+
+
+@pytest.mark.asyncio
+async def test_close_run_is_not_closeable_with_an_open_human_review_request() -> None:
+    orch, tasks, store = _rig()
+    run = await _started_run(orch)
+    root = (await store.find_many("work_items", {"run_id": run.run_id}))[0]
+    claimed = await tasks.claim(task_id=root["task_id"], lease_owner="w1")
+    await tasks.complete(task_id=root["task_id"], lease_owner="w1", fence=claimed.fence, output_ref={})
+    run = await _completed_run(orch, run.run_id)
+    from phi_core.control.records import HumanReviewRequest
+    stray = HumanReviewRequest(
+        run_id=run.run_id, session_id=SESSION_ID, workflow_version="wf/1",
+        task_id="", node="human_review_decisions", state="open",
+    )
+    await store.insert("human_review_requests", stray)
+
+    summary = await orch.close_run(run_id=run.run_id)
+
+    assert summary["closeable"] is False
+    assert summary["open_human_review_request_ids"] == [stray.request_id]
