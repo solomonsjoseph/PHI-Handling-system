@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from ..control.handoff import INSTRUMENT, JUDGE, LEXICON, SCHEMA, InstrumentQuestion, LexiconQuestion, SchemaQuestion
-from ..control.records import ControlRecord, HandoffEnvelope
+from ..control.records import ControlRecord, HandoffEnvelope, HandoffResult
 from ..security import scrub_persisted_text
 from .base import Agent
 
@@ -25,7 +25,7 @@ class ManagerAdvice:
     note: Optional[str]
 
 
-class Manager(Agent):
+class ExecutionHealthSupervisor(Agent):
     """The supervising agent. Owns the health of the run, never its content.
 
       1. run()                     open the run; assign roles and deliverables.
@@ -38,10 +38,28 @@ class Manager(Agent):
                                    working or hand off to a human.
       5. close_run()                persistable report of every intervention.
 
-    Per D10, Manager no longer owns any path to 'awaiting_human_review':
+    Per D10, this class no longer owns any path to 'awaiting_human_review':
     the deleted escalate_to_human_review() write moved to the shared
     orchestrator._escalate_to_human_review() helper and
     SuperOrchestrator.request_human_review(), the durable authority.
+
+    Wave 4b (docs #87): demoted from an independent peer class
+    ``run_pipeline`` called directly for phase sequencing into a
+    subordinate ExecutionHealthSupervisor -- ``run_pipeline`` now asks
+    ``SuperOrchestrator.advance()`` for sequencing and dispatches through
+    a registry; this class supervises execution health FOR that
+    authority (retry/extend-timeout/grant-web-search/escalate, plus the
+    new handoff-observation responder below), never in place of it. The
+    class name changed; its role identity (``NAME = "Manager"``, the
+    agent identifier every ``AgentContext``/``AgentManifest``/
+    capability-grant/task record still keys on) did not -- renaming
+    that string is a separate, much larger cross-cutting change (
+    ``control/policy.py``'s ``MANIFESTS``, every persisted record with
+    ``agent="Manager"``) out of this wave's scope. ``Manager`` remains
+    importable as a compatibility name at the bottom of this module for
+    the one caller outside this wave's authority to migrate
+    (``server.py``'s human-review-resume path); see that alias's own
+    comment.
 
     It is never given a prompt, a reply, a decision, or a file. Its LLM
     payload is always counts, enums, and timings.
@@ -51,10 +69,10 @@ class Manager(Agent):
     ``attach_lexicon``/``ask_lexicon``) does pass a column or field name
     through, so Judge/Sentinel can ask a specialist a targeted question
     instead of relying only on the broadcast summary. That name and the
-    specialist's lookup result never reach the Manager's own LLM calls --
+    specialist's lookup result never reach this class's own LLM calls --
     ``ask_schema``/``ask_instrument`` never call an LLM at all, and
-    ``ask_lexicon`` forwards straight to ``Lexicon.answer`` without the
-    Manager itself reading the reply content.
+    ``ask_lexicon`` forwards straight to ``Lexicon.answer`` without this
+    class itself reading the reply content.
     """
 
     NAME = "Manager"
@@ -137,6 +155,13 @@ class Manager(Agent):
     DECISION_TIMEOUT_S = 12.0           # the Manager's own calls stay short
     NOTE_MAX_CHARS = 200
     LEXICON_QUERY_BUDGET = 8             # Lexicon.answer calls an LLM; cap queries/run
+    # Wave 4b: repeated denials on the same (sender, recipient) edge within
+    # one run's observation window escalate rather than being reported as
+    # an ordinary BLOCK forever -- mirrors run_supervised's own "repeated
+    # failure of the same kind means the agent is blocked" philosophy
+    # (see PROMPT above), applied to handoff denials instead of call
+    # failures.
+    HANDOFF_DENIAL_ESCALATION_THRESHOLD = 3
 
     def __init__(self, ctx, *, db=None):
         super().__init__(ctx)
@@ -152,6 +177,14 @@ class Manager(Agent):
         self._instrument = None
         self._lexicon = None
         self._lexicon_queries = 0
+        # Wave 4b: handoff-observation action responder state (see
+        # respond_to_handoff/respond_to_handoff_budget below). Both are
+        # process-local, run-scoped counters -- SuperOrchestrator.
+        # observe_handoff already keeps the durable per-run denial count;
+        # these back this class's own supervisory *response*, not a
+        # second copy of that durable record.
+        self._handoff_denials: dict[tuple[str, str], int] = {}
+        self._handoff_budget_denials: dict[str, int] = {}
 
     # ---- 1. open -------------------------------------------------------
     async def run(self, *, roster: list[str], phase_plan: list[str]) -> dict[str, Any]:
@@ -324,6 +357,74 @@ class Manager(Agent):
         await self._log(f"manager.consult.{agent_name}", "info", record)
         return ManagerAdvice(action=decision.action, note=decision.note)
 
+    # ---- 5. observe handoffs ---------------------------------------------
+    # Wave 4b (docs #9/#10/#87): the handoff-observation action responder.
+    # ``SuperOrchestrator.observe_handoff`` already records the durable,
+    # per-run denial count (Wave 4a); this is the *response* half -- this
+    # class watches the same ``HandoffResult`` a caller reports and picks
+    # one of section 10's nine actions (ALLOW, BLOCK, PAUSE, CANCEL,
+    # LIMIT, REDIRECT, RETRY, ESCALATE, INVALIDATE).
+    #
+    # Only four of the nine have a clear, testable trigger derivable from
+    # a single observed ``HandoffResult`` plus this class's own run-scoped
+    # denial counters -- implemented in full below. The remaining five
+    # would require context this method does not have (PAUSE: whether a
+    # human should be looped in; REDIRECT: which alternate recipient the
+    # original request actually intended; RETRY: every one of
+    # ``HandoffGateway``'s checks 1-10 is deterministic given the same
+    # envelope, so retrying it unchanged can never succeed; INVALIDATE:
+    # which artifact_id a denial reason maps to, a different domain
+    # entirely (``ArtifactService.invalidate_descendants``)) -- inventing
+    # a trigger for any of them would be exactly the "a fixed escalation
+    # policy tied to a rule that has never fired against real data"
+    # Wave 4a's own ``observe_handoff`` docstring already declined to do.
+    # Forward-compatible hooks: the action vocabulary this method's
+    # return type carries already includes them, so a later phase can
+    # wire a real trigger without changing this method's contract.
+
+    async def respond_to_handoff(self, *, result: HandoffResult) -> str:
+        """One of ALLOW / BLOCK / CANCEL / ESCALATE, chosen from ``result``
+        and this run's own denial history on ``(result.sender,
+        result.recipient)``.
+
+        - ALLOW: the gateway already let it through -- no supervisory
+          reaction needed.
+        - CANCEL: ``residual_phi_detected``/``secret_detected`` is a
+          genuine leak signal, not a shape/policy mismatch a retry or a
+          plain block addresses -- severe enough to stop the attempting
+          task rather than merely record the denial.
+        - ESCALATE: this exact edge has now been denied
+          ``HANDOFF_DENIAL_ESCALATION_THRESHOLD`` times in this run --
+          "repeated failure of the same kind means the agent is
+          blocked" (the same philosophy ``run_supervised`` already
+          applies to call failures), so a human should see it rather
+          than the run silently re-attempting forever.
+        - BLOCK: every other denial -- the deterministic gateway's own
+          verdict stands; this class never tries to force a denied
+          handoff through (section 10: "Manager intelligence does not
+          replace deterministic policy").
+        """
+        if result.allowed:
+            return "ALLOW"
+        if result.reason_code in ("residual_phi_detected", "secret_detected"):
+            return "CANCEL"
+        edge = (result.sender, result.recipient)
+        self._handoff_denials[edge] = self._handoff_denials.get(edge, 0) + 1
+        if self._handoff_denials[edge] >= self.HANDOFF_DENIAL_ESCALATION_THRESHOLD:
+            return "ESCALATE"
+        return "BLOCK"
+
+    async def respond_to_handoff_budget(self, *, category: str) -> str:
+        """LIMIT: the response to a ``HandoffGateway`` retry/correction
+        budget refusal (check 11, ``BudgetExceeded`` -- a distinct
+        observation channel from ``respond_to_handoff`` above, since a
+        budget refusal never produces a ``HandoffResult`` at all; the
+        gateway raises instead of returning). Unlike a plain denial,
+        exhausting a budget has exactly one clear supervisory meaning:
+        this edge has hit its ceiling for this run."""
+        self._handoff_budget_denials[category] = self._handoff_budget_denials.get(category, 0) + 1
+        return "LIMIT"
+
 
     # ---- guardian query broker -----------------------------------------
     # Deterministic lookups a specialist already indexed during its own
@@ -469,3 +570,20 @@ class Manager(Agent):
         else:
             note = None
         return ManagerDecision(action=action, note=note)
+
+
+# Wave 4b compatibility name: `server.py`'s independent human-review-resume
+# path (`from phi_core.agents.manager import Manager` around its own
+# `session_human_review` handler) constructs this class directly, outside
+# this wave's owns list -- `server.py` is explicitly out of scope this
+# wave. A bare rename would leave that live, tested HTTP path
+# (`test_agent_pipeline.py::test_human_review_and_export`) broken with no
+# way for this wave to fix it, which is worse than a one-line compat
+# export. `phi_core/agents/__init__.py`'s own `from .manager import
+# Manager` and `phi_core/agents/base.py`'s `TYPE_CHECKING`-only reference
+# both resolve through this alias too, unchanged.
+#
+# GAP for the orchestrator to close (see the wave report): once
+# `server.py` imports `ExecutionHealthSupervisor` directly, delete this
+# alias.
+Manager = ExecutionHealthSupervisor
