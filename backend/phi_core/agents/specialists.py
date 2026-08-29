@@ -18,6 +18,9 @@ from typing import Any
 import openpyxl
 
 from ..anonymizer import scrub_for_prompt
+from ..control import limits
+from ..control.opaque import OpaqueMap
+from ..control.source_projection import classify_header, source_projection
 from ..file_readers import (
     column_value_stats,
     read_csv_columns,
@@ -29,6 +32,39 @@ from ..file_readers import (
     read_xlsx_columns,
 )
 from .base import Agent
+
+
+_SPAN_COUNT_RE = re.compile(r"^(\d+) PHI detector span")
+
+
+def _phi_span_count(reasons: list[str]) -> int:
+    """Approximate the number of PHI spans a ``source_projection`` result
+    redacted, parsed from its ``reasons`` text, for the same diagnostic
+    ``scrub_count`` metric Lexicon/Instrument already reported before
+    Wave R-c routed their extracted text through ``source_projection``
+    instead of a bare ``scrub_for_prompt`` call."""
+    total = 0
+    for reason in reasons:
+        match = _SPAN_COUNT_RE.match(reason)
+        if match:
+            total += int(match.group(1))
+    return total
+
+
+class UncertainHeaderCeilingExceeded(Exception):
+    """Raised when a single ``Schema`` run leaves more than
+    ``limits.MAX_UNCERTAIN_HEADERS_PER_RUN`` headers with an
+    ``uncertain`` disposition (v3 section 7): past this ceiling, an
+    unresolved, ambiguous-header population is itself evidence the
+    review process is not keeping up for this run, not something one
+    more retry fixes."""
+
+    failure_class = "HEADER_SENSITIVE_CONTENT"
+
+    def __init__(self, count: int, limit: int) -> None:
+        self.count = count
+        self.limit = limit
+        super().__init__(f"{count} uncertain headers exceeds the per-run ceiling of {limit}")
 
 
 def _opaque_file_id(file_record: dict[str, Any]) -> str:
@@ -91,9 +127,21 @@ class Lexicon(Agent):
                 # "Patient", "US", "years", "sex_at_birth", "Hispanic"/
                 # "Latino" as PHI in the TB study dictionary, none of which
                 # are); rule-based regex still catches any genuine
-                # identifier value typed into a description.
-                scrubbed_row, n_removed = scrub_for_prompt(raw_row, detectors=("rule",))
-                self.scrub_count += n_removed
+                # identifier value typed into a description. Routed
+                # through `source_projection` (Wave R-c, v3 section 22)
+                # rather than a bare `scrub_for_prompt` call: a
+                # credential-shape or residual-PHI row is fully blocked
+                # (`raw_row` becomes empty) instead of merely redacted.
+                projection = source_projection(
+                    content_type="dictionary", raw_text=raw_row, run_id=self.ctx.run_id,
+                )
+                self.scrub_count += _phi_span_count(projection.reasons)
+                if projection.blocked:
+                    await self._log(
+                        "lexicon.row_blocked", "info",
+                        {"file_id": f["file_id"], "name": name, "disposition": projection.disposition},
+                    )
+                scrubbed_row = projection.projected_text
                 entry = {
                     "name": name,
                     "raw_row": scrubbed_row,
@@ -270,6 +318,15 @@ class Schema(Agent):
         results: list[dict[str, Any]] = []
         self._headers: dict[str, list[str]] = {}
         self._stats: dict[tuple[str, str], dict[str, int]] = {}
+        # Wave R-c (v3 section 7 HEADER SAFETY GATE): a header carrying a
+        # typed-in real value must never reach `results` (agent/LLM-facing)
+        # under its literal text -- only the opaque token does. Falls back
+        # to a local, unpersisted `OpaqueMap` when no store-backed
+        # `ctx.opaque` was wired (e.g. a context built directly via
+        # `control.testing.make_ctx`), so the security property (never
+        # leak the literal) holds even outside the live pipeline.
+        local_opaque = OpaqueMap(self.ctx.run_id, {})
+        uncertain_count = 0
         for f in dataset_files:
             file_id = f["file_id"]
             headers = f.get("columns") or self._read_headers(f)
@@ -278,13 +335,45 @@ class Schema(Agent):
                 await self._log(f"schema.error:{file_id}", "info",
                                 {"error": "no headers provided", "file": _opaque_file_id(f)})
                 continue
-            self._headers[file_id] = [h.lower() for h in headers]
+            projected_headers: list[str] = []
+            for header in headers:
+                disposition, reasons = classify_header(header)
+                if disposition == "safe":
+                    projected_headers.append(header)
+                    continue
+                if disposition == "uncertain":
+                    uncertain_count += 1
+                    if uncertain_count > limits.MAX_UNCERTAIN_HEADERS_PER_RUN:
+                        raise UncertainHeaderCeilingExceeded(
+                            uncertain_count, limits.MAX_UNCERTAIN_HEADERS_PER_RUN,
+                        )
+                if self.ctx.opaque is not None:
+                    token = await self.ctx.opaque.to_opaque("header", header)
+                else:
+                    token = local_opaque.to_opaque("header", header)
+                projected_headers.append(token)
+                if disposition == "uncertain":
+                    # Non-blocking review item: a recorded trace event,
+                    # never a `HumanReviewRequest` (which pauses the run --
+                    # the wrong tool for a disposition this system already
+                    # treats identically to `sensitive` for the rest of
+                    # this run). If no human ever resolves it, the
+                    # disposition simply stays sensitive permanently: no
+                    # code path anywhere reverses an opaque projection
+                    # back to its literal header.
+                    await self._log(
+                        "schema.header_uncertain_review", "info",
+                        {"file_id": file_id, "opaque_token": token, "reasons": reasons},
+                    )
+            self._headers[file_id] = [h.lower() for h in projected_headers]
             await self._log(f"schema.headers:{file_id}", "info", {"header_count": len(headers)})
             stats = self._column_stats(f, headers)
+            raw_to_projected = {raw.lower(): proj for raw, proj in zip(headers, projected_headers)}
             for name, s in stats.items():
-                self._stats[(file_id, name.lower())] = s
+                projected_name = raw_to_projected.get(name.lower(), name)
+                self._stats[(file_id, projected_name.lower())] = s
             await self._log(f"schema.cardinality:{file_id}", "info", {"columns": len(stats)})
-            for h in headers:
+            for h in projected_headers:
                 results.append({"name": h, "_file_id": file_id})
         return {"columns": results}
 
@@ -389,9 +478,19 @@ class Instrument(Agent):
             # combine the structured table view with the full narrative
             # paragraph text.
             text = _read_form_text(path)
-            scrubbed, n_removed = scrub_for_prompt(text[:6000], detectors=("rule",))
+            projection = source_projection(
+                content_type="form", raw_text=text[:6000], run_id=self.ctx.run_id,
+            )
+            n_removed = _phi_span_count(projection.reasons)
             self.scrub_count += n_removed
-            await self._log(f"instrument.scrub:{file_id}", "info", {"identifiers_removed": n_removed})
+            await self._log(f"instrument.scrub:{file_id}", "info",
+                            {"identifiers_removed": n_removed, "blocked": projection.blocked})
+            if projection.blocked:
+                await self._log(f"instrument.blocked:{file_id}", "info",
+                                {"disposition": projection.disposition})
+                self._fields[file_id] = []
+                continue
+            scrubbed = projection.projected_text
             reply = await self.call_json(
                 f"Form: {_opaque_file_id(f)}\nExtracted text:\n{scrubbed}\n"
                 "Respond with JSON only.",

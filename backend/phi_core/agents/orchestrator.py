@@ -59,7 +59,7 @@ from .reasoning import (
     validate_decisions,
 )
 from .reviewer import Reviewer
-from .specialists import Instrument, Lexicon, Schema
+from .specialists import Instrument, Lexicon, Schema, UncertainHeaderCeilingExceeded
 
 PhaseCb = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -745,7 +745,29 @@ async def run_pipeline(
     lex_task = lexicon_agent.run(dict_files=dict_files) if lexicon_agent else _empty({"columns": [], "notes": ""})
     schema_task = schema_agent.run(dataset_files=dataset_files) if schema_agent else _empty({"columns": []})
     inst_task = instrument_agent.run(form_files=form_files) if instrument_agent else _empty({"fields": []})
-    lexicon, schema, instrument = await asyncio.gather(lex_task, schema_task, inst_task)
+    try:
+        lexicon, schema, instrument = await asyncio.gather(lex_task, schema_task, inst_task)
+    except UncertainHeaderCeilingExceeded as exc:
+        # v3 section 7: past the per-run uncertain-header ceiling, an
+        # unresolved ambiguous-header population is itself evidence the
+        # review process is not keeping up for this run -- block, same
+        # "blocked" shape Publish Guard's own scan uses further down.
+        await close_last_phase()
+        manager_report = await manager.close_run("blocked")
+        await db.sessions.update_one(
+            session_filter,
+            {"$set": {
+                "status": "blocked",
+                "failure_class": exc.failure_class,
+                "phase_timings": _phase_timings,
+                "run_elapsed_s": round(time.perf_counter() - _run_started, 3),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "manager_report": manager_report,
+            }},
+        )
+        cleanup_session_unpacked(sid)
+        return {"status": "blocked", "failure_class": exc.failure_class,
+                "detail": str(exc), "phase_timings": _phase_timings}
     if lexicon_agent:
         await require_accepted(lexicon_ctx, lexicon, "Lexicon")
     if schema_agent:
