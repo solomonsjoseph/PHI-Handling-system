@@ -753,6 +753,50 @@ class SuperOrchestrator:
                     f"artifact_id {artifact_id!r} is linked to an invalidated VerifiedClassificationManifest"
                 )
 
+    # ---- evaluate_handoff_budget / route_budget_exceeded ---------------------
+
+    def evaluate_handoff_budget(
+        self, *, category: str, attempt_number: int, correction_number: int
+    ) -> bool:
+        """The retry/correction-budget responsibility (D9/docs #87,
+        section 48): whether ``attempt_number + correction_number`` still
+        fits ``limits.HANDOFF_ATTEMPT_BUDGET[category]``.
+
+        Read-only and synchronous: the actual enforcement (raising
+        ``policy.BudgetExceeded`` and recording the refusal) is
+        ``HandoffGateway``'s check 11, run at the moment of one handoff
+        attempt. This is the lifecycle-decision mirror this class needs to
+        decide, once that ceiling is already known to be exceeded (see
+        ``route_budget_exceeded``), how the *run* should respond -- a
+        question ``HandoffGateway`` itself never answers, since it has no
+        notion of a workflow run's node or state. A ``category`` with no
+        configured budget is unbounded by this check (matches
+        ``HandoffGateway._evaluate``'s own "no entry means no ceiling"
+        convention for an edge outside :data:`limits.HANDOFF_ATTEMPT_BUDGET`).
+        """
+        budget = limits.HANDOFF_ATTEMPT_BUDGET.get(category)
+        if budget is None:
+            return True
+        return (attempt_number + correction_number) <= budget
+
+    async def route_budget_exceeded(self, *, run_id: str, reason: str) -> HumanReviewRequest:
+        """The routing decision once a retry or correction budget is
+        exhausted (D9/docs #87 "retry budgets"/"correction budgets"):
+        pause the run for human review the same way every other
+        automatic-retry exhaustion in this codebase resolves, since a
+        budget-exhausted loop is, by definition, something no further
+        automatic retry can fix. Delegates to ``request_human_review``,
+        the sole existing path to ``awaiting_human_review``, rather than
+        writing a second one -- ``reason`` is recorded alongside the
+        fixed ``"budget_exceeded"`` code so a reviewer sees both the
+        category this refusal fired on and why."""
+        return await self.request_human_review(
+            run_id=run_id,
+            node="human_review_decisions",
+            reason_codes=["budget_exceeded", reason],
+            decision_version=0,
+        )
+
     # ---- authorize_publication ---------------------------------------------
 
     async def authorize_publication(
