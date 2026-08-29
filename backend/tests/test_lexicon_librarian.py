@@ -132,6 +132,25 @@ def test_missing_headers_logged_and_skipped(tmp_path):
     assert lex.call_count == 0  # never asked the LLM about zero rows
 
 
+def test_unreadable_dictionary_file_logged_and_skipped(tmp_path):
+    """A malformed dictionary file (corrupt .xlsx) degrades Lexicon to an
+    empty index for that file instead of crashing the whole run (docs #27:
+    one bad input must not destroy every specialist's successful output)."""
+    path = tmp_path / "corrupt.xlsx"
+    path.write_bytes(b"not a real xlsx archive")
+    lex = _DropCountStubLexicon(make_ctx("Lexicon"))
+    dict_files = [{"file_id": "f1", "original_name": "corrupt.xlsx",
+                  "stored_path": str(path)}]
+
+    result = asyncio.run(lex.run(dict_files=dict_files))
+
+    assert result == {"columns": [], "notes": ""}
+    unreadable_logs = [d for d in lex.ctx.trace.legacy_messages
+                       if d.phase == "lexicon.unreadable:f1"]
+    assert len(unreadable_logs) == 1
+    assert lex.call_count == 0
+
+
 def test_blank_name_rows_are_logged_as_one_aggregate_event(tmp_path):
     """Rows with a blank/absent name cell are skipped, but never silently:
     every one of them is named in a single aggregate lexicon.blank_name
