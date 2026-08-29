@@ -224,3 +224,108 @@ All 7 failures are pre-existing baseline failures (4 sandbox D1/D2/D9, 3
 R-a's own transcript was the pre-existing missing-`DATA_DIR` issue, not a regression.
 
 Next: Wave R-b (5 parallel subagents: R-Sandbox, R-Lineage, R-Trace, R-Handoff, R-Docs).
+
+### Wave R-b (5 parallel): sandbox, lineage, trace, handoff, docs — COMPLETE
+
+37 commits since Wave R-a landed. 18 files touched, all cleanly disjoint across the 5
+subagents' owns lists (verified via `git diff --stat`, no collisions).
+
+**R-Sandbox** (13 commits, `control/sandbox.py` +
+`test_control_phase2_sandbox_and_raw_data_boundary.py`): fixed D1 (env allowlist replaces
+the broken substring denylist), D2 (drain the result queue before joining, fixes the
+128 KiB+ payload deadlock), D3 child half (scrub + cap forwarded exception text), D7
+(subsumed by the D1 allowlist rewrite), D9 (explicit chmod 0700 on the run_id intermediate
+directory), plus the fail-closed memory-limit switch (`PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY`,
+never `PHI_ENV`) and a declared return contract on `run_isolated`. All 4 baseline macOS
+sandbox failures now pass. Final run: `pytest
+tests/test_control_phase2_sandbox_and_raw_data_boundary.py -q -p no:cacheprovider -p
+no:xdist` -> **19 passed**.
+**Correction to the plan's stated rlimit behavior** (grounded in direct empirical
+reproduction on this machine, Darwin 25.6.0): `setrlimit(RLIMIT_AS, ...)` does not
+unconditionally raise `ValueError` on Darwin as the plan stated; it raises only when the
+target ceiling is below the process's already-mapped virtual address space, which a modern
+Python 3.11 process's own shared-library mappings exceed at the configured 1 GiB default.
+The enforceability probe (`_probe_memory_limit_enforceable` in `sandbox.py`) tests the real
+configured ceiling (`limits.MAX_SANDBOX_MEMORY_BYTES`), not an arbitrary large sentinel, and
+touches only the soft limit (the hard limit is a one-way ratchet without elevated privilege).
+
+**R-Lineage** (12 commits, `control/artifacts.py` + new
+`test_control_phaseR_lineage.py`): built artifact lineage invalidation (section 30).
+`stage()` requires an explicit `parents` list for the 13 section-29 consequential artifact
+types. `invalidate_descendants(artifact_id)` walks `parents` forward (cycle-safe,
+idempotent, run-scoped), flips descendants to `superseded`, flips any linked
+`VerifiedClassificationManifest` to `invalidated`. A read guard in `open_for_download`
+refuses a superseded artifact or an invalidated linked manifest. Final run: `pytest
+tests/test_control_phaseR_lineage.py tests/test_control_artifacts.py -q -p no:cacheprovider
+-p no:xdist` -> **44 passed**.
+**Convention future work must follow:** `VerifiedClassificationManifest` has no field
+linking it to an `ArtifactRecord`; no code anywhere yet creates one. R-Lineage introduced a
+dedicated collection `MANIFEST_COLLECTION = "verified_classification_manifests"`, documents
+keyed by `{artifact_id, status, ...}`. Any future code that creates a
+`VerifiedClassificationManifest` (likely Phase 9/10) must write into this collection with
+that shape for `invalidate_descendants`/`open_for_download` to see it.
+
+**R-Trace** (2 commits, `control/events.py` + `control/trace_sanitizer.py` + new
+`test_control_phaseR_trace.py`): fixed D3 store half and D4. `TraceEventStore.append` now
+scrubs `status_text` and `retry_category` through the existing `scrub_persisted_text` before
+hashing, matching how `payload` was already treated. A planted SSN in either field no longer
+survives into the persisted/hashed event. Final run: `pytest tests/test_control_phaseR_trace.py
+tests/test_control_events.py -q -p no:cacheprovider -p no:xdist` -> passed (see wave-landing
+total below for exact count).
+
+**R-Handoff** (3 commits, `control/handoff.py` +
+`test_control_phase3_handoff_gateway.py`): added the missing `(Judge, Reviewer)` topology
+edge with a `RevisedArtifactHandoff` schema; implemented check 11 (attempt/correction budget
+enforcement); replaced the confused "ALLOWED_EDGES is not mutable" test with three real
+tests (single-assignment AST scan, no-request-data-read AST assert, exhaustive 42-pair
+matrix); tested `Executor`/raw-worker absence from the role registry.
+**Design decision on check 11:** budget denial does not fit any of the 10 existing
+`HandoffReasonCode` Literal values (a closed enum in `records.py`, correctly left untouched).
+Rather than edit the closed file, check 11 follows the codebase's established D5-ceiling
+pattern: raise `policy.BudgetExceeded`, record a `TraceEvent(outcome="budget_exceeded")`,
+re-raise. No `HandoffResult` is constructed for a budget refusal; this is a documented
+exception carved out of checks 1-10's tuple-return contract.
+
+**R-Docs** (10 commits, `docs/*`, `CLAUDE.md`, `backend/.env.example`, `backend/tests/conftest.py`,
+`backend/phi_core/db.py`, plus the explicitly-assigned `test_control_gateway_egress.py`
+widening): Phase 0 reconfirmed at current HEAD (`PRECHECK = PASS`,
+`INSTRUCTION_BASELINE_STATUS = ALIGNED`, scoped to `eaaa1f4`). New
+`docs/BRANCH_MIGRATION_INVENTORY.md`: `feat/agent-design-docs` is an older superseded
+snapshot, not an unmerged feature branch; every structural component already exists on
+`main` equal-or-better; its deletion of `phi_engine`/`harness` contradicts this rewrite's
+out-of-scope rule, so that move is flagged DELETE. New `docs/THREAT_MODEL_BACKEND.md` with
+all six required disclosures (macOS memory-limit gap, accurate socket-monkeypatch bypass
+list, same-uid filesystem reality, D9 caveat, D6 cookie gap, crypto dev-key orphaning),
+each independently re-verified against the live code, not just paraphrased. D8 fixed:
+`conftest.py` docstring corrected, `_mongo_up()`/`needs_mongo` skip guard added and applied
+to the three Mongo-dependent test files, `serverSelectionTimeoutMS=2000` added to
+`phi_core/db.py`. `backend/.env.example` documents the three `TRACE_RAW_*` flags. Final
+acceptance run: **19 passed**.
+
+**Wave-landing check** (orchestrator, backend server restarted first to pick up the runtime
+changes to sandbox/artifacts/events/handoff/trace_sanitizer/db):
+`cd backend && .venv/bin/python -m pytest tests -q -p no:cacheprovider -n auto --deselect
+tests/test_agent_pipeline.py --deselect tests/test_ocr_pdf.py --deselect
+tests/test_corpus_researcher.py` -> **3 failed, 1376 passed, 3 skipped, 1 xfailed, 63.48s**.
+All 3 remaining failures are the pre-existing `test_human_review_invariant.py`
+`client_event_id` schema mismatches (out of Phase R scope, deferred to Phase 8). The 4
+sandbox failures present at the R-a wave-landing check are now fixed. **Zero regressions.**
+
+**Nodeid regression check** (full corrected comparison, `PHI_TEST_BASE_URL` set to match the
+baseline capture conditions): 1400 nodeids collected now vs 1039 at Step 0 baseline. `comm
+-23` against the baseline nodeid set is **empty** — no silent test disappearance.
+
+### RESIDUAL_RISK (Phase R-b additions)
+
+See `docs/THREAT_MODEL_BACKEND.md` for full detail. Summary pointers:
+- macOS cannot enforce `RLIMIT_AS`; fails closed via `PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY`.
+- `socket.socket` monkeypatch stops accidental egress only, not deliberate bypass
+  (`_socket`, `importlib.reload`, `subprocess`/`os.system`/`os.execve`, `ctypes`,
+  pre-patch unpickling references).
+- Same-uid filesystem: the sandboxed worker can read `backend/.env`, `~/.aws/credentials`,
+  `~/.ssh/`, service-account tokens.
+- D6 (cookie expiry / HMAC domain separation) remains open until Phase 8.
+- `crypto.py` dev-key auto-generation orphans existing ciphertext; see
+  `docs/RUNBOOK.md`'s new "Encryption-key rotation" section.
+
+Next: Wave R-c (solo): integration.
