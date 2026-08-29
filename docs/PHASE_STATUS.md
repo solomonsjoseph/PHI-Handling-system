@@ -906,3 +906,70 @@ Left unfixed, these 5 grants would raise `CapabilityDenied`. Fixed in the same c
 
 Next: Phase 5 (study specialists) and Phase 6 (targeted experts), one two-subagent batch,
 disjoint on `agents/specialists.py` versus `agents/experts.py`.
+
+## Phase 5/Phase 6 (parallel study specialists + targeted experts) — COMPLETE
+
+Two-subagent parallel batch, dispatched immediately after the 5/6-rename wave landed.
+
+**Phase 5 (study specialists)** -- 5 commits. `assemble_study_knowledge_package` built
+(StudyKnowledgePackage from Schema+Lexicon+Instrument outputs); orchestrator's
+`_dispatch_specialists` gathers with `return_exceptions=True` now (added ast guard,
+section 27); Lexicon degrades gracefully on unreadable dictionary file instead of
+crashing. `test_study_knowledge_package.py` new: 34 passed, 4 warnings, 1 xfailed (KNOWN_XFAIL).
+
+**Phase 6 (targeted experts)** -- 3 commits. `RegulationsExpert`/`PHIMethodsExpert`
+research is now demand-driven, triggered once after Judge's own first (triage) pass,
+deduplicated by HIPAA category, and skipped entirely when nothing is flagged. Findings
+persisted directly to `ArtifactRegistry` as typed `RegulatoryFinding`/`MethodFinding`
+records (per section 29's literal wording) -- flagged by the subagent as not yet routed
+through `HandoffGateway`, closed below.
+
+**Follow-up (3 items closed by a dedicated subagent, 6 commits, all test-first):**
+1. `RegulatoryFinding`/`MethodFinding` now route through `HandoffGateway.handoff()` on
+   the `(REGULATIONS_EXPERT, JUDGE)` / `(METHODS_EXPERT, JUDGE)` edges (already registered
+   by Phase R-c), matching section 89's "shared contract, decided now" text exactly.
+2. `_dispatch_specialists`'s `asyncio.gather` widened to `return_exceptions=True`
+   (section 27 failure-isolation): one specialist crash no longer silently drops its
+   siblings' results.
+3. `assemble_study_knowledge_package`'s output now reaches `Judge.run`'s live call
+   (previously built but never wired into the actual dispatch path).
+
+**Gate (full per-phase procedure, run against `9633a1` (Phase R's final commit),
+immediately before Phase 4a's first commit) as the phase-gate baseline, continuing
+in this same session):**
+
+- Full backend suite (`-n auto`, `PHI_TEST_BASE_URL` set): **8 failed, 1512 passed,
+  4 skipped, 1 xfailed, 2 errors, 56.28s** -- exact nodeid match to the Step 0 baseline
+  (3 `test_human_review_invariant.py` + 5 `test_agent_pipeline.py` FAILED, 2
+  `test_agent_pipeline.py` ERROR).
+- `ruff check .` -> 1 pre-existing unsorted-import finding in
+  `test_experts_web_search.py` (new test file from Phase 6), fixed via `ruff --fix`;
+  reconfirmed clean; `server import OK` after the fix.
+- Root suite: **85 failed, 909 passed, 3 skipped** -- exact match to Step 0 baseline,
+  all `phi_engine`, out of scope.
+- Invariant + canary (`test_control_phaseR_canary.py` + `test_phi_corpus_verify_run_surfaces.py`):
+  **21 passed**. `grep -rn "not wired into.*phi-"` control/: zero hits.
+- Nodeid regression: **zero disappeared** (1527 collected vs 1039 at Step 0 baseline;
+  growth is new test files added across Phase R, Phase 4, and Phase 5/6).
+
+**Diagnostic finding (not a regression, not a new defect -- recorded for the record):**
+`test_agent_pipeline.py`'s live-server pipeline run now progresses far past where it
+used to fail. Before this wave, `CapabilityDenied` (the Phase 4 gate's own documented
+defect, `MAX_PARALLEL_TASKS_PER_PARENT` collision from broad research-at-t=0) killed the
+run before Judge, Sentinel, or Manager ever ran. With research now demand-driven and
+deduplicated, the trace now shows Lexicon, Schema, Instrument, Judge, Sentinel, and
+Manager all completing normally -- `CapabilityDenied` is gone. The run still ultimately
+fails, now with `DecisionGateFailure: decision gate sequence failed exact-coverage proof`
+(zero decisions ever recorded), because `RegulationsExpert`'s live research call needs a
+real LLM provider key and this environment has none (`ANTHROPIC_API_KEY` unset), and
+`_dispatch_demand_driven_research`'s `state.statute = await regulations_expert_task`
+is unprotected (no `return_exceptions=True`), so the expert's failure propagates and
+aborts the whole decide loop before any decision is persisted. This is squarely the
+documented Step 0 "no provider key -> NOT RUN, never stub the provider" limitation,
+now surfacing at a different point in the pipeline than before. The 5 FAILED + 2 ERROR
+`test_agent_pipeline.py` nodeids are byte-identical to the Step 0 baseline set, so the
+regression rule holds; this is not treated as a new required fix for this gate.
+
+**`PHASE_5_6_STATUS = PASS`. Phase 5/Phase 6 are complete.** Proceeding to Phase 7 per
+plan order, pausing first per the user's explicit "pause before moving to phase 7"
+instruction from this session.

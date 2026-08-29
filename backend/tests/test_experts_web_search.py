@@ -78,6 +78,7 @@ def test_statute_pack_fallback_shape():
 
 def test_regulations_expert_run_signature_accepts_only_jurisdiction():
     import inspect
+
     from phi_core.agents.experts import RegulationsExpert
     params = set(inspect.signature(RegulationsExpert.run).parameters) - {"self"}
     assert params == {"jurisdiction"}, (
@@ -88,6 +89,7 @@ def test_regulations_expert_run_signature_accepts_only_jurisdiction():
 
 def test_phi_methods_expert_method_for_signature_accepts_only_category():
     import inspect
+
     from phi_core.agents.experts import PHIMethodsExpert
     params = set(inspect.signature(PHIMethodsExpert.method_for).parameters) - {"self"}
     assert params == {"category"}, (
