@@ -166,8 +166,8 @@ def test_agent_trace(api, session_id):
     msgs = r.json()["messages"]
     assert len(msgs) >= 10, f"only {len(msgs)} agent messages"
     agents = {m.get("agent") for m in msgs}
-    # Spec asks for spans: Lexicon, Schema, Instrument, RegulationsExpert, Judge, Sentinel
-    expected = {"Lexicon", "Schema", "Instrument", "RegulationsExpert", "Judge", "Sentinel"}
+    # Spec asks for spans: Lexicon, Schema, Instrument, RegulationsExpert, Judge, Reviewer
+    expected = {"Lexicon", "Schema", "Instrument", "RegulationsExpert", "Judge", "Reviewer"}
     missing = expected - agents
     assert not missing, f"missing agents in trace: {missing}. Present: {agents}"
 
