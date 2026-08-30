@@ -5,7 +5,6 @@ import axios from 'axios';
 import { API, getSession, streamUrl, whoami } from '../lib/api';
 import { Btn } from '../components/ui';
 import Spinner from '../components/common/Spinner';
-import StatusChip from '../components/common/StatusChip';
 import AgentTracePanel from '../components/trace/AgentTracePanel';
 import LiveNarrationStrip from '../components/trace/LiveNarrationStrip';
 import PipelineProgressBar from '../components/progress/PipelineProgressBar';
@@ -14,6 +13,7 @@ import CorpusVerifierPanel from '../components/corpus/CorpusVerifierPanel';
 import BenchmarkPanel from '../components/corpus/BenchmarkPanel';
 import HumanReviewPanel from '../components/review/HumanReviewPanel';
 import DevLogsPanel from '../components/dev/DevLogsPanel';
+import RunHero from '../components/status/RunHero';
 
 export default function SessionDetail() {
   const { sid } = useParams();
@@ -191,6 +191,17 @@ export default function SessionDetail() {
     a.href = url; a.target = '_blank'; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove();
   };
 
+  const cancelRun = async () => {
+    setBusy(true);
+    try {
+      await axios.post(`${API}/sessions/${sid}/cancel`);
+      toast.info('Cancel requested — pipeline exits at next phase boundary.');
+      await refresh();
+    } catch (e) {
+      toast.error(`cancel failed: ${e?.response?.data?.detail || e.message}`);
+    } finally { setBusy(false); }
+  };
+
   const submitReview = async () => {
     if (!principal) { toast.error('Not authenticated -- reload the page'); return; }
     const unresolved = humanRows.filter(d => !resolutions[`${d.file_id}|${d.column}`]?.mode);
@@ -262,55 +273,22 @@ export default function SessionDetail() {
 
   return (
     <div className="max-w-5xl mx-auto px-10 py-16">
-      {/* Hero */}
-      <div className="rule-bottom pb-10">
-        <div className="kicker">Run receipt</div>
-        <div className="mt-2 flex items-baseline gap-4 flex-wrap">
-          <h1 className="font-display text-display-lg text-ink">
-            {isComplete ? 'Handled.'
-              : isPartiallyComplete ? 'Partially handled — some columns still pending.'
-              : reviewNeeded ? 'Awaiting your review.'
-              : status === 'cancelled' ? 'Run cancelled.'
-              : isPending ? 'Working on it.'
-              : 'Something went wrong.'}
-          </h1>
-          <StatusChip status={status} />
-        </div>
-        <div className="mt-3 text-[13px] text-ink-muted font-mono">session {sid}</div>
-
-        {(isComplete || isPartiallyComplete) && (
-          <div className="mt-10 flex items-center gap-4">
-            <Btn variant="primary" size="lg" onClick={downloadBundle} disabled={busy || guard?.status === 'blocked'} testId="btn-download-bundle">
-              {guard?.status === 'blocked' ? 'Bundle blocked'
-                : isPartiallyComplete ? `Download partial bundle (${humanRows.length} column(s) withheld) ↓`
-                : `Download ${wantPub ? 'publication bundle' : 'safe-to-share bundle'} ↓`}
-            </Btn>
-            {isComplete && <Btn variant="ghost" onClick={() => navigate('/')} testId="btn-new-run">Start another run</Btn>}
-          </div>
-        )}
-        {isPending && (
-          <div className="mt-10 flex items-center gap-4">
-            <Btn
-              variant="ghost"
-              size="lg"
-              disabled={busy || session?.cancel_requested}
-              testId="btn-cancel-run"
-              onClick={async () => {
-                setBusy(true);
-                try {
-                  await axios.post(`${API}/sessions/${sid}/cancel`);
-                  toast.info('Cancel requested — pipeline exits at next phase boundary.');
-                  await refresh();
-                } catch (e) {
-                  toast.error(`cancel failed: ${e?.response?.data?.detail || e.message}`);
-                } finally { setBusy(false); }
-              }}
-            >
-              {session?.cancel_requested ? 'Cancel pending…' : '■ Stop this run'}
-            </Btn>
-          </div>
-        )}
-      </div>
+      <RunHero
+        sid={sid}
+        status={status}
+        isComplete={isComplete}
+        isPartiallyComplete={isPartiallyComplete}
+        reviewNeeded={reviewNeeded}
+        isPending={isPending}
+        guard={guard}
+        humanRows={humanRows}
+        busy={busy}
+        wantPub={wantPub}
+        downloadBundle={downloadBundle}
+        navigate={navigate}
+        cancelRequested={session?.cancel_requested}
+        onCancel={cancelRun}
+      />
 
       {/* Pipeline progress bar — high-level "what's happening right now" */}
       <PipelineProgressBar
