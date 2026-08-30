@@ -1,6 +1,6 @@
 """SECURITY_BOUNDARY_VIOLATION incident handling (spec section 71).
 
-A run-scoped registry and handler for security-boundary incidents. Section 71
+A durable registry and handler for security-boundary incidents. Section 71
 names six event classes, each with a structural detection site in the control
 plane:
 
@@ -40,10 +40,15 @@ This module implements the whole sequence as data plus explicit functions:
     until ``resolve_security_incident`` is called with an explicit authorized
     principal; no code path clears it on its own.
 
-The registry is process-local and append-only, matching the lifetime of a run:
-both the boundary detection and the release gate run inside the one backend
-process. Nothing here is serialized to disk. "Do not copy the leaked sensitive
-value into incident telemetry" holds structurally, not just by convention.
+Durability: every function here takes a ``ControlStore`` (the same interface
+``runs.py``/``gateway.py`` already use) and reads/writes the ``security_incidents``
+collection. There is deliberately no process-local cache layered on top: an
+open incident is a release-blocking safety fact that must survive a backend
+crash, deploy, or routine restart -- a process-local registry would silently
+lose every open incident on restart, which is exactly the "DO NOT
+automatically resume" guarantee failing quietly. "Do not copy the leaked
+sensitive value into incident telemetry" holds structurally, not just by
+convention: no field on the record can carry it.
 """
 from __future__ import annotations
 
@@ -56,6 +61,7 @@ from pydantic import Field
 from phi_core.security import scrub_persisted_text
 
 from .records import ControlRecord
+from .store import ControlStore
 
 # --- section 71's six event classes ----------------------------------------
 
@@ -72,6 +78,8 @@ SecurityIncidentEventClass = Literal[
 DestructionDecision = Literal["NOT_REQUIRED", "REQUIRED", "UNDETERMINED"]
 
 IncidentStatus = Literal["open", "resolved"]
+
+COLLECTION = "security_incidents"
 
 
 def _new_id() -> str:
@@ -110,13 +118,14 @@ class SecurityIncident(ControlRecord):
     resolved_by: str = ""            # authorized principal, explicit action only
 
 
-# --- run-scoped, append-only registry --------------------------------------
-# Process-local, matches the lifetime of the one backend process that both
-# detects a violation and later evaluates the release gate. Never persisted.
-_INCIDENTS: dict[str, list[SecurityIncident]] = {}
+# --- durable registry (control.store.ControlStore) --------------------------
+# No process-local cache: an open incident is a release-blocking safety fact
+# and must survive a backend crash, deploy, or routine restart -- see module
+# docstring. Every read/write goes through the store, same as runs.py.
 
 
-def record_security_incident(
+async def record_security_incident(
+    store: ControlStore,
     run_id: str,
     event_class: SecurityIncidentEventClass,
     *,
@@ -138,20 +147,21 @@ def record_security_incident(
         escalation_note=scrub_persisted_text(escalation_note),
         egress_digest=egress_digest,
     )
-    _INCIDENTS.setdefault(run_id, []).append(incident)
+    await store.insert(COLLECTION, incident)
     return incident
 
 
-def open_incidents(run_id: str) -> tuple[SecurityIncident, ...]:
-    """The still-open incidents for ``run_id`` (append-order preserved)."""
-    return tuple(i for i in _INCIDENTS.get(run_id, []) if i.status == "open")
+async def open_incidents(store: ControlStore, run_id: str) -> tuple[SecurityIncident, ...]:
+    """The still-open incidents for ``run_id``."""
+    documents = await store.find_many(COLLECTION, {"run_id": run_id, "status": "open"})
+    return tuple(SecurityIncident.model_validate(doc) for doc in documents)
 
 
-def security_incident_active(run_id: str) -> bool:
+async def security_incident_active(store: ControlStore, run_id: str) -> bool:
     """True when ``run_id`` has at least one unresolved incident. This is the
     producer ``FinalAssuranceGate``'s ``no_unresolved_security_incident``
     condition reads, so an open incident BLOCKs release."""
-    return any(i.status == "open" for i in _INCIDENTS.get(run_id, []))
+    return bool(await open_incidents(store, run_id))
 
 
 def determine_destruction_required(incident: SecurityIncident) -> DestructionDecision:
@@ -164,33 +174,39 @@ def determine_destruction_required(incident: SecurityIncident) -> DestructionDec
     return "UNDETERMINED"
 
 
-def resolve_security_incident(
+async def resolve_security_incident(
+    store: ControlStore,
     incident_id: str,
     *,
     resolved_by: str,
     destruction_decision: DestructionDecision = "NOT_REQUIRED",
 ) -> SecurityIncident | None:
     """Close one incident by explicit authorized action. Returns ``None`` (and
-    changes nothing) when the id is unknown or already resolved, so there is
-    no accidental resume. ``resolved_by`` is required and non-empty: the
-    "DO NOT automatically resume" rule means a principal must act, nothing
-    clears the open status on its own."""
+    changes nothing) when the id is unknown, already resolved, or a
+    concurrent resolver won the race -- so there is no accidental resume.
+    ``resolved_by`` is required and non-empty: the "DO NOT automatically
+    resume" rule means a principal must act, nothing clears the open status
+    on its own."""
     if not resolved_by:
         raise ValueError("resolved_by is required: incidents are only closed by explicit authorized action")
-    for run in _INCIDENTS.values():
-        for incident in run:
-            if incident.incident_id == incident_id:
-                if incident.status != "open":
-                    return None
-                incident.status = "resolved"
-                incident.resolved_at = _now()
-                incident.resolved_by = resolved_by
-                incident.destruction_decision = destruction_decision
-                return incident
-    return None
+    document = await store.get_one(COLLECTION, {"incident_id": incident_id})
+    if document is None:
+        return None
+    incident = SecurityIncident.model_validate(document)
+    if incident.status != "open":
+        return None
+    updated = incident.model_copy(update={
+        "status": "resolved",
+        "resolved_at": _now(),
+        "resolved_by": resolved_by,
+        "destruction_decision": destruction_decision,
+    })
+    ok = await store.compare_and_set(COLLECTION, {"incident_id": incident_id}, {"status": "open"}, updated)
+    return updated if ok else None
 
 
-def handle_security_boundary_violation(
+async def handle_security_boundary_violation(
+    store: ControlStore,
     run_id: str,
     event_class: SecurityIncidentEventClass,
     *,
@@ -206,14 +222,16 @@ def handle_security_boundary_violation(
     dispatch); this records the ISOLATE / PRESERVE / ESCALATE / DETERMINE
     steps and enforces the BLOCK-release and DO-NOT-auto-resume consequences:
 
-      * PRESERVE safe metadata only (scrubbed, no value field).
-      * DETERMINE destruction (recommendation only, no destroy).
+      * PRESERVE safe metadata only (scrubbed, no value field), durably.
+      * DETERMINE destruction (recommendation only, no destroy), persisted.
       * ESCALATE to authorized review (safe reference only).
-      * With an open incident, ``security_incident_active(run_id)`` is True and
-        FinalAssuranceGate blocks release; only ``resolve_security_incident``
-        (explicit authorized action) clears it.
+      * With an open incident, ``security_incident_active(store, run_id)`` is
+        True and FinalAssuranceGate blocks release; only
+        ``resolve_security_incident`` (explicit authorized action) clears it,
+        and it survives a restart because it lives in the durable store.
     """
-    incident = record_security_incident(
+    incident = await record_security_incident(
+        store,
         run_id,
         event_class,
         source=source,
@@ -222,10 +240,9 @@ def handle_security_boundary_violation(
         escalation_note=escalation_note,
         egress_digest=egress_digest,
     )
-    incident.destruction_decision = determine_destruction_required(incident)
+    decision = determine_destruction_required(incident)
+    if decision != incident.destruction_decision:
+        updated = incident.model_copy(update={"destruction_decision": decision})
+        await store.replace_one(COLLECTION, {"incident_id": incident.incident_id}, updated)
+        incident = updated
     return incident
-
-
-def reset_security_incidents() -> None:
-    """Test-only: clear every run's incident registry in-process."""
-    _INCIDENTS.clear()

@@ -110,6 +110,7 @@ from .records import (
     VerifiedClassificationManifest,
 )
 from .report_artifacts import ReportArtifacts, is_report_package_complete
+from .store import ControlStore
 
 ReportingSafetyVerdict = Literal["PASS", "FAIL"]
 FinalAssuranceVerdict = Literal["READY_FOR_EXPORT", "BLOCKED"]
@@ -441,16 +442,20 @@ def derive_report_package_complete(artifacts: ReportArtifacts, *, human_review_o
 
 # --- no_unresolved_security_incident: real producer (Phase 15a) ------------
 # Section 71's SECURITY_BOUNDARY_VIOLATION handling records an open incident
-# in ``control.security_incident``'s run-scoped registry. This producer reads
-# that registry so the gate genuinely checks for an open incident rather than
+# durably in ``control.security_incident``'s ``security_incidents``
+# collection (no process-local cache: an open incident is a release-blocking
+# safety fact and must survive a backend restart). This producer reads that
+# collection so the gate genuinely checks for an open incident rather than
 # trusting a hand-picked boolean. Pure addition mirroring
 # ``derive_report_package_complete``: ``evaluate_final_assurance`` still takes
 # the derived fact as its ``security_incident_active`` parameter unchanged.
 
 
-def derive_security_incident_active(run_id: str) -> bool:
+async def derive_security_incident_active(store: ControlStore, run_id: str) -> bool:
     """The real producer for ``no_unresolved_security_incident``: True when
-    ``control.security_incident`` holds at least one open incident for
-    ``run_id`` (section 71), which makes the gate return ``BLOCKED``."""
+    the durable ``security_incidents`` collection holds at least one open
+    incident for ``run_id`` (section 71), which makes the gate return
+    ``BLOCKED``. Async and store-backed so the check survives a restart --
+    see ``control.security_incident``'s module docstring."""
     from .security_incident import security_incident_active
-    return security_incident_active(run_id)
+    return await security_incident_active(store, run_id)

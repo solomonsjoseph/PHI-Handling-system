@@ -3,10 +3,12 @@ Phase 15a: ``phi_core.control.security_incident``).
 
 Covers the module's own contract (record / active / resolve / destruction
 decision / no-auto-resume), the "never copies the leaked value" guarantee
-that section 71 explicitly requires, the FinalAssuranceGate wiring
+that section 71 explicitly requires, durability across a simulated backend
+restart (an open incident is a release-blocking safety fact and must not be
+lost when the process restarts), the FinalAssuranceGate wiring
 (``derive_security_incident_active`` -> ``no_unresolved_security_incident``),
 and the live gateway integration where a real canary hit now also opens a
-security incident (not just a trace event).
+durable security incident (not just a trace event).
 """
 from __future__ import annotations
 
@@ -34,7 +36,8 @@ from phi_core.control.records import (
     VerifiedClassificationManifest,
     WorkflowRun,
 )
-from phi_core.control.store import MemoryControlStore
+from phi_core.control.store import MemoryControlStore, MongoControlStore
+from phi_core.db import get_db
 from pydantic import ValidationError
 
 RUN_ID = "sec-incident-run-" + "r" * 12
@@ -45,11 +48,8 @@ SENSITIVE_VALUE = "999-88-7777"  # SSN-shaped: a real value that must never be c
 SENSITIVE_NAME = "Rutherford Applewhite"
 
 
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    si.reset_security_incidents()
-    yield
-    si.reset_security_incidents()
+def _store() -> MemoryControlStore:
+    return MemoryControlStore()
 
 
 # ---------------------------------------------------------------------------
@@ -70,86 +70,109 @@ def test_six_event_classes_match_section_71():
     }
 
 
-def test_record_security_incident_opens_and_activates():
-    assert si.security_incident_active(RUN_ID) is False
-    incident = si.record_security_incident(RUN_ID, "raw_data_escaped_sandbox", source="sandbox")
+@pytest.mark.asyncio
+async def test_record_security_incident_opens_and_activates():
+    store = _store()
+    assert await si.security_incident_active(store, RUN_ID) is False
+    incident = await si.record_security_incident(store, RUN_ID, "raw_data_escaped_sandbox", source="sandbox")
     assert incident.status == "open"
-    assert si.security_incident_active(RUN_ID) is True
-    assert incident in si.open_incidents(RUN_ID)
+    assert await si.security_incident_active(store, RUN_ID) is True
+    assert incident.incident_id in {i.incident_id for i in await si.open_incidents(store, RUN_ID)}
 
 
-def test_incident_is_scoped_to_its_own_run():
-    si.record_security_incident(RUN_ID, "raw_data_escaped_sandbox")
-    assert si.security_incident_active(RUN_ID) is True
-    assert si.security_incident_active("some-other-run") is False
+@pytest.mark.asyncio
+async def test_incident_is_scoped_to_its_own_run():
+    store = _store()
+    await si.record_security_incident(store, RUN_ID, "raw_data_escaped_sandbox")
+    assert await si.security_incident_active(store, RUN_ID) is True
+    assert await si.security_incident_active(store, "some-other-run") is False
 
 
-def test_resolve_requires_an_explicit_authorized_principal():
-    incident = si.record_security_incident(RUN_ID, "cross_run_data_access")
+@pytest.mark.asyncio
+async def test_resolve_requires_an_explicit_authorized_principal():
+    store = _store()
+    incident = await si.record_security_incident(store, RUN_ID, "cross_run_data_access")
     with pytest.raises(ValueError):
-        si.resolve_security_incident(incident.incident_id, resolved_by="")
-    assert si.security_incident_active(RUN_ID) is True  # unchanged: still open
+        await si.resolve_security_incident(store, incident.incident_id, resolved_by="")
+    assert await si.security_incident_active(store, RUN_ID) is True  # unchanged: still open
 
 
-def test_resolve_security_incident_closes_it_and_stops_blocking():
-    incident = si.record_security_incident(RUN_ID, "unauthorized_sensitive_review")
-    resolved = si.resolve_security_incident(incident.incident_id, resolved_by="security-officer-42")
+@pytest.mark.asyncio
+async def test_resolve_security_incident_closes_it_and_stops_blocking():
+    store = _store()
+    incident = await si.record_security_incident(store, RUN_ID, "unauthorized_sensitive_review")
+    resolved = await si.resolve_security_incident(store, incident.incident_id, resolved_by="security-officer-42")
     assert resolved is not None
     assert resolved.status == "resolved"
     assert resolved.resolved_by == "security-officer-42"
     assert resolved.resolved_at
-    assert si.security_incident_active(RUN_ID) is False
+    assert await si.security_incident_active(store, RUN_ID) is False
 
 
-def test_resolving_an_unknown_incident_id_is_a_safe_no_op():
-    assert si.resolve_security_incident("does-not-exist", resolved_by="someone") is None
+@pytest.mark.asyncio
+async def test_resolving_an_unknown_incident_id_is_a_safe_no_op():
+    store = _store()
+    assert await si.resolve_security_incident(store, "does-not-exist", resolved_by="someone") is None
 
 
-def test_resolving_an_already_resolved_incident_is_a_safe_no_op_not_a_reopen():
-    incident = si.record_security_incident(RUN_ID, "dataset_value_in_trace")
-    si.resolve_security_incident(incident.incident_id, resolved_by="officer-1")
-    again = si.resolve_security_incident(incident.incident_id, resolved_by="officer-2")
+@pytest.mark.asyncio
+async def test_resolving_an_already_resolved_incident_is_a_safe_no_op_not_a_reopen():
+    store = _store()
+    incident = await si.record_security_incident(store, RUN_ID, "dataset_value_in_trace")
+    await si.resolve_security_incident(store, incident.incident_id, resolved_by="officer-1")
+    again = await si.resolve_security_incident(store, incident.incident_id, resolved_by="officer-2")
     assert again is None
-    assert incident.resolved_by == "officer-1"  # first resolution is authoritative
+    stored = await store.get_one(si.COLLECTION, {"incident_id": incident.incident_id})
+    assert stored["resolved_by"] == "officer-1"  # first resolution is authoritative
 
 
-def test_nothing_ever_auto_resumes_an_open_incident():
+@pytest.mark.asyncio
+async def test_nothing_ever_auto_resumes_an_open_incident():
     """DO NOT automatically resume (section 71): recording, checking active,
     and reading open_incidents any number of times must never itself close
     an incident. Only an explicit resolve_security_incident call does."""
-    si.record_security_incident(RUN_ID, "provider_bypass_sensitive_content")
+    store = _store()
+    await si.record_security_incident(store, RUN_ID, "provider_bypass_sensitive_content")
     for _ in range(5):
-        assert si.security_incident_active(RUN_ID) is True
-        si.open_incidents(RUN_ID)
-    assert si.security_incident_active(RUN_ID) is True
+        assert await si.security_incident_active(store, RUN_ID) is True
+        await si.open_incidents(store, RUN_ID)
+    assert await si.security_incident_active(store, RUN_ID) is True
 
 
-def test_determine_destruction_required_is_a_decision_not_an_action():
-    sandbox_incident = si.record_security_incident(RUN_ID, "raw_data_escaped_sandbox")
+@pytest.mark.asyncio
+async def test_determine_destruction_required_is_a_decision_not_an_action():
+    store = _store()
+    sandbox_incident = await si.record_security_incident(store, RUN_ID, "raw_data_escaped_sandbox")
     assert si.determine_destruction_required(sandbox_incident) == "REQUIRED"
 
-    other_incident = si.record_security_incident(RUN_ID, "unauthorized_sensitive_review")
+    other_incident = await si.record_security_incident(store, RUN_ID, "unauthorized_sensitive_review")
     assert si.determine_destruction_required(other_incident) == "UNDETERMINED"
 
-    # A decision point only: nothing about the incident record itself changes
-    # or triggers a destroy just from calling the function.
-    assert sandbox_incident.destruction_decision == "UNDETERMINED"
-    assert si.security_incident_active(RUN_ID) is True
+    # A decision point only: merely calling the pure function must not
+    # itself write anything -- the stored record is untouched.
+    stored = await store.get_one(si.COLLECTION, {"incident_id": sandbox_incident.incident_id})
+    assert stored["destruction_decision"] == "UNDETERMINED"
+    assert await si.security_incident_active(store, RUN_ID) is True
 
 
-def test_handle_security_boundary_violation_runs_the_full_sequence():
-    incident = si.handle_security_boundary_violation(
-        RUN_ID, "raw_data_escaped_sandbox", source="sandbox", category="sandbox",
+@pytest.mark.asyncio
+async def test_handle_security_boundary_violation_runs_the_full_sequence():
+    store = _store()
+    incident = await si.handle_security_boundary_violation(
+        store, RUN_ID, "raw_data_escaped_sandbox", source="sandbox", category="sandbox",
         summary="a path resolved outside the run workspace",
     )
-    # PRESERVE: recorded, open.
+    # PRESERVE: recorded, open, durably.
     assert incident.status == "open"
-    # DETERMINE destruction: a real recommendation was set, not left at the default.
+    # DETERMINE destruction: a real recommendation was persisted, not left
+    # at the default.
+    stored = await store.get_one(si.COLLECTION, {"incident_id": incident.incident_id})
+    assert stored["destruction_decision"] == "REQUIRED"
     assert incident.destruction_decision == "REQUIRED"
     # BLOCK release consequence.
-    assert si.security_incident_active(RUN_ID) is True
+    assert await si.security_incident_active(store, RUN_ID) is True
     # DO NOT auto-resume: still open after the handler returns.
-    assert incident in si.open_incidents(RUN_ID)
+    assert incident.incident_id in {i.incident_id for i in await si.open_incidents(store, RUN_ID)}
 
 
 # ---------------------------------------------------------------------------
@@ -157,12 +180,16 @@ def test_handle_security_boundary_violation_runs_the_full_sequence():
 # ---------------------------------------------------------------------------
 
 
-def test_never_copies_the_leaked_value_even_when_a_caller_passes_it_in_summary():
+@pytest.mark.asyncio
+async def test_never_copies_the_leaked_value_even_when_a_caller_passes_it_in_summary():
     """The strongest proof: plant a REAL sensitive value and drive it through
     a caller who (mistakenly, as a caller might) puts it directly in the
-    free-text summary/escalation_note. The persisted incident -- serialized
-    in full -- must never contain that value anywhere."""
-    incident = si.handle_security_boundary_violation(
+    free-text summary/escalation_note. The persisted incident -- read back
+    from the store and serialized in full -- must never contain that value
+    anywhere."""
+    store = _store()
+    incident = await si.handle_security_boundary_violation(
+        store,
         RUN_ID,
         "dataset_value_to_provider",
         source="provider_gateway",
@@ -174,11 +201,13 @@ def test_never_copies_the_leaked_value_even_when_a_caller_passes_it_in_summary()
 
     assert SENSITIVE_VALUE not in dumped
     assert SENSITIVE_NAME not in dumped
-    # The whole run's registry, not just this one incident.
-    for stored in si.open_incidents(RUN_ID):
-        stored_dump = json.dumps(stored.model_dump())
-        assert SENSITIVE_VALUE not in stored_dump
-        assert SENSITIVE_NAME not in stored_dump
+
+    # The durably persisted document itself, not just the in-memory return
+    # value -- read it back fresh from the store.
+    stored = await store.get_one(si.COLLECTION, {"incident_id": incident.incident_id})
+    stored_dump = json.dumps(stored)
+    assert SENSITIVE_VALUE not in stored_dump
+    assert SENSITIVE_NAME not in stored_dump
 
     # And the scrubber genuinely fired -- the summary is not simply empty,
     # it is the redacted text with the value replaced.
@@ -205,6 +234,75 @@ def test_record_security_incident_rejects_extra_fields_a_value_could_hide_in():
             run_id=RUN_ID, event_class="dataset_value_to_provider",
             leaked_value=SENSITIVE_VALUE,  # not a real field
         )
+
+
+# ---------------------------------------------------------------------------
+# Durability: an open incident must survive a simulated backend restart
+# (Mongo, not MemoryControlStore -- proving real persistence, not merely
+# that the in-test object graph shares a reference).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _fresh_motor_client_per_test():
+    """Matches test_control_migrate.py / test_control_phase12_cleanup_wiring.py's
+    own fixture: get_db is @lru_cache'd process-wide against whichever event
+    loop was running at first construction, and asyncio_mode=strict gives
+    each test its own loop."""
+    get_db.cache_clear()
+    yield
+    get_db.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_open_incident_survives_a_simulated_backend_restart():
+    """Phase 15a durability fix: record an incident against the real test
+    Mongo instance, "restart" the backend (get_db.cache_clear() forces a
+    brand-new AsyncIOMotorClient and therefore a brand-new MongoControlStore
+    on the next call -- the exact technique
+    test_control_superorchestrator_lifecycle.py's _fresh_orchestrator and
+    test_control_phase12_cleanup_wiring.py's restart test both use), and
+    confirm a MongoControlStore built from scratch after the "restart"
+    still finds the incident open and still resolves the destruction
+    decision and safe metadata identically. Nothing about this depends on
+    any Python object surviving -- only the durable Mongo document does."""
+    db = get_db()
+    store = MongoControlStore(db)
+    run_id = "restart-" + RUN_ID
+
+    try:
+        incident = await si.handle_security_boundary_violation(
+            store, run_id, "raw_data_escaped_sandbox", source="sandbox", category="sandbox",
+            summary=f"a path escaped the sandbox, saw {SENSITIVE_VALUE}",
+        )
+        assert await si.security_incident_active(store, run_id) is True
+
+        # "Restart": drop the cached Motor client so the next store is
+        # constructed from scratch, sharing only the durable Mongo state.
+        get_db.cache_clear()
+        fresh_store = MongoControlStore(get_db())
+
+        assert await si.security_incident_active(fresh_store, run_id) is True
+        reopened = (await si.open_incidents(fresh_store, run_id))[0]
+        assert reopened.incident_id == incident.incident_id
+        assert reopened.event_class == "raw_data_escaped_sandbox"
+        assert reopened.destruction_decision == "REQUIRED"
+        assert SENSITIVE_VALUE not in json.dumps(reopened.model_dump())
+
+        # BLOCK release still holds against the fresh store, and DO NOT
+        # auto-resume: the incident is still open, nothing cleared it.
+        assert derive_security_incident_active is not None  # sanity: module wired
+        assert await derive_security_incident_active(fresh_store, run_id) is True
+
+        # Only an explicit authorized resolve against the fresh store closes
+        # it -- and that closure is itself durable across a further restart.
+        resolved = await si.resolve_security_incident(fresh_store, incident.incident_id, resolved_by="security-officer-9")
+        assert resolved is not None
+        get_db.cache_clear()
+        second_fresh_store = MongoControlStore(get_db())
+        assert await si.security_incident_active(second_fresh_store, run_id) is False
+    finally:
+        await db.security_incidents.delete_many({"run_id": run_id})
 
 
 # ---------------------------------------------------------------------------
@@ -237,32 +335,40 @@ def _evaluate(security_incident_active: bool) -> object:
     )
 
 
-def test_derive_security_incident_active_is_false_with_a_clean_registry():
-    assert derive_security_incident_active(RUN_ID) is False
+@pytest.mark.asyncio
+async def test_derive_security_incident_active_is_false_with_a_clean_registry():
+    store = _store()
+    assert await derive_security_incident_active(store, RUN_ID) is False
 
 
-def test_derive_security_incident_active_is_true_once_an_incident_is_open():
-    si.record_security_incident(RUN_ID, "cross_run_data_access")
-    assert derive_security_incident_active(RUN_ID) is True
+@pytest.mark.asyncio
+async def test_derive_security_incident_active_is_true_once_an_incident_is_open():
+    store = _store()
+    await si.record_security_incident(store, RUN_ID, "cross_run_data_access")
+    assert await derive_security_incident_active(store, RUN_ID) is True
 
 
-def test_open_incident_blocks_final_assurance_release():
-    si.record_security_incident(RUN_ID, "cross_run_data_access")
-    result = _evaluate(derive_security_incident_active(RUN_ID))
+@pytest.mark.asyncio
+async def test_open_incident_blocks_final_assurance_release():
+    store = _store()
+    await si.record_security_incident(store, RUN_ID, "cross_run_data_access")
+    result = _evaluate(await derive_security_incident_active(store, RUN_ID))
     assert result.verdict == "BLOCKED"
     assert "no_unresolved_security_incident" in result.failed_conditions
 
 
-def test_resolved_incident_no_longer_blocks_final_assurance_release():
-    incident = si.record_security_incident(RUN_ID, "cross_run_data_access")
-    si.resolve_security_incident(incident.incident_id, resolved_by="security-officer-1")
-    result = _evaluate(derive_security_incident_active(RUN_ID))
+@pytest.mark.asyncio
+async def test_resolved_incident_no_longer_blocks_final_assurance_release():
+    store = _store()
+    incident = await si.record_security_incident(store, RUN_ID, "cross_run_data_access")
+    await si.resolve_security_incident(store, incident.incident_id, resolved_by="security-officer-1")
+    result = _evaluate(await derive_security_incident_active(store, RUN_ID))
     assert result.verdict == "READY_FOR_EXPORT"
     assert "no_unresolved_security_incident" not in result.failed_conditions
 
 
 # ---------------------------------------------------------------------------
-# Live gateway integration: a real canary hit opens a security incident
+# Live gateway integration: a real canary hit opens a durable security incident
 # ---------------------------------------------------------------------------
 
 
@@ -309,7 +415,8 @@ def _never_called_completion(**kwargs):
 async def test_real_canary_hit_at_the_gateway_opens_a_security_incident(monkeypatch) -> None:
     """The live production detection point for dataset_value_to_provider:
     ProviderGateway.complete's existing canary scan now also records an open
-    SecurityIncident (not just a TraceEvent), so a real leak blocks release
+    SecurityIncident (not just a TraceEvent) through the very same
+    ControlStore the gateway itself uses, so a real leak blocks release
     until an authorized principal resolves it -- and the incident itself
     never carries the planted literal."""
     from phi_core.control import gateway as gateway_module
@@ -321,14 +428,14 @@ async def test_real_canary_hit_at_the_gateway_opens_a_security_incident(monkeypa
     req = _gateway_request(grant_id=grant.grant_id, user_prompt="patient record ZZZLIVECANARY9911 attached")
     canary.activate_canary_set(RUN_ID, {"planted": [{"plant_id": "p1", "leak_literals": ["ZZZLIVECANARY9911"]}]})
 
-    assert si.security_incident_active(RUN_ID) is False
+    assert await si.security_incident_active(store, RUN_ID) is False
 
     try:
         with pytest.raises(canary.SecurityBoundaryViolation):
             await ProviderGateway(store).complete(req)
 
-        assert si.security_incident_active(RUN_ID) is True
-        incidents = si.open_incidents(RUN_ID)
+        assert await si.security_incident_active(store, RUN_ID) is True
+        incidents = await si.open_incidents(store, RUN_ID)
         assert len(incidents) == 1
         assert incidents[0].event_class == "dataset_value_to_provider"
         assert incidents[0].source == "provider_gateway"
@@ -337,8 +444,9 @@ async def test_real_canary_hit_at_the_gateway_opens_a_security_incident(monkeypa
         assert "ZZZLIVECANARY9911" not in dumped
         assert "zzzlivecanary9911" not in dumped.lower()
 
-        # BLOCK release: FinalAssuranceGate would see this run as blocked.
-        assert derive_security_incident_active(RUN_ID) is True
+        # BLOCK release: FinalAssuranceGate would see this run as blocked,
+        # reading through the same store the gateway just wrote to.
+        assert await derive_security_incident_active(store, RUN_ID) is True
     finally:
         canary.deactivate_canary_set(RUN_ID)
 
@@ -364,6 +472,6 @@ async def test_clean_canary_scan_never_opens_a_security_incident(monkeypatch) ->
     try:
         result = await ProviderGateway(store).complete(req)
         assert result.status == "ok"
-        assert si.security_incident_active(RUN_ID) is False
+        assert await si.security_incident_active(store, RUN_ID) is False
     finally:
         canary.deactivate_canary_set(RUN_ID)

@@ -499,9 +499,10 @@ class ProviderGateway:
             # canary_id and hit_count). Records an open SecurityIncident so
             # FinalAssuranceGate BLOCKs release until an authorized actor
             # resolves it.
-            security_incident.record_security_incident(
-                run_id=req.run_id,
-                event_class="dataset_value_to_provider",
+            await security_incident.record_security_incident(
+                self._store,
+                req.run_id,
+                "dataset_value_to_provider",
                 source="provider_gateway",
                 category="provider",
                 summary=f"leak canary detected in outbound payload "
