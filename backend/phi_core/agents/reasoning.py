@@ -913,6 +913,45 @@ def _sandboxed_read_narrative(src: str, ext: str) -> str:
     return read_narrative(Path(src), ext)
 
 
+def _read_columns(path: "str | Path", ext: str) -> tuple[list[str], dict[str, list[str]]]:
+    """One `iter_dataset_rows` pass over a dataset file: header order
+    plus, per column, every row's value in row order (empty cells
+    included, so a row-aligned source/written comparison stays
+    possible). Raises on a corrupt or unsupported file -- callers
+    isolate that per file_id rather than letting it abort the whole run.
+
+    Phase 10: moved here, verbatim, from the retired `agents/operator.py`
+    (docs #54's `Operator -> DeterministicVerifier` migration). This is
+    the only reason `_read_dataset_headers`'s empty-dataset fallback
+    below still lives in `reasoning.py` rather than in
+    `control/deterministic_verifier.py` -- `reasoning.py` is the sole
+    module `test_control_phaseR_integration.py`'s Step 8 invariant 2 raw-
+    reader call-site scan allowlists now that `operator.py` is gone;
+    `DeterministicVerifier` calls this function by name (never
+    `_read_dataset_headers` directly), so its own module carries no raw-
+    reader call site of its own.
+    """
+    header: list[str] = []
+    columns: dict[str, list[str]] = {}
+    for _row_index, row in iter_dataset_rows(Path(path), ext):
+        if not header:
+            header = list(row.keys())
+            for name in header:
+                columns[name] = []
+        for name in header:
+            columns[name].append(row.get(name, ""))
+    if not header:
+        # Zero data rows is a valid, empty dataset -- iter_dataset_rows has
+        # nothing to yield a header from, so fall back to the real on-disk
+        # header rather than reporting every column missing. Never raises
+        # (returns an empty set on a genuinely unreadable file), so a real
+        # read failure still surfaces through the loop above, not here.
+        header = sorted(_read_dataset_headers(Path(path), ext))
+        columns = {name: [] for name in header}
+    return header, columns
+
+
+
 class Executor(Agent):
     NAME = "Executor"
     PROMPT = ""  # deterministic; no LLM call needed for execution
