@@ -38,17 +38,18 @@ from .records import (
     VerificationResult,
     VerifiedClassificationManifest,
 )
-from .report_artifacts import ReportArtifacts
+from .report_artifacts import (
+    AUDIT_REPORT_NAME,
+    CHECKSUMS_NAME,
+    COLUMN_LEDGER_NAME,
+    EVIDENCE_MANIFEST_NAME,
+    HUMAN_REVIEW_SUMMARY_NAME,
+    RUN_MANIFEST_NAME,
+    TECHNICAL_APPENDIX_NAME,
+    VERIFICATION_MANIFEST_NAME,
+    ReportArtifacts,
+)
 from .report_pdf import build_audit_report_pdf, build_human_review_summary_pdf, build_technical_appendix_pdf
-
-_AUDIT_REPORT_NAME = "PHI_Handling_Audit_Report.pdf"
-_COLUMN_LEDGER_NAME = "What_Happened_to_Each_Column.xlsx"
-_TECHNICAL_APPENDIX_NAME = "Technical_Appendix.pdf"
-_HUMAN_REVIEW_SUMMARY_NAME = "Human_Review_Summary.pdf"
-_EVIDENCE_MANIFEST_NAME = "Evidence_Manifest.json"
-_VERIFICATION_MANIFEST_NAME = "Verification_Manifest.json"
-_RUN_MANIFEST_NAME = "Run_Manifest.json"
-_CHECKSUMS_NAME = "CHECKSUMS.sha256"
 
 
 @dataclass
@@ -93,18 +94,18 @@ class ReportGenerator:
             method_names=inputs.method_names,
         )
 
-        ledger_path = write_column_ledger_xlsx(rows, self.output_dir / _COLUMN_LEDGER_NAME)
+        ledger_path = write_column_ledger_xlsx(rows, self.output_dir / COLUMN_LEDGER_NAME)
 
         audit_path, _ = build_audit_report_pdf(
             manifest=inputs.manifest, rows=rows, execution_result=inputs.execution_result,
             verification_result=inputs.verification_result, reviewer_final=inputs.reviewer_final,
-            path=self.output_dir / _AUDIT_REPORT_NAME,
+            path=self.output_dir / AUDIT_REPORT_NAME,
         )
 
         appendix_path, _ = build_technical_appendix_pdf(
             manifest=inputs.manifest, rows=rows, evidence_records=inputs.evidence_records,
             run_manifest=inputs.run_manifest, verification_result=inputs.verification_result,
-            path=self.output_dir / _TECHNICAL_APPENDIX_NAME,
+            path=self.output_dir / TECHNICAL_APPENDIX_NAME,
         )
 
         human_review_occurred = (
@@ -116,19 +117,19 @@ class ReportGenerator:
         if human_review_occurred:
             human_review_path, _ = build_human_review_summary_pdf(
                 run_id=inputs.run_id, human_review_events=inputs.human_review_events,
-                human_decisions=inputs.human_decisions, path=self.output_dir / _HUMAN_REVIEW_SUMMARY_NAME,
+                human_decisions=inputs.human_decisions, path=self.output_dir / HUMAN_REVIEW_SUMMARY_NAME,
             )
 
-        evidence_path = export_evidence_manifest(inputs.evidence_records, self.output_dir / _EVIDENCE_MANIFEST_NAME)
+        evidence_path = export_evidence_manifest(inputs.evidence_records, self.output_dir / EVIDENCE_MANIFEST_NAME)
         verification_path = export_verification_manifest(
-            inputs.verification_result, self.output_dir / _VERIFICATION_MANIFEST_NAME,
+            inputs.verification_result, self.output_dir / VERIFICATION_MANIFEST_NAME,
         )
-        run_manifest_path = export_run_manifest(inputs.run_manifest, self.output_dir / _RUN_MANIFEST_NAME)
+        run_manifest_path = export_run_manifest(inputs.run_manifest, self.output_dir / RUN_MANIFEST_NAME)
 
         checksum_inputs = [ledger_path, audit_path, appendix_path, evidence_path, verification_path, run_manifest_path]
         if human_review_path is not None:
             checksum_inputs.append(human_review_path)
-        checksums_path = write_checksums(checksum_inputs, self.output_dir / _CHECKSUMS_NAME)
+        checksums_path = write_checksums(checksum_inputs, self.output_dir / CHECKSUMS_NAME)
 
         return ReportArtifacts(
             audit_report_pdf=audit_path,

@@ -14,6 +14,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+# The eight canonical section-58/61 filenames -- the single source of
+# truth ReportGenerator (the writer) and ZIPBuilder (the packer) both
+# import, rather than each defining its own copy, so the name that lands
+# on disk and the name the ZIP expects to find can never silently drift
+# apart from one another.
+AUDIT_REPORT_NAME = "PHI_Handling_Audit_Report.pdf"
+COLUMN_LEDGER_NAME = "What_Happened_to_Each_Column.xlsx"
+TECHNICAL_APPENDIX_NAME = "Technical_Appendix.pdf"
+HUMAN_REVIEW_SUMMARY_NAME = "Human_Review_Summary.pdf"
+EVIDENCE_MANIFEST_NAME = "Evidence_Manifest.json"
+VERIFICATION_MANIFEST_NAME = "Verification_Manifest.json"
+RUN_MANIFEST_NAME = "Run_Manifest.json"
+CHECKSUMS_NAME = "CHECKSUMS.sha256"
+
+
 # The seven fields every run must populate regardless of whether human
 # review occurred. Kept as a tuple of attribute names (not hand-duplicated
 # in `is_report_package_complete`) so the two can never silently drift.

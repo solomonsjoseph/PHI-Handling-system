@@ -55,22 +55,23 @@ from .final_assurance import (
     run_reporting_safety_gate,
 )
 from .records import VerifiedClassificationManifest
-from .report_artifacts import ReportArtifacts
+from .report_artifacts import (
+    AUDIT_REPORT_NAME,
+    CHECKSUMS_NAME,
+    COLUMN_LEDGER_NAME,
+    EVIDENCE_MANIFEST_NAME,
+    HUMAN_REVIEW_SUMMARY_NAME,
+    RUN_MANIFEST_NAME,
+    TECHNICAL_APPENDIX_NAME,
+    VERIFICATION_MANIFEST_NAME,
+    ReportArtifacts,
+)
 
 _PROCESSED_DATASETS_DIR = "01_Processed_Datasets"
 _AUDIT_REPORT_DIR = "02_Audit_Report"
 _TECHNICAL_APPENDIX_DIR = "03_Technical_Appendix"
 _HUMAN_REVIEW_DIR = "04_Human_Review"
 _INTEGRITY_DIR = "05_Integrity"
-
-_AUDIT_REPORT_NAME = "PHI_Handling_Audit_Report.pdf"
-_COLUMN_LEDGER_NAME = "What_Happened_to_Each_Column.xlsx"
-_TECHNICAL_APPENDIX_NAME = "Technical_Appendix.pdf"
-_EVIDENCE_MANIFEST_NAME = "Evidence_Manifest.json"
-_VERIFICATION_MANIFEST_NAME = "Verification_Manifest.json"
-_RUN_MANIFEST_NAME = "Run_Manifest.json"
-_HUMAN_REVIEW_SUMMARY_NAME = "Human_Review_Summary.pdf"
-_CHECKSUMS_NAME = "CHECKSUMS.sha256"
 
 
 class ReportingSafetyRefused(RuntimeError):
@@ -217,12 +218,12 @@ class ZIPBuilder:
                 digests[arcname] = _sha256_of(Path(path))
 
             for arcname, source in (
-                (f"{_AUDIT_REPORT_DIR}/{_AUDIT_REPORT_NAME}", artifacts.audit_report_pdf),
-                (f"{_AUDIT_REPORT_DIR}/{_COLUMN_LEDGER_NAME}", artifacts.column_ledger_xlsx),
-                (f"{_TECHNICAL_APPENDIX_DIR}/{_TECHNICAL_APPENDIX_NAME}", artifacts.technical_appendix_pdf),
-                (f"{_TECHNICAL_APPENDIX_DIR}/{_EVIDENCE_MANIFEST_NAME}", artifacts.evidence_manifest_json),
-                (f"{_TECHNICAL_APPENDIX_DIR}/{_VERIFICATION_MANIFEST_NAME}", artifacts.verification_manifest_json),
-                (f"{_TECHNICAL_APPENDIX_DIR}/{_RUN_MANIFEST_NAME}", artifacts.run_manifest_json),
+                (f"{_AUDIT_REPORT_DIR}/{AUDIT_REPORT_NAME}", artifacts.audit_report_pdf),
+                (f"{_AUDIT_REPORT_DIR}/{COLUMN_LEDGER_NAME}", artifacts.column_ledger_xlsx),
+                (f"{_TECHNICAL_APPENDIX_DIR}/{TECHNICAL_APPENDIX_NAME}", artifacts.technical_appendix_pdf),
+                (f"{_TECHNICAL_APPENDIX_DIR}/{EVIDENCE_MANIFEST_NAME}", artifacts.evidence_manifest_json),
+                (f"{_TECHNICAL_APPENDIX_DIR}/{VERIFICATION_MANIFEST_NAME}", artifacts.verification_manifest_json),
+                (f"{_TECHNICAL_APPENDIX_DIR}/{RUN_MANIFEST_NAME}", artifacts.run_manifest_json),
             ):
                 if source is None:
                     continue
@@ -231,12 +232,12 @@ class ZIPBuilder:
                 digests[arcname] = _sha256_of(Path(source))
 
             if include_human_review:
-                arcname = f"{_HUMAN_REVIEW_DIR}/{_HUMAN_REVIEW_SUMMARY_NAME}"
+                arcname = f"{_HUMAN_REVIEW_DIR}/{HUMAN_REVIEW_SUMMARY_NAME}"
                 zf.write(artifacts.human_review_summary_pdf, arcname)
                 members.append(arcname)
                 digests[arcname] = _sha256_of(Path(artifacts.human_review_summary_pdf))
 
-            checksums_arcname = f"{_INTEGRITY_DIR}/{_CHECKSUMS_NAME}"
+            checksums_arcname = f"{_INTEGRITY_DIR}/{CHECKSUMS_NAME}"
             if artifacts.checksums_sha256 is not None:
                 zf.write(artifacts.checksums_sha256, checksums_arcname)
             else:
