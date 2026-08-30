@@ -1472,3 +1472,166 @@ nodeids accounted for above (1 deleted, ~32 migrated verbatim); 1615 collected.
 
 **`PHASE_10_STATUS = PASS`, genuinely gate-verified.** Phase 7-10 wave complete.
 Proceeding to Phase 11 (Final Assurance and reports, two waves, sections 57-63/94).
+
+---
+
+## Phase 11a (FinalAssuranceGate, ReportingSafetyGate, frozen API surface) — IN PROGRESS
+
+Solo subagent, wave 1 of 2 (docs #94's two-wave phase; wave 2 dispatches report
+generation separately once this wave's schema freeze lands).
+
+**1. Investigation.** Read section 57 (FinalAssuranceGate) and section 94 (phase 11
+summary) verbatim, `Auditor` (`agents/reasoning.py:1443`), `auditor_escalation_reason`
+(`agents/reasoning.py:1343`, Auditor's one genuinely deterministic behavior),
+`Reviewer.finalize()`'s return shape (`agents/reviewer.py:422`), and Publish Guard's
+`scan_names`/`scan_export_file`/`scan_all_exports`. Confirmed no live code path calls
+`ArtifactService.stage` anywhere in the repository today, so `FinalAssuranceResult`/
+`ReportPackage`/`ReviewerFinalResult`'s presence in `control/artifacts.py`'s
+`CONSEQUENTIAL_ARTIFACT_TYPES` is a genuinely unused forward declaration from an
+earlier wave, not evidence of an existing staging call site to preserve.
+
+**2-3. `ReportingSafetyGate` and `FinalAssuranceGate` built
+(`control/final_assurance.py`, new module).** Both gates live in one file (documented
+design choice in the module's own docstring): they are tightly coupled (Final
+AssuranceGate directly consumes ReportingSafetyGate's verdict as one of its own
+conditions) and neither duplicates Publish Guard's detection logic -- both import
+`scan_names`/`_scan_text`/`scan_export_file` rather than re-implementing pattern or
+name detection.
+
+`ReportingSafetyGate` (`run_reporting_safety_gate`) scans all seven docs #60 surfaces
+(report text, workbook cells, filenames, safe-display column names, human-review
+summaries, technical appendix, manifest display fields) via `ReportPackageContent`, a
+dataclass every field of which defaults empty so the gate is genuinely callable before
+Phase 11b's report generator exists.
+
+`FinalAssuranceGate` (`evaluate_final_assurance`) implements section 57's own verbatim
+text, which enumerates **fourteen** `AND`-joined conditions, not sixteen (documented
+discrepancy from this phase's own task framing, resolved in favor of the spec text) --
+plus one additional condition, `no_unresolved_audit_finding`, migrating Auditor's one
+genuinely deterministic behavior (`auditor_escalation_reason`, imported unchanged, not
+duplicated) per docs #94's "migrate useful Publish Guard/Auditor behavior" instruction.
+Fifteen checks total. `Auditor` itself is unchanged and not removed this phase.
+
+Of the fifteen checks, **fourteen are wired to real typed records and independently
+testable end to end this phase**: `input_inventory_complete` and
+`all_logical_columns_accounted` are computed from real fields already on
+`VerifiedClassificationManifest.source_artifact_versions` and
+`VerificationResult.manifest_coverage_percent` (not opaque booleans);
+`reviewer_preview_pass`, `no_unresolved_human_review`, `manifest_current`,
+`manifest_frozen`, `executor_complete`, `deterministic_verifier_pass`,
+`reviewer_final_pass` (via the new `ReviewerFinalResult` wrapper around
+`Reviewer.finalize()`'s existing, unchanged dict contract), `no_unresolved_privacy_finding`,
+`no_unresolved_security_incident`, `reporting_safety_gate_pass` (this same module's own
+`run_reporting_safety_gate`, genuinely computed, not accepted as an opaque flag),
+`integrity_checks_pass` (`run_integrity_checks`, reusing `artifacts._hash_file`), and
+`no_unresolved_audit_finding` all have real passing and failing test cases below.
+
+**`report_package_complete` is the one condition structurally blocked from a genuine
+end-to-end upstream producer until Phase 11b lands.** The condition itself is fully
+implemented and fully tested (both its PASS and FAIL paths are exercised in
+`test_final_assurance.py`), but no live code in this session computes that boolean from
+an actually-generated report bundle -- that is Phase 11b's own `ReportGenerator`/
+`ReportPackage` responsibility. Until 11b lands, any caller of `evaluate_final_assurance`
+must supply this value itself (e.g. `False`, honestly reporting the gap) rather than the
+gate silently assuming completion.
+
+**Non-bypassability proof:** `test_model_confidence_cannot_override_a_failing_condition`
+constructs a scenario where `execution_result.success=False` (a genuinely failing
+deterministic condition) alongside `auditor_escalation=None` (Auditor's own confidence
+floor and issues checks all cleared -- the maximally "confident, everything looks fine"
+signal) and confirms the verdict is still `BLOCKED` with `executor_complete` in
+`failed_conditions`. A second test confirms the converse: a low-confidence Auditor
+escalation (`"auditor_confidence_below_floor:0.50"`) blocks even when every other
+condition passes, proving Auditor's signal can only ever add a block reason, never
+remove one. `evaluate_final_assurance`'s own signature has no parameter through which a
+bare confidence number could reach it at all.
+
+**Not wired into a live execution path this phase (documented, matches the target-file
+list).** `agents/orchestrator.py` is not in this phase's target files; `final_assurance.py`
+is a standalone, fully-tested deterministic module, exactly matching how
+`control/verification.py` (Phase 9) and `control/rewind.py` (Phase 10) each started as
+pure gate/classifier logic before a later step wired them into `execute_decisions`.
+Wiring into the live pipeline is left to a later phase's own target-file list.
+
+**5. Invariant/acceptance tests (`test_final_assurance.py`, new file).** Every one of the
+fifteen `FINAL_ASSURANCE_CONDITIONS` has at least one dedicated failing-path test (its own
+`test_*_blocks` case) plus the shared all-pass `READY_FOR_EXPORT` case;
+`ReportingSafetyGate` has both a clean-content pass test and positive-detection tests
+that plant a real SSN in report text, a real person name in a filename, and a real SSN in
+an on-disk `.xlsx` workbook cell (reusing the same `openpyxl` construction pattern
+`test_publish_guard.py` already uses) and confirm each is caught, not merely that an empty
+input passes. `ReviewerFinalResult.from_finalize_dict` is exercised against a real
+`Reviewer(make_ctx("Reviewer")).finalize()` call (the same helper pattern
+`test_reviewer_final.py` uses), not a hand-built mock dict, confirming the wrapper
+round-trips the actual production contract.
+
+### Phase 11a: frozen API surface (export/download/acknowledgment/cleanup-status)
+
+Documentation exercise (item 4): the **current, unmodified** response shapes of the four
+endpoints in `backend/server.py` that most directly correspond to
+export/download/acknowledgment/cleanup-status, read verbatim from the live code (not
+invented). Phase 12 may change these endpoints' *implementation*; it may not change the
+shapes below without a fresh freeze. No endpoint's behavior was changed to produce this
+section.
+
+**Honest naming note:** `backend/server.py`'s own route list (its module docstring,
+lines 3-44) has no endpoint literally named "acknowledgment" or "cleanup-status" today --
+those are Phase 12 concepts (docs #95: "download lifecycle, user acknowledgment where
+required" and `CleanupManager`) that have not been built yet. The two rows below for
+those roles document the **closest existing endpoint that currently serves that
+function**, named explicitly as such, rather than inventing a schema for an endpoint that
+does not exist.
+
+**export -- `GET /api/sessions/{sid}/export/{file_id}`** (`session_export`,
+`server.py:1748`). Download one Publish-Guard-clean redacted file.
+- Success: raw `FileResponse(path, filename=artifact_id)` -- a binary file stream (the
+  export bytes), `Content-Disposition: attachment; filename="<artifact_id>"`. No JSON
+  envelope.
+- 403 (`JSONResponse`), session status not `complete`/`partially_complete`:
+  `{"error": "publish_guard_not_certified", "message": <str>, "guard": null}`.
+- 403 (`JSONResponse`), this file's guard status is not exactly one `clean` result:
+  `{"error": "publish_guard_not_certified", "message": <str>, "guard": <per-file guard
+  result dict, or null if missing/duplicate>}`.
+- 404 (`HTTPException`): `{"detail": "export not ready"}` -- no clean artifact_id on
+  record for this `file_id`.
+- 409 (`HTTPException`): `{"detail": "export artifact unavailable: <ArtifactError.reason>"}`
+  -- the resolved artifact failed hash-verification or is otherwise unservable.
+
+**download -- `GET /api/sessions/{sid}/bundle`** (`session_bundle`, `server.py:1658`).
+Assemble and stream the full shareable bundle ZIP. Query params: `publication: bool =
+False` (include coverage tables/figures/paper drafts/benchmark scaffold),
+`attestation_pdf: bool = False` (reserved for signed PDF attestation).
+- Success: raw `Response(content=<zip bytes>, media_type="application/zip")`,
+  `Content-Disposition: attachment; filename="<filename>"`. No JSON envelope.
+- 403 (`HTTPException`): `{"detail": <str>}` -- session status not
+  `complete`/`partially_complete`, or `guard_report.status != "clean"`.
+
+**acknowledgment (closest current analog) -- `GET /api/sessions/{sid}/reversal-key`**
+(`session_reversal_key`, `server.py:1707`). No dedicated "acknowledgment" endpoint exists
+yet; this is the one route today whose semantics are acknowledgment-shaped -- reading it
+is a one-time, consuming action (the decrypted blob is deleted from the session document
+immediately after this response is built), the closest existing analog to "the user has
+now acknowledged/received this artifact."
+- Success: raw `Response(content=<json bytes>, media_type="application/json")`,
+  `Content-Disposition: attachment; filename="<sid>_reversal_key.json"`. Body (as bytes,
+  not a FastAPI-serialized JSON response) is
+  `{"session_id": <str>, "salt": <str>, "pseudonym_map": <dict[str, str]>}` (`indent=2`).
+- 403 (`HTTPException`): `{"detail": <str>}` -- session not complete, or guard status not
+  `clean`.
+- 404 (`HTTPException`): `{"detail": "No reversal key was generated for this run (no
+  column was pseudonymized or hashed, so there is nothing to reverse)."}`.
+
+**cleanup-status (closest current analog) -- `DELETE /api/sessions/{sid}`**
+(`session_delete`, `server.py:1045`). No dedicated read-only "cleanup-status" endpoint
+exists yet; this is the one route today whose response body reports the outcome/status of
+a cleanup (right-to-erasure) attempt.
+- Success, erasure fully confirmed: `{"deleted": true}` (200, default FastAPI JSON
+  envelope; every filesystem/registered-artifact erasure step succeeded).
+- Success, erasure partially failed: `{"deleted": false, "erasure_pending": true}` (200)
+  -- the session document is left with `status="erasure_pending"`,
+  `erasure_error`/`erasure_attempts` recorded server-side (not in this response body);
+  `_purge_settled_sessions_loop` retries on the next sweep.
+
+**`PHASE_11A_STATUS`:** pending final gate run (see acceptance criteria). Items 2 and 3
+landed as two commits; this documentation section (item 4) is the third; item 5 (tests)
+and the final gate run follow next.
