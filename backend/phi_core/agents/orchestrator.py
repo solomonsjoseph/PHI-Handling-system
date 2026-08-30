@@ -297,7 +297,8 @@ async def execute_decisions(
     try:
         executor_ctx = await make_ctx("Executor")
         exec_out = await Executor(executor_ctx).run(
-            files=files, decisions=decisions, omit_by_file=omit_by_file, manifest=manifest)
+            files=files, decisions=decisions, omit_by_file=omit_by_file,
+            manifest=manifest, store=store)
         await require_accepted(executor_ctx, exec_out, "Executor")
     except Exception as exc:
         # Executor is deterministic and irreversible (writes exports to disk);

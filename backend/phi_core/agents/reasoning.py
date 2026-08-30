@@ -25,6 +25,8 @@ from ..anonymizer import apply_to_text
 from ..control.records import (
     ColumnDecision,
     EvidenceClaim,
+    ExecutionResult,
+    ExecutionTask,
     GateResult,
     MethodRecord,
     SandboxRecord,
@@ -1031,7 +1033,8 @@ class Executor(Agent):
 
     async def run(self, files: list[dict[str, Any]], decisions: list[dict[str, Any]],
                   omit_by_file: dict[str, set[str]] | None = None, *,
-                  manifest: "VerifiedClassificationManifest | None" = None) -> dict[str, Any]:
+                  manifest: "VerifiedClassificationManifest | None" = None,
+                  store: "Any | None" = None) -> dict[str, Any]:
         """Apply decisions to each file. Returns {"exports": {file_id: path}}.
 
         ``omit_by_file`` (file_id -> deferred column names) is the partial-
@@ -1048,23 +1051,28 @@ class Executor(Agent):
         via ``control.manifest.ensure_frozen_manifest``) -- ``None`` for
         every pre-existing unit test's direct ``Executor(ctx).run(...)``
         call, the same permanent ``make_ctx``-built compatibility path
-        the sandbox dispatch above documents; the idempotency spine
-        (``ExecutionTask``/``ExecutionResult``, docs #53) is populated
-        from it only when it is supplied.
-
-        Every write is staged through ``self.ctx.artifacts``
-        (``control/writer.py::ArtifactWriter``): an ``ArtifactRecord`` is
-        registered ``provisional`` before the first byte, the producer
-        writes to the returned ``.tmp`` path, and only a completed write
-        is hashed and atomically promoted via ``finalize``. A producer
-        that raises leaves that artifact ``provisional`` with nothing at
-        the real path -- there is nothing to clean up, and that file_id
-        simply never reaches ``exports``.
+        the sandbox dispatch above documents. ``store`` (a
+        ``control.store.ControlStore``, typed ``Any`` here to avoid an
+        import this module otherwise has no other reason to carry) is
+        the idempotency spine's (``ExecutionTask``/``ExecutionResult``,
+        docs #53) persistence target; both ``manifest`` and ``store``
+        must be supplied together for the spine to activate -- a retry
+        that finds a prior successful ``ExecutionResult`` for this
+        manifest's task_id returns that recorded result unchanged
+        instead of re-running a single transformation, so a retry never
+        double-transforms data, duplicates a Human Review item, or
+        duplicates a destructive action.
         """
         pending = [(d.get("file_id", ""), d.get("column", "")) for d in decisions if d.get("action") == "human_review"]
         if pending:
             raise ValueError(f"unresolved human_review deferrals cannot be executed: {pending}")
         omit_by_file = omit_by_file or {}
+        task_id = f"execution:{manifest.manifest_id}" if manifest is not None else ""
+        if manifest is not None and store is not None:
+            prior = await self._prior_execution_result(store, task_id)
+            if prior is not None:
+                await self._log("executor.idempotent_replay", "info", {"task_id": task_id})
+                return prior
         if manifest is not None:
             # docs #52: the seven deterministic pre-execution validators
             # only run on a real, governed execution (one that already
@@ -1095,6 +1103,62 @@ class Executor(Agent):
                 worker_module_paths=[Path(__file__)],
                 approved_methods=approved_methods, grant=self.ctx.grant, sandbox=self.ctx.sandbox,
             )
+        attempt_id = uuid4().hex
+        if manifest is not None and store is not None:
+            await store.insert("execution_tasks", ExecutionTask(
+                run_id=self.ctx.run_id, attempt_id=attempt_id, manifest_id=manifest.manifest_id,
+                manifest_version=str(manifest.schema_version),
+                decision_refs=[f"{d.get('file_id', '')}:{d.get('column', '')}" for d in decisions],
+                state="running",
+            ))
+        try:
+            result = await self._apply_decisions(files, decisions, omit_by_file)
+        except Exception as exc:
+            if manifest is not None and store is not None:
+                await store.insert("execution_results", ExecutionResult(
+                    task_id=task_id, run_id=self.ctx.run_id, attempt_id=attempt_id,
+                    manifest_id=manifest.manifest_id, manifest_version=str(manifest.schema_version),
+                    success=False, failure_class=type(exc).__name__, detail=str(exc)[:2000],
+                ))
+            raise
+        if manifest is not None and store is not None:
+            await store.insert("execution_results", ExecutionResult(
+                task_id=task_id, run_id=self.ctx.run_id, attempt_id=attempt_id,
+                manifest_id=manifest.manifest_id, manifest_version=str(manifest.schema_version),
+                success=True, detail=_json.dumps(result),
+            ))
+        return result
+
+    async def _prior_execution_result(self, store: Any, task_id: str) -> dict[str, Any] | None:
+        """The idempotency spine's read side (docs #53): the most recent
+        successful :class:`~control.records.ExecutionResult` for
+        ``task_id``, decoded back into ``run``'s own return shape, or
+        ``None`` if this manifest's execution has never completed
+        successfully. A caller that finds one here must skip the
+        transformation loop entirely -- inspecting prior attempt state,
+        not re-deriving it, is what makes a retry safe. Every field this
+        function needs (``exports``, ``pseudonym_count``,
+        ``reversal_key_blob``) was JSON-encoded into ``ExecutionResult
+        .detail`` on the original successful attempt, since the fixed
+        record schema (docs #50-53) has no generic payload field of its
+        own and this module does not own ``control/records.py``."""
+        if not task_id:
+            return None
+        matches = await store.find_many("execution_results", {"task_id": task_id, "success": True})
+        if not matches:
+            return None
+        try:
+            return _json.loads(matches[-1].get("detail") or "{}")
+        except (TypeError, ValueError):
+            return None
+
+    async def _apply_decisions(
+        self, files: list[dict[str, Any]], decisions: list[dict[str, Any]],
+        omit_by_file: dict[str, set[str]],
+    ) -> dict[str, Any]:
+        """The actual per-file transformation loop, extracted from ``run``
+        so ``run`` can wrap it in the idempotency spine's try/except
+        without reindenting this entire method body."""
         await self._log("executor.begin", "info", {"decision_count": len(decisions)})
         exports: dict[str, str] = {}
         by_file: dict[str, list[dict[str, Any]]] = {}

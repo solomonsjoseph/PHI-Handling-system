@@ -165,7 +165,7 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
         def __init__(self, ctx=None, *_a, **_kw):
             self._ctx = ctx
 
-        async def run(self, files, decisions, omit_by_file=None, *, manifest=None):
+        async def run(self, files, decisions, omit_by_file=None, *, manifest=None, store=None):
             dst = tmp_path / "f1_export.csv"
             dst.write_text("field\nx\ny\n", encoding="utf-8")
             result = {"exports": {"f1": str(dst)}}
@@ -323,7 +323,7 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
         def __init__(self, ctx=None, *_a, **_kw):
             self._ctx = ctx
 
-        async def run(self, files, decisions, omit_by_file=None, *, manifest=None):
+        async def run(self, files, decisions, omit_by_file=None, *, manifest=None, store=None):
             executor_calls.append({"decisions": decisions, "omit_by_file": omit_by_file})
             dst = tmp_path / "f1_export.csv"
             dst.write_text("a\nx\ny\n", encoding="utf-8")
