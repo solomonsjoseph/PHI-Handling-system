@@ -74,6 +74,7 @@ _MONGO_GUARDED_MODULES = {
     "test_control_migrate.py",
     "test_control_store_effect_key.py",
     "test_control_phase12_cleanup_wiring.py",
+    "test_resilience_restart_resume.py",  # Phase 14: calls phi_core.db.get_db() directly
 }
 
 
