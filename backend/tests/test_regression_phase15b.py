@@ -74,17 +74,6 @@ async def test_learning_case_error_exposes_raw_backstop_only_identifier_via_case
     assert planted_mbi not in excinfo.value.case.abstract
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "awaiting fix: CanarySet._TOKEN_SPLIT treats '.' as an intra-token "
-        "character, so a planted literal immediately followed by a "
-        "sentence-ending period with no space tokenizes as 'literal.' and "
-        "never matches the registered literal, letting the leak-canary "
-        "harness (the Phase 15b mandatory release test) silently miss a "
-        "real leak"
-    ),
-)
 def test_leak_canary_misses_a_literal_immediately_followed_by_a_sentence_period():
     """CanarySet._TOKEN_SPLIT is ``re.compile(r"[^A-Za-z0-9@.'\\-]+")`` --
     it deliberately keeps '.' inside a token (so decimal numbers, dotted

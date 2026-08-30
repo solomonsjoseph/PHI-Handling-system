@@ -137,9 +137,16 @@ class CanarySet:
         hit_count = 0
         first_match = ""
         for tok in set(t for t in _TOKEN_SPLIT.split(lower) if t):
-            if tok in self._single:
+            # '.' is a kept token character, so a literal at the end of a
+            # sentence ("...is ZZZCANARY7788.") tokenizes with the period
+            # attached. Strip trailing periods before the membership test so
+            # that sentence-final placement is caught. An interior period
+            # (a dotted hostname, an email, a decimal) is never a trailing
+            # character, so it is left intact.
+            stripped = tok.rstrip(".")
+            if stripped in self._single:
                 hit_count += 1
-                first_match = first_match or tok
+                first_match = first_match or stripped
         for lit in self._multi:
             if lit in lower:
                 hit_count += 1
