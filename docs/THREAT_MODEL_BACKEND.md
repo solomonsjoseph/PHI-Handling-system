@@ -244,3 +244,43 @@ with an ephemeral filesystem hits it routinely, silently, and without a
 diagnostic trail connecting the symptom to the cause. A corresponding
 one-line pointer is added to `docs/RUNBOOK.md` so an operator hitting this
 symptom has somewhere to look.
+
+## 7. Phase 9 confirmation: worker-credential criterion and its residual risk
+
+Phase 9 (`agents/reasoning.py::Executor`, `control/execution_validators.py`)
+re-checked docs #50-52's worker-credential criterion -- "the worker process
+receives no credential in its environment or its arguments" -- against the
+live `sandbox.py` rather than assuming section 3's description above still
+matches the code. It does, with one correction: section 3 above names
+`_DENYLIST_ENV_FRAGMENTS` as the env-var control; that symbol no longer
+exists. `sandbox.py`'s `run_isolated`/`_child_entry` now rebuild the child's
+environment from `_ALLOWLISTED_ENV_KEYS` (`PATH`, `HOME`, `TMPDIR`, `LANG`,
+`LC_ALL`, `PYTHONPATH`, `PYTHONDONTWRITEBYTECODE`) -- a strictly stronger
+control than the denylist section 3 describes: an allowlist cannot miss a
+credential-shaped variable name the way a denylist substring match can
+(the module's own docstring cites this as the reason for the change:
+`APP_ENCRYPTION_KEY` and `ATTESTATION_SIGNING_KEY` are exactly the shape a
+denylist keyed on `"API_KEY"`/`"SECRET"`/`"TOKEN"`/`"PASSWORD"`/
+`"CREDENTIAL"`/`"MONGO_URL"` would miss). `CapabilityBroker`
+(`control/execution_validators.py`, Phase 9 item 3) adds a second,
+independent check at the capability-grant layer: an `ExecutionTask`'s
+`CapabilityGrant` may never list a credential-shaped tool name
+(`*_key`/`*_secret`/`*_token`/`*_password`/`*_credential`). Together these
+confirm the criterion is met: no credential reaches the worker through its
+environment, and none is granted to it as a capability.
+
+This says nothing new about the residual risk section 3 already documents
+in full and this confirmation does not repeat: the worker is a same-uid
+child process with no `setuid`, no separate service account, and no
+container/namespace boundary, so it can still open `backend/.env`,
+`~/.aws/credentials`, `~/.ssh/`, or any other file the parent process's uid
+can already read, directly by path, regardless of what its environment or
+capability grant carry. `PathPolicyValidator` (Phase 9 item 3) confines
+which paths the *rest of the codebase* is willing to hand the worker
+(dataset files under `phi_core.paths.DATA_DIR`) -- exactly like
+`validate_sandbox_path` already did per section 3 -- and, exactly as section
+3 already concludes, this constrains callers, not what the worker's own
+code could choose to open once running as that uid. The no-container
+architectural decision this codebase has made leaves full process-identity
+isolation undeliverable; this residual risk is disclosed, not remediated,
+and stays open by the same design section 3 already records it under.
