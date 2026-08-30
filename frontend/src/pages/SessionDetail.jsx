@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import axios from 'axios';
-import { API, getSession, streamUrl, whoami } from '../lib/api';
+import { API, getSession, streamUrl, whoami, acknowledgeSession, getCleanupStatus } from '../lib/api';
 import { Btn } from '../components/ui';
 import Spinner from '../components/common/Spinner';
 import AgentTracePanel from '../components/trace/AgentTracePanel';
@@ -14,6 +14,11 @@ import BenchmarkPanel from '../components/corpus/BenchmarkPanel';
 import HumanReviewPanel from '../components/review/HumanReviewPanel';
 import DevLogsPanel from '../components/dev/DevLogsPanel';
 import RunHero from '../components/status/RunHero';
+import UserClarificationPanel from '../components/clarification/UserClarificationPanel';
+import ReviewerCorrectionsPanel from '../components/review/ReviewerCorrectionsPanel';
+import ExportReadyPanel from '../components/export/ExportReadyPanel';
+import ExpiryWarningPanel from '../components/export/ExpiryWarningPanel';
+import CleanupStatusPanel from '../components/cleanup/CleanupStatusPanel';
 
 export default function SessionDetail() {
   const { sid } = useParams();
@@ -43,6 +48,7 @@ export default function SessionDetail() {
   const [busy, setBusy] = useState(false);
   const [notFound, setNotFound] = useState(false);
   const esRef = useRef(null);
+  const [cleanupStatus, setCleanupStatus] = useState(null);
   const traceCursorRef = useRef(null);
   const traceFetchInFlightRef = useRef(false);
   const traceFetchPendingRef = useRef(false);
@@ -85,6 +91,14 @@ export default function SessionDetail() {
     }
   };
 
+  // Statuses where a terminal-path cleanup (docs #76) might plausibly
+  // have already run -- avoids polling the cleanup-status endpoint on
+  // every SSE tick of an otherwise-live run.
+  const _CLEANUP_RELEVANT = new Set([
+    'complete', 'partially_complete', 'failed', 'cancelled', 'intake_failed',
+    'blocked', 'erasure_pending', 'security_incident', 'destroying', 'session_destroyed',
+  ]);
+
   const refresh = async () => {
     const [s, r] = await Promise.all([
       getSession(sid).catch(() => null),
@@ -106,6 +120,9 @@ export default function SessionDetail() {
       axios.get(`${API}/corpus/study/benchmark/${sid}`)
         .then(br => setBenchmarkReport(br.data))
         .catch(() => setBenchmarkReport(null));
+    }
+    if (_CLEANUP_RELEVANT.has(s.status)) {
+      getCleanupStatus(sid).then(cs => setCleanupStatus(cs?.cleanup || null));
     }
   };
 
@@ -202,6 +219,17 @@ export default function SessionDetail() {
     } finally { setBusy(false); }
   };
 
+  const onAcknowledge = async () => {
+    setBusy(true);
+    try {
+      await acknowledgeSession(sid);
+      toast.success('Export receipt acknowledged');
+      await refresh();
+    } catch (e) {
+      toast.error(`acknowledge failed: ${e?.response?.data?.detail || e.message}`);
+    } finally { setBusy(false); }
+  };
+
   const submitReview = async () => {
     if (!principal) { toast.error('Not authenticated -- reload the page'); return; }
     const unresolved = humanRows.filter(d => !resolutions[`${d.file_id}|${d.column}`]?.mode);
@@ -290,6 +318,8 @@ export default function SessionDetail() {
         onCancel={cancelRun}
       />
 
+      <UserClarificationPanel status={status} clarification={session?.clarification} />
+
       {/* Pipeline progress bar — high-level "what's happening right now" */}
       <PipelineProgressBar
         events={trace}
@@ -328,8 +358,13 @@ export default function SessionDetail() {
         </div>
       </div>
 
+      <ReviewerCorrectionsPanel trace={trace} advisoryIssues={session?.advisory_issues} />
+
       {/* Guard */}
       <PublishGuardPanel guard={guard} />
+
+      <ExportReadyPanel sid={sid} guard={guard} session={session} busy={busy} onAcknowledge={onAcknowledge} />
+      <ExpiryWarningPanel exportExpiresAt={session?.export_expires_at} />
 
       <CorpusVerifierPanel corpusReport={corpusReport} />
 
@@ -366,6 +401,8 @@ export default function SessionDetail() {
       )}
 
       <DevLogsPanel devOpen={devOpen} setDevOpen={setDevOpen} decisions={decisions} trace={trace} />
+
+      <CleanupStatusPanel cleanup={cleanupStatus} />
     </div>
   );
 }
