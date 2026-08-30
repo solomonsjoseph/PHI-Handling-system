@@ -37,15 +37,6 @@ from phi_core.control.store import MemoryControlStore
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "awaiting fix: LearningCaseError.case.abstract carries the raw identifier "
-        "in cleartext for any PHI shape the sanitize stage's regex set does not "
-        "recognize (VIN/MBI/DEA/NPI etc.), even though the durable store never "
-        "receives it"
-    ),
-)
 async def test_learning_case_error_exposes_raw_backstop_only_identifier_via_case_abstract():
     """control/learning.py's LearningCaseService.create_candidate pipeline is:
     _sanitize(abstract) -> _phi_pii_scan(sanitized_abstract) -> reject-on-fail.

@@ -390,6 +390,11 @@ class LearningCaseService:
         case = case.model_copy(update={"phi_pii_scan_passed": not phi_reasons})
         if phi_reasons:
             await self._reject(case)
+            # The PHI/PII scan just caught an identifier scrub_persisted_text
+            # left intact (the sanitize stage's regex set is not exhaustive).
+            # Withhold that sanitize-missed raw text instead of letting it
+            # travel back out on the rejection object's case.abstract.
+            case = case.model_copy(update={"abstract": ""})
             raise LearningCaseError("phi_pii_scan_failed", ",".join(phi_reasons), case=case)
 
         reconstruction_reasons = _reconstruction_check(abstract)
