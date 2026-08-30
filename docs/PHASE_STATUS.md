@@ -1743,6 +1743,24 @@ Nodeid regression: zero unexpected disappearances beyond the already-recorded Ph
 7/8/10 renames; 1706 collected.
 
 **`PHASE_11B_STATUS = PASS`, genuinely gate-verified.** Phase 11 (both waves) complete.
+
+### Phase 11 gate: live confirmation and post-phase simplification
+
+**Live canonical gate** (serial, `PHI_TEST_BASE_URL=http://127.0.0.1:8001`, fresh
+restart, clean `.env`/Mongo): **8 failed, 1692 passed, 4 skipped, 2 errors, 0 xfailed,
+92.44s** -- exactly the Step 0/Phase 10 baseline (3 `test_human_review_invariant.py`
+FAILED, 5 `test_agent_pipeline.py` FAILED, 2 `test_agent_pipeline.py` ERROR).
+
+**Post-phase simplification:** one genuine duplication found and consolidated --
+`report_generator.py` and `zip_builder.py` each independently hand-typed the same 8
+canonical report-bundle filenames (a single-source-of-truth gap that could let the
+on-disk filename and the ZIP's expected filename silently drift). Moved to
+`report_artifacts.py` (the module both already import), both now import the names.
+`scripts/cleanup.py`'s dry run proposed only gitignored/untracked paths (3966 of them,
+`.venv/` contents, `data/uploads/`, `docs/MASTER_ARCHITECTURE_V2.md`), correctly
+declined as out of scope. Full suite unchanged (3 failed / 1688 passed non-live, exact
+match). `ruff check .` clean. Committed `bfc2c28`.
+
 **`PHASE_11_STATUS = PASS`.** Proceeding to Phase 12 and Phase 13 (run in parallel,
 disjoint trees, made safe by 11a's schema freeze): Phase 12 (export, learning, retention,
 cleanup, sections 73-77/95) and Phase 13 (frontend, section 96).
