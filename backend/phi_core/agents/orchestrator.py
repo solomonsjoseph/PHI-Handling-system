@@ -39,13 +39,14 @@ from phi_core.control.store import ControlStore
 if TYPE_CHECKING:
     from phi_core.control.superorchestrator import SuperOrchestrator
 
+from phi_core.control.deterministic_verifier import DeterministicVerifier
+
 from ..paths import cleanup_session_unpacked
 from ..security import scrub_decision, scrub_persisted_text
 from .base import ITERATION_CAP, AgentMessage
 from .experts import PHIMethodsExpert, RegulationsExpert
 from .llm import LlmConfig
 from .manager import ExecutionHealthSupervisor
-from .operator import Operator
 from .outward import Herald, Ledger, Scout
 from .reasoning import (
     BLOCKING_ISSUE_FLOOR,
@@ -330,22 +331,28 @@ async def execute_decisions(
     scout_agent = Scout(scout_ctx)
     scout_task = asyncio.create_task(scout_agent.run())
 
-    # Operator: deterministic self-verification of what Executor wrote,
-    # one stage before Publish Guard, mirroring the Judge/Sentinel split one
-    # stage later. exec_out["exports"] stays Executor's own factual record
-    # of what it wrote and is never mutated here; `exports` is the
-    # Operator-then-Reviewer-filtered view every later step in this
-    # function uses.
+    # DeterministicVerifier (docs #54): deterministic self-verification of
+    # what Executor wrote, one stage before Publish Guard, mirroring the
+    # Judge/Sentinel split one stage later. exec_out["exports"] stays
+    # Executor's own factual record of what it wrote and is never mutated
+    # here; `exports` is the DeterministicVerifier-then-Reviewer-filtered
+    # view every later step in this function uses. Not an `Agent` (see
+    # that module's docstring), so this is a plain call, not a
+    # make_ctx/require_accepted pair -- `executor_ctx.sandbox` is passed
+    # directly so its raw-row work stays inside the same isolation
+    # boundary Executor itself already opted into for this run (`None`
+    # for every pre-existing unit test's make_ctx-built context, exactly
+    # as before).
     await on_phase("operator", {"decision_count": len(decisions)})
     try:
-        operator_ctx = await make_ctx("Operator")
-        op_out = await Operator(operator_ctx).run(
-            files=files, decisions=decisions, exports=exec_out["exports"], omit_by_file=omit_by_file)
-        await require_accepted(operator_ctx, op_out, "Operator")
+        op_out = await DeterministicVerifier().run(
+            files=files, decisions=decisions, exports=exec_out["exports"],
+            omit_by_file=omit_by_file, sandbox=executor_ctx.sandbox)
     except Exception as exc:
-        # Fail open into the existing failed-file machinery: a file Operator
-        # cannot verify is dropped from exports exactly like an unreadable
-        # file already is, rather than trusting it or inventing a new path.
+        # Fail open into the existing failed-file machinery: a file the
+        # verifier cannot verify is dropped from exports exactly like an
+        # unreadable file already is, rather than trusting it or
+        # inventing a new path.
         await manager._log("operator.crashed", "info",
                            {"error_kind": f"exception:{type(exc).__name__}"})
         op_out = {"failed_file_ids": list(exec_out["exports"].keys()), "verdicts": []}

@@ -176,7 +176,7 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
         def __init__(self, ctx=None, *_a, **_kw):
             self._ctx = ctx
 
-        async def run(self, files, decisions, exports, omit_by_file=None):
+        async def run(self, files, decisions, exports, omit_by_file=None, sandbox=None):
             result = {"failed_file_ids": [], "verdicts": []}
             await _complete(self._ctx, result)
             return result
@@ -234,7 +234,7 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
             return result
 
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
-    monkeypatch.setattr(orchestrator, "Operator", FakeOperator)
+    monkeypatch.setattr(orchestrator, "DeterministicVerifier", FakeOperator)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
     monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
     monkeypatch.setattr(orchestrator, "Scout", FakeScout)
@@ -335,7 +335,7 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
         def __init__(self, ctx=None, *_a, **_kw):
             self._ctx = ctx
 
-        async def run(self, files, decisions, exports, omit_by_file=None):
+        async def run(self, files, decisions, exports, omit_by_file=None, sandbox=None):
             result = {"failed_file_ids": [], "verdicts": []}
             await _complete(self._ctx, result)
             return result
@@ -391,7 +391,7 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
             return {}
 
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
-    monkeypatch.setattr(orchestrator, "Operator", FakeOperator)
+    monkeypatch.setattr(orchestrator, "DeterministicVerifier", FakeOperator)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
     monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
     monkeypatch.setattr(orchestrator, "Scout", FakeScout)

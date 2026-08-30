@@ -1096,7 +1096,7 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
     monkeypatch.setattr(srv, "_current_llm_cfg", fake_cfg)
     monkeypatch.setattr(srv, "_emit", fake_emit)
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
-    monkeypatch.setattr(orchestrator, "Operator", FakeOperator)
+    monkeypatch.setattr(orchestrator, "DeterministicVerifier", FakeOperator)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
     monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
     monkeypatch.setattr(orchestrator, "Scout", FakeScout)

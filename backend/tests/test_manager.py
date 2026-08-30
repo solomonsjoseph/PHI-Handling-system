@@ -609,7 +609,7 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
-        async def run(self, files, decisions, exports, omit_by_file=None):
+        async def run(self, files, decisions, exports, omit_by_file=None, sandbox=None):
             return await complete_fake_task(self.ctx, {"failed_file_ids": [], "verdicts": []})
 
     class FakeReviewer:
@@ -648,7 +648,7 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
     monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
-    monkeypatch.setattr(orchestrator, "Operator", FakeOperator)
+    monkeypatch.setattr(orchestrator, "DeterministicVerifier", FakeOperator)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
     monkeypatch.setattr(orchestrator, "Scout", FakeScout)
 

@@ -164,7 +164,7 @@ async def test_execute_decisions_freezes_and_runs_when_no_manifest_exists_yet(mo
         async def run(self, **kw):
             return {"exports": kw.get("exports", {}), "findings": []}
 
-    monkeypatch.setattr(orchestrator, "Operator", FakeOperator)
+    monkeypatch.setattr(orchestrator, "DeterministicVerifier", FakeOperator)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
 
     async def make_ctx(agent):
