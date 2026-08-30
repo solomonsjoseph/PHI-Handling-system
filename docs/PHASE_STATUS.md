@@ -16,7 +16,21 @@ must consume an interface or decision.
 Every `xfail(strict=True)` in the suite is listed here with its nodeid, resolving phase,
 and exact reason string. A phase may not close with an unrecorded xfail.
 
-(empty)
+- nodeid: `tests/test_regression_phase15b.py::test_learning_case_error_exposes_raw_backstop_only_identifier_via_case_abstract`
+  resolving phase: Phase 17
+  reason: "awaiting fix: LearningCaseError.case.abstract carries the raw identifier in cleartext for any PHI shape the sanitize stage's regex set does not recognize (VIN/MBI/DEA/NPI etc.), even though the durable store never receives it"
+
+- nodeid: `tests/test_regression_phase15b.py::test_leak_canary_misses_a_literal_immediately_followed_by_a_sentence_period`
+  resolving phase: Phase 17
+  reason: "awaiting fix: CanarySet._TOKEN_SPLIT treats '.' as an intra-token character, so a planted literal immediately followed by a sentence-ending period with no space tokenizes as 'literal.' and never matches the registered literal, letting the leak-canary harness (the Phase 15b mandatory release test) silently miss a real leak"
+
+- nodeid: `tests/test_regression_phase16.py::test_triage_known_state_is_unreachable_from_real_instrument_fields`
+  resolving phase: Phase 17
+  reason: "awaiting fix: triage_columns's instrument name_keys ('name','field','column') never match Instrument.run()'s real field shape ('label','collected_variable'), so TRIAGE's KNOWN state is unreachable from real Instrument coverage in production"
+
+- nodeid: `tests/test_regression_phase16.py::test_reviewer_deterministic_checklist_does_not_flag_a_correct_keep_on_a_keep_allowlisted_column`
+  resolving phase: Phase 17
+  reason: "awaiting fix: Reviewer._deterministic_checklist's unsafe-KEEP check matches ANY _HARD_RULE_TABLE row including the table's own keep-allowlisted clinical row, so a correct 'keep' on ~40 legitimate clinical columns (diagnosis_code, heart_rate_bpm, bmi, sex, ...) is incorrectly flagged CORRECTION_REQUIRED"
 
 ### DELETED_TESTS
 
@@ -1982,6 +1996,111 @@ nesting still unpacks cleanly (the regression check).
   `security_incident.py`'s schema and the "no process-local cache" comment to confirm
   the durability fix landed as claimed.
 
-**`PHASE_15A_STATUS = PASS`.** Proceeding to Phases 14 (scale/resilience), 15b
-(adversarial security), and 16 (evaluations) as one three-subagent parallel batch, all
-test-authoring only, modifying no production code.
+**`PHASE_15A_STATUS = PASS`.**
+
+---
+
+## Phase 14 (scale/resilience), Phase 15b (adversarial security), Phase 16 (evaluations) — COMPLETE
+
+Three parallel subagents (Phase14ScaleResilience, Phase15bAdversarial, Phase16Evaluations),
+all test-authoring only per the plan's explicit framing -- 26 commits, zero production
+code touched (independently confirmed: `git diff --stat` against `backend/phi_core/`,
+`backend/server.py`, `frontend/src/` is empty except the explicitly-authorized new,
+isolated `backend/phi_core/evaluations/` scoring module, confirmed never imported by any
+live pipeline file). Coordinated live over `hub` for a shared `conftest.py` addition and
+one cross-file regression (Phase15b's concurrent commits transiently broke two of
+Phase14's tests; flagged, fixed, and independently re-confirmed clean by both sides).
+
+**Phase 14 (scale and resilience, 5 files, 25 tests).** Multi-dataset scale (12 files x
+15 columns, one column name shared across all 12, exact `(file_id, column)` coverage
+held at 180-decision scale); bounded concurrency (research dedup at 30 columns/5
+categories; genuine in-flight overlap proven for `RegulationsExpert`/`PHIMethodsExpert`,
+not just call-count ordering; `MAX_PARALLEL_TASKS_PER_PARENT`/`MAX_PARALLEL_TASKS_PER_RUN`
+composed together under real unpatched production limits); provider/web timeout
+(the real `GatewayResult(status="timeout")` contract driven through `Agent.call`/
+`Manager.run_supervised`/`RegulationsExpert.rules_for`, plus a full simulated provider
+outage through `orchestrator.run_pipeline` end to end, reaching a clear bounded-time
+failure classification rather than hanging); backend restart mid-pipeline and Human
+Review pause/resume (widens Phase 9/12's `get_db.cache_clear()` restart technique to a
+real `MongoControlStore`, mid-pipeline, not just post-completion); execution retry at
+multi-file scale (a simulated Executor crash partway through a 3-file batch, proving the
+retry never double-transforms and reaches every file). **No genuine defects found** --
+two candidate gaps were investigated and traced to non-issues (documented single-sheet
+xlsx behavior; an unreachable-in-production timeout code path in `Agent.call_with_web_search`'s
+solo branch, confirmed every real caller wraps it or always has a Manager attached).
+
+**Phase 15b (adversarial security, 9 files, ~2530 lines, all 9 required categories).**
+Raw dataset boundary, cross-run, uploads, prompt injection, evidence, Executor,
+observability, reports, cleanup -- each driven through the real end-to-end production
+path (e.g. uploads through `build_manifest()`, not `unpack_zip` in isolation; Executor
+categories through the real manifest-gated `Executor.run()` call site, not
+`execution_validators.py` unit tests alone; reports through the real `ZIPBuilder.build()`
+pipeline). **Two genuine defects found and recorded** (below). Never weakened a test to
+obtain a green build, per the plan's explicit instruction.
+
+**Phase 16 (evaluations, 9 harnesses + 1 shared scoring module, all against labeled
+synthetic ground truth, never model self-confidence).** Schema interpretation: 1.0
+accuracy (21/21 labeled headers). Lexicon: `phi_flag_hint` precision=0.7/recall=1.0/
+F1=0.8235 (16 labeled rows, 3 deliberately tricky). Instrument: AcroForm tier
+label-recall=1.0, `collected_variable` P=1.0/R=1.0; flat-PDF tier label-recall=1.0,
+P=0.8/R=1.0 (2 deliberate false positives). Judge two-stage classification: macro-F1 =
+0.8753 across all 19 categories (18 HIPAA letters + NONE) on the existing 98-column
+labeled corpus, action accuracy = 0.9082 (89/98), full per-category P/R/F1 table.
+Regulatory evidence support: D12 verification accuracy = 1.0 (12/12, zero false
+VERIFIED -- the security-critical property). Method recommendation:
+`PHIMethodsExpert` accuracy = 0.8571 (6/7), `MethodRegistry` approved-query accuracy =
+1.0 (7/7, the approval gate never returns an unapproved distractor). Reviewer error
+detection recall = 1.0 (10/10 planted errors caught). Reviewer false-positive rate:
+deterministic-checklist-only = 0/12 on genuinely correct decisions; full pipeline with
+an over-eager double = 0.1667 (2/12), strictly between the two failure-mode extremes.
+Handoff minimum-context compliance = 1.0 (9/9 `ALLOWED_EDGES`, each payload structurally
+subsetting its schema, an injected raw-value key genuinely rejected). **Two genuine
+defects found and recorded** (below).
+
+**Four genuine defects found across Phase 15b and Phase 16, each recorded per the
+plan's regression-test-class scheduling rule** (`xfail(strict=True)`, resolving in
+Phase 17, entries added to `KNOWN_XFAIL` above by the orchestrator):
+
+1. `LearningCaseError.case.abstract` carries a raw identifier in cleartext for any PHI
+   shape the sanitize stage's regex set does not recognize (VIN/MBI/DEA/NPI etc.), even
+   though the durable learning store itself never receives it.
+2. **Significant:** the Wave R-d leak-canary harness (`CanarySet._TOKEN_SPLIT`, the
+   mandatory release test) treats `.` as an intra-token character, so a planted literal
+   immediately followed by a sentence-ending period with no space (a common natural
+   prose shape) is never detected. Comma/space/paren-adjacent placements all detect
+   correctly.
+3. `triage_columns`'s instrument `name_keys` (`'name'`/`'field'`/`'column'`) never match
+   `Instrument.run()`'s real field shape (`'label'`/`'collected_variable'`), so TRIAGE's
+   `KNOWN` state (docs section 32, two independent sources agreeing) is unreachable from
+   real Instrument coverage in production -- silently degrading to `UNVERIFIED` for
+   every form-documented column.
+4. `Reviewer._deterministic_checklist`'s unsafe-KEEP check matches ANY
+   `_HARD_RULE_TABLE` row, including the table's own keep-allowlisted clinical row
+   (~40 legitimate columns: `diagnosis_code`, `heart_rate_bpm`, `bmi`, `sex`, ...), so a
+   genuinely correct `keep` on those columns is incorrectly flagged
+   `CORRECTION_REQUIRED` -- measured false-positive rate 1.0 on that column set.
+
+### Orchestrator verification
+
+Independently confirmed all 4 xfails are real and strict (not silently passing):
+`pytest -rx` lists all four with matching reason text. Ran into and resolved two rounds
+of environmental noise, both traced to root cause rather than dismissed: (1) the intake
+rate limiter (`session_intake`, 20/hour, `server.py:1127`) was exhausted by the
+cumulative adversarial upload tests hitting the long-running live server across this
+session's many verification passes -- confirmed via `tests/test_security_paths.py`'s
+`BASE_URL` defaulting to `http://localhost:8001` even without `PHI_TEST_BASE_URL` set,
+so this file has always hit the live server unconditionally; resolved by restarting
+`phi-backend` immediately before the final gate run with no other suite run in between
+to re-exhaust it. (2) the recurring dev-mode `APP_ENCRYPTION_KEY` duplication (documented
+at Phase 9's gate) -- cleaned up identically each time.
+
+**Genuine canonical gate (serial, `PHI_TEST_BASE_URL`, fresh restart, clean state,
+no intervening suite runs):** **8 failed, 1858 passed, 4 skipped, 2 errors, 4 xfailed,
+109.60s** -- exactly the Step 0/Phase 15a baseline plus the 4 legitimate new xfails.
+`ruff check .` clean. Root suite unchanged (85 failed / 909 passed / 3 skipped, all
+`phi_engine`, out of scope). Nodeid regression: zero unexpected disappearances beyond
+already-recorded renames; 1876 collected.
+
+**`PHASE_14_STATUS = PASS`. `PHASE_15B_STATUS = PASS`. `PHASE_16_STATUS = PASS`.**
+Proceeding to Phase 17 (repository clean slate), which must resolve all four recorded
+`KNOWN_XFAIL` entries to either a passing test or a recorded `REVIEW_REQUIRED`.
