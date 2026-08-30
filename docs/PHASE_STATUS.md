@@ -1891,5 +1891,22 @@ untouched, per the plan's explicit assignment of that cleanup to Phase 17.
   `phi_engine`, out of scope). Nodeid regression: zero unexpected disappearances beyond
   the already-recorded renames; 1730 collected.
 
-**`PHASE_12_STATUS = PASS`. `PHASE_13_STATUS = PASS`.** Proceeding to Phase 15a (solo,
-production hardening), then Phases 14, 15b, 16 in parallel.
+**`PHASE_12_STATUS = PASS`. `PHASE_13_STATUS = PASS`.**
+
+### Post-phase simplification
+
+Two commits (`96d7f42`, `684bea3`). Backend: deduped a byte-identical 6-line
+export-window-expired 410 guard repeated across `session_bundle`/`session_reversal_key`/
+`session_export` into `_raise_if_export_window_expired`. Frontend: extracted a shared
+`Stat` component for 9 duplicated stat-cell blocks across `BenchmarkPanel.jsx`/
+`CorpusVerifierPanel.jsx`. `scripts/cleanup.py` (a git-ignore garbage collector, not a
+dedup tool) correctly declined as out of scope. Several other near-duplications
+(SuperOrchestrator construction idiom, cleanup_manager.py's key-destruction symmetry,
+CleanupStatusPanel's different-typography grid) were reviewed and correctly left alone
+as either pre-existing idioms or genuinely distinct despite surface similarity.
+Orchestrator-independently re-verified: `ruff check .` clean, non-live suite **3 failed
+/ 1712 passed** (exact match), frontend **2 suites / 6 passed**, no `frontend/build/`
+artifact left on disk.
+
+Proceeding to Phase 15a (solo, production hardening), then Phases 14, 15b, 16 in
+parallel.
