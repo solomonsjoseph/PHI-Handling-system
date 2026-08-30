@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from phi_core.anonymizer import scrub_for_prompt
 from phi_core.security import scrub_persisted_text, validate_llm_base_url, validate_llm_provider
 
-from . import authorization, canary, limits
+from . import authorization, canary, limits, security_incident
 from .egress import _STRUCTURAL_KEYS, canonical_payload, egress_digest
 from .policy import BudgetExceeded, CapabilityDenied, CapabilityPolicy
 from .records import CapabilityGrant, DataClass, TraceEvent
@@ -494,6 +494,20 @@ class ProviderGateway:
         from .events import EventAppendError, TraceEventStore
 
         if scan.hit:
+            # Section 71: PRESERVE safe incident metadata only (never the
+            # matched literal -- the CanaryScanResult carries only the opaque
+            # canary_id and hit_count). Records an open SecurityIncident so
+            # FinalAssuranceGate BLOCKs release until an authorized actor
+            # resolves it.
+            security_incident.record_security_incident(
+                run_id=req.run_id,
+                event_class="dataset_value_to_provider",
+                source="provider_gateway",
+                category="provider",
+                summary=f"leak canary detected in outbound payload "
+                        f"(canary_id={scan.canary_id}, hit_count={scan.hit_count})",
+                egress_digest=digest,
+            )
             payload: dict[str, Any] = {
                 "canary_scan": "violation", "canary_id": scan.canary_id, "hit_count": scan.hit_count,
             }
