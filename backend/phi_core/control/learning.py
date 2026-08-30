@@ -25,13 +25,22 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, get_args
 
-from phi_core.security import reviewer_role
+from phi_core.paths import is_safe_scoped_id
+from phi_core.security import reviewer_role, scrub_persisted_text
 
 from .events import canonical_json
-from .records import LearningActivation, LearningEvaluation, LearningProposal
+from .final_assurance import ReportingSafetyFinding, _scan_text_surface
+from .records import (
+    LearningActivation,
+    LearningCase,
+    LearningCaseSource,
+    LearningEvaluation,
+    LearningProposal,
+)
 from .store import ControlStore
 
 _ROLLOUT_ORDER = ("shadow", "canary", "full")
@@ -224,3 +233,185 @@ class LearningService:
         if not candidates:
             return None
         return max(candidates, key=lambda a: a.approved_at)
+
+
+# --- Phase 12 item 4: the docs #73 learning candidate pipeline ------------
+#
+# Feeds LearningService above (LearningProposal/LearningEvaluation/
+# LearningActivation) -- not a replacement for it, see records.LearningCase's
+# own docstring. This is the missing front half docs #73 describes:
+# candidate -> abstract -> sanitize -> PHI/PII scan -> study reconstruction
+# check -> policy validation -> (unsafe -> DELETE) -> safe learning store.
+# Section 74's "no autonomous self-modification" is LearningService's own
+# job above (propose -> record_evaluation -> approve -> promote_rollout, all
+# human-gated, never auto-deploying); this pipeline only ever produces a
+# sanitized LearningCase a human can later choose to turn into a
+# LearningProposal by hand -- nothing here calls LearningService.propose
+# automatically.
+#
+# Reuses this codebase's existing PHI/PII primitives rather than rebuilding
+# any of them: `phi_core.security.scrub_persisted_text` (the same scrubber
+# `trace_sanitizer.sanitize_status_text` already reuses) for sanitize, and
+# `final_assurance._scan_text_surface` (itself a thin wrapper around
+# `publish_guard._scan_text`/`publish_guard.scan_names`) for the PHI/PII
+# scan stage.
+
+LEARNING_CANDIDATES_COLLECTION = "learning_case_candidates"
+LEARNING_CASES_COLLECTION = "learning_cases"
+
+# No numeric value is given anywhere in the spec text for how long an
+# abstract may run; 1000 chars is a chosen default (same disclosed-default
+# convention Wave R-a used for MAX_UNCERTAIN_HEADERS_PER_RUN/
+# MAX_SANDBOX_OUTPUT_BYTES) -- long enough for a real category-level
+# summary, short enough that a caller cannot smuggle a near-verbatim
+# document through as one long "abstract".
+MAX_ABSTRACT_CHARS = 1000
+
+_VALID_LEARNING_CASE_SOURCES = frozenset(get_args(LearningCaseSource))
+
+_LONG_DIGIT_RUN = re.compile(r"\d{6,}")
+_LONG_QUOTED_EXCERPT = re.compile(r"\"[^\"]{40,}\"|'[^']{40,}'")
+
+
+class LearningCaseError(RuntimeError):
+    """Raised with a fixed, testable ``reason`` on any refusal, matching
+    ``LearningError``'s convention. ``case`` (when set) is the rejected,
+    already-deleted-from-staging candidate, so a caller can inspect which
+    pipeline stage flags are ``False`` without a second store round trip."""
+
+    def __init__(self, reason: str, detail: str = "", case: LearningCase | None = None) -> None:
+        self.reason = reason
+        self.case = case
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+
+
+def _abstract(raw_content: str) -> str:
+    """Whitespace-normalize and length-cap. Deterministic, not an LLM
+    summarization step -- this pipeline runs with no model in the loop
+    (section 74's own "no autonomous self-modification" posture extends
+    naturally to "no autonomous candidate authoring" too, since an LLM
+    call here would itself be exactly the kind of runtime behavior that
+    directly touches the learning store this module gates)."""
+    return " ".join((raw_content or "").split())[:MAX_ABSTRACT_CHARS]
+
+
+def _sanitize(text: str) -> str:
+    return scrub_persisted_text(text)
+
+
+def _phi_pii_scan(text: str, jurisdiction: str) -> list[str]:
+    if not text:
+        return []
+    findings: list[ReportingSafetyFinding] = []
+    _scan_text_surface("learning_case_abstract", text, jurisdiction, findings)
+    return [f"{f.pattern_id}:{f.hipaa_category}" for f in findings]
+
+
+def _reconstruction_check(text: str) -> list[str]:
+    """A heuristic, deterministic reconstructability check distinct from
+    the PHI/PII scan above: a run of 6+ consecutive digits (an account
+    number, an MRN, a numerically-written date) or a long quoted excerpt
+    (a verbatim cell/column value) can reconstruct study content even
+    when it does not match a named PHI pattern or a person's name."""
+    reasons: list[str] = []
+    if _LONG_DIGIT_RUN.search(text):
+        reasons.append("long_digit_run")
+    if _LONG_QUOTED_EXCERPT.search(text):
+        reasons.append("long_quoted_excerpt")
+    return reasons
+
+
+def _policy_check(*, run_id: str, source: str, abstract: str, validated: bool) -> list[str]:
+    reasons: list[str] = []
+    if not validated:
+        reasons.append("source_not_validated")
+    if source not in _VALID_LEARNING_CASE_SOURCES:
+        reasons.append("source_not_allowlisted")
+    if not is_safe_scoped_id(run_id):
+        reasons.append("run_id_not_scoped")
+    if not abstract.strip():
+        reasons.append("empty_abstract")
+    return reasons
+
+
+class LearningCaseService:
+    """The docs #73 candidate pipeline. A separate service from
+    ``LearningService`` even though both live in this module: they operate
+    on different records (``LearningCase`` vs
+    ``LearningProposal``/``LearningEvaluation``/``LearningActivation``) and
+    different concerns (candidate creation and safety filtering, versus
+    approval and rollout of an already-safe learning artifact). Unlike
+    ``LearningService``, this pipeline is not gated by ``LEARNING_ENABLED``
+    -- producing a sanitized audit-trail candidate is safe and useful even
+    while the self-modification machinery downstream stays off; the flag
+    only gates whether a human may ever turn a candidate into a live
+    ``LearningProposal``.
+    """
+
+    def __init__(self, store: ControlStore) -> None:
+        self._store = store
+
+    async def create_candidate(
+        self, *, run_id: str, source: LearningCaseSource, raw_content: str,
+        validated: bool = True, jurisdiction: str = "us",
+    ) -> LearningCase:
+        """Run the full docs #73 pipeline over ``raw_content`` (never
+        itself persisted -- only ever held in a local variable of this
+        call). ``validated=True`` is the caller's own attestation that
+        ``raw_content`` genuinely comes from a validated signal already
+        looked up elsewhere (a real ``ReviewFinding``, ``HumanDecision``,
+        ``ExecutionResult``, ``VerificationResult``, or rewind
+        classification) -- section 73's "only from validated ..." opening
+        clause; this function has no way to independently re-verify that
+        claim, so it is a required, explicit keyword rather than a
+        default-true toggle a caller could forget to consider.
+
+        Raises :class:`LearningCaseError` with a fixed ``reason`` and the
+        rejected ``case`` on any pipeline failure. The staged candidate
+        row is always deleted before the error is raised (docs #73's
+        "unsafe -> DELETE"); nothing unsafe is ever written to
+        ``LEARNING_CASES_COLLECTION``, and the raw/sanitized abstract text
+        itself is never written to the staging collection at all -- only
+        the run-scoped bookkeeping fields (``case_id``/``run_id``/
+        ``source``/timestamps) are staged before the abstract exists, so
+        even a rejected candidate's staged row never carries any of the
+        text this function scanned.
+        """
+        if source not in _VALID_LEARNING_CASE_SOURCES:
+            raise LearningCaseError("invalid_source", str(source))
+
+        case = LearningCase(run_id=run_id, source=source)
+        await self._store.insert(LEARNING_CANDIDATES_COLLECTION, case)
+
+        abstract = _sanitize(_abstract(raw_content))
+        case = case.model_copy(update={"abstract": abstract, "sanitized": True})
+
+        phi_reasons = _phi_pii_scan(abstract, jurisdiction)
+        case = case.model_copy(update={"phi_pii_scan_passed": not phi_reasons})
+        if phi_reasons:
+            await self._reject(case)
+            raise LearningCaseError("phi_pii_scan_failed", ",".join(phi_reasons), case=case)
+
+        reconstruction_reasons = _reconstruction_check(abstract)
+        case = case.model_copy(update={"reconstruction_check_passed": not reconstruction_reasons})
+        if reconstruction_reasons:
+            await self._reject(case)
+            raise LearningCaseError("reconstruction_check_failed", ",".join(reconstruction_reasons), case=case)
+
+        policy_reasons = _policy_check(run_id=run_id, source=source, abstract=abstract, validated=validated)
+        case = case.model_copy(update={"policy_validation_passed": not policy_reasons})
+        if policy_reasons:
+            await self._reject(case)
+            raise LearningCaseError("policy_validation_failed", ",".join(policy_reasons), case=case)
+
+        case = case.model_copy(update={"detail": "passed the full docs #73 candidate pipeline"})
+        await self._store.delete_one(LEARNING_CANDIDATES_COLLECTION, {"case_id": case.case_id})
+        await self._store.insert(LEARNING_CASES_COLLECTION, case)
+        return case
+
+    async def _reject(self, case: LearningCase) -> None:
+        await self._store.delete_one(LEARNING_CANDIDATES_COLLECTION, {"case_id": case.case_id})
+
+    async def get_case(self, case_id: str) -> LearningCase | None:
+        doc = await self._store.get_one(LEARNING_CASES_COLLECTION, {"case_id": case_id})
+        return LearningCase.model_validate(doc) if doc else None
