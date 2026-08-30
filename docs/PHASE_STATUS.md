@@ -1217,3 +1217,46 @@ The baseline's 1 xfailed (judge output_schema marker) does not appear because it
 already resolved at Phase 7's close, per that phase's own gate note.
 
 **`PHASE_8_STATUS = PASS`. Phase 8 is complete.**
+
+### Orchestrator verification (post-subagent): genuine live-gate confirmation
+
+The subagent's own live-gate run (above) explicitly could not validate against this
+phase's actual code: it hit the long-running dev server (uptime since before Phase 7's
+gate), started before Phase 8's commits landed, so it exercised pre-Phase-8 code. Fixed:
+
+1. **Restarted `phi-backend`** to load Phase 8's code. Confirmed live: `test_agent_trace`'s
+   trace now genuinely shows `Reviewer` (not `Sentinel`).
+2. **Root-caused and fixed the `409==200` `test_get_settings_never_returns_api_key_plaintext`
+   failure**, rather than leaving it as an unexplained "environmental" note. `crypto.py`'s
+   `_load_or_create_key()` appends a freshly-minted `APP_ENCRYPTION_KEY` to `backend/.env`
+   whenever the key isn't yet in `os.environ` at call time (dev-mode convenience, line
+   51-58) -- across roughly 38 server restarts performed during this session, this
+   accumulated 38 duplicate `APP_ENCRYPTION_KEY` lines in `.env`. A stale `settings.llm`
+   Mongo document (encrypted under an earlier one of those 38 keys) no longer decrypted
+   under the effective (last-loaded) key, raising `KeyRotated` -> `409`. Fixed by
+   deduplicating `.env` to a single `APP_ENCRYPTION_KEY` line (kept the first; no key
+   contents ever printed) and deleting the one stale `settings.llm` document. Confirmed:
+   `GET /api/settings/llm` now returns `200` cleanly. This is dev-environment hygiene
+   (a consequence of this session's many restarts), not a Phase 8 code defect; `.env` is
+   gitignored and the fix produced no tracked diff.
+3. **Fixed one genuine stale reference the subagent's clean-cutover missed**:
+   `tests/test_agent_pipeline.py::test_agent_trace`'s hardcoded `expected` agent set still
+   named `"Sentinel"` (a role that no longer exists post-Phase-8). Corrected to
+   `"Reviewer"` (commit `6160cff`). Confirmed: the test now fails for the single
+   documented reason (`RegulationsExpert` missing, no `ANTHROPIC_API_KEY` in this
+   environment), never a stale-role mismatch.
+
+**Genuine canonical gate (serial, `PHI_TEST_BASE_URL=http://127.0.0.1:8001`, fresh
+restart, clean `.env`/Mongo):** **8 failed, 1525 passed, 4 skipped, 2 errors, 0 xfailed,
+90.49s.** Failed/error set exactly matches the Step 0/Phase 7 baseline: 3
+`test_human_review_invariant.py` FAILED (pre-existing `client_event_id` schema drift,
+untouched), 5 `test_agent_pipeline.py` FAILED, 2 `test_agent_pipeline.py` ERROR (all
+live-LLM-dependent, expected with no provider key). No intermittent extras. `ruff check .`
+clean. Root suite unchanged (85 failed / 909 passed / 3 skipped, all `phi_engine`, out of
+scope). Invariant + canary + the two new Phase 8/7 test files: 26 passed. Nodeid
+regression: only Phase 7's 5 already-recorded deleted nodeids plus one expected
+parametrize-value rename (`test_control_capability.py::test_nonresearch_agent_denied_web_search[Sentinel]`
+-> `[Reviewer]`, the item-A trivial fix) disappeared; 1539 collected.
+
+**`PHASE_8_STATUS = PASS`, now genuinely gate-verified against live Phase 8 code.**
+Proceeding to Phase 9 (verified manifest and Executor, solo, sections 49-53/92).
