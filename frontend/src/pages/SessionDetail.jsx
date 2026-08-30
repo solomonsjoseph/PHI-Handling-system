@@ -3,12 +3,17 @@ import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import axios from 'axios';
 import { API, getSession, streamUrl, whoami } from '../lib/api';
-import { Btn, Panel, Tag } from '../components/ui';
+import { Btn } from '../components/ui';
 import Spinner from '../components/common/Spinner';
 import StatusChip from '../components/common/StatusChip';
 import AgentTracePanel from '../components/trace/AgentTracePanel';
 import LiveNarrationStrip from '../components/trace/LiveNarrationStrip';
 import PipelineProgressBar from '../components/progress/PipelineProgressBar';
+import PublishGuardPanel from '../components/guard/PublishGuardPanel';
+import CorpusVerifierPanel from '../components/corpus/CorpusVerifierPanel';
+import BenchmarkPanel from '../components/corpus/BenchmarkPanel';
+import HumanReviewPanel from '../components/review/HumanReviewPanel';
+import DevLogsPanel from '../components/dev/DevLogsPanel';
 
 export default function SessionDetail() {
   const { sid } = useParams();
@@ -346,427 +351,31 @@ export default function SessionDetail() {
       </div>
 
       {/* Guard */}
-      {guard && (
-        <Panel title="Publish Guard" cite="Deterministic residual-PHI scan at the download boundary"
-               testId="publish-guard-panel"
-               right={
-                 <Tag color={guard.status === 'clean' ? 'accept' : 'reject'} testId="publish-guard-status">
-                   {guard.status === 'clean' ? 'PHI-handled · safe to share' : 'BLOCKED'}
-                 </Tag>
-               }>
-          <div className="text-body text-ink">
-            Scanned <span className="font-mono">{guard.scanned || 0}</span> file(s);
-            blocked <span className="font-mono">{guard.blocked || 0}</span>.
-          </div>
-          {guard.blocked > 0 && (
-            <div className="mt-4 space-y-3">
-              {(guard.results || []).filter(r => r.status === 'blocked').map((r, i) => (
-                <div key={i} className="border-l-2 border-oxblood pl-4" data-testid={`guard-block-${i}`}>
-                  <div className="kicker text-oxblood">{(r.file_path || '').split('/').pop()}</div>
-                  <div className="mt-2 space-y-1">
-                    {(r.findings || []).slice(0, 5).map((f, j) => (
-                      <div key={j} className="font-mono text-[12px] text-ink-2">
-                        L{f.line} · {f.pattern_id} · cat {f.hipaa_category} · <span className="phi-mask">{f.sample}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Panel>
-      )}
+      <PublishGuardPanel guard={guard} />
 
-      {/* Corpus verifier report (only for corpus-mode sessions) */}
-      {corpusReport && (
-        <Panel title="Adversarial corpus verifier"
-               cite="Every planted PHI cell scored against Judge decisions + redacted export text"
-               testId="corpus-verifier-panel"
-               right={
-                 <Tag color={
-                   (corpusReport.correctness?.overall_f1 || 0) >= 0.999 &&
-                   (corpusReport.correctness?.false_negatives || []).length === 0
-                     ? 'accept' : 'reject'
-                 } testId="corpus-verifier-status">
-                   F1 {((corpusReport.correctness?.overall_f1 || 0)).toFixed(4)}
-                 </Tag>
-               }>
-          <div className="grid grid-cols-4 gap-6">
-            <div>
-              <div className="kicker">Precision</div>
-              <div className="font-display text-display-md text-oxblood" data-testid="corpus-precision">
-                {(corpusReport.correctness?.overall_precision || 0).toFixed(4)}
-              </div>
-            </div>
-            <div>
-              <div className="kicker">Recall</div>
-              <div className="font-display text-display-md text-oxblood" data-testid="corpus-recall">
-                {(corpusReport.correctness?.overall_recall || 0).toFixed(4)}
-              </div>
-            </div>
-            <div>
-              <div className="kicker">Accuracy</div>
-              <div className="font-display text-display-md text-oxblood" data-testid="corpus-accuracy">
-                {(corpusReport.correctness?.overall_accuracy || 0).toFixed(4)}
-              </div>
-            </div>
-            <div>
-              <div className="kicker">Deferrals</div>
-              <div className="font-display text-display-md text-ink" data-testid="corpus-deferrals">
-                {corpusReport.deferral?.count || 0}
-              </div>
-            </div>
-          </div>
-          <div className="mt-6 text-[12px] text-ink-muted">
-            planted <span className="font-mono">{corpusReport.summary?.planted_columns || 0}</span> cells ·
-            TP <span className="font-mono">{corpusReport.summary?.tp || 0}</span> ·
-            FP <span className="font-mono">{corpusReport.summary?.fp || 0}</span> ·
-            FN <span className="font-mono">{corpusReport.summary?.fn || 0}</span> ·
-            TN <span className="font-mono">{corpusReport.summary?.tn || 0}</span>
-          </div>
-          <div className="mt-6 grid grid-cols-6 gap-2" data-testid="corpus-per-category">
-            {(corpusReport.correctness?.per_category || []).map(pc => (
-              <div key={pc.category} className="border border-rule px-3 py-2">
-                <div className="font-mono text-[11px] text-ink-muted">cat {pc.category}</div>
-                <div className="font-display text-[13px] text-ink mt-0.5">
-                  {pc.tp}/{pc.tp + pc.fn} recalled
-                </div>
-                <div className="font-mono text-[10px] text-ink-muted">
-                  fp {pc.fp} · tn {pc.tn}
-                </div>
-              </div>
-            ))}
-          </div>
-          {(corpusReport.correctness?.false_negatives || []).length > 0 && (
-            <div className="mt-6 border-l-2 border-oxblood pl-4">
-              <div className="kicker text-oxblood">False negatives (PHI leaks)</div>
-              <div className="mt-2 space-y-1">
-                {corpusReport.correctness.false_negatives.slice(0, 10).map((m, i) => (
-                  <div key={i} className="font-mono text-[12px] text-ink-2" data-testid={`corpus-fn-${i}`}>
-                    {m.file} · {m.column} · cat {m.hipaa_category} · expected {m.expected_action} → got {m.actual_action}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          {(corpusReport.correctness?.false_positives || []).length > 0 && (
-            <div className="mt-4 border-l-2 border-signal pl-4">
-              <div className="kicker text-signal">False positives (over-blocked)</div>
-              <div className="mt-2 space-y-1">
-                {corpusReport.correctness.false_positives.slice(0, 10).map((m, i) => (
-                  <div key={i} className="font-mono text-[12px] text-ink-2" data-testid={`corpus-fp-${i}`}>
-                    {m.file} · {m.column} · expected {m.expected_action} → got {m.actual_action}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </Panel>
-      )}
+      <CorpusVerifierPanel corpusReport={corpusReport} />
 
-      {/* Per-dataset benchmark report (only for corpus-mode sessions) */}
-      {benchmarkReport && (
-        <Panel title="Per-dataset benchmark"
-               cite="Per-column method, why, how, confidence, and gold verdict; see the benchmark bundle for the full report"
-               testId="benchmark-panel"
-               right={
-                 <Btn variant="ghost" size="sm" onClick={downloadBenchmark} disabled={busy} testId="benchmark-download">
-                   Download benchmark ↓
-                 </Btn>
-               }>
-          <div className="grid grid-cols-5 gap-6">
-            <div>
-              <div className="kicker">Leak rate</div>
-              <div className="font-display text-display-md text-oxblood" data-testid="benchmark-leak-rate">
-                {((benchmarkReport.totals?.leak_rate || 0) * 100).toFixed(2)}%
-              </div>
-            </div>
-            <div>
-              <div className="kicker">F1</div>
-              <div className="font-display text-display-md text-oxblood" data-testid="benchmark-f1">
-                {(benchmarkReport.totals?.f1 || 0).toFixed(4)}
-              </div>
-            </div>
-            <div>
-              <div className="kicker">Method-exact rate</div>
-              <div className="font-display text-display-md text-ink" data-testid="benchmark-method-exact-rate">
-                {((benchmarkReport.totals?.method_exact_rate || 0) * 100).toFixed(1)}%
-              </div>
-            </div>
-            <div>
-              <div className="kicker">Autonomy rate</div>
-              <div className="font-display text-display-md text-ink" data-testid="benchmark-autonomy">
-                {((benchmarkReport.totals?.autonomy_rate || 0) * 100).toFixed(1)}%
-              </div>
-            </div>
-            <div>
-              <div className="kicker">Identifiers removed before prompt</div>
-              <div className="font-display text-display-md text-ink" data-testid="benchmark-scrub-count">
-                {benchmarkReport.context_hygiene?.identifiers_removed_before_prompt ?? '—'}
-              </div>
-            </div>
-          </div>
-          <div className="mt-6 overflow-x-auto" data-testid="benchmark-columns-table">
-            <table className="w-full text-[12px]">
-              <thead>
-                <tr className="text-ink-muted text-left border-b border-rule">
-                  <th className="py-2 pr-3">Column</th>
-                  <th className="py-2 pr-3">Gold category</th>
-                  <th className="py-2 pr-3">Method</th>
-                  <th className="py-2 pr-3">Why</th>
-                  <th className="py-2 pr-3">Confidence</th>
-                  <th className="py-2 pr-3">Decided by</th>
-                  <th className="py-2 pr-3">Verdict</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(benchmarkReport.columns || []).map((c, i) => (
-                  <tr key={i} className="border-b border-rule/50" data-testid={`benchmark-column-${i}`}>
-                    <td className="py-2 pr-3 font-mono">{c.file}:{c.column}</td>
-                    <td className="py-2 pr-3">{c.gold_category}</td>
-                    <td className="py-2 pr-3">{c.action_label}</td>
-                    <td className="py-2 pr-3 text-ink-2 max-w-xs truncate" title={c.reason}>{c.reason}</td>
-                    <td className="py-2 pr-3 font-mono">{c.confidence == null ? '—' : c.confidence.toFixed(2)}</td>
-                    <td className="py-2 pr-3">{c.decided_by}</td>
-                    <td className="py-2 pr-3">
-                      <Tag color={c.verdict === 'correct' ? 'accept' : 'reject'}>{c.verdict}</Tag>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Panel>
-      )}
+      <BenchmarkPanel benchmarkReport={benchmarkReport} onDownload={downloadBenchmark} busy={busy} />
       {reviewNeeded && (
-        <Panel title="Human review" cite="You are the reviewer of record; decisions carry your id + timestamp"
-               testId="human-review-panel">
-          {isPartiallyComplete && (
-            <div className="mb-6 border-l-2 border-signal pl-4 py-2 bg-paper-2/50" data-testid="partially-complete-banner">
-              <div className="text-[12px] text-ink-2">
-                A partial bundle is ready above. <span className="font-mono">{humanRows.length}</span> column(s) below are
-                still withheld from every export pending your decision — never defaulted, never blanked.
-              </div>
-            </div>
-          )}
-          <div className="grid grid-cols-2 gap-6 mb-6">
-            <div>
-              <div className="kicker">Reviewer identity</div>
-              {/* D13 step 8: read-only -- this is the authenticated
-                  credential from whoami(), never operator-editable text,
-                  so what is displayed here always matches what the
-                  backend actually stamps on the review event. */}
-              <div data-testid="reviewer-id"
-                   className="mt-2 w-full h-10 flex items-center border-b border-ink text-ink font-mono">
-                {principal === null ? 'loading…' : principal || 'not authenticated'}
-              </div>
-            </div>
-            <div>
-              <div className="kicker">Comment</div>
-              <input data-testid="reviewer-comment" value={reviewComment} onChange={e => setReviewComment(e.target.value)}
-                     placeholder="general note for this submission"
-                     className="mt-2 w-full h-10 bg-transparent border-b border-ink text-ink focus:border-oxblood"/>
-            </div>
-          </div>
-
-          {/* Original file access: the system never opens or reads these on
-              the reviewer's behalf -- only column headers ever reach a model. */}
-          {datasetFiles.length > 0 && (
-            <div className="rule-top pt-5 mb-6" data-testid="dataset-file-review-panel">
-              <div className="kicker mb-3">Original dataset file(s) <span className="text-oxblood">(required)</span></div>
-              <div className="text-[12px] text-ink-muted mb-3">
-                Download the original file(s) and open them in your own tool to judge the flagged columns below.
-              </div>
-              <div className="space-y-2">
-                {datasetFiles.map(f => (
-                  <div key={f.file_id} className="flex items-center justify-between gap-4 data-cell" data-testid={`dataset-file-row-${f.file_id}`}>
-                    <div className="font-mono text-[12px] text-ink">{f.original_name}</div>
-                    <Btn size="sm" variant="ghost" onClick={() => downloadDatasetFile(f.file_id)} testId={`btn-download-dataset-file-${f.file_id}`}>
-                      Download ↓
-                    </Btn>
-                  </div>
-                ))}
-              </div>
-              <label className="mt-4 flex items-start gap-3 cursor-pointer" data-testid="file-review-ack-label">
-                <input type="checkbox" checked={fileReviewAck}
-                       onChange={e => setFileReviewAck(e.target.checked)}
-                       data-testid="file-review-ack"
-                       className="mt-[3px] h-4 w-4 accent-oxblood"/>
-                <span className="text-[12px] text-ink-2 leading-5">
-                  I have downloaded and reviewed the original file(s) above in my own tool.
-                </span>
-              </label>
-            </div>
-          )}
-
-          {/* D13 step 4/7/8: the Auditor's own second-review escalation.
-              Distinct from the per-column resolutions below -- confidence
-              is telemetry (D12), never evidence, so it is labelled as
-              such; confirming answers only "I have seen this verdict",
-              never "I agree the export is clean". */}
-          {session?.audit_version && (
-            <div className="rule-top pt-5 mb-6" data-testid="auditor-confirmation-panel">
-              <div className="kicker mb-3">Auditor second review</div>
-              <div className="text-[12px] text-ink-2 mb-2">
-                Verdict: <span className="font-mono text-ink">{session.audit?.verdict || 'unknown'}</span>
-                {' · '}Confidence (telemetry, not evidence):{' '}
-                <span className="font-mono text-ink">
-                  {typeof session.audit?.confidence === 'number' ? session.audit.confidence.toFixed(2) : '—'}
-                </span>
-              </div>
-              {session.audit?.summary && (
-                <div className="text-[12px] text-ink-2 mb-2">{session.audit.summary}</div>
-              )}
-              {(session.audit?.issues || []).length > 0 && (
-                <ul className="text-[12px] text-ink-2 list-disc pl-5 mb-3 space-y-1" data-testid="auditor-issues-list">
-                  {session.audit.issues.map((iss, i) => (
-                    <li key={i}>
-                      {iss.file ? <span className="font-mono">{iss.file}</span> : null}
-                      {iss.column ? <span className="font-mono"> · {iss.column}</span> : null}
-                      {': '}{iss.problem || JSON.stringify(iss)}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <Btn size="sm" variant="ghost" onClick={confirmAuditorConfidence}
-                   disabled={busy || !principal} testId="btn-confirm-auditor-confidence">
-                Confirm I have reviewed this verdict
-              </Btn>
-            </div>
-          )}
-
-          {humanRows.length > 0 ? (() => {
-            const setRowMode = (key, mode) => setResolutions(prev => ({
-              ...prev, [key]: { ...(prev[key] || {}), mode, comment: mode === 'comment' ? (prev[key]?.comment || '') : '' },
-            }));
-            const setRowComment = (key, text) => setResolutions(prev => ({
-              ...prev, [key]: { ...(prev[key] || {}), mode: 'comment', comment: text },
-            }));
-            const clearRow = (key) => setResolutions(prev => {
-              const next = { ...prev }; delete next[key]; return next;
-            });
-            const activeRows = humanRows.filter(d => resolutions[`${d.file_id}|${d.column}`]?.mode !== 'defer');
-            const setAsideRows = humanRows.filter(d => resolutions[`${d.file_id}|${d.column}`]?.mode === 'defer');
-            const renderRow = (d) => {
-              const key = `${d.file_id}|${d.column}`;
-              const current = resolutions[key] || {};
-              const pending = d.pending_confirmation;
-              return (
-                <div key={key} className="data-cell space-y-3" data-testid={`review-row-${d.column}`}>
-                  <div>
-                    <div className="font-mono text-[13px] text-ink">{d.column}</div>
-                    <div className="text-[12px] text-ink-2 mt-1">{d.reviewer_prompt || d.reason || 'no rationale'}</div>
-                    {d.needs_file_glance && (
-                      <div className="text-[11px] text-oxblood mt-1">↑ open the original file above to judge this free-text column</div>
-                    )}
-                  </div>
-
-                  {pending ? (
-                    <div className="border-l-2 border-signal pl-3 py-2 bg-paper-2/50" data-testid={`review-row-confirm-${d.column}`}>
-                      <div className="text-[12px] text-ink-2">
-                        You said: <span className="italic">"{d.reviewer_comment}"</span> — I read that as:{' '}
-                        <span className="font-mono text-oxblood">{pending.action || '(no clear action)'}</span>.
-                        {pending.reason ? ` ${pending.reason}` : ''} Confirm?
-                      </div>
-                      <div className="mt-2 flex gap-2">
-                        <Btn size="sm" variant={current.mode === 'approve' ? 'primary' : 'ghost'}
-                             disabled={!pending.action}
-                             onClick={() => setRowMode(key, 'approve')} testId={`btn-confirm-${d.column}`}>
-                          Confirm
-                        </Btn>
-                        <Btn size="sm" variant={current.mode === 'comment' ? 'primary' : 'ghost'}
-                             onClick={() => setRowMode(key, 'comment')} testId={`btn-recomment-${d.column}`}>
-                          Re-comment
-                        </Btn>
-                        <Btn size="sm" variant="ghost" onClick={() => setRowMode(key, 'defer')} testId={`btn-defer-${d.column}`}>
-                          Defer
-                        </Btn>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex gap-2" data-testid={`review-row-buttons-${d.column}`}>
-                      <Btn size="sm" variant={current.mode === 'approve' ? 'primary' : 'ghost'}
-                           disabled={!d.suggested_action}
-                           onClick={() => setRowMode(key, 'approve')} testId={`btn-approve-${d.column}`}
-                           title={d.suggested_action ? `Apply: ${d.suggested_action}` : 'No suggested action available — use Comment'}>
-                        Approve{d.suggested_action ? ` (${d.suggested_action})` : ''}
-                      </Btn>
-                      <Btn size="sm" variant={current.mode === 'comment' ? 'primary' : 'ghost'}
-                           onClick={() => setRowMode(key, 'comment')} testId={`btn-comment-${d.column}`}>
-                        Comment
-                      </Btn>
-                      <Btn size="sm" variant="ghost" onClick={() => setRowMode(key, 'defer')} testId={`btn-defer-${d.column}`}>
-                        Defer
-                      </Btn>
-                    </div>
-                  )}
-
-                  {current.mode === 'comment' && (
-                    <textarea
-                      value={current.comment || ''}
-                      onChange={e => setRowComment(key, e.target.value)}
-                      placeholder="Tell the system what should happen to this column…"
-                      className="w-full h-16 bg-transparent border border-rule text-ink px-2 py-1.5 text-[12px] focus:border-oxblood"
-                      data-testid={`review-row-comment-${d.column}`}
-                    />
-                  )}
-                </div>
-              );
-            };
-            return (
-              <div className="space-y-4">
-                <div className="space-y-5">{activeRows.map(renderRow)}</div>
-                {setAsideRows.length > 0 && (
-                  <div className="rule-top pt-4" data-testid="set-aside-panel">
-                    <div className="kicker text-ink-muted mb-2">Set aside for later ({setAsideRows.length})</div>
-                    <div className="space-y-2">
-                      {setAsideRows.map(d => {
-                        const key = `${d.file_id}|${d.column}`;
-                        return (
-                          <div key={key} className="flex items-center justify-between gap-4 text-[12px] text-ink-muted" data-testid={`set-aside-row-${d.column}`}>
-                            <span className="font-mono">{d.column}</span>
-                            <button className="text-oxblood hover:underline" onClick={() => clearRow(key)} data-testid={`btn-unset-aside-${d.column}`}>
-                              bring back
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-                <label className="mt-2 flex items-start gap-3 rule-top pt-4 cursor-pointer" data-testid="actual-knowledge-ack-label">
-                  <input type="checkbox" checked={actualKnowledgeAck}
-                         onChange={e => setActualKnowledgeAck(e.target.checked)}
-                         data-testid="actual-knowledge-ack"
-                         className="mt-[3px] h-4 w-4 accent-oxblood"/>
-                  <span className="text-[12px] text-ink-2 leading-5">
-                    <span className="font-mono text-oxblood">Required for approved/commented columns · 45 CFR 164.514(b)(2)(ii).</span>{' '}
-                    I have no actual knowledge that the information I am resolving this round, alone or in combination
-                    with other reasonably available information, could be used to identify an individual.
-                  </span>
-                </label>
-                <div className="pt-4 flex justify-end">
-                  <Btn variant="primary" onClick={submitReview}
-                       disabled={busy || humanRows.some(d => !resolutions[`${d.file_id}|${d.column}`]?.mode)}
-                       testId="btn-submit-human-review">
-                    Submit ({humanRows.filter(d => resolutions[`${d.file_id}|${d.column}`]?.mode).length}/{humanRows.length}) →
-                  </Btn>
-                </div>
-              </div>
-            );
-          })() : (
-            <div className="space-y-4">
-              <div className="text-[12px] text-ink-muted">
-                Nothing is flagged for a specific column right now — resume the pipeline to continue.
-              </div>
-              <div className="flex justify-end">
-                <Btn variant="primary" onClick={submitReview} disabled={busy || !principal} testId="btn-accept-globally">
-                  Resume →
-                </Btn>
-              </div>
-            </div>
-          )}
-        </Panel>
+        <HumanReviewPanel
+          isPartiallyComplete={isPartiallyComplete}
+          humanRows={humanRows}
+          principal={principal}
+          reviewComment={reviewComment}
+          setReviewComment={setReviewComment}
+          datasetFiles={datasetFiles}
+          fileReviewAck={fileReviewAck}
+          setFileReviewAck={setFileReviewAck}
+          downloadDatasetFile={downloadDatasetFile}
+          session={session}
+          busy={busy}
+          confirmAuditorConfidence={confirmAuditorConfidence}
+          resolutions={resolutions}
+          setResolutions={setResolutions}
+          actualKnowledgeAck={actualKnowledgeAck}
+          setActualKnowledgeAck={setActualKnowledgeAck}
+          submitReview={submitReview}
+        />
       )}
 
       {/* Pending state */}
@@ -778,40 +387,7 @@ export default function SessionDetail() {
         </div>
       )}
 
-      {/* Dev logs */}
-      <div className="mt-24 rule-top pt-6" data-testid="dev-toggle-panel">
-        <button onClick={() => setDevOpen(o => !o)} className="kicker text-ink-2 hover:text-oxblood" data-testid="btn-toggle-dev">
-          {devOpen ? '— hide agent details' : '+ show agent details'}
-        </button>
-        {devOpen && (
-          <div className="mt-8 grid grid-cols-2 gap-10">
-            <div>
-              <div className="kicker mb-3">Agent decisions</div>
-              <div className="space-y-2">
-                {decisions.map((d, i) => (
-                  <div key={i} className="data-cell flex justify-between gap-4 text-[12px]">
-                    <span className="font-mono text-ink">{d.column}</span>
-                    <span className="font-mono text-oxblood">{d.action}</span>
-                    <span className="font-mono text-ink-muted">{typeof d.confidence === 'number' ? d.confidence.toFixed(2) : '—'}</span>
-                  </div>
-                ))}
-                {decisions.length === 0 && <div className="text-[12px] text-ink-muted">No decisions yet.</div>}
-              </div>
-            </div>
-            <div>
-              <div className="kicker mb-3">Agent trace ({trace.length})</div>
-              <div className="space-y-1 max-h-96 overflow-auto font-mono text-[11px]">
-                {trace.map((m, i) => (
-                  <div key={i} className="text-ink-2">
-                    <span className="text-oxblood">{m.agent}</span> · {m.direction} · {m.phase} {m.error && <span className="text-oxblood">err</span>}
-                  </div>
-                ))}
-                {trace.length === 0 && <div className="text-ink-muted">No trace yet.</div>}
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
+      <DevLogsPanel devOpen={devOpen} setDevOpen={setDevOpen} decisions={decisions} trace={trace} />
     </div>
   );
 }
