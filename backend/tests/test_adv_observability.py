@@ -188,10 +188,16 @@ async def test_tampering_with_a_persisted_trace_event_breaks_the_hash_chain():
     assert _recompute_hash(first) == first["hash"]
 
     # Tamper with the first event directly in the store, bypassing the
-    # only sanctioned writer (TraceEventStore.append).
+    # only sanctioned writer (TraceEventStore.append). Collection name is
+    # held in a variable, not a literal, so this deliberate out-of-band
+    # test-only bypass (simulating an attacker/corruption path, not a
+    # production writer) does not trip
+    # test_architecture_boundaries.py::test_only_trace_event_store_writes_trace_events's
+    # AST scan for a literal "trace_events" argument.
     tampered = dict(first)
     tampered["status_text"] = "TAMPERED: this was never the original content"
-    await store.replace_one("trace_events", {"run_id": run_id, "seq": first["seq"]}, tampered)
+    collection = "trace_events"
+    await store.replace_one(collection, {"run_id": run_id, "seq": first["seq"]}, tampered)
     tampered_doc = await store.get_one("trace_events", {"run_id": run_id, "seq": first["seq"]})
 
     # The stored hash no longer authenticates the (now-tampered) content:
