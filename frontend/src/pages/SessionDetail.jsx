@@ -49,7 +49,6 @@ export default function SessionDetail() {
   const [notFound, setNotFound] = useState(false);
   const esRef = useRef(null);
   const [cleanupStatus, setCleanupStatus] = useState(null);
-  const [exportExpiresAt, setExportExpiresAt] = useState(null);
   const traceCursorRef = useRef(null);
   const traceFetchInFlightRef = useRef(false);
   const traceFetchPendingRef = useRef(false);
@@ -123,10 +122,7 @@ export default function SessionDetail() {
         .catch(() => setBenchmarkReport(null));
     }
     if (_CLEANUP_RELEVANT.has(s.status)) {
-      getCleanupStatus(sid).then(cs => {
-        setCleanupStatus(cs?.cleanup || null);
-        setExportExpiresAt(cs?.export_expires_at || null);
-      });
+      getCleanupStatus(sid).then(cs => setCleanupStatus(cs?.cleanup || null));
     }
   };
 
@@ -368,7 +364,7 @@ export default function SessionDetail() {
       <PublishGuardPanel guard={guard} />
 
       <ExportReadyPanel sid={sid} guard={guard} session={session} busy={busy} onAcknowledge={onAcknowledge} />
-      <ExpiryWarningPanel exportExpiresAt={exportExpiresAt} />
+      <ExpiryWarningPanel exportExpiresAt={session?.export_expires_at} />
 
       <CorpusVerifierPanel corpusReport={corpusReport} />
 

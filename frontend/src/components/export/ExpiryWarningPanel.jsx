@@ -2,12 +2,13 @@ import React from 'react';
 
 const WARNING_WINDOW_MS = 72 * 60 * 60 * 1000; // 72h
 
-// Expiry warning (docs #96, #75 EXPORT_RETENTION_WINDOW): computed by
-// `GET /api/sessions/{sid}/cleanup-status`'s `export_expires_at` field
-// (ISO datetime or null; never stored on the plain session document --
-// it is derived on the fly from `updated_at` once the run is
-// export-ready and Publish-Guard-clean). Renders nothing before that
-// endpoint has ever returned a value, or on an older backend without it.
+// Expiry warning (docs #96, #75 EXPORT_RETENTION_WINDOW): `session
+// .export_expires_at` (ISO datetime or null), computed on the fly from
+// `updated_at` once the run is export-ready and Publish-Guard-clean.
+// `_scrub_session_document` sets this on every `GET /api/sessions/{sid}`
+// and list read; the same value is also returned by `GET
+// .../cleanup-status`. Renders nothing before export-readiness sets it,
+// or on an older backend without it.
 export default function ExpiryWarningPanel({ exportExpiresAt }) {
   if (!exportExpiresAt) return null;
   const expires = new Date(exportExpiresAt);
