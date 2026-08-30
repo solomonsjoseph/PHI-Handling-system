@@ -1370,5 +1370,105 @@ extras this run, confirming the subagent's `test_llm_settings_default` flake the
 the widened raw-reader scan: 82 passed. Nodeid regression: only the 6 already-recorded
 disappeared nodeids from Phases 7-8 (no new disappearances); 1580 collected.
 
-**`PHASE_9_STATUS = PASS`, genuinely gate-verified.** Proceeding to Phase 10
-(deterministic verification, Reviewer Final, rewind; solo; sections 54-56/93).
+**`PHASE_9_STATUS = PASS`, genuinely gate-verified.**
+
+---
+
+## Phase 10 (deterministic verification, Reviewer Final, rewind) — COMPLETE
+
+Six commits (`12209f4`, `bde5be1`, `85f4ae0`, `9efe184`, `1dccda0`, `15106b4`), landed by
+a solo subagent (paused once at its own request after item 4 with a clean, fully-tested
+handoff; resumed to finish items 5-7).
+
+**1-2. `DeterministicVerifier` built and wired (`control/deterministic_verifier.py`).**
+Covers the full section 54 checklist (12 items: input datasets accounted, expected
+outputs exist, every manifest column accounted, DROP->absent, KEEP->present, transformed
+operation->applied, no unexpected columns, output readable, schema valid, file/column
+counts valid, checksums available, manifest coverage 100%). Populates Phase 9's
+`VerificationResult` via the existing `control/verification.py` helper (not duplicated).
+Wired into `execute_decisions` at the point `Operator` used to run.
+
+**3. `Operator` retired.** `phi_core/agents/operator.py` deleted. Raw-reader allowlist
+tightened in the same commit: the `operator.py::_read_columns` docstring bullet and code
+exemption removed from `test_control_phaseR_integration.py`'s AST scan (renamed
+`test_sandboxed_raw_reader_call_sites_confined_to_reasoning_py`, allowlist narrowed to
+`reasoning.py` only). **This closes the last of the two-phase allowlist tightening the
+Wave R-c invariant itself specified** (Phase 9 took `verify_keep_decisions`, Phase 10
+takes `operator.py`, exactly as documented at R-c Step 8).
+
+**4. Reviewer Final built (`Reviewer.finalize()`, section 55).** Consumes
+`VerifiedClassificationManifest` + `ExecutionResult` + `VerificationResult` +
+`HumanDecision` refs + safe output metadata; returns PASS/FAIL/HUMAN_REVIEW_REQUIRED
+over the 8-item checklist. Wired into `execute_decisions` after the coverage-audit
+`Reviewer.run()`, fail-open (an exception in Reviewer Final does not itself crash the
+pipeline). **Fixed a real double-penalty bug found during wiring:** Reviewer Final was
+initially auditing `DeterministicVerifier`'s raw pre-filter verdicts, so a single
+per-file shape violation already excluded from exports by the existing
+`partially_complete` degradation path was also tripping a second, competing FAIL/rewind
+escalation for the same fact. Fixed by scoping Reviewer Final's inputs to the surviving
+exports only; the Phase 9 `VerificationResult` persistence contract is unchanged.
+
+**5. Root-cause classifier and rewind router (`control/rewind.py`, section 56).** A
+5-value classifier (`EXECUTION_ERROR`, `METHOD_ERROR`, `REGULATION_ERROR`,
+`SEMANTIC_ERROR`, `UNRESOLVED_UNCERTAINTY`; a new Literal, not added to `records.py`'s
+closed `FailureClass`) maps each category to its earliest-affected workflow node
+(`execute`, `decide`, `decide`, `specialists`, `human_review_decisions`/
+`human_review_audit`) and calls the **already-existing** `SuperOrchestrator.rewind()`
+(Wave R-b, `superorchestrator.py:871`, built but never wired to a live caller before this
+phase) rather than building a second rewind mechanism. `SEMANTIC_ERROR` maps to
+`FailureClass "SPECIALIST_INTERPRETATION_ERROR"`, `UNRESOLVED_UNCERTAINTY` to
+`"HUMAN_REVIEW_REQUIRED"`, the other three exact-name matches -- recorded alongside the
+persisted failure. Fires when Reviewer Final returns FAIL.
+
+**Disclosed architectural boundary (not a defect):** when a failure is detected while
+`execute_decisions` is still mid-dispatch of its own `execute` node (the pipeline driver
+has not yet advanced `WorkflowRun.node` past `execute`), a rewind *to* `execute` targets
+the run's own current node, which `SuperOrchestrator.rewind()`'s existing guard
+(`superorchestrator.py:890/896`, built at Wave R-b) correctly refuses (`WorkflowError`,
+"not earlier than current node"), never a rewind to a later or identical node. This is
+caught and falls back to the existing `_escalate_to_human_review` path -- never a silent
+failure or a crash, and never `FINAL FAIL -> STOP FOREVER` (section 56's explicit
+prohibition). Verified this is a narrow, genuine edge case, not a general defect: when a
+failure surfaces later (e.g. from Reviewer Final at `verify_reviewer`, well after
+`execute`), the same classifier and router successfully rewind to `execute` --
+independently confirmed by reading `test_route_execution_error_rewinds_to_execute`,
+which constructs its run at `report_ledger` (a later node) and asserts a real,
+successful rewind. The actual re-execution-from-a-rewound-checkpoint loop remains
+explicitly out of scope per section 56 ("do not implement... unless truly blocked").
+
+**6-7. Individual rewind-path tests and invariants.** `test_control_rewind.py`: 8
+classification tests (one per category plus edge cases: unroutable failure class, no
+failure class present) and 8 routing tests (one successful rewind per category, plus the
+refused-target case above and a `FailureClass`-persistence test).
+`test_phase10_invariants.py`: Operator module gone (both a file-existence and an
+import-failure check), the raw-reader scan is non-vacuous and confined to `reasoning.py`,
+and all five rewind categories route to their expected nodes end to end.
+
+**DELETED_TESTS:** `tests/test_operator.py::test_agent_log_row_emitted_per_batch` --
+asserted on `Operator`'s own `Agent`-based `self._log`/`run_batched` per-batch logging;
+`DeterministicVerifier` is not an `Agent` and does not use `run_batched` for its
+verification pass, so this specific infrastructure no longer exists to test. (The other
+~32 `test_operator.py` nodeids that disappeared were **migrated, not deleted**: every one
+reappears verbatim by name in `test_deterministic_verifier.py`, independently confirmed
+by this session via a direct name-for-name comparison -- `cap_age_90`, `scrub_text`,
+`pseudonymize`, `zip3_truncate`, `decision_for_nonexistent_column`, `drop_column`,
+`missing_export_file`, `corrupt_written_file`, `unknown_file_id`, `omit_by_file`,
+`header_only_export`, `zero_decision_file`, all present, plus new coverage for
+`checksums_present`, `file_and_column_counts`, and the sandbox-routing check. Not
+recorded as separate `DELETED_TESTS` entries, consistent with how this document has
+treated other exact migrations, e.g. Phase 8's `[Sentinel]`->`[Reviewer]` parametrize
+rename.)
+
+**Genuine canonical gate (serial, `PHI_TEST_BASE_URL=http://127.0.0.1:8001`, fresh
+restart, clean `.env`/Mongo, orchestrator-verified independently of the subagent's own
+run):** **8 failed, 1601 passed, 4 skipped, 2 errors, 0 xfailed, 88.42s.** Failed/error
+set exactly matches the Step 0/Phase 9 baseline (3 `test_human_review_invariant.py`
+FAILED, 5 `test_agent_pipeline.py` FAILED, 2 `test_agent_pipeline.py` ERROR); no
+intermittent extras. `ruff check .` clean. Root suite unchanged (85 failed / 909 passed /
+3 skipped, all `phi_engine`, out of scope). Invariant + canary + all four new/renamed
+Phase 10 test files + the narrowed raw-reader scan: 105 passed. Nodeid regression: only
+the already-recorded disappeared nodeids from Phases 7-8, plus the ~33 `test_operator.py`
+nodeids accounted for above (1 deleted, ~32 migrated verbatim); 1615 collected.
+
+**`PHASE_10_STATUS = PASS`, genuinely gate-verified.** Phase 7-10 wave complete.
+Proceeding to Phase 11 (Final Assurance and reports, two waves, sections 57-63/94).
