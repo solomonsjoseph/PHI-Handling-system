@@ -373,8 +373,18 @@ async def test_retention_purge_removes_expired_partially_complete_session(tmp_pa
     }
 
     class _Sessions:
+        """A mutable in-memory collection, not a static single-document
+        check: ``delete_one`` genuinely removes the session, so a later
+        step's ``find()`` in the same sweep (Phase 12's new step 5, export
+        retention) sees it as gone, exactly like a real live Mongo
+        collection would. A prior version of this stub statically checked
+        ``expired_session`` without ever removing it, which happened to
+        work only because no earlier step's query shape also matched
+        step 1's -- no longer true once step 5 exists."""
+
         def __init__(self):
             self.deleted = []
+            self._live = True
 
         def find(self, query, *_a, **_kw):
             status_filter = query["status"]["$in"]
@@ -382,7 +392,8 @@ async def test_retention_purge_removes_expired_partially_complete_session(tmp_pa
 
             async def matching_sessions():
                 if (
-                    expired_session["status"] in status_filter
+                    self._live
+                    and expired_session["status"] in status_filter
                     and expired_session["updated_at"] < cutoff
                 ):
                     yield expired_session
@@ -391,6 +402,7 @@ async def test_retention_purge_removes_expired_partially_complete_session(tmp_pa
 
         async def delete_one(self, query):
             self.deleted.append(query)
+            self._live = False
 
     class _AgentLog:
         def __init__(self):

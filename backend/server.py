@@ -2830,7 +2830,7 @@ async def _erase_opaque_map_best_effort(db, run_id: str | None) -> None:
 
 
 async def _purge_settled_sessions_loop():
-    """Hourly: four independent retention sweeps, each backed off and
+    """Hourly: five independent retention sweeps, each backed off and
     retried rather than allowed to kill the loop on a bad iteration.
 
     1. Terminal sessions (``_TERMINAL_RETENTION_STATUSES``) older than
@@ -2851,15 +2851,33 @@ async def _purge_settled_sessions_loop():
     4. ``ArtifactService.reconcile`` (Phase 7 step 3): the registry-wide
        artifact collection sweep, run from the same interval rather than
        a fifth background task.
+    5. Phase 12 item 1 (docs #75/#76): export-ready sessions
+       (``complete``/``partially_complete`` with a clean guard report)
+       whose ``EXPORT_RETENTION_WINDOW_DAYS`` has elapsed -- typically a
+       shorter window than ``RETENTION_DAYS``, so this step is what
+       actually enforces "do not retain final packages indefinitely" for
+       sessions RETENTION_DAYS alone has not yet caught. Reuses the same
+       erasure path as step 1; a session step 5 already destroyed this
+       same sweep simply will not match step 1's query on the next
+       iteration (or vice versa) -- both run sequentially against the
+       live collection, so there is no double-processing race within one
+       iteration.
+
+    Steps 1, 3, and 5 additionally hand a best-effort ``CleanupManager``
+    pass (docs #76-77) the same audit-trail role ``session_delete`` gets
+    -- see ``_run_cleanup_manager_best_effort``'s own docstring for why
+    this never turns a successful erasure into a failed sweep.
 
     Every step skips a session (or, for reconcile, an artifact) whose
     ``WorkflowRun``/``ArtifactRecord`` carries a non-empty ``hold``.
     """
+    from phi_core.control.artifacts import EXPORT_RETENTION_WINDOW_DAYS
     from phi_core.control.artifacts import reconcile as reconcile_artifacts
     from phi_core.control.store import MongoControlStore
 
     while True:
         db = get_db()
+        control_store = MongoControlStore(db)
 
         # Step 1: terminal-state sessions past RETENTION_DAYS.
         try:
@@ -2883,10 +2901,12 @@ async def _purge_settled_sessions_loop():
                         "updated_at": datetime.now(timezone.utc).isoformat(),
                     }})
                     continue
-                await _erase_opaque_map_best_effort(db, doc.get("_pipeline_run_id") or sid)
+                run_id = doc.get("_pipeline_run_id") or sid
+                await _erase_opaque_map_best_effort(db, run_id)
                 await db.agent_log.delete_many({"session_id": sid})  # pre-migration rows, if any remain
                 await db.trace_events.delete_many({"session_id": sid})
                 await db.sessions.delete_one({"id": sid})
+                await _run_cleanup_manager_best_effort(control_store, run_id=run_id, session_id=sid)
         except asyncio.CancelledError:  # pragma: no cover - shutdown
             raise
         except Exception:  # pragma: no cover - defensive
@@ -2939,10 +2959,12 @@ async def _purge_settled_sessions_loop():
                         "updated_at": datetime.now(timezone.utc).isoformat(),
                     }})
                     continue
-                await _erase_opaque_map_best_effort(db, doc.get("_pipeline_run_id") or sid)
+                run_id = doc.get("_pipeline_run_id") or sid
+                await _erase_opaque_map_best_effort(db, run_id)
                 await db.agent_log.delete_many({"session_id": sid})  # pre-migration rows, if any remain
                 await db.trace_events.delete_many({"session_id": sid})
                 await db.sessions.delete_one({"id": sid})
+                await _run_cleanup_manager_best_effort(control_store, run_id=run_id, session_id=sid)
         except asyncio.CancelledError:  # pragma: no cover - shutdown
             raise
         except Exception:  # pragma: no cover - defensive
@@ -2950,7 +2972,45 @@ async def _purge_settled_sessions_loop():
 
         # Step 4: the artifact-registry-wide reconcile sweep.
         try:
-            await reconcile_artifacts(MongoControlStore(db))
+            await reconcile_artifacts(control_store)
+        except asyncio.CancelledError:  # pragma: no cover - shutdown
+            raise
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        # Step 5 (Phase 12 item 1): export-ready sessions past their own,
+        # typically shorter, EXPORT_RETENTION_WINDOW_DAYS.
+        try:
+            export_cutoff = (datetime.now(timezone.utc) - timedelta(days=EXPORT_RETENTION_WINDOW_DAYS)).isoformat()
+            cursor = db.sessions.find(
+                {
+                    "status": {"$in": ["complete", "partially_complete"]},
+                    "guard_report.status": "clean",
+                    "updated_at": {"$lt": export_cutoff},
+                },
+                {"_id": 0, "id": 1, "export_paths": 1, "_pipeline_run_id": 1, "erasure_attempts": 1},
+            )
+            async for doc in cursor:
+                sid = doc.get("id")
+                if not sid:
+                    continue
+                if await _run_hold(db, doc.get("_pipeline_run_id")):
+                    continue
+                errors = _erase_session_from_disk(sid, doc.get("export_paths"))
+                if errors:
+                    await db.sessions.update_one({"id": sid}, {"$set": {
+                        "status": "erasure_pending",
+                        "erasure_error": "; ".join(f"{k}: {v}" for k, v in errors.items()),
+                        "erasure_attempts": int(doc.get("erasure_attempts", 0)) + 1,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }})
+                    continue
+                run_id = doc.get("_pipeline_run_id") or sid
+                await _erase_opaque_map_best_effort(db, run_id)
+                await db.agent_log.delete_many({"session_id": sid})  # pre-migration rows, if any remain
+                await db.trace_events.delete_many({"session_id": sid})
+                await db.sessions.delete_one({"id": sid})
+                await _run_cleanup_manager_best_effort(control_store, run_id=run_id, session_id=sid)
         except asyncio.CancelledError:  # pragma: no cover - shutdown
             raise
         except Exception:  # pragma: no cover - defensive
