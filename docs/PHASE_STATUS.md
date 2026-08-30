@@ -1910,3 +1910,78 @@ artifact left on disk.
 
 Proceeding to Phase 15a (solo, production hardening), then Phases 14, 15b, 16 in
 parallel.
+
+---
+
+## Phase 15a (production hardening, solo) — COMPLETE
+
+Three commits (`b34ae18`, `ce9f24e`, `dfaa937`).
+
+**SECURITY_BOUNDARY_VIOLATION handling (section 71).** New `control/security_incident.py`:
+the six named event classes, `SecurityIncident` (a `ControlRecord` deliberately carrying
+no field capable of holding a raw leaked value -- no `value`/`content`/`payload`/`raw`
+slot; the two free-text fields, `summary`/`escalation_note`, are scrubbed via
+`security.scrub_persisted_text` on write as defense in depth beyond the schema
+guarantee; `egress_digest` is an opaque keyed HMAC, never the payload). Full section-71
+action sequence in `handle_security_boundary_violation`: STOP/BLOCK (caller-side),
+ISOLATE (run-scoped), PRESERVE safe metadata only, ESCALATE, BLOCK release (wired into
+`FinalAssuranceGate`'s pre-existing `no_unresolved_security_incident` condition via new
+`derive_security_incident_active` -- that condition was already a real check, it was
+missing a genuine boolean producer, now supplied), DETERMINE destruction (a decision
+point only, `REQUIRED` for `raw_data_escaped_sandbox`, `UNDETERMINED` otherwise, never
+auto-destroys), and no automatic resume (`resolve_security_incident` requires a
+non-empty `resolved_by`, is a no-op on an unknown/already-resolved id). Wired into the
+one clearly-live production detection point: `ProviderGateway._record_canary_scan`'s
+existing leak-canary-hit branch (Wave R-d) now also opens a durable incident.
+
+**Fixed mid-review: incident durability.** The orchestrating session found the initial
+implementation stored incidents in a process-local dict, explicitly documented as
+"never persisted" -- a genuine safety gap, since section 71's core actions (BLOCK
+release, DO NOT automatically resume) are meant to survive a backend restart (crash,
+deploy, routine restart), not just the current process's lifetime. Flagged and fixed in
+the same session: `SecurityIncident` now persists through the standard `ControlStore`
+(a real `security_incidents` collection, matching `HumanDecision`/`CleanupManifest`'s
+existing convention), with no process-local cache layered on top (a cache would
+reintroduce the identical bug). `resolve_security_incident` uses compare-and-set on
+`status="open"` so a lost race is a safe no-op. Proven with a restart-simulation test
+(`test_open_incident_survives_a_simulated_backend_restart`, the same `get_db.cache_clear()`
+technique Phase 9/12's own restart tests use): an incident recorded before a simulated
+restart is still found open, with its destruction decision and scrubbed summary intact,
+by a from-scratch store afterward; an explicit resolve is itself durable across a
+second restart.
+
+**Intake hardening.** `intake.py:140-222`: signature/executable checks applied to every
+accepted extension regardless of claimed type (`_EXECUTABLE_MAGICS`: PE/ELF/4 Mach-O
+variants, plus shebang detection); `_signature_matches_extension` extends the previously
+PDF-only magic-byte check to `.csv` (must NOT start with zip magic, catching a disguised
+archive), `.xlsx`/`.docx` (MUST start with zip magic); new `_docx_is_readable` (OOXML
+container validation -- `.docx` previously had zero format-specific validation, so a
+garbage file named `codebook.docx` was silently accepted). `unpack_zip` gained an
+archive-depth guard: every entry is checked by name against `ARCHIVE_SUFFIXES` and
+peeked for zip magic bytes before ever being written to disk. **Design decision:**
+nested archives are rejected outright rather than recursively re-inspected -- no
+accepted intake component takes any archive extension, so a nested archive has zero
+legitimate destination; rejecting is strictly fail-closed-safer than building a
+recursive re-inspection path duplicating the outer unpack's own path-safety logic for
+an input class the format does not accept in the first place (this was explicitly
+sanctioned as an acceptable resolution in the dispatch brief). Proven with escalating
+tests: literal `.zip` suffix rejected and never written; a nested archive renamed to an
+accepted extension still caught by the magic-byte peek; a zip-of-a-zip-of-a-zip stopped
+at the first level (no depth lets a hidden payload through); an ordinary upload with no
+nesting still unpacks cleanly (the regression check).
+
+**Genuine canonical gate (orchestrator-independently re-run):**
+- Non-live: **3 failed, 1752 passed, 5 skipped, 86.92s** -- exactly the 3 pre-existing
+  `test_human_review_invariant.py` failures.
+- Live (`PHI_TEST_BASE_URL`, fresh restart, clean `.env`/Mongo): **8 failed, 1756
+  passed, 4 skipped, 2 errors, 0 xfailed, 98.82s** -- exactly the Step 0/Phase 12
+  baseline.
+- `ruff check .` clean. Root suite unchanged (85 failed / 909 passed / 3 skipped, all
+  `phi_engine`, out of scope). Nodeid regression: zero unexpected disappearances beyond
+  already-recorded renames; 1770 collected. Independently spot-read
+  `security_incident.py`'s schema and the "no process-local cache" comment to confirm
+  the durability fix landed as claimed.
+
+**`PHASE_15A_STATUS = PASS`.** Proceeding to Phases 14 (scale/resilience), 15b
+(adversarial security), and 16 (evaluations) as one three-subagent parallel batch, all
+test-authoring only, modifying no production code.
