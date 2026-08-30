@@ -1698,12 +1698,7 @@ async def session_bundle(sid: str, publication: bool = False, attestation_pdf: b
             f"(status={guard_status or 'missing'}). Re-run the pipeline "
             "so the last-mile PHI scan populates a passing guard report.",
         )
-    if _export_window_expired(session):
-        raise HTTPException(
-            410,
-            "This export package's EXPORT_RETENTION_WINDOW has elapsed; it is no "
-            "longer available for download.",
-        )
+    _raise_if_export_window_expired(session)
     # D14: bind the certified guard status to a hash-verified artifact
     # before assembling anything -- a tampered or missing export on disk
     # refuses the whole bundle rather than silently shipping stale bytes.
@@ -1742,12 +1737,7 @@ async def session_reversal_key(sid: str, principal: str = Depends(resolve_princi
     guard = session.get("guard_report") or {}
     if guard.get("status") != "clean":
         raise HTTPException(403, "Publish Guard has not certified this session as clean.")
-    if _export_window_expired(session):
-        raise HTTPException(
-            410,
-            "This export package's EXPORT_RETENTION_WINDOW has elapsed; it is no "
-            "longer available for download.",
-        )
+    _raise_if_export_window_expired(session)
     # D14: the reversal key is only meaningful alongside a hash-verified
     # publication -- if any clean-guarded export has since been tampered
     # with or gone missing on disk, refuse the key too rather than trust
@@ -1790,12 +1780,7 @@ async def session_export(sid: str, file_id: str, principal: str = Depends(resolv
             ),
             "guard": None,
         })
-    if _export_window_expired(session):
-        raise HTTPException(
-            410,
-            "This export package's EXPORT_RETENTION_WINDOW has elapsed; it is no "
-            "longer available for download.",
-        )
+    _raise_if_export_window_expired(session)
     guard = session.get("guard_report") or {}
     matching_results = [
         r for r in (guard.get("results") or [])
@@ -2742,6 +2727,19 @@ def _export_window_expired(session: dict) -> bool:
     except ValueError:
         return False
     return datetime.now(timezone.utc) > expiry
+
+
+def _raise_if_export_window_expired(session: dict) -> None:
+    """410 when the session is export-ready and its EXPORT_RETENTION_WINDOW
+    has already elapsed. Shared by the frozen bundle/reversal-key/export
+    download routes; the acknowledge route keeps its own wording inline
+    because its message describes acknowledgment, not download."""
+    if _export_window_expired(session):
+        raise HTTPException(
+            410,
+            "This export package's EXPORT_RETENTION_WINDOW has elapsed; it is no "
+            "longer available for download.",
+        )
 
 
 async def _run_cleanup_manager_best_effort(
