@@ -2,9 +2,11 @@
 # Python >= 3.11 required (4.15). Install with:
 #   pip install -r requirements.txt
 #
-# Dev/test-only tooling (linters, type checker, reportlab for the manual
-# tests/live/intake_audit.py script) lives in requirements-dev.txt, not here,
-# so the production container stays minimal.
+# reportlab renders the release-required PDF reports (docs #58:
+# PHI_Handling_Audit_Report.pdf, Technical_Appendix.pdf,
+# Human_Review_Summary.pdf), so it ships in the production image, not
+# requirements-dev.txt. Dev/test-only tooling (linters, type checker,
+# parallel pytest runner) still lives in requirements-dev.txt.
 aiohappyeyeballs==2.7.1
 aiohttp==3.13.3
 aiosignal==1.4.0
@@ -108,6 +110,7 @@ pytokens==0.4.1
 PyYAML==6.0.3
 referencing==0.37.0
 regex==2026.7.19
+reportlab==5.0.1
 requests==2.34.2
 requests-file==3.0.1
 rich==15.0.0
