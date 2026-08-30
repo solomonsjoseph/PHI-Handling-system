@@ -1656,3 +1656,93 @@ genuine -- individual blocking test per condition, real non-bypassable-confidenc
 real planted-value detection in report text/filenames/manifest fields/workbook cells).
 Confirmed section 57's verbatim text names 14 conditions (13 `AND` separators), not 16 as
 the execution plan's own prose stated -- the subagent's discrepancy note is accurate.
+
+---
+
+## Phase 11b (report generation and packaging) — COMPLETE
+
+Two parallel subagents (ReportGeneration, PackagingAndIntegration), four commits
+(`d029807`, `261de37`, `5bfb8e7`, `7345fc7`), coordinated live via `hub` on a shared
+contract decided up front.
+
+**Scope correction found and applied mid-flight: `phi_corpus/instruments.py` dropped
+entirely.** The plan's 11b text said to build it "per the Phase 5 decision," but
+ReportGeneration stopped before writing any code, investigated, and found this rewrite's
+own Phase 5 (docs/PHASE_STATUS.md) covers only `assemble_study_knowledge_package` --
+nothing there authorizes synthetic PDF/DOCX generation in the corpus generator. It then
+found, in this repo's own git history, a real, verbatim prior user directive (commit
+`137a2de`, `memory/PRD.md`, gitignored but present in history): "remove pdf or form
+creation in corpus generator, the output is useless. Completely remove it with no traces
+of it left." That commit deleted `phi_corpus/forms.py` and added the regression test
+`tests/test_corpus.py::test_planter_no_pdf_generation_module`, which still asserts
+`import phi_corpus.forms` raises `ModuleNotFoundError` today. The directive explicitly
+scoped itself to the corpus generator only ("the pipeline's Instrument agent + OCR fast
+path still handle real user-uploaded PDF forms" -- unaffected). Independently
+re-verified by this session (`git show 137a2de`, confirmed the deletion and the guard
+test's current presence) before ruling: a verified prior user directive overrides an
+unclear execution-plan cross-reference. `phi_corpus/instruments.py` is not built, gated
+or not; no traces added. Everything else in 11b proceeded unaffected.
+
+**ReportGeneration.** `reportlab` moved from `requirements-dev.txt` (dev-only) to
+`requirements.txt` (production), bumped `5.0.0` -> `5.0.1` (current release, re-verified
+at execution time per the plan's own instruction), rationale comments at both files
+rewritten. Built the full section 58/59 report pipeline: `control/column_ledger.py`
+(`ColumnLedgerRow`, the 19 docs #59 fields in verbatim order, correlated across
+`ColumnDecision`/`ReviewFinding`/`HumanReviewEvent`/`ExecutionResult`/`VerificationResult`
+by `(file_id, column_id)`), `control/report_pdf.py` (audit report, technical appendix,
+human review summary, via reportlab `platypus`, never HTML -- found and fixed a real
+reportlab 5.0.1 auto-width bug producing mid-word text breaks in `Paragraph`-cell tables,
+fixed with explicit `colWidths`), `control/manifest_export.py` (the three JSON manifest
+exporters plus `CHECKSUMS.sha256`, reusing `publish_guard._sha256_of_file`),
+`control/report_generator.py` (`RunReportInputs`/`ReportGenerator.generate()`
+orchestrating all of the above into one `ReportArtifacts`). Imported
+PackagingAndIntegration's `ReportArtifacts` directly rather than redefining it (confirmed
+live via `hub` before either side wrote code). 34 new tests.
+
+**PackagingAndIntegration.** `control/report_artifacts.py` (`ReportArtifacts`, the
+contract: `audit_report_pdf`/`column_ledger_xlsx`/`technical_appendix_pdf`/
+`human_review_summary_pdf` (nullable)/`evidence_manifest_json`/
+`verification_manifest_json`/`run_manifest_json`/`checksums_sha256`, all `Path | None`,
+frozen dataclass), `control/zip_builder.py` (`ZIPBuilder`, the exact section 61
+structure, `04_Human_Review/` omitted when no review occurred, calls 11a's
+`run_reporting_safety_gate` before writing anything and refuses on FAIL),
+`control/integrity_service.py` (`IntegrityService`, section 62 exact-output binding
+across `VerifiedClassificationManifest`/`ExecutionResult`/`VerificationResult`/the
+declared `ReviewerFinalResult` binding/the ZIP's own manifest/checksums, refusing and
+listing every mismatch rather than the first). Also wired
+`final_assurance.py`'s previously-structurally-blocked `report_package_complete`
+condition to a real `derive_report_package_complete` (pure addition, confirmed via
+`git diff`: 24 insertions, 0 deletions, no existing signature changed) -- **this closes
+11a's disclosed gap**, so all fifteen `FinalAssuranceGate` conditions are now genuinely
+exercisable end to end, not fourteen.
+
+**Integration tests closing the class gap** (`tests/test_agent_pair_integration.py`, 11
+tests): one per surviving agent-pair interaction (Judge->Schema, Judge->Lexicon,
+Judge->Instrument, RegulationsExpert<->Judge, PHIMethodsExpert<->Judge, and the
+remaining Reviewer/Executor/DeterministicVerifier/rewind edges from Phases 8-10),
+enumerated from `control/handoff.py`'s real `ALLOWED_EDGES` plus the direct-call pairs
+Phases 7-10 actually wired -- not invented. Each drives the real `HandoffGateway`, the
+real `MemoryControlStore`, and stub/fake providers, asserting the `TraceEvent` chain
+(sender/recipient/edge in order) rather than return values. **This is the regression
+suite Phases 12-17 run against**, per the plan's own framing.
+
+**Invariant checks:** the ZIP exclusion test (`test_zip_builder_never_includes_forbidden_categories`)
+plants all ten section-61 forbidden categories, with a realistic secret marker, in three
+plausible glob-collision locations (dataset-export dir, alongside the legitimate report
+artifacts, and inside the output dir itself), and asserts both filename absence and
+byte-content absence in the packaged ZIP -- independently spot-read by this session and
+confirmed non-vacuous. Manifest-to-report version binding: four dedicated
+`IntegrityService` negative tests (wrong-manifest `ExecutionResult`, cross-run report
+package, wrong-declared `ReviewerFinalResult` binding, multi-mismatch listing).
+
+**Genuine canonical gate (non-live, orchestrator-independently re-run):** **3 failed,
+1688 passed, 5 skipped, 84.49s** -- exactly the 3 pre-existing `test_human_review_invariant.py`
+failures, matching both subagents' own reported counts exactly. `ruff check .` clean.
+Root suite unchanged (85 failed / 909 passed / 3 skipped, all `phi_engine`, out of scope).
+Nodeid regression: zero unexpected disappearances beyond the already-recorded Phase
+7/8/10 renames; 1706 collected.
+
+**`PHASE_11B_STATUS = PASS`, genuinely gate-verified.** Phase 11 (both waves) complete.
+**`PHASE_11_STATUS = PASS`.** Proceeding to Phase 12 and Phase 13 (run in parallel,
+disjoint trees, made safe by 11a's schema freeze): Phase 12 (export, learning, retention,
+cleanup, sections 73-77/95) and Phase 13 (frontend, section 96).
