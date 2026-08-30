@@ -22,7 +22,7 @@ import openpyxl as _openpyxl
 from pydantic import BaseModel
 
 from ..anonymizer import apply_to_text
-from ..control.records import ColumnDecision, EvidenceClaim, GateResult, StudyKnowledgePackage
+from ..control.records import ColumnDecision, EvidenceClaim, GateResult, SandboxRecord, StudyKnowledgePackage
 from ..control.sandbox import run_isolated
 from ..crypto import pseudonym_salt
 from ..detectors import detect_text
@@ -571,6 +571,50 @@ def verify_keep_decisions(
         for index, updated in file_updates.items():
             verified[index] = updated
         demotions.extend(file_demotions)
+    return verified, demotions
+
+
+def _sandboxed_verify_keep_decisions(decisions_json: str, dataset_paths_json: str, jurisdiction: str) -> str:
+    """Sandboxed dispatch target for `verify_keep_decisions`. Crosses the
+    `run_isolated` boundary as JSON both ways (the return contract in
+    `control/sandbox.py` allows only str/int/float/bool/None): the raw
+    decision/path payloads are already JSON-safe primitives, and the
+    `(verified, demotions)` tuple this returns is re-encoded the same way
+    on the way back."""
+    decisions = _json.loads(decisions_json)
+    dataset_paths = {file_id: Path(p) for file_id, p in _json.loads(dataset_paths_json).items()}
+    verified, demotions = verify_keep_decisions(decisions, dataset_paths, jurisdiction=jurisdiction)
+    return _json.dumps([verified, demotions])
+
+
+async def verify_keep_decisions_maybe_sandboxed(
+    sandbox: SandboxRecord | None,
+    decisions: list[dict[str, Any]],
+    dataset_paths: dict[str, Path],
+    jurisdiction: str = "us",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Route `verify_keep_decisions` through the sandbox when `sandbox` is
+    not `None` (`ActivationFactory.activate(..., needs_sandbox=True)`);
+    call it in-process otherwise. Same permanent, documented
+    compatibility-path rationale as `Executor`'s own
+    `*_maybe_sandboxed` methods (see
+    `_read_dataset_headers_maybe_sandboxed`'s docstring): every
+    pre-existing unit test builds its context via
+    `control.testing.make_ctx`, which never attaches a sandbox, and this
+    function must keep calling `verify_keep_decisions` in-process for
+    those callers exactly as before. `verify_keep_decisions` itself reads
+    raw dataset row values (`file_readers.iter_dataset_rows`) to verify
+    'keep' decisions against deterministic PHI detectors -- the same
+    class of raw-data work the four Executor call sites already sandbox,
+    just invoked from the decision-gate sequence (`control/gates.py`)
+    instead of `Executor.run`. Callers pass `ctx.sandbox` directly."""
+    if sandbox is None:
+        return verify_keep_decisions(decisions, dataset_paths, jurisdiction=jurisdiction)
+    encoded = await asyncio.to_thread(
+        run_isolated, sandbox, _sandboxed_verify_keep_decisions,
+        _json.dumps(decisions), _json.dumps({fid: str(p) for fid, p in dataset_paths.items()}), jurisdiction,
+    )
+    verified, demotions = _json.loads(encoded)
     return verified, demotions
 
 

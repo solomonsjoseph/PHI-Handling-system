@@ -651,6 +651,7 @@ def test_sandboxed_raw_reader_call_sites_confined_to_reasoning_and_operator_read
     targets = {
         "_read_dataset_headers", "read_narrative",
         "_redact_metadata_file", "apply_column_actions_to_dataset",
+        "verify_keep_decisions",
     }
     sites = _call_sites(PHI_CORE_ROOT, targets)
     reasoning_py = PHI_CORE_ROOT / "agents" / "reasoning.py"

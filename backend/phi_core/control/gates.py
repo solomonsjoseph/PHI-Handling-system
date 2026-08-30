@@ -34,7 +34,7 @@ from phi_core.agents.reasoning import (
     apply_sentinel_hard_rules,
     apply_site_cardinality_rule,
     validate_decisions,
-    verify_keep_decisions,
+    verify_keep_decisions_maybe_sandboxed,
 )
 
 from .context import AgentContext
@@ -375,7 +375,9 @@ async def run_decision_gates(
 
     before = current
     dataset_paths = {f["file_id"]: Path(f["stored_path"]) for f in files if f.get("stored_path")}
-    current, demotions = verify_keep_decisions(current, dataset_paths, jurisdiction=jurisdiction)
+    current, demotions = await verify_keep_decisions_maybe_sandboxed(
+        ctx.sandbox, current, dataset_paths, jurisdiction=jurisdiction
+    )
     record("verify_keep_decisions", before, "pass", f"{len(demotions)} demotion(s)")
 
     before = current
