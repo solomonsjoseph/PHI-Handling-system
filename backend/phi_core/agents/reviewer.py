@@ -1,4 +1,4 @@
-"""Reviewer: the one Reviewer role (docs #42), with two modes.
+"""Reviewer: the one Reviewer role (docs #42), with three modes.
 
 PREVIEW (docs #43, this class's ``preview`` method) independently
 challenges Judge's decisions before execution: a deterministic checklist
@@ -9,31 +9,43 @@ that used to belong to the retired ``Sentinel`` role, unified into one
 review logic live here now, migrated verbatim.
 
 The (existing, unchanged) completeness-audit mode below -- confirms
-Operator covered every decision, not that Operator's per-cell checks were
-correct (that is Operator's own job, and Operator's own tests) -- is the
-FINAL-mode half of the same role (docs #42), formally dispatched in a
-later phase; its method stays named ``run`` and its behavior is
-untouched by this phase.
+DeterministicVerifier covered every decision, not that
+DeterministicVerifier's per-cell checks were correct (that is its own
+job, and its own tests) -- is the coverage-audit half of the FINAL role
+(docs #42); its method stays named ``run`` and its behavior is untouched
+by Phase 10.
 
-Operator's own completeness pass ("reverse completeness") synthesizes an
-``undecided`` verdict for a written column that has neither a Judge
-decision nor an ``omit_by_file`` entry -- but it never synthesizes
-anything for a column that IS in ``omit_by_file`` with no matching
-decision, because ``Operator.run``'s extra-records loop skips columns
-already in ``omit_cols``. ``run`` closes exactly that gap: it
-independently opens each file's real written export and confirms every
+DeterministicVerifier's own completeness pass ("reverse completeness")
+synthesizes an ``undecided`` verdict for a written column that has
+neither a Judge decision nor an ``omit_by_file`` entry -- but it never
+synthesizes anything for a column that IS in ``omit_by_file`` with no
+matching decision, because its extra-records loop skips columns already
+in ``omit_cols``. ``run`` closes exactly that gap: it independently
+opens each file's real written export and confirms every
 ``omit_by_file`` column is genuinely absent, rather than trusting that
 Executor honoured the deferral.
 
-``run`` is a completeness audit of Operator's coverage against the raw
-ground truth -- the decisions Judge actually produced, and the real
-written column count -- never a re-trust of Operator's own
-``status``/``failed_file_ids`` claims, and never a second re-derivation
-of Operator's per-cell shape checks, which would just be Operator running
-twice. It never calls an LLM and never logs a PHI value: every finding
-and every log payload carries only file/column identifiers, counts, and
-template text. ``preview`` is the only method on this class that calls
-an LLM.
+``run`` is a completeness audit of DeterministicVerifier's coverage
+against the raw ground truth -- the decisions Judge actually produced,
+and the real written column count -- never a re-trust of
+DeterministicVerifier's own ``status``/``failed_file_ids`` claims, and
+never a second re-derivation of its per-cell shape checks, which would
+just be DeterministicVerifier running twice. It never calls an LLM and
+never logs a PHI value: every finding and every log payload carries only
+file/column identifiers, counts, and template text.
+
+FINAL (docs #55, this class's ``finalize`` method, Phase 10): the real
+Reviewer Final gate. Consumes the frozen
+``VerifiedClassificationManifest``, the raw-worker's ``ExecutionResult``,
+``DeterministicVerifier``'s governed ``VerificationResult``, every
+``HumanDecision`` on record for this run, and the safe (no-raw-value)
+output metadata ``DeterministicVerifier.run`` additionally returns
+(checksums/file counts/column counts/schema validity). Runs the full
+section-55 checklist and returns one of ``PASS``/``FAIL``/
+``HUMAN_REVIEW_REQUIRED`` -- never an LLM call, and never a value beyond
+file/column identifiers and counts in any finding.
+
+``preview`` is the only method on this class that calls an LLM.
 """
 from __future__ import annotations
 
@@ -42,7 +54,13 @@ from pathlib import Path
 from typing import Any
 
 from phi_core.control.artifacts import ArtifactService
-from phi_core.control.records import ReviewFinding
+from phi_core.control.records import (
+    ExecutionResult,
+    HumanDecision,
+    ReviewFinding,
+    VerificationResult,
+    VerifiedClassificationManifest,
+)
 from phi_core.paths import artifact_id_from_export_alias
 
 from .base import Agent
@@ -396,3 +414,178 @@ class Reviewer(Agent):
                          "missing": total_missing},
             "exports": filtered_exports,
         }
+
+    # ---- FINAL (docs #55, Phase 10) -----------------------------------
+
+    _UNRESOLVED_HUMAN_ACTIONS = frozenset({"DEFER", "HOLD", "REQUEST_MORE_EVIDENCE"})
+
+    async def finalize(
+        self,
+        *,
+        manifest: VerifiedClassificationManifest,
+        execution_result: ExecutionResult,
+        verification_result: VerificationResult,
+        decisions: list[dict[str, Any]],
+        human_decisions: list[HumanDecision] | None = None,
+        safe_output_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Reviewer Final (docs #55): the real completeness/authorization/
+        privacy/utility gate over an already-executed, already-verified
+        run. Never calls an LLM; every finding carries only file/column
+        identifiers, check names, and counts -- never a raw value.
+
+        Runs the 8-item section-55 checklist against:
+        - ``manifest``: the frozen ``VerifiedClassificationManifest`` that
+          authorized this execution (``decision_refs``,
+          ``human_review_refs``, ``unresolved_items``).
+        - ``execution_result``: the raw worker's own success/failure
+          report for this attempt.
+        - ``verification_result``: ``DeterministicVerifier``'s governed
+          ``VerificationResult`` (docs #54).
+        - ``decisions``: the same decision list Executor actually ran
+          (file_id/column/action; no row values).
+        - ``human_decisions``: every ``HumanDecision`` on record for this
+          run (may be empty for a run with no human review at all).
+        - ``safe_output_metadata``: ``DeterministicVerifier.run``'s own
+          additive section-54 fields (``column_counts``,
+          ``schema_valid``) -- safe counts/booleans, never raw values.
+
+        Returns ``{"verdict": "PASS"|"FAIL"|"HUMAN_REVIEW_REQUIRED",
+        "checks": [{"name": str, "pass": bool, "detail": str}, ...],
+        "findings": [ReviewFinding-shaped dict, ...],
+        "signal": {"failure_class": str} | None}``. ``signal`` is the
+        Phase 10 root-cause-classifier hint (``control.rewind
+        .RewindRouter.classify`` consumes it directly); it is ``None``
+        exactly when ``verdict == "PASS"``.
+        """
+        human_decisions = human_decisions or []
+        safe_output_metadata = safe_output_metadata or {}
+        checks: list[dict[str, Any]] = []
+
+        def _check(name: str, ok: bool, detail: str = "") -> None:
+            checks.append({"name": name, "pass": ok, "detail": detail})
+
+        authorized_refs = set(manifest.decision_refs)
+        deferred_refs = {
+            f"{d.get('file_id', '')}:{d.get('column', '')}"
+            for d in decisions if d.get("action") == "human_review"
+        }
+        executed_refs = {
+            f"{d.get('file_id', '')}:{d.get('column', '')}"
+            for d in decisions if d.get("action") not in (None, "human_review")
+        }
+
+        # 1. every approved action executed? (a deferred column is not
+        #    "missing" -- it is legitimately not executed yet.)
+        missing_execution = authorized_refs - executed_refs - deferred_refs
+        _check("every_approved_action_executed", not missing_execution,
+               f"{len(missing_execution)} authorized decision(s) never reached execution"
+               if missing_execution else "")
+
+        # 2. anything omitted? -- fewer verdicts than decisions for a file
+        #    means DeterministicVerifier never actually checked something
+        #    it was handed.
+        column_counts = safe_output_metadata.get("column_counts") or {}
+        omitted = sorted(
+            fid for fid, counts in column_counts.items()
+            if counts.get("verdicts", 0) < counts.get("decisions", 0)
+        )
+        _check("nothing_omitted", not omitted,
+               f"file(s) with fewer verdicts than decisions: {omitted}" if omitted else "")
+
+        # 3. anything unauthorized? -- an executed decision the manifest
+        #    never named.
+        unauthorized = executed_refs - authorized_refs
+        _check("nothing_unauthorized", not unauthorized,
+               f"{len(unauthorized)} executed decision(s) were never authorized by the manifest"
+               if unauthorized else "")
+
+        # 4. human decisions followed? -- every manifest human_review_ref
+        #    must have a matching, recorded HumanDecision; nothing may be
+        #    silently left unaddressed.
+        resolved_decision_ids = {hd.decision_id for hd in human_decisions}
+        unresolved_human_refs = [r for r in manifest.human_review_refs if r not in resolved_decision_ids]
+        _check("human_decisions_followed", not unresolved_human_refs,
+               f"{len(unresolved_human_refs)} human_review_refs have no recorded HumanDecision"
+               if unresolved_human_refs else "")
+
+        # 5. deterministic verification passed?
+        _check("deterministic_verification_passed", verification_result.passed,
+               "" if verification_result.passed
+               else f"failed_checks={verification_result.failed_checks}")
+
+        # 6. privacy intent preserved? -- no executed decision matches a
+        #    known direct-identifier hard-rule pattern while still 'keep'.
+        leaks = sorted({
+            (d.get("file_id", ""), d.get("column", "")) for d in decisions
+            if d.get("action") == "keep" and any(
+                re.match(pattern, str(d.get("column") or "").strip().lower().replace(" ", "_"))
+                for pattern, *_ in _HARD_RULE_TABLE
+            )
+        })
+        _check("privacy_intent_preserved", not leaks,
+               f"{len(leaks)} column(s) matching a direct-identifier pattern still kept" if leaks else "")
+
+        # 7. utility requirement respected? -- the raw worker actually
+        #    succeeded and every dataset DeterministicVerifier expected
+        #    stayed schema-readable (a silently corrupted/unreadable
+        #    export destroys the deliverable's research utility even
+        #    when no single decision looks wrong in isolation).
+        schema_valid = safe_output_metadata.get("schema_valid") or {}
+        unreadable = sorted(fid for fid, ok in schema_valid.items() if not ok)
+        _check("utility_requirement_respected", execution_result.success and not unreadable,
+               "" if execution_result.success and not unreadable
+               else f"execution_success={execution_result.success}, unreadable_files={unreadable}")
+
+        # 8. unresolved issue? -- the manifest itself still carries
+        #    unresolved_items, or a human decision explicitly deferred/
+        #    held/asked for more evidence rather than resolving.
+        pending_human_actions = [
+            hd.decision_id for hd in human_decisions if hd.action in self._UNRESOLVED_HUMAN_ACTIONS
+        ]
+        unresolved = manifest.unresolved_items > 0 or bool(pending_human_actions) or bool(unresolved_human_refs)
+        _check("no_unresolved_issue", not unresolved,
+               f"unresolved_items={manifest.unresolved_items}, "
+               f"pending_human_decisions={len(pending_human_actions)}" if unresolved else "")
+
+        failed = [c for c in checks if not c["pass"]]
+        human_review_triggers = {"human_decisions_followed", "no_unresolved_issue"}
+        if not failed:
+            verdict = "PASS"
+        elif any(c["name"] in human_review_triggers for c in failed):
+            verdict = "HUMAN_REVIEW_REQUIRED"
+        else:
+            verdict = "FAIL"
+
+        findings = [
+            ReviewFinding(
+                verdict="HUMAN_REVIEW_REQUIRED" if verdict == "HUMAN_REVIEW_REQUIRED" else "CORRECTION_REQUIRED",
+                kind=c["name"], detail=c["detail"],
+            ).model_dump()
+            for c in failed
+        ]
+        signal = None if verdict == "PASS" else self._finalize_signal(failed, execution_result)
+
+        return {"verdict": verdict, "checks": checks, "findings": findings, "signal": signal}
+
+    @staticmethod
+    def _finalize_signal(failed: list[dict[str, Any]], execution_result: ExecutionResult) -> dict[str, str]:
+        """Map Reviewer Final's failed checks onto a
+        ``{"failure_class": <records.FailureClass member>}`` hint for
+        ``control.rewind.RewindRouter.classify`` (docs #56). Fixed
+        priority order when multiple checks fail simultaneously: an
+        execution-side failure (nothing ran, or nothing readable) is the
+        earliest, most upstream-actionable cause, so it takes precedence
+        over a downstream method/regulation/human-review signal that
+        might be a symptom of the same root cause rather than a second,
+        independent problem."""
+        failed_names = {c["name"] for c in failed}
+        if (not execution_result.success or "every_approved_action_executed" in failed_names
+                or "nothing_omitted" in failed_names or "utility_requirement_respected" in failed_names):
+            return {"failure_class": "EXECUTION_ERROR"}
+        if "nothing_unauthorized" in failed_names or "deterministic_verification_passed" in failed_names:
+            return {"failure_class": "METHOD_ERROR"}
+        if "privacy_intent_preserved" in failed_names:
+            return {"failure_class": "REGULATION_ERROR"}
+        # "human_decisions_followed" / "no_unresolved_issue"
+        return {"failure_class": "HUMAN_REVIEW_REQUIRED"}

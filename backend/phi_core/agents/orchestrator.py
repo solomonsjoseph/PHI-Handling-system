@@ -33,7 +33,13 @@ from phi_core.control.activation import ActivationFactory
 from phi_core.control.context import AgentContext
 from phi_core.control.handoff import JUDGE, METHODS_EXPERT, REGULATIONS_EXPERT, REVIEWER, ReviewerHandoff
 from phi_core.control.policy import BudgetExceeded
-from phi_core.control.records import HandoffEnvelope, MethodFinding, RegulatoryFinding, StudyKnowledgePackage
+from phi_core.control.records import (
+    ExecutionResult,
+    HandoffEnvelope,
+    MethodFinding,
+    RegulatoryFinding,
+    StudyKnowledgePackage,
+)
 from phi_core.control.store import ControlStore
 
 if TYPE_CHECKING:
@@ -356,19 +362,23 @@ async def execute_decisions(
         await manager._log("operator.crashed", "info",
                            {"error_kind": f"exception:{type(exc).__name__}"})
         op_out = {"failed_file_ids": list(exec_out["exports"].keys()), "verdicts": []}
+    verification_result = None
     if manifest is not None and store is not None:
         # docs #54/Phase 9 item 5: migrate Operator's useful deterministic
         # verification into a governed VerificationResult rather than
         # letting it live only as an ephemeral dict Reviewer's coverage
-        # audit happens to consume -- additive only; Operator itself, and
-        # every existing consumer of `op_out` below, are unchanged.
+        # audit happens to consume -- additive only; every existing
+        # consumer of `op_out` below is unchanged. Kept as a local
+        # variable (Phase 10) so Reviewer Final below can reuse the same
+        # object instead of re-deriving it from `op_out` a second time.
         from phi_core.control.verification import build_verification_result, record_verification_result
 
-        await record_verification_result(store, build_verification_result(
+        verification_result = build_verification_result(
             run_id=run_id, task_id=f"execution:{manifest.manifest_id}", attempt_id="",
             manifest_id=manifest.manifest_id, manifest_version=str(manifest.schema_version),
             input_artifact_version=0, output_artifact_version=0, operator_result=op_out,
-        ))
+        )
+        await record_verification_result(store, verification_result)
     # Operator's own `failed_file_ids` only covers a file it could not read
     # or that never made it into `exports` at all (see operator.py). A
     # shape-check or reverse-completeness failure surfaces as a per-column
@@ -437,6 +447,51 @@ async def execute_decisions(
             run_elapsed_s=time.perf_counter() - run_started,
             approved_decisions=decisions, sentinel_report=sentinel_report,
             manager=manager, store=store, run_id=run_id, node="human_review_audit")
+
+    # Reviewer Final (docs #55, Phase 10): the real completeness/
+    # authorization/privacy/utility gate for this attempt, distinct from
+    # `rv_out`'s coverage audit above (confirms DeterministicVerifier's
+    # own coverage of every decision, not the decisions' authorization/
+    # privacy/utility). Gated the same way the governed
+    # `VerificationResult` write above is (`manifest`/`store` both
+    # present) -- every pre-existing unit test's direct `execute_
+    # decisions` call with neither supplied never computes one, exactly
+    # like every other Phase 9/10 additive control-plane write in this
+    # function. Reuses `reviewer_ctx` from the coverage-audit call above
+    # rather than opening a second `make_ctx("Reviewer")` task/`WorkItem`
+    # for the same logical role in the same attempt; `finalize` never
+    # touches `ctx.tasks` itself (unlike `run`), so no completion
+    # bookkeeping is skipped by sharing it. `human_decisions` is `[]`:
+    # no live caller constructs a `HumanDecision` record yet (Phase R-a
+    # pre-add, still unwired), matching `ensure_frozen_manifest`'s own
+    # `human_review_refs=[]` above -- forward-compatible, not a gap this
+    # function invents.
+    reviewer_final: dict[str, Any] | None = None
+    if manifest is not None and store is not None and verification_result is not None:
+        try:
+            execution_results = await store.find_many(
+                "execution_results", {"task_id": f"execution:{manifest.manifest_id}"})
+            execution_result = (
+                ExecutionResult.model_validate(execution_results[-1]) if execution_results
+                else ExecutionResult(task_id=f"execution:{manifest.manifest_id}", run_id=run_id,
+                                     manifest_id=manifest.manifest_id, success=True)
+            )
+            reviewer_final = await Reviewer(reviewer_ctx).finalize(
+                manifest=manifest, execution_result=execution_result,
+                verification_result=verification_result, decisions=decisions,
+                human_decisions=[], safe_output_metadata=op_out,
+            )
+            await on_phase("reviewer_final", {"verdict": reviewer_final["verdict"]})
+        except Exception as exc:
+            # Same fail-open shape as Operator/Reviewer coverage-audit
+            # above: Reviewer Final is an additive audit gate, never the
+            # sole boundary (Publish Guard below remains that regardless
+            # of what happens here) -- a crash here (e.g. a test double
+            # standing in for a role that predates this method) must
+            # never take down an otherwise-successful run.
+            await manager._log("reviewer_final.crashed", "info",
+                               {"error_kind": f"exception:{type(exc).__name__}"})
+            reviewer_final = None
 
     # Publish Guard: deterministic last-mile PHI scan on emitted exports.
     # GOAL invariant: exports are only 'ready to share publicly' after this
@@ -633,6 +688,7 @@ async def execute_decisions(
         "manager_report": manager_report,
         "operator_failures": op_failed_ids,
         "reviewer_findings": rv_out["findings"],
+        "reviewer_final": reviewer_final,
     }
     result.update(extra_result_fields or {})
     completion_set = {
@@ -649,6 +705,7 @@ async def execute_decisions(
         "manager_report": manager_report,
         "operator_failures": op_failed_ids,
         "reviewer_findings": rv_out["findings"],
+        "reviewer_final": reviewer_final,
     }
     completion_set.update(extra_completion_fields or {})
     await db.sessions.update_one(session_filter, {"$set": completion_set})
