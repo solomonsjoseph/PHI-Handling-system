@@ -26,6 +26,7 @@ from ..control.records import (
     ColumnDecision,
     EvidenceClaim,
     GateResult,
+    MethodRecord,
     SandboxRecord,
     StudyKnowledgePackage,
     VerifiedClassificationManifest,
@@ -1064,6 +1065,36 @@ class Executor(Agent):
         if pending:
             raise ValueError(f"unresolved human_review deferrals cannot be executed: {pending}")
         omit_by_file = omit_by_file or {}
+        if manifest is not None:
+            # docs #52: the seven deterministic pre-execution validators
+            # only run on a real, governed execution (one that already
+            # cleared the docs #49 manifest-freeze gate) -- the same
+            # permanent make_ctx-test compatibility path every other
+            # Phase R-c/Phase 9 control-plane addition in this class
+            # follows. Unconditionally enforcing PathPolicyValidator's
+            # DATA_DIR containment check, in particular, would reject
+            # every pre-existing unit test's `tmp_path`-based dataset
+            # file -- a false positive that has nothing to do with
+            # whether decisions may safely execute.
+            from ..control.execution_validators import run_pre_execution_validators
+
+            # `MethodRegistryValidator` needs the run's approved-method
+            # set, but `test_control_phaseR_integration.py`'s invariant 4
+            # confines every live call to `ctx.methods.get_approved_methods`
+            # to `experts.py` (PHIMethodsExpert's own resolution gate) and
+            # `context.py`'s facade delegation -- Executor deliberately
+            # never becomes a second direct caller here. Judge does not
+            # currently emit a `method_id` on any decision, so this
+            # validator has nothing to check in production today; its own
+            # unit tests exercise the real rejection/acceptance logic
+            # directly, and it starts doing real work the day a decision
+            # carries a `method_id` without any further wiring change.
+            approved_methods: list[MethodRecord] = []
+            run_pre_execution_validators(
+                decisions=decisions, files=files, allowed_operations=ACTION_TYPES,
+                worker_module_paths=[Path(__file__)],
+                approved_methods=approved_methods, grant=self.ctx.grant, sandbox=self.ctx.sandbox,
+            )
         await self._log("executor.begin", "info", {"decision_count": len(decisions)})
         exports: dict[str, str] = {}
         by_file: dict[str, list[dict[str, Any]]] = {}
