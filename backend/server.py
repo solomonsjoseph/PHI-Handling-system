@@ -994,6 +994,12 @@ def _scrub_session_document(doc: dict) -> dict:
     ):
         if k in doc:
             doc[k] = _scrub_nested(doc[k])
+    # Phase 12 item 1/2 (docs #75): surface the computed export-window
+    # expiry on every session read, not only GET .../cleanup-status --
+    # `_export_expires_at` is defined further down this module but that
+    # is fine, Python resolves the name at call time (this function is
+    # only ever invoked per-request, long after module load completes).
+    doc["export_expires_at"] = _export_expires_at(doc)
     return doc
 
 
