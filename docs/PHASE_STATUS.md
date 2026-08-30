@@ -1632,6 +1632,47 @@ a cleanup (right-to-erasure) attempt.
   `erasure_error`/`erasure_attempts` recorded server-side (not in this response body);
   `_purge_settled_sessions_loop` retries on the next sweep.
 
+### Phase 12: frozen-API-surface additions
+
+Phase 12 adds two new endpoints alongside the four Phase 11a froze (an addition, not a
+break of the freeze -- 11a's own text explicitly named acknowledgment and cleanup-status
+as unbuilt Phase 12 concepts):
+
+**acknowledge -- `POST /api/sessions/{sid}/acknowledge`** (`session_acknowledge`,
+`server.py`). Gated identically to bundle/reversal-key (owned, complete/partially_complete,
+guard clean) plus a new check: refuses `410 Gone` once `EXPORT_RETENTION_WINDOW_DAYS` has
+elapsed since the session became export-ready. Idempotent. Success:
+`{"acknowledged": true, "acknowledged_at": <iso>, "acknowledged_by": <principal>}`, same
+shape whether freshly recorded or already-acknowledged. Also readable on the session
+document itself (`GET /api/sessions/{sid}` -> `session.acknowledgment`, null/absent if
+never called).
+
+**cleanup-status -- `GET /api/sessions/{sid}/cleanup-status`** (`session_cleanup_status`,
+`server.py`). Read-only, never triggers a cleanup pass itself.
+`{"cleanup": <CleanupManifest dict or null>, "export_expires_at": <iso or null>}`.
+`cleanup` fields verbatim from `records.CleanupManifest`: `run_id, cleanup_started_at,
+cleanup_completed_at, destroyed_categories[], retained_safe_categories[],
+credentials_revoked, keys_destroyed, sandbox_destroyed,
+storage_sanitization_status (pending|complete|failed),
+verification_status (pending|verified|failed), failure_details`. `null` until
+`CleanupManager` has actually run for that session's run (wired best-effort into
+`session_delete` and the retention purge loop).
+
+**Additive-only change to the four Phase 11a-frozen routes**: `export`/`bundle`/
+`reversal-key` now also refuse `410 Gone` once `EXPORT_RETENTION_WINDOW_DAYS`
+(docs #75, default 14 days, env `EXPORT_RETENTION_WINDOW_DAYS`) has elapsed since the
+session became export-ready. No existing 403/404/409 shape changed.
+`GET /api/sessions/{sid}` (and the session-list route) additionally return
+`export_expires_at` (iso string or null) on every read.
+
+**Disclosed gap, not built this phase**: `FinalAssuranceGate`/`evaluate_final_assurance`
+(Phase 11a) still has zero live call sites anywhere in `server.py`/`superorchestrator.py`/
+`agents/` -- confirmed unchanged by this session. The download/acknowledge routes above
+tighten on `EXPORT_RETENTION_WINDOW_DAYS` but do not gate on a live `READY_FOR_EXPORT`
+verdict; wiring the full 15-condition gate into the live session flow (assembling
+`VerifiedClassificationManifest`/`ExecutionResult`/`VerificationResult`/
+`ReviewerFinalResult`/`ReportPackage` per session) remains open for a future phase.
+
 **Genuine canonical gate (serial, `DATA_DIR` pointed at the real data dir, existing
 MongoDB/backend already up):** `test_final_assurance.py`: **30 passed.** Full suite:
 **3 failed, 1627 passed, 5 skipped, 4 warnings, 83.70s.** Delta from the pre-phase-11a
@@ -1761,6 +1802,94 @@ on-disk filename and the ZIP's expected filename silently drift). Moved to
 declined as out of scope. Full suite unchanged (3 failed / 1688 passed non-live, exact
 match). `ruff check .` clean. Committed `bfc2c28`.
 
-**`PHASE_11_STATUS = PASS`.** Proceeding to Phase 12 and Phase 13 (run in parallel,
-disjoint trees, made safe by 11a's schema freeze): Phase 12 (export, learning, retention,
-cleanup, sections 73-77/95) and Phase 13 (frontend, section 96).
+**`PHASE_11_STATUS = PASS`.**
+
+---
+
+## Phase 12 (export, learning, retention, cleanup) and Phase 13 (frontend) — COMPLETE
+
+Two parallel subagents (Phase12ExportRetention, Phase13Frontend), disjoint trees
+(`backend/` vs `frontend/`), 17 commits total, coordinated live via `hub` for the shared
+field shapes (`acknowledge`/`cleanup-status`/`export_expires_at`).
+
+**Phase 12 (backend).** `EXPORT_RETENTION_WINDOW_DAYS` (docs #75, `artifacts.py:92-116`,
+default 14 days) plus `export_expires_at`, computed from the session's completion
+timestamp and wired into the hourly purge loop as a new step (export-ready sessions past
+their own window are fully erased+cleaned, independent of the longer `RETENTION_DAYS`).
+Two new endpoints (`POST /sessions/{sid}/acknowledge`, `GET /sessions/{sid}/cleanup-status`,
+full shapes recorded above under "Phase 12: frozen-API-surface additions"), additive to
+11a's freeze, plus a `410 Gone` addition to the four frozen download routes once the
+export window elapses. Learning candidate pipeline (docs #73, extending the pre-existing
+`control/learning.py` D16 governance service rather than creating a competing module --
+`records.py`'s already-defined `LearningCase`/`LearningCaseSource` explicitly says it
+"feeds the existing LearningProposal pipeline, not a replacement"): candidate -> abstract
+-> sanitize -> PHI/PII scan -> reconstruction check -> policy validation, unsafe
+candidates deleted, never reaching the safe store. Verified non-vacuous: independently
+spot-read `test_the_phi_scan_stage_is_a_genuine_backstop_not_a_rubber_stamp` (a VIN,
+deliberately outside `scrub_persisted_text`'s own redaction regex set, caught and deleted
+at the scan stage) plus dedicated SSN/name/digit-run/quoted-excerpt tests. No autonomous
+self-modification (docs #74): verified clean by grep, the runtime pipeline never imports
+`control.learning` at all (matching `test_architecture_boundaries.py`'s existing
+enforcement); the new candidate pipeline never calls `LearningService.propose`
+automatically. `CleanupManager` (new `control/cleanup_manager.py`) populates every
+`CleanupManifest` field `destroy_sandbox` left empty (`keys_destroyed` via NIST SP
+800-88 Rev. 2 Cryptographic-Erase rationale -- documented as irrecoverable ciphertext
+deletion since this system has no independent per-run key to zero separately;
+`credentials_revoked` always writes a real auditable record, not a bare default-true).
+Wired best-effort into `session_delete` and every live purge-loop step covering every
+terminal status actually reachable today; never transitions to `SESSION_DESTROYED`
+until cleanup verification succeeds -- independently spot-read
+`test_a_failed_destruction_step_is_never_verified_and_blocks_session_destroyed`,
+confirmed real. `workflow_runs.opaque_map` erasure (the Wave R-c item the plan calls
+out): confirmed already live from Wave R-c, added to the new purge step too. Restart/
+resume coverage: a dedicated test forces a fresh `SuperOrchestrator`/`ArtifactService`
+chain mid-test (the same `_fresh_orchestrator` pattern proven in
+`test_control_superorchestrator_lifecycle.py`) and confirms `session_export`/
+`session_bundle` and `export_expires_at` are all correctly served from persisted state
+alone, nothing held in memory.
+
+**Disclosed gap (not built this phase, explicitly flagged rather than force-wired):**
+`FinalAssuranceGate`/`evaluate_final_assurance` (Phase 11a) still has zero live call
+sites. Wiring the full 15-condition gate into the live download/acknowledge path would
+require assembling `VerifiedClassificationManifest`/`ExecutionResult`/
+`VerificationResult`/`ReviewerFinalResult`/`ReportPackage` per session in a
+session-queryable way, which the live pipeline does not currently do; attempting it
+within this phase's scope risked a mass regression across ~100+ existing download
+tests. The new `EXPORT_RETENTION_WINDOW_DAYS` gating is real and additive but is not a
+substitute for the full gate. Recorded here for a dedicated future phase.
+
+**Phase 13 (frontend).** `SessionDetail.jsx` decomposed from 1427 lines to a 412-line
+orchestrating shell plus 21 new focused components across 9 subdirectories, split
+incrementally (verified test-green after each extraction, per the assignment's own
+discipline). Represents the full docs #96 runtime: study intake and policy selection
+were already in `Wizard.jsx` (outside `SessionDetail`, unaffected); this phase added
+User Clarification (distinct from Human Review per docs #16), Reviewer corrections,
+blocked/security-incident-safe states (`RunHero`, extracted with distinct states so a
+security incident never renders raw detail to a non-privileged view), export-ready,
+expiry warning, and cleanup/destruction status panels (the last three built against
+Phase 12's live `acknowledge`/`cleanup-status`/`export_expires_at` shapes, confirmed via
+direct `hub` coordination before either side finalized the contract -- one round trip
+corrected `export_expires_at` to bind to the `cleanup-status` endpoint rather than the
+session document, per commit `33a56e5`). No raw sensitive content exposure: verified
+against `trace_sanitizer.py`/`events.py`, new panels render only short server-controlled
+tokens. Dead-agent trace rows (the retired `Sentinel` name) deliberately left
+untouched, per the plan's explicit assignment of that cleanup to Phase 17.
+
+**Genuine canonical gate (orchestrator-independently re-run):**
+- Non-live: **3 failed, 1712 passed, 5 skipped, 84.79s** -- exactly the 3 pre-existing
+  `test_human_review_invariant.py` failures. (One transient extra,
+  `test_spa_mount.py::test_no_static_mount_without_a_build_directory`, was traced to a
+  leftover gitignored `frontend/build/` directory from Phase 13's own `npm run build`
+  verification run -- disposable build output, not a code defect; removed, confirmed
+  the suite returns to the clean 3-failure baseline.)
+- Live (`PHI_TEST_BASE_URL=http://127.0.0.1:8001`, fresh restart, clean `.env`/Mongo):
+  **8 failed, 1716 passed, 4 skipped, 2 errors, 0 xfailed, 93.88s** -- exactly the Step
+  0/Phase 11 baseline.
+- Frontend: `CI=true npx react-scripts test --watchAll=false` -> **2 suites, 6 passed**.
+  `CI=true npx react-scripts build` -> compiles cleanly, zero warnings.
+- `ruff check .` clean. Root suite unchanged (85 failed / 909 passed / 3 skipped, all
+  `phi_engine`, out of scope). Nodeid regression: zero unexpected disappearances beyond
+  the already-recorded renames; 1730 collected.
+
+**`PHASE_12_STATUS = PASS`. `PHASE_13_STATUS = PASS`.** Proceeding to Phase 15a (solo,
+production hardening), then Phases 14, 15b, 16 in parallel.
