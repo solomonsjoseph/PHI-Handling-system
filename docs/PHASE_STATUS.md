@@ -1647,3 +1647,12 @@ Wave 1 of Phase 11 complete. Wave 2 (report generation: `ReportGenerator`, the f
 report artifacts, `IntegrityService`, `ZIPBuilder`, docs #58/#61) is a separate dispatch
 that consumes this wave's frozen `ReportPackageContent` shape and
 `report_package_complete` gap.
+
+**Orchestrator verification:** independently re-ran the full gate (ruff clean; 3 failed /
+1627 passed / 5 skipped, byte-identical failure set; root suite unchanged at 85 failed /
+909 passed / 3 skipped; nodeid regression clean beyond the already-recorded Phase 7/8/10
+renames; 30/30 `test_final_assurance.py` tests independently spot-read and confirmed
+genuine -- individual blocking test per condition, real non-bypassable-confidence proofs,
+real planted-value detection in report text/filenames/manifest fields/workbook cells).
+Confirmed section 57's verbatim text names 14 conditions (13 `AND` separators), not 16 as
+the execution plan's own prose stated -- the subagent's discrepancy note is accurate.
