@@ -1687,6 +1687,12 @@ async def session_bundle(sid: str, publication: bool = False, attestation_pdf: b
             f"(status={guard_status or 'missing'}). Re-run the pipeline "
             "so the last-mile PHI scan populates a passing guard report.",
         )
+    if _export_window_expired(session):
+        raise HTTPException(
+            410,
+            "This export package's EXPORT_RETENTION_WINDOW has elapsed; it is no "
+            "longer available for download.",
+        )
     # D14: bind the certified guard status to a hash-verified artifact
     # before assembling anything -- a tampered or missing export on disk
     # refuses the whole bundle rather than silently shipping stale bytes.
@@ -1725,6 +1731,12 @@ async def session_reversal_key(sid: str, principal: str = Depends(resolve_princi
     guard = session.get("guard_report") or {}
     if guard.get("status") != "clean":
         raise HTTPException(403, "Publish Guard has not certified this session as clean.")
+    if _export_window_expired(session):
+        raise HTTPException(
+            410,
+            "This export package's EXPORT_RETENTION_WINDOW has elapsed; it is no "
+            "longer available for download.",
+        )
     # D14: the reversal key is only meaningful alongside a hash-verified
     # publication -- if any clean-guarded export has since been tampered
     # with or gone missing on disk, refuse the key too rather than trust
@@ -1767,6 +1779,12 @@ async def session_export(sid: str, file_id: str, principal: str = Depends(resolv
             ),
             "guard": None,
         })
+    if _export_window_expired(session):
+        raise HTTPException(
+            410,
+            "This export package's EXPORT_RETENTION_WINDOW has elapsed; it is no "
+            "longer available for download.",
+        )
     guard = session.get("guard_report") or {}
     matching_results = [
         r for r in (guard.get("results") or [])
@@ -1803,6 +1821,81 @@ async def session_export(sid: str, file_id: str, principal: str = Depends(resolv
     except ArtifactError as exc:
         raise HTTPException(409, f"export artifact unavailable: {exc.reason}") from exc
     return FileResponse(path, filename=artifact_id)
+
+
+@app.post("/api/sessions/{sid}/acknowledge", dependencies=[Depends(rate_limited("session_acknowledge", 20, 3600))])
+async def session_acknowledge(sid: str, principal: str = Depends(resolve_principal)):
+    """Phase 12 item 3 (docs #75 "capture acknowledgment where policy
+    requires it"): record that the authorized owner has acknowledged
+    receipt of the export package. New, dedicated endpoint -- distinct
+    from the frozen ``GET .../reversal-key`` route (Phase 11a's own
+    closest-analog note for the pre-Phase-12 state), which stays exactly
+    as frozen.
+
+    Gated identically to the download routes above (owned,
+    complete/partially_complete, guard clean, export window not yet
+    elapsed) -- acknowledging a package that is not actually
+    downloadable would record a false attestation. Idempotent:
+    re-acknowledging an already-acknowledged session returns the
+    original timestamp/principal unchanged -- an acknowledgment is a
+    one-time fact, not a renewable one.
+    """
+    db = get_db()
+    session = await _owned_session(sid, principal, {"_id": 0})
+    if session.get("status") not in ("complete", "partially_complete"):
+        raise HTTPException(403, "This session has not completed a clean run yet.")
+    guard = session.get("guard_report") or {}
+    if guard.get("status") != "clean":
+        raise HTTPException(403, "Publish Guard has not certified this session as clean.")
+    if _export_window_expired(session):
+        raise HTTPException(
+            410,
+            "This export package's EXPORT_RETENTION_WINDOW has elapsed; it can no "
+            "longer be acknowledged.",
+        )
+    existing = session.get("acknowledgment")
+    if isinstance(existing, dict) and existing.get("acknowledged"):
+        return existing
+    acknowledgment = {
+        "acknowledged": True,
+        "acknowledged_at": datetime.now(timezone.utc).isoformat(),
+        "acknowledged_by": principal,
+    }
+    await db.sessions.update_one(_owned_filter(sid, principal), {"$set": {"acknowledgment": acknowledgment}})
+    return acknowledgment
+
+
+@app.get("/api/sessions/{sid}/cleanup-status")
+async def session_cleanup_status(sid: str, principal: str = Depends(resolve_principal)):
+    """Phase 12 item 6 read path: the CleanupManager-produced
+    CleanupManifest for this session's run (docs #77), if a terminal-path
+    cleanup has ever run for it, alongside ``export_expires_at`` (docs
+    #75) for the frontend's expiry-warning surface (docs #96). ``cleanup``
+    is ``null`` before any cleanup pass has run -- this route only
+    *reports* what CleanupManager (wired into ``session_delete`` and
+    ``_purge_settled_sessions_loop`` below) has already produced; it never
+    triggers a cleanup pass itself.
+    """
+    from phi_core.control.cleanup_manager import CleanupManager
+    from phi_core.control.policy import CapabilityPolicy
+    from phi_core.control.store import MongoControlStore
+    from phi_core.control.superorchestrator import SuperOrchestrator
+    from phi_core.control.tasks import TaskService
+    db = get_db()
+    session = await _owned_session(
+        sid, principal,
+        {"_id": 0, "_pipeline_run_id": 1, "status": 1, "guard_report": 1, "updated_at": 1},
+    )
+    run_id = session.get("_pipeline_run_id") or sid
+    control_store = MongoControlStore(db)
+    manager = CleanupManager(
+        control_store, SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(None))),
+    )
+    manifest = await manager.latest_manifest(run_id)
+    return {
+        "cleanup": manifest.model_dump() if manifest is not None else None,
+        "export_expires_at": _export_expires_at(session),
+    }
 
 
 # --- LLM settings (BYO-key) ----------------------------------------------
@@ -2584,6 +2677,60 @@ REVIEW_RETENTION_DAYS = int(os.environ.get("REVIEW_RETENTION_DAYS", str(RETENTIO
 
 _TERMINAL_RETENTION_STATUSES = ["complete", "failed", "cancelled", "blocked", "intake_failed",
                                 "partially_complete", "expired_awaiting_review"]
+
+
+def _export_expires_at(session: dict) -> str | None:
+    """Phase 12 item 1/2 (docs #75 "export lifecycle"): the ISO instant a
+    READY_FOR_EXPORT package stops being downloadable, or ``None`` when
+    the session is not export-ready at all (never computed as "the
+    future" for a session that was never certified clean).
+
+    Anchored on ``updated_at`` rather than a dedicated stored field:
+    ``agents.orchestrator.execute_decisions`` (the D9 execute-onward path)
+    writes ``status`` and ``guard_report`` together in one
+    ``completion_set`` update that also stamps ``updated_at`` to that
+    exact moment (see ``completion_set["updated_at"]``). For a session
+    that has not been mutated since completing -- true for every session
+    until an operator, a reviewer, or a later retention sweep touches it
+    -- that timestamp genuinely is "when this package became ready", not
+    merely "the last write". A later legitimate mutation (e.g. the
+    right-to-erasure `erasure_pending` retry path) only ever moves a
+    session toward destruction, never resets an already-expired window
+    back to "not yet expired", so this anchor cannot be used to extend a
+    package's life past its real completion time.
+    """
+    if session.get("status") not in ("complete", "partially_complete"):
+        return None
+    guard = session.get("guard_report") or {}
+    if guard.get("status") != "clean":
+        return None
+    updated_at = session.get("updated_at")
+    if not updated_at:
+        return None
+    from phi_core.control.artifacts import export_expires_at as _compute_export_expiry
+    try:
+        anchor = datetime.fromisoformat(updated_at)
+    except ValueError:
+        return None
+    return _compute_export_expiry(anchor)
+
+
+def _export_window_expired(session: dict) -> bool:
+    """``True`` only when the session is export-ready *and* its
+    EXPORT_RETENTION_WINDOW has genuinely elapsed. A session with no
+    computable expiry (not yet export-ready, or missing ``updated_at``)
+    is never treated as expired -- this must never be looser than "not
+    expired" by default, since every pre-existing session/test fixture
+    has no ``export_expires_at`` concept at all and must keep working
+    exactly as before."""
+    expires_at = _export_expires_at(session)
+    if expires_at is None:
+        return False
+    try:
+        expiry = datetime.fromisoformat(expires_at)
+    except ValueError:
+        return False
+    return datetime.now(timezone.utc) > expiry
 
 
 async def _run_hold(db, run_id: str | None) -> str:
