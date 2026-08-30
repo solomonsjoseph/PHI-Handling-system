@@ -137,6 +137,90 @@ def _pdf_is_readable(path: Path) -> tuple[bool, str]:
         return False, f"unreadable pdf: {type(e).__name__}"
 
 
+# --- Phase 15a: signature/executable hardening ------------------------------
+# Executable-content signatures rejected wherever they appear in an intake
+# file, regardless of component or claimed extension: a disguised PE/ELF/
+# Mach-O binary or shebang script must never be accepted just because it was
+# named `study.csv`.
+_EXECUTABLE_MAGICS: tuple[tuple[bytes, str], ...] = (
+    (b"MZ", "PE (Windows executable/DLL)"),
+    (b"\x7fELF", "ELF (Unix executable)"),
+    (b"\xfe\xed\xfa\xce", "Mach-O 32-bit big-endian"),
+    (b"\xce\xfa\xed\xfe", "Mach-O 32-bit little-endian"),
+    (b"\xfe\xed\xfa\xcf", "Mach-O 64-bit big-endian"),
+    (b"\xcf\xfa\xed\xfe", "Mach-O 64-bit little-endian"),
+    (b"\xca\xfe\xba\xbe", "Mach-O universal (fat) binary"),
+    (b"\xbe\xba\xfe\xca", "Mach-O universal (fat) binary (byte-swapped)"),
+)
+
+# ZIP-family magic bytes: local-file-header, empty-archive, and spanned-
+# archive signatures. `.xlsx`/`.docx` are OOXML zips and must start with one
+# of these; a `.csv` that starts with one is a disguised archive.
+_ZIP_MAGICS: tuple[bytes, ...] = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+
+# Archive extensions: never an accepted component suffix for any of
+# datasets/forms/dictionary (see COMPONENT_SUFFIXES), so an entry with one
+# of these suffixes has no legitimate destination in the intake tree.
+ARCHIVE_SUFFIXES = {
+    ".zip", ".tar", ".gz", ".tgz", ".tar.gz", ".bz2", ".7z", ".rar", ".xz", ".zst", ".cab", ".iso",
+}
+
+
+def _head_bytes(path: Path, n: int = 32) -> bytes:
+    try:
+        with path.open("rb") as f:
+            return f.read(n)
+    except OSError:
+        return b""
+
+
+def _executable_signature(head: bytes) -> str:
+    """Description of the recognized executable/script signature at the
+    start of ``head``, or "" when ``head`` matches none of them."""
+    for magic, desc in _EXECUTABLE_MAGICS:
+        if head.startswith(magic):
+            return desc
+    if head.startswith(b"#!"):
+        return "shebang script"
+    return ""
+
+
+def _signature_matches_extension(head: bytes, ext: str) -> tuple[bool, str]:
+    """Confirm ``head`` genuinely matches the magic bytes an accepted
+    ``ext`` requires, beyond a parse-succeeds check. Returns (ok, reason)."""
+    if ext == ".csv":
+        if head.startswith(_ZIP_MAGICS):
+            return False, "csv content is actually a zip archive"
+        return True, ""
+    if ext in (".xlsx", ".docx"):
+        if not head.startswith(_ZIP_MAGICS):
+            return False, f"{ext} missing required zip signature"
+        return True, ""
+    if ext == ".pdf":
+        if not head.startswith(b"%PDF-"):
+            return False, "not a PDF (missing %PDF- magic)"
+        return True, ""
+    return True, ""
+
+
+def _docx_is_readable(path: Path) -> tuple[bool, str]:
+    """Confirm the file is a genuine OOXML zip container (has
+    ``[Content_Types].xml``), not merely something whose first bytes happen
+    to start with ``PK``. `.docx` had no readability check at all before
+    Phase 15a; `_xlsx_is_single_sheet` and `_pdf_is_readable` already had
+    dedicated checks, this closes that gap."""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = zf.namelist()
+        if "[Content_Types].xml" not in names:
+            return False, "docx missing [Content_Types].xml (not a genuine OOXML container)"
+        return True, ""
+    except zipfile.BadZipFile:
+        return False, "unreadable docx: not a valid zip archive"
+    except Exception as e:
+        return False, f"unreadable docx: {type(e).__name__}"
+
+
 def _sha256_of(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -153,6 +237,13 @@ def unpack_zip(zip_path: Path, dest_root: Path) -> tuple[list[str], str | None]:
       * total decompressed size <= INTAKE_MAX_TOTAL_BYTES (default 1 GiB)
       * entry count <= INTAKE_MAX_ENTRIES (default 500)
       * per-entry compression ratio <= INTAKE_MAX_RATIO (default 100x)
+    SEC-007 archive-depth guard: this function unpacks exactly one archive
+    level. Any entry that is itself an archive (by extension, or by zip
+    magic bytes even when renamed) is rejected outright -- no accepted
+    intake component (COMPONENT_SUFFIXES) takes an archive extension, so a
+    nested archive has no legitimate destination and is never silently
+    written as an unexamined file, nor recursively re-opened to hide a
+    second bomb inside it.
     Normalizes a single-root wrapper directory so top-level components are at dest_root.
     """
     max_total = int(os.environ.get("INTAKE_MAX_TOTAL_BYTES", 1 << 30))          # 1 GiB
@@ -195,6 +286,15 @@ def unpack_zip(zip_path: Path, dest_root: Path) -> tuple[list[str], str | None]:
                         f"suspicious compression ratio for {name!r}: "
                         f"{info.file_size}/{info.compress_size} (> {max_ratio}x)"
                     )
+                # SEC-007: reject nested archives outright by extension.
+                # No accepted component takes an archive extension, so an
+                # entry that is itself an archive has no legitimate use
+                # here and must not be silently written as an opaque,
+                # unexamined file -- it would bypass every check this
+                # function applies to the outer zip.
+                entry_lower = name.lower()
+                if any(entry_lower.endswith(suffix) for suffix in ARCHIVE_SUFFIXES):
+                    return extracted, f"nested archive not allowed: {name!r} (archive suffix)"
                 # NOTE: we intentionally do NOT precompute a total from
                 # `info.file_size` because the ZIP header can lie. The
                 # authoritative aggregate cap is enforced by streamed_total
@@ -207,6 +307,13 @@ def unpack_zip(zip_path: Path, dest_root: Path) -> tuple[list[str], str | None]:
                         rel_name = str(Path(*parts[1:])) if len(parts) > 1 else ""
                 if not rel_name:
                     continue
+                # SEC-007 (continued): a disguised archive can be renamed
+                # away from an archive suffix, so also peek its content for
+                # zip magic bytes before ever writing it to disk.
+                with zf.open(info) as peek:
+                    head = peek.read(8)
+                if head.startswith(_ZIP_MAGICS):
+                    return extracted, f"nested archive not allowed: {name!r} (zip magic bytes detected)"
                 dst = dest_root / rel_name
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 # Also enforce a streaming cap on decompressed bytes per file so
@@ -297,6 +404,25 @@ def scan_intake(root: Path) -> tuple[list[IntakeEntry], list[str]]:
             ))
             continue
 
+        # Signature/executable hardening (Phase 15a): reject a disguised
+        # executable/script, or content whose magic bytes contradict its
+        # extension, before any format-specific parse is attempted below.
+        head = _head_bytes(path)
+        exec_reason = _executable_signature(head)
+        if exec_reason:
+            entries.append(IntakeEntry(
+                component="_unclassified", relpath=str(rel), stored_path=str(path),
+                size_bytes=size, reason=f"executable content detected ({exec_reason})",
+            ))
+            continue
+        sig_ok, sig_reason = _signature_matches_extension(head, ext)
+        if not sig_ok:
+            entries.append(IntakeEntry(
+                component="_unclassified", relpath=str(rel), stored_path=str(path),
+                size_bytes=size, reason=sig_reason,
+            ))
+            continue
+
         # Format-specific validation
         reason = ""
         if ext == ".xlsx" and component in ("datasets", "dictionary"):
@@ -317,6 +443,14 @@ def scan_intake(root: Path) -> tuple[list[IntakeEntry], list[str]]:
                 continue
         elif ext == ".pdf":
             ok, reason = _pdf_is_readable(path)
+            if not ok:
+                entries.append(IntakeEntry(
+                    component="_unclassified", relpath=str(rel), stored_path=str(path),
+                    size_bytes=size, reason=reason,
+                ))
+                continue
+        elif ext == ".docx":
+            ok, reason = _docx_is_readable(path)
             if not ok:
                 entries.append(IntakeEntry(
                     component="_unclassified", relpath=str(rel), stored_path=str(path),
