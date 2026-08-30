@@ -11,12 +11,6 @@ from phi_core.agents.reasoning import triage_columns
 from phi_core.agents.reviewer import Reviewer
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="awaiting fix: triage_columns's instrument name_keys ('name','field','column') "
-           "never match Instrument.run()'s real field shape ('label','collected_variable'), "
-           "so TRIAGE's KNOWN state is unreachable from real Instrument coverage in production",
-)
 def test_triage_known_state_is_unreachable_from_real_instrument_fields():
     """Discovered building the Phase 16 Judge two-stage classification
     evaluation harness (``test_eval_phase16_judge.py::

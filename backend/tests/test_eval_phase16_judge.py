@@ -155,23 +155,14 @@ async def test_judge_two_stage_per_category_precision_recall_f1():
 @pytest.mark.asyncio
 async def test_judge_triage_state_reflects_specialist_coverage():
     """TRIAGE (stage 1) is deterministic evidence bookkeeping, not a model
-    judgment -- exercised directly against a small labeled set, against
-    triage_columns's REAL, CURRENT behavior (not its docstring's intended
-    behavior -- see ``test_regression_phase16.py::
-    test_triage_known_state_is_unreachable_from_real_instrument_fields``
-    for the genuine defect this evaluation surfaced: Instrument.run()'s
-    real field shape is ``{"label": ..., "collected_variable": ...}``, but
-    ``_entry_identity``'s instrument name_keys are
-    ``("name", "field", "column")`` -- no real Instrument field ever
-    matches, so a column documented by BOTH Lexicon and Instrument
-    currently triages UNVERIFIED, identically to Lexicon-only coverage,
-    never KNOWN. This test locks in that real behavior so a future fix
-    is a deliberate, visible change here, not a silent one).
+    judgment -- exercised directly against a small labeled set. A column
+    documented by BOTH Lexicon and Instrument (whose real field shape is
+    ``{"label": ..., "collected_variable": ...}``) must triage KNOWN: two
+    independent sources agree it is understood.
 
     A column documented by neither Lexicon nor Instrument still correctly
-    triages UNKNOWN, the fail-closed default -- that path does not depend
-    on the broken instrument-identity lookup and is unaffected by the
-    defect above."""
+    triages UNKNOWN, the fail-closed default; a Lexicon-only column triages
+    UNVERIFIED."""
     corpus = _load_corpus()[:9]
     known = corpus[:3]        # documented by both Lexicon and Instrument
     lexicon_only = corpus[3:6]
@@ -199,10 +190,9 @@ async def test_judge_triage_state_reflects_specialist_coverage():
 
     provenance_by_column = {cd["column_id"]: cd["technical_rationale"] for cd in result["column_decisions"]}
     for col in known:
-        assert "triage=UNVERIFIED" in provenance_by_column[col["column"]], (
-            "Instrument coverage started elevating triage past UNVERIFIED -- "
-            "the identity-key mismatch this test documents may have been fixed; "
-            "see test_regression_phase16.py's matching xfail"
+        assert "triage=KNOWN" in provenance_by_column[col["column"]], (
+            "Instrument coverage no longer elevates both-covered columns past "
+            "UNVERIFIED to KNOWN; see test_regression_phase16.py"
         )
     for col in lexicon_only:
         assert "triage=UNVERIFIED" in provenance_by_column[col["column"]]

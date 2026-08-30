@@ -149,7 +149,7 @@ def triage_columns(
     conflict_names = set(conflicts or [])
 
     lexicon_names = {_entry_identity(c)[1] for c in lexicon_columns}
-    instrument_names = {_entry_identity(f, ("name", "field", "column"))[1] for f in instrument_fields}
+    instrument_names = {_entry_identity(f, ("label", "collected_variable"))[1] for f in instrument_fields}
 
     triage: dict[tuple[str, str], str] = {}
     for entry in schema_columns:
