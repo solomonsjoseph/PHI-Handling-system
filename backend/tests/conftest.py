@@ -73,6 +73,7 @@ _MONGO_GUARDED_MODULES = {
     "test_admin_hold.py",
     "test_control_migrate.py",
     "test_control_store_effect_key.py",
+    "test_control_phase12_cleanup_wiring.py",
 }
 
 
