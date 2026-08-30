@@ -108,13 +108,14 @@ def test_deterministic_checklist_false_positive_rate_on_hard_rule_table_keep_lis
     """Genuine defect this evaluation surfaced (see ``test_regression_
     phase16.py::test_deterministic_checklist_ignores_hard_rule_allow_list_
     for_unsafe_keep``): ``_deterministic_checklist``'s "unsafe KEEP" check
-    fires whenever a column matches ANY ``_HARD_RULE_TABLE`` row while
-    proposing 'keep' -- including the table's own last row, whose
-    allow-list is ``["keep"]`` (roughly 40 legitimate clinical/stratifier
-    column names such as "diagnosis_code", "heart_rate_bpm", "bmi", "sex").
-    A correct 'keep' decision on any of those columns is incorrectly
-    flagged CORRECTION_REQUIRED. Measured directly here against 4 of those
-    genuinely-correct 'keep' columns."""
+    used to fire whenever a column matched ANY ``_HARD_RULE_TABLE`` row --
+    including the table's own last row, whose allow-list is ``["keep"]``
+    (roughly 40 legitimate clinical/stratifier column names such as
+    "diagnosis_code", "heart_rate_bpm", "bmi", "sex"). That defect is now
+    fixed: the check skips any row whose allow-list includes 'keep', so a
+    correct 'keep' on those columns is no longer flagged. Measured
+    directly here against 4 of those columns as a zero false-positive
+    rate."""
     keep_listed_correct_decisions = [
         {"file_id": FILE_ID, "column": column, "phi_category": None, "subject": "participant",
          "action": "keep", "reason": f"clinical value, not an identifier ({column})",
@@ -126,9 +127,9 @@ def test_deterministic_checklist_false_positive_rate_on_hard_rule_table_keep_lis
     fpr = round(len(blocking) / len(keep_listed_correct_decisions), 4)
     print(f"\n[Phase16][reviewer_precision] deterministic-checklist false-positive rate on "
           f"hard-rule-table keep-listed columns: {fpr} ({len(blocking)}/{len(keep_listed_correct_decisions)})")
-    assert fpr == 1.0, (
-        "expected the known defect to reproduce (every keep-listed clinical column incorrectly "
-        f"flagged); got fpr={fpr} -- the defect may have been fixed, see the matching xfail"
+    assert fpr == 0.0, (
+        "a correct 'keep' on a keep-listed clinical column was incorrectly flagged "
+        f"as CORRECTION_REQUIRED; got fpr={fpr}"
     )
 
 

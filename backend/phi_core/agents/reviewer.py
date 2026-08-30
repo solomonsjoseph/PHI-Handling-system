@@ -219,7 +219,9 @@ class Reviewer(Agent):
             decided_files.add(file_id)
             col_norm = str(column or "").strip().lower().replace(" ", "_")
             if action == "keep" and any(
-                re.match(pattern, col_norm) for pattern, *_ in _HARD_RULE_TABLE
+                re.match(pattern, col_norm)
+                for pattern, allowed, *_ in _HARD_RULE_TABLE
+                if "keep" not in allowed
             ):
                 findings.append({
                     "verdict": "CORRECTION_REQUIRED", "file_id": file_id, "column": column,

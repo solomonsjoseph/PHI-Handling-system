@@ -6,7 +6,6 @@ of scope for this phase and is recorded separately in
 """
 from __future__ import annotations
 
-import pytest
 from phi_core.agents.reasoning import triage_columns
 from phi_core.agents.reviewer import Reviewer
 
@@ -48,13 +47,6 @@ def test_triage_known_state_is_unreachable_from_real_instrument_fields():
     assert triage[("f1", "mrn")] == "KNOWN"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="awaiting fix: Reviewer._deterministic_checklist's unsafe-KEEP check matches ANY "
-           "_HARD_RULE_TABLE row including the table's own keep-allowlisted clinical row, so a "
-           "correct 'keep' on ~40 legitimate clinical columns (diagnosis_code, heart_rate_bpm, "
-           "bmi, sex, ...) is incorrectly flagged CORRECTION_REQUIRED",
-)
 def test_reviewer_deterministic_checklist_does_not_flag_a_correct_keep_on_a_keep_allowlisted_column():
     """Discovered building the Phase 16 Reviewer false-positive-rate
     evaluation harness (``test_eval_phase16_reviewer_precision.py::
