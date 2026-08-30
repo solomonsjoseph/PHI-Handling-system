@@ -1259,4 +1259,103 @@ parametrize-value rename (`test_control_capability.py::test_nonresearch_agent_de
 -> `[Reviewer]`, the item-A trivial fix) disappeared; 1539 collected.
 
 **`PHASE_8_STATUS = PASS`, now genuinely gate-verified against live Phase 8 code.**
-Proceeding to Phase 9 (verified manifest and Executor, solo, sections 49-53/92).
+
+---
+
+## Phase 9 (verified manifest and Executor) — COMPLETE
+
+Seven commits (`121cc54`, `2abe4c2`, `960da1b`, `38d9121`, `b12347a`, `b783525`,
+`06b9e09`), landed by a solo subagent (redispatched once after a first attempt spent 5
+hours in open-ended investigation with zero commits; the redispatch supplied concrete
+pre-investigated file:line anchors and a mandatory commit-after-each-item order).
+
+**1. `verify_keep_decisions` relocated.** Follows the exact `*_maybe_sandboxed` pattern
+the four Wave R-c readers already use: routes through `run_isolated` when a sandbox is
+attached, calls in-process otherwise (the same permanent test-compatibility fallback).
+`control/gates.py`'s `run_decision_gates` now calls the sandboxed wrapper. The raw-reader
+AST scan's `targets` set (`test_control_phaseR_integration.py:651`) widened to include it
+in the same commit -- confirmed substantive, not cosmetic (Phase 7's gap): `grep` confirms
+`verify_keep_decisions`'s only remaining call site inside `phi_core/` is its own
+definition plus the new sandboxed-dispatch wrapper. **This closes the Phase 7 residual
+risk note.**
+
+**2. Manifest freeze (`control/manifest.py`).** `evaluate_freeze_conditions` checks all
+four docs #49 conditions (Judge complete, Reviewer Preview PASS, Human Review resolved,
+policy gates satisfied); `ensure_frozen_manifest` freezes-or-reuses idempotently against
+`SuperOrchestrator.authorize_manifest_freeze` (Wave R-b, previously built but unwired from
+any live caller) and refuses execution once R-b's lineage invalidation has flipped a
+manifest's status. Wired into `orchestrator.py`'s `execute_decisions` immediately before
+`Executor(...).run()`: a freeze refusal escalates to human review via the existing
+`_escalate_to_human_review` path. Verified the real execution-authorization decision
+lives in `SuperOrchestrator` (D9's deterministic workflow authority), not
+`agents/manager.py`'s `ExecutionHealthSupervisor` (whose `consult()` fails open by design
+and is documented as never a safety gate) -- `manager.py` correctly left untouched.
+
+**3. Seven deterministic pre-execution validators (`control/execution_validators.py`).**
+`StaticCodeValidator` (real AST parse of worker module sources, rejects network/shell/
+subprocess/dynamic-install imports and calls), `OperationAllowlistValidator`,
+`MethodRegistryValidator`, `CapabilityBroker`, `PathPolicyValidator`, `ResourceLimitValidator`,
+`SandboxPolicyValidator` (confirms `SandboxRecord.network_denied` is actually set, the
+runtime-config counterpart to the static network check). Spot-verified genuine (not
+stubs) by the orchestrating session: real conditional rejection logic throughout, e.g.
+`SandboxPolicyValidator.validate` returns a violation whenever `network_denied` is false.
+Gated on `manifest is not None` (same compatibility convention as item 2) so pre-existing
+unit tests built without a manifest are unaffected. `MethodRegistryValidator`'s
+`approved_methods` is deliberately passed as `[]` from Executor -- Judge does not
+currently emit a `method_id` on any decision, so this is honestly dormant in production
+today, documented in code, not silently broken.
+
+**4. Idempotency spine wired (docs #53).** `Executor.run` gained `manifest`/`store`
+keywords (both default `None`, permanent `make_ctx`-test compatibility); when both are
+supplied, a deterministic `task_id` (`execution:<manifest_id>`) is checked against a prior
+successful `ExecutionResult` first (a true no-op retry, skipping the transform loop and
+every validator), otherwise an `ExecutionTask` is persisted before starting and an
+`ExecutionResult` (success or failure, with `failure_class` on error) after.
+
+**5. Operator migration (`control/verification.py`).** Converts Operator's raw
+`{verdicts, failed_file_ids, status}` result into a typed `VerificationResult` (docs #54
+fields) and persists it alongside the idempotency-spine records. Purely additive --
+Operator's class/module and its existing Reviewer-coverage-audit consumption are
+unchanged; **Operator is not removed**, per the plan (Phase 10 retires it).
+
+**6. Threat model.** Confirmed the worker-credential criterion ("the worker process
+receives no credential in its environment or its arguments") against R-Sandbox's existing
+`docs/THREAT_MODEL_BACKEND.md` section 3 disclosure; cross-referenced rather than
+duplicated. Corrected one stale symbol name found in the process
+(`_DENYLIST_ENV_FRAGMENTS` -> `_ALLOWLISTED_ENV_KEYS`).
+
+**7. End-to-end invariant.** `execute_decisions` itself (not only the `manifest.py` unit)
+refuses a stale/invalidated manifest before `Executor` ever runs, plus a contrast test
+proving the gate is not overly broad.
+
+**DELETED_TESTS:** none.
+
+### Orchestrator verification (post-subagent)
+
+The subagent's own live-gate run showed one extra failure
+(`test_llm_settings_default`) beyond the expected baseline, attributed to transient
+concurrency/key-rotation noise. Independently confirmed and root-caused: `crypto.py`'s
+`_load_or_create_key()` runs during `phi_core.agents` import (triggered transitively
+before `server.py:109`'s `load_dotenv()` call), so **every** dev-mode server restart
+appends a fresh `APP_ENCRYPTION_KEY` to `backend/.env` regardless of whether one already
+exists there -- not merely accumulated pollution from this session's restarts, but a
+genuinely reproducible per-restart behavior, consistent with the plan's own
+acknowledgment (Phase 9 text: "in dev `crypto.py:51-58` appends a freshly minted key to
+it"). Not a Phase 9 (or any phase's) code defect to fix: the plan documents this as
+accepted dev-mode behavior, not a listed defect (D1-D9). Cleaned up for verification
+(deduplicated `.env` to one `APP_ENCRYPTION_KEY` line, deleted the resulting stale
+`settings.llm` Mongo document; `.env` is gitignored, no tracked diff) and re-ran the
+canonical gate **without an additional restart** (to avoid re-triggering the append):
+
+**Genuine canonical gate (serial, `PHI_TEST_BASE_URL=http://127.0.0.1:8001`):** **8
+failed, 1566 passed, 4 skipped, 2 errors, 0 xfailed, 87.68s.** Failed/error set exactly
+matches the Step 0/Phase 8 baseline (3 `test_human_review_invariant.py` FAILED, 5
+`test_agent_pipeline.py` FAILED, 2 `test_agent_pipeline.py` ERROR); no intermittent
+extras this run, confirming the subagent's `test_llm_settings_default` flake theory.
+`ruff check .` clean. Root suite unchanged (85 failed / 909 passed / 3 skipped, all
+`phi_engine`, out of scope). Invariant + canary + all five new Phase 9 test files +
+the widened raw-reader scan: 82 passed. Nodeid regression: only the 6 already-recorded
+disappeared nodeids from Phases 7-8 (no new disappearances); 1580 collected.
+
+**`PHASE_9_STATUS = PASS`, genuinely gate-verified.** Proceeding to Phase 10
+(deterministic verification, Reviewer Final, rewind; solo; sections 54-56/93).
