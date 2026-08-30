@@ -19,9 +19,6 @@ from pathlib import Path
 
 import openpyxl
 import pytest
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-
 from phi_core.control.final_assurance import derive_report_package_complete
 from phi_core.control.integrity_service import (
     BindingKey,
@@ -31,7 +28,8 @@ from phi_core.control.integrity_service import (
 from phi_core.control.records import ExecutionResult, VerificationResult, VerifiedClassificationManifest
 from phi_core.control.report_artifacts import ReportArtifacts, is_report_package_complete
 from phi_core.control.zip_builder import ReportingSafetyRefused, ZIPBuilder
-
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
 
 # ---- fixtures ---------------------------------------------------------------
 

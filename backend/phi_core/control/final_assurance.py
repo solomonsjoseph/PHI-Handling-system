@@ -109,7 +109,6 @@ from .records import (
     VerificationResult,
     VerifiedClassificationManifest,
 )
-
 from .report_artifacts import ReportArtifacts, is_report_package_complete
 
 ReportingSafetyVerdict = Literal["PASS", "FAIL"]
