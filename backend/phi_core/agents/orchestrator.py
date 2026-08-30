@@ -349,6 +349,19 @@ async def execute_decisions(
         await manager._log("operator.crashed", "info",
                            {"error_kind": f"exception:{type(exc).__name__}"})
         op_out = {"failed_file_ids": list(exec_out["exports"].keys()), "verdicts": []}
+    if manifest is not None and store is not None:
+        # docs #54/Phase 9 item 5: migrate Operator's useful deterministic
+        # verification into a governed VerificationResult rather than
+        # letting it live only as an ephemeral dict Reviewer's coverage
+        # audit happens to consume -- additive only; Operator itself, and
+        # every existing consumer of `op_out` below, are unchanged.
+        from phi_core.control.verification import build_verification_result, record_verification_result
+
+        await record_verification_result(store, build_verification_result(
+            run_id=run_id, task_id=f"execution:{manifest.manifest_id}", attempt_id="",
+            manifest_id=manifest.manifest_id, manifest_version=str(manifest.schema_version),
+            input_artifact_version=0, output_artifact_version=0, operator_result=op_out,
+        ))
     # Operator's own `failed_file_ids` only covers a file it could not read
     # or that never made it into `exports` at all (see operator.py). A
     # shape-check or reverse-completeness failure surfaces as a per-column
