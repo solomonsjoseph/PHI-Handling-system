@@ -16,21 +16,22 @@ must consume an interface or decision.
 Every `xfail(strict=True)` in the suite is listed here with its nodeid, resolving phase,
 and exact reason string. A phase may not close with an unrecorded xfail.
 
-- nodeid: `tests/test_regression_phase15b.py::test_learning_case_error_exposes_raw_backstop_only_identifier_via_case_abstract`
-  resolving phase: Phase 17
-  reason: "awaiting fix: LearningCaseError.case.abstract carries the raw identifier in cleartext for any PHI shape the sanitize stage's regex set does not recognize (VIN/MBI/DEA/NPI etc.), even though the durable store never receives it"
+(empty -- all four Phase 14/15b/16 findings resolved in Phase 17-A, see below)
 
-- nodeid: `tests/test_regression_phase15b.py::test_leak_canary_misses_a_literal_immediately_followed_by_a_sentence_period`
-  resolving phase: Phase 17
-  reason: "awaiting fix: CanarySet._TOKEN_SPLIT treats '.' as an intra-token character, so a planted literal immediately followed by a sentence-ending period with no space tokenizes as 'literal.' and never matches the registered literal, letting the leak-canary harness (the Phase 15b mandatory release test) silently miss a real leak"
+**Resolved in Phase 17-A** (commits `a82b5e3`, `1d5afd1`, `02a2e88`, `f9ea307`; each
+regression test now passes for real, `xfail(strict=True)` removed):
 
-- nodeid: `tests/test_regression_phase16.py::test_triage_known_state_is_unreachable_from_real_instrument_fields`
-  resolving phase: Phase 17
-  reason: "awaiting fix: triage_columns's instrument name_keys ('name','field','column') never match Instrument.run()'s real field shape ('label','collected_variable'), so TRIAGE's KNOWN state is unreachable from real Instrument coverage in production"
-
-- nodeid: `tests/test_regression_phase16.py::test_reviewer_deterministic_checklist_does_not_flag_a_correct_keep_on_a_keep_allowlisted_column`
-  resolving phase: Phase 17
-  reason: "awaiting fix: Reviewer._deterministic_checklist's unsafe-KEEP check matches ANY _HARD_RULE_TABLE row including the table's own keep-allowlisted clinical row, so a correct 'keep' on ~40 legitimate clinical columns (diagnosis_code, heart_rate_bpm, bmi, sex, ...) is incorrectly flagged CORRECTION_REQUIRED"
+1. `LearningCaseError.case.abstract` no longer carries a raw backstop-only-caught
+   identifier -- cleared before the exception is raised (`control/learning.py:391-398`).
+2. Leak canary now detects a literal at a sentence-final period -- `CanarySet.scan_text`
+   strips a trailing `.` before the single-literal membership test, leaving interior
+   periods (dotted hostnames, emails, decimals) untouched (`control/canary.py:139-149`).
+3. `triage_columns`'s instrument `name_keys` now match `Instrument.run()`'s real field
+   shape (`'label'`/`'collected_variable'`), so TRIAGE's `KNOWN` state is reachable from
+   real Instrument coverage (`agents/reasoning.py:152`).
+4. `Reviewer._deterministic_checklist`'s unsafe-KEEP check now skips the table's own
+   keep-allowlisted clinical row, so a correct `keep` on those ~40 columns is no longer
+   flagged `CORRECTION_REQUIRED` (`agents/reviewer.py:221-225`).
 
 ### DELETED_TESTS
 
@@ -2104,3 +2105,30 @@ already-recorded renames; 1876 collected.
 **`PHASE_14_STATUS = PASS`. `PHASE_15B_STATUS = PASS`. `PHASE_16_STATUS = PASS`.**
 Proceeding to Phase 17 (repository clean slate), which must resolve all four recorded
 `KNOWN_XFAIL` entries to either a passing test or a recorded `REVIEW_REQUIRED`.
+
+---
+
+## Phase 17 (repository clean slate) — IN PROGRESS
+
+Section 100, solo. Decomposed into sequential sub-dispatches given its scope (whole-repo
+cleanup-audit plus a genuine architectural extraction). Progress recorded incrementally.
+
+### Phase 17-A: resolve all four KNOWN_XFAIL regressions — COMPLETE
+
+Four commits (`a82b5e3`, `1d5afd1`, `02a2e88`, `f9ea307`), detailed above under the
+now-empty `KNOWN_XFAIL` section's "Resolved in Phase 17-A" note.
+
+**Genuine canonical gate (orchestrator-independently re-run):**
+- Non-live: **3 failed, 1858 passed, 5 skipped, 0 xfailed, 96.27s** -- exactly the
+  pre-existing baseline, zero xfailed (all four genuinely resolved, not suppressed).
+- Live (`PHI_TEST_BASE_URL`, fresh restart, clean state): **8 failed, 1862 passed,
+  4 skipped, 2 errors, 0 xfailed, 106.16s** -- exactly the Step 0 baseline.
+- `ruff check .` clean. Root suite unchanged (85 failed / 909 passed / 3 skipped, all
+  `phi_engine`, out of scope). Independently spot-read the canary fix
+  (`control/canary.py:139-149`): confirmed `rstrip(".")` only strips a *trailing*
+  period, leaving interior periods (dotted hostnames, emails, decimals) intact --
+  correct, does not weaken canary detection elsewhere.
+
+Proceeding to Phase 17-B: move Scout, Ledger, and Herald out of the core PHI path into
+an opt-in post-run add-on, and remove the Auditor top-level role, per the plan's explicit
+decision.
