@@ -48,7 +48,7 @@ from phi_core.paths import artifact_id_from_export_alias
 from .base import Agent
 from .batching import run_batched
 from .deterministic_rules import _HARD_RULE_TABLE
-from .operator import _read_columns
+from .reasoning import _read_columns
 
 
 class Reviewer(Agent):

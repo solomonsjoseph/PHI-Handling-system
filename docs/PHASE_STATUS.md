@@ -38,6 +38,19 @@ removal justifies it, and the commit that removed that symbol.
 - nodeid: `tests/test_judge_typed_proposal.py::test_non_dict_top_level_reply_produces_an_empty_proposal_not_a_crash`
   removed symbol: `phi_core.agents.reasoning.JudgeDecision`/`JudgeProposal`
   commit: Phase 7 flip commit
+- nodeid: `tests/test_operator.py::test_agent_log_row_emitted_per_batch`
+  removed symbol: `phi_core.agents.operator.Operator` (retired Phase 10, docs #54:
+  "Operator -> migrate useful deterministic verification into DeterministicVerifier
+  then remove")
+  reason: asserted on Operator's own `Agent`-based `self._log`/`run_batched` per-batch
+  logging (`op.ctx.trace.legacy_messages`, `phase="operator.batch:<n>"`).
+  `control.deterministic_verifier.DeterministicVerifier` is not an `Agent` and its
+  (now sandboxable) verification pass does not use `agents.batching.run_batched` for
+  per-batch progress logging, so this specific infrastructure no longer exists to
+  test. Every behavioral check the batch covered (per-decision verdicts, pass/fail
+  counts) is still exercised, just not through a batch-log assertion -- see
+  `tests/test_deterministic_verifier.py`'s other 30+ migrated tests.
+  commit: Phase 10 item 3 commit (Operator retirement)
 
 Note: `test_judge_typed_proposal.py`'s whole premise (Judge.run returning a
 `JudgeDecision`/`JudgeProposal`-typed proposal) is superseded by the ColumnDecision

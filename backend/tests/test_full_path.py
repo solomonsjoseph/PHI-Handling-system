@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from phi_core.agents.base import Agent
-from phi_core.agents.operator import Operator
 from phi_core.agents.reasoning import (
     Executor,
     annotate_pending_review,
@@ -25,6 +24,7 @@ from phi_core.agents.reasoning import (
 )
 from phi_core.agents.reviewer import Reviewer
 from phi_core.bundle import BundleOptions, build_bundle
+from phi_core.control.deterministic_verifier import DeterministicVerifier
 from phi_core.control.testing import FakeGateway, make_ctx
 from phi_core.file_readers import column_value_stats, read_csv_columns
 from phi_core.intake import build_manifest
@@ -166,7 +166,7 @@ def test_planted_corpus_full_path_uses_real_safety_components(tmp_path, monkeypa
 
     async def complete_local_workflow() -> tuple[dict[str, str], dict[str, Any], dict[str, Any]]:
         exports = (await Executor(make_ctx("Executor")).run(files, resumed))["exports"]
-        operator = await Operator(make_ctx("Operator")).run(files, resumed, exports)
+        operator = await DeterministicVerifier().run(files, resumed, exports)
         reviewer = await Reviewer(make_ctx("Reviewer")).run(resumed, operator, exports)
         return reviewer["exports"], operator, reviewer
 

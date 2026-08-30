@@ -16,10 +16,12 @@ documented allowlist exceptions.
 
 Allowlist rationale (Step 8 invariant 2, sandboxed raw reads):
 
-- ``phi_core/agents/operator.py::_read_columns`` calls
-  ``_read_dataset_headers`` directly as a real on-disk-header fallback.
-  ``operator.py`` is outside this wave's owns list (Phase 10 retires the
-  whole module per docs/PHASE_STATUS.md); allowlisted here, not edited.
+- ``phi_core/agents/operator.py`` is gone (Phase 10 retired the whole
+  module per docs/PHASE_STATUS.md, migrating its useful checks into
+  ``control/deterministic_verifier.py``); the raw-reader helper it used
+  to hold, ``_read_columns``, now lives in ``phi_core/agents/reasoning.py``
+  itself (the same module the next bullet already allowlists
+  unconditionally), so it needs no allowlist entry of its own.
 - ``phi_core/agents/reasoning.py::Executor.run``'s own direct-call
   fallback (used only when ``ctx.sandbox is None``, i.e. a context built
   without ``ActivationFactory``'s ``needs_sandbox=True`` opt-in, such as
@@ -636,18 +638,20 @@ async def test_judge_prompt_never_carries_a_raw_sensitive_header_only_the_opaque
 # ---- invariant 2: raw reads are sandboxed ----------------------------------
 
 
-def test_sandboxed_raw_reader_call_sites_confined_to_reasoning_and_operator_read_columns() -> None:
+def test_sandboxed_raw_reader_call_sites_confined_to_reasoning_py() -> None:
     """Exclusivity: the four relocated raw-data readers
     (``_read_dataset_headers``, ``read_narrative``, ``_redact_metadata_
     file``, ``apply_column_actions_to_dataset``) are only ever called
     from ``reasoning.py`` (their own definitions, the Step 4 sandboxed
-    dispatch wrappers, and ``Executor``'s sandboxed/direct-call dispatch
-    methods) or from ``operator.py::_read_columns`` (the documented
-    on-disk-header fallback, allowlisted -- ``operator.py`` is outside
-    this wave's owns list and Phase 10 retires the whole module per
-    docs/PHASE_STATUS.md). ``phi_corpus/replay.py``'s direct calls are
-    out of scope by construction: this scan is rooted at ``phi_core/``,
-    a sibling package."""
+    dispatch wrappers, ``Executor``'s sandboxed/direct-call dispatch
+    methods, and -- since Phase 10 -- the relocated ``_read_columns``
+    raw-column reader, moved here verbatim from the retired
+    ``agents/operator.py``). Tightened from the pre-Phase-10 version of
+    this test, which additionally allowlisted
+    ``operator.py::_read_columns``: that module is gone, so this scan no
+    longer carries a second allowed site at all. ``phi_corpus/replay.py``'s
+    direct calls are out of scope by construction: this scan is rooted
+    at ``phi_core/``, a sibling package."""
     targets = {
         "_read_dataset_headers", "read_narrative",
         "_redact_metadata_file", "apply_column_actions_to_dataset",
@@ -655,11 +659,7 @@ def test_sandboxed_raw_reader_call_sites_confined_to_reasoning_and_operator_read
     }
     sites = _call_sites(PHI_CORE_ROOT, targets)
     reasoning_py = PHI_CORE_ROOT / "agents" / "reasoning.py"
-    operator_py = PHI_CORE_ROOT / "agents" / "operator.py"
-    offenders = [
-        (p, ln) for p, ln in sites
-        if not (p == reasoning_py or (p == operator_py and _enclosing_function_name(p, ln) == "_read_columns"))
-    ]
+    offenders = [(p, ln) for p, ln in sites if p != reasoning_py]
     assert offenders == [], f"raw reader called outside its allowed sites: {offenders}"
     assert sites, "the scan itself found nothing"
 
