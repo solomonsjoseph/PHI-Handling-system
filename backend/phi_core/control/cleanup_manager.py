@@ -53,6 +53,7 @@ CATEGORY_OPAQUE_MAP = "opaque_map_vault"
 CATEGORY_REVERSAL_KEY = "reversal_key_ciphertext"
 CATEGORY_CREDENTIALS = "run_scoped_credentials"
 CATEGORY_STAGED_ARTIFACTS = "staged_intake_and_cached_artifacts"
+CREDENTIAL_REVOCATIONS_COLLECTION = "run_credential_revocations"
 
 CATEGORY_AUDIT_TRAIL = "trace_hash_chain_audit_trail"
 CATEGORY_CLEANUP_MANIFEST = "cleanup_manifest_record"
@@ -226,11 +227,29 @@ class CleanupManager:
     async def _revoke_credentials(
         self, inputs: CleanupInputs, destroyed: list[str], failures: list[str],
     ) -> bool:
-        step = inputs.revoke_credentials or _true
-        ok = await self._run_bool_step(step, CATEGORY_CREDENTIALS, failures)
-        if ok:
-            destroyed.append(CATEGORY_CREDENTIALS)
-        return ok
+        """Always writes a real, auditable revocation record to this
+        module's own store (``CREDENTIAL_REVOCATIONS_COLLECTION``) --
+        that part of the category never depends on caller-supplied
+        wiring, unlike opaque-map/reversal-key/staged-artifact erasure,
+        which are genuinely session/db-schema-specific and must be
+        injected. ``inputs.revoke_credentials``, when supplied,
+        additionally runs any external revocation action a caller needs
+        (e.g. invalidating a signed session cookie/token); its failure
+        still fails this category even though the internal record was
+        already written."""
+        try:
+            await self._store.insert(CREDENTIAL_REVOCATIONS_COLLECTION, {
+                "run_id": inputs.run_id, "revoked_at": _now(),
+            })
+        except Exception as exc:  # pragma: no cover - defensive
+            failures.append(f"{CATEGORY_CREDENTIALS}: {exc}")
+            return False
+        if inputs.revoke_credentials is not None:
+            ok = await self._run_bool_step(inputs.revoke_credentials, CATEGORY_CREDENTIALS, failures)
+            if not ok:
+                return False
+        destroyed.append(CATEGORY_CREDENTIALS)
+        return True
 
     @staticmethod
     async def _run_bool_step(step: AsyncBoolStep, category: str, failures: list[str]) -> bool:

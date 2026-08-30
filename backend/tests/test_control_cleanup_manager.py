@@ -19,6 +19,7 @@ from phi_core.control.cleanup_manager import (
     CATEGORY_SANDBOX,
     CATEGORY_STAGED_ARTIFACTS,
     CLEANUP_MANIFEST_COLLECTION,
+    CREDENTIAL_REVOCATIONS_COLLECTION,
     CleanupInputs,
     CleanupManager,
 )
@@ -93,6 +94,8 @@ async def test_cleanup_populates_every_manifest_field_on_full_success(tmp_path):
     assert CATEGORY_OPAQUE_MAP in manifest.destroyed_categories
     assert CATEGORY_REVERSAL_KEY in manifest.destroyed_categories
     assert CATEGORY_CREDENTIALS in manifest.destroyed_categories
+    revocation = await store.get_one(CREDENTIAL_REVOCATIONS_COLLECTION, {"run_id": run.run_id})
+    assert revocation is not None  # a real, auditable record, not a bare True
     assert CATEGORY_STAGED_ARTIFACTS in manifest.destroyed_categories
     assert manifest.retained_safe_categories  # audit trail / manifest / run manifest
     # Workspace bytes are actually gone, not merely flagged.
