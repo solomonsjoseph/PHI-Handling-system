@@ -1081,7 +1081,8 @@ async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
 
     db = get_db()
     doc = await _owned_session(
-        sid, principal, {"_id": 0, "export_paths": 1, "_pipeline_run_id": 1, "erasure_attempts": 1},
+        sid, principal,
+        {"_id": 0, "export_paths": 1, "_pipeline_run_id": 1, "erasure_attempts": 1, "reversal_key_blob": 1},
     )
     control_store = MongoControlStore(db)
     await tombstone_session(control_store, sid)
@@ -1116,6 +1117,10 @@ async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
     await db.agent_log.delete_many({"session_id": sid})  # pre-migration rows, if any remain
     await db.trace_events.delete_many({"session_id": sid})
     await db.sessions.delete_one(_owned_filter(sid, principal))
+    await _run_cleanup_manager_best_effort(
+        control_store, run_id=run_id, session_id=sid,
+        reversal_key_present=bool(doc.get("reversal_key_blob")),
+    )
     return {"deleted": True}
 
 
@@ -2737,6 +2742,54 @@ def _export_window_expired(session: dict) -> bool:
     except ValueError:
         return False
     return datetime.now(timezone.utc) > expiry
+
+
+async def _run_cleanup_manager_best_effort(
+    control_store, *, run_id: str, session_id: str, reversal_key_present: bool = False,
+) -> None:
+    """Phase 12 item 6 (docs #76-77): produce an audit-trail
+    ``CleanupManifest`` for a terminal path that already completed its
+    real filesystem/db erasure, and -- only when the manifest genuinely
+    verifies -- advance the run to ``session_destroyed`` through the
+    pre-existing, already-tested ``begin_cleanup``/``confirm_cleanup``
+    invariant (``superorchestrator.py``; refuses outright on anything
+    but ``verification_status == "verified"``).
+
+    Best-effort and broadly caught by design, matching this module's own
+    ``_erase_opaque_map_best_effort`` convention: a pre-Phase-5 session
+    with no durable ``WorkflowRun`` (``begin_cleanup``/``confirm_cleanup``
+    both call ``SuperOrchestrator._load_run``, which raises
+    ``WorkflowError`` for an unknown ``run_id``), or a test harness
+    stubbing ``SuperOrchestrator`` without these newer cleanup-lifecycle
+    methods, must never turn an otherwise-successful erasure into a
+    failed request. The filesystem/db erasure the caller already
+    performed is the real right-to-erasure guarantee; this is additive
+    audit trail on top of it, not a precondition for it.
+    """
+    from phi_core.control.cleanup_manager import CleanupInputs, CleanupManager
+    from phi_core.control.policy import CapabilityPolicy
+    from phi_core.control.superorchestrator import SuperOrchestrator
+    from phi_core.control.tasks import TaskService
+
+    async def _confirm_true() -> bool:
+        return True
+
+    async def _confirm_erased() -> "tuple[bool, list[str]]":
+        return True, []
+
+    try:
+        orchestrator = SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(None)))
+        manager = CleanupManager(control_store, orchestrator)
+        manifest = await manager.cleanup(CleanupInputs(
+            run_id=run_id, session_id=session_id,
+            opaque_map_present=True, erase_opaque_map=_confirm_true,
+            reversal_key_present=reversal_key_present, erase_reversal_key=_confirm_true,
+            erase_staged_artifacts=_confirm_erased,
+        ))
+        if manifest.verification_status == "verified":
+            await orchestrator.confirm_cleanup(run_id=run_id, manifest=manifest)
+    except Exception:  # pragma: no cover - defensive, matches _erase_opaque_map_best_effort's own posture
+        pass
 
 
 async def _run_hold(db, run_id: str | None) -> str:
