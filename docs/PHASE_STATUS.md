@@ -1475,7 +1475,7 @@ Proceeding to Phase 11 (Final Assurance and reports, two waves, sections 57-63/9
 
 ---
 
-## Phase 11a (FinalAssuranceGate, ReportingSafetyGate, frozen API surface) — IN PROGRESS
+## Phase 11a (FinalAssuranceGate, ReportingSafetyGate, frozen API surface) — COMPLETE
 
 Solo subagent, wave 1 of 2 (docs #94's two-wave phase; wave 2 dispatches report
 generation separately once this wave's schema freeze lands).
@@ -1632,6 +1632,18 @@ a cleanup (right-to-erasure) attempt.
   `erasure_error`/`erasure_attempts` recorded server-side (not in this response body);
   `_purge_settled_sessions_loop` retries on the next sweep.
 
-**`PHASE_11A_STATUS`:** pending final gate run (see acceptance criteria). Items 2 and 3
-landed as two commits; this documentation section (item 4) is the third; item 5 (tests)
-and the final gate run follow next.
+**Genuine canonical gate (serial, `DATA_DIR` pointed at the real data dir, existing
+MongoDB/backend already up):** `test_final_assurance.py`: **30 passed.** Full suite:
+**3 failed, 1627 passed, 5 skipped, 4 warnings, 83.70s.** Delta from the pre-phase-11a
+baseline (3 failed, 1597 passed, 5 skipped, 83.43s): exactly +30 passed (this phase's new
+tests), the same 3 pre-existing `test_human_review_invariant.py` failures (client_event_id
+drift, documented Phase-9/10-era environmental issue, not this phase's), zero new
+failures, zero regressions. `ruff check .` clean across the whole `backend/` tree.
+
+**`PHASE_11A_STATUS = PASS`, genuinely gate-verified.** Five commits total (one for
+ReportingSafetyGate, one for FinalAssuranceGate, one for the frozen API surface, one for
+tests, plus this status update).
+Wave 1 of Phase 11 complete. Wave 2 (report generation: `ReportGenerator`, the five
+report artifacts, `IntegrityService`, `ZIPBuilder`, docs #58/#61) is a separate dispatch
+that consumes this wave's frozen `ReportPackageContent` shape and
+`report_package_complete` gap.
