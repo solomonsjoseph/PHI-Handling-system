@@ -1,5 +1,5 @@
 import React from 'react';
-import { Panel, Btn, Tag } from '../ui';
+import { Panel, Btn, Tag, Stat } from '../ui';
 
 // Corpus-mode only: per-dataset benchmark comparing Judge's method choice
 // against the gold-standard verdict for every column in the corpus.
@@ -15,36 +15,16 @@ export default function BenchmarkPanel({ benchmarkReport, onDownload, busy }) {
              </Btn>
            }>
       <div className="grid grid-cols-5 gap-6">
-        <div>
-          <div className="kicker">Leak rate</div>
-          <div className="font-display text-display-md text-oxblood" data-testid="benchmark-leak-rate">
-            {((benchmarkReport.totals?.leak_rate || 0) * 100).toFixed(2)}%
-          </div>
-        </div>
-        <div>
-          <div className="kicker">F1</div>
-          <div className="font-display text-display-md text-oxblood" data-testid="benchmark-f1">
-            {(benchmarkReport.totals?.f1 || 0).toFixed(4)}
-          </div>
-        </div>
-        <div>
-          <div className="kicker">Method-exact rate</div>
-          <div className="font-display text-display-md text-ink" data-testid="benchmark-method-exact-rate">
-            {((benchmarkReport.totals?.method_exact_rate || 0) * 100).toFixed(1)}%
-          </div>
-        </div>
-        <div>
-          <div className="kicker">Autonomy rate</div>
-          <div className="font-display text-display-md text-ink" data-testid="benchmark-autonomy">
-            {((benchmarkReport.totals?.autonomy_rate || 0) * 100).toFixed(1)}%
-          </div>
-        </div>
-        <div>
-          <div className="kicker">Identifiers removed before prompt</div>
-          <div className="font-display text-display-md text-ink" data-testid="benchmark-scrub-count">
-            {benchmarkReport.context_hygiene?.identifiers_removed_before_prompt ?? '—'}
-          </div>
-        </div>
+        <Stat label="Leak rate" tone="oxblood" testId="benchmark-leak-rate"
+              value={`${((benchmarkReport.totals?.leak_rate || 0) * 100).toFixed(2)}%`} />
+        <Stat label="F1" tone="oxblood" testId="benchmark-f1"
+              value={(benchmarkReport.totals?.f1 || 0).toFixed(4)} />
+        <Stat label="Method-exact rate" testId="benchmark-method-exact-rate"
+              value={`${((benchmarkReport.totals?.method_exact_rate || 0) * 100).toFixed(1)}%`} />
+        <Stat label="Autonomy rate" testId="benchmark-autonomy"
+              value={`${((benchmarkReport.totals?.autonomy_rate || 0) * 100).toFixed(1)}%`} />
+        <Stat label="Identifiers removed before prompt" testId="benchmark-scrub-count"
+              value={benchmarkReport.context_hygiene?.identifiers_removed_before_prompt ?? '—'} />
       </div>
       <div className="mt-6 overflow-x-auto" data-testid="benchmark-columns-table">
         <table className="w-full text-[12px]">

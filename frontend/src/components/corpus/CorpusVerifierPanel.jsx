@@ -1,5 +1,5 @@
 import React from 'react';
-import { Panel, Tag } from '../ui';
+import { Panel, Tag, Stat } from '../ui';
 
 // Corpus-mode only: scores Judge decisions against a planted-PHI ground
 // truth corpus. Never rendered for a real study run (`corpusReport` is
@@ -21,30 +21,14 @@ export default function CorpusVerifierPanel({ corpusReport }) {
              </Tag>
            }>
       <div className="grid grid-cols-4 gap-6">
-        <div>
-          <div className="kicker">Precision</div>
-          <div className="font-display text-display-md text-oxblood" data-testid="corpus-precision">
-            {(corpusReport.correctness?.overall_precision || 0).toFixed(4)}
-          </div>
-        </div>
-        <div>
-          <div className="kicker">Recall</div>
-          <div className="font-display text-display-md text-oxblood" data-testid="corpus-recall">
-            {(corpusReport.correctness?.overall_recall || 0).toFixed(4)}
-          </div>
-        </div>
-        <div>
-          <div className="kicker">Accuracy</div>
-          <div className="font-display text-display-md text-oxblood" data-testid="corpus-accuracy">
-            {(corpusReport.correctness?.overall_accuracy || 0).toFixed(4)}
-          </div>
-        </div>
-        <div>
-          <div className="kicker">Deferrals</div>
-          <div className="font-display text-display-md text-ink" data-testid="corpus-deferrals">
-            {corpusReport.deferral?.count || 0}
-          </div>
-        </div>
+        <Stat label="Precision" tone="oxblood" testId="corpus-precision"
+              value={(corpusReport.correctness?.overall_precision || 0).toFixed(4)} />
+        <Stat label="Recall" tone="oxblood" testId="corpus-recall"
+              value={(corpusReport.correctness?.overall_recall || 0).toFixed(4)} />
+        <Stat label="Accuracy" tone="oxblood" testId="corpus-accuracy"
+              value={(corpusReport.correctness?.overall_accuracy || 0).toFixed(4)} />
+        <Stat label="Deferrals" testId="corpus-deferrals"
+              value={corpusReport.deferral?.count || 0} />
       </div>
       <div className="mt-6 text-[12px] text-ink-muted">
         planted <span className="font-mono">{corpusReport.summary?.planted_columns || 0}</span> cells ·

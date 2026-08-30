@@ -67,6 +67,20 @@ export function Tag({ children, color = 'default', testId }) {
   );
 }
 
+
+// Display metric: serif kicker label over a large display value. Shared by
+// the benchmark and corpus-verifier stat grids so the display-number
+// typography has one source of truth.
+export function Stat({ label, value, tone = 'ink', testId }) {
+  const toneClass = tone === 'oxblood' ? 'text-oxblood' : 'text-ink';
+  return (
+    <div>
+      <div className="kicker">{label}</div>
+      <div className={`font-display text-display-md ${toneClass}`} data-testid={testId}>{value}</div>
+    </div>
+  );
+}
+
 // Custom hand-drawn tick checkbox — used in output selector
 export function CheckCard({ checked, onChange, locked, title, blurb, testId }) {
   return (
