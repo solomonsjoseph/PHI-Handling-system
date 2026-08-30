@@ -22,7 +22,14 @@ import openpyxl as _openpyxl
 from pydantic import BaseModel
 
 from ..anonymizer import apply_to_text
-from ..control.records import ColumnDecision, EvidenceClaim, GateResult, SandboxRecord, StudyKnowledgePackage
+from ..control.records import (
+    ColumnDecision,
+    EvidenceClaim,
+    GateResult,
+    SandboxRecord,
+    StudyKnowledgePackage,
+    VerifiedClassificationManifest,
+)
 from ..control.sandbox import run_isolated
 from ..crypto import pseudonym_salt
 from ..detectors import detect_text
@@ -1022,7 +1029,8 @@ class Executor(Agent):
         registry._map.update(updated_map)
 
     async def run(self, files: list[dict[str, Any]], decisions: list[dict[str, Any]],
-                  omit_by_file: dict[str, set[str]] | None = None) -> dict[str, Any]:
+                  omit_by_file: dict[str, set[str]] | None = None, *,
+                  manifest: "VerifiedClassificationManifest | None" = None) -> dict[str, Any]:
         """Apply decisions to each file. Returns {"exports": {file_id: path}}.
 
         ``omit_by_file`` (file_id -> deferred column names) is the partial-
@@ -1032,6 +1040,16 @@ class Executor(Agent):
         entirely -- excluded from ``exports`` -- rather than written as a
         headerless file, so Publish Guard never has to reason about it and
         the manifest can record it as fully deferred (see server.py).
+
+        ``manifest`` (docs #49/#50) is the current, authorized
+        ``VerifiedClassificationManifest`` the caller froze immediately
+        before this call (``agents/orchestrator.py``'s ``execute_decisions``,
+        via ``control.manifest.ensure_frozen_manifest``) -- ``None`` for
+        every pre-existing unit test's direct ``Executor(ctx).run(...)``
+        call, the same permanent ``make_ctx``-built compatibility path
+        the sandbox dispatch above documents; the idempotency spine
+        (``ExecutionTask``/``ExecutionResult``, docs #53) is populated
+        from it only when it is supplied.
 
         Every write is staged through ``self.ctx.artifacts``
         (``control/writer.py::ArtifactWriter``): an ``ArtifactRecord`` is

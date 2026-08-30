@@ -247,10 +247,57 @@ async def execute_decisions(
             raise ResultAcceptanceError(f"{agent} result was not accepted")
 
     await on_phase("executor", {"decision_count": len(decisions)})
+    manifest = None
+    if store is not None and run_id:
+        from phi_core.control.manifest import (
+            ManifestFreezeRefused,
+            ManifestInvalidated,
+            ensure_frozen_manifest,
+            manifest_artifact_id,
+        )
+        from phi_core.control.policy import CapabilityPolicy
+        from phi_core.control.superorchestrator import SuperOrchestrator
+        from phi_core.control.tasks import TaskService
+
+        unresolved_items = sum(1 for d in decisions if d.get("action") == "human_review")
+        reviewer_preview_status = (
+            sentinel_report.get("preview_status") if isinstance(sentinel_report, dict) else None
+        )
+        try:
+            manifest = await ensure_frozen_manifest(
+                store=store,
+                orchestrator=SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None))),
+                run_id=run_id, artifact_id=manifest_artifact_id(run_id),
+                source_artifact_versions={f["file_id"]: 0 for f in files if f.get("file_id")},
+                decision_refs=[f"{d.get('file_id', '')}:{d.get('column', '')}" for d in decisions],
+                evidence_refs=[],
+                preview_review_id=str((sentinel_report or {}).get("finding_id", "")),
+                human_review_refs=[],
+                judge_complete=True,
+                reviewer_preview_status=reviewer_preview_status,
+                unresolved_items=unresolved_items,
+                policy_gate_ok=True,
+            )
+        except (ManifestFreezeRefused, ManifestInvalidated) as exc:
+            # Only a current, verified manifest may authorize execution
+            # (docs #49/#50): a refusal here is a policy outcome, not an
+            # Executor crash, so it gets its own log tag, but the same
+            # escalation route -- there is exactly one path a run takes
+            # to 'awaiting_human_review' (D10), and inventing a second
+            # one for this case would fork that invariant for no reason.
+            await manager._log("manifest.freeze_refused", "info", {"detail": str(exc)})
+            return await _escalate_to_human_review(
+                db=db, session_filter=session_filter, reasons=["manifest_freeze_refused"],
+                reasons_plain=plain_human_review_reasons(["manifest_freeze_refused"]),
+                close_last_phase=close_last_phase, phase_timings=phase_timings,
+                run_elapsed_s=time.perf_counter() - run_started,
+                approved_decisions=decisions, sentinel_report=sentinel_report,
+                manager=manager, store=store, run_id=run_id, node="human_review_decisions")
+
     try:
         executor_ctx = await make_ctx("Executor")
         exec_out = await Executor(executor_ctx).run(
-            files=files, decisions=decisions, omit_by_file=omit_by_file)
+            files=files, decisions=decisions, omit_by_file=omit_by_file, manifest=manifest)
         await require_accepted(executor_ctx, exec_out, "Executor")
     except Exception as exc:
         # Executor is deterministic and irreversible (writes exports to disk);

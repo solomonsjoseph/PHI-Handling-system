@@ -602,7 +602,7 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
 
-        async def run(self, files, decisions, omit_by_file=None):
+        async def run(self, files, decisions, omit_by_file=None, *, manifest=None):
             return await complete_fake_task(self.ctx, {"exports": {"f": "/tmp/does-not-matter.csv"}})
 
     class FakeOperator:
