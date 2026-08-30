@@ -110,6 +110,8 @@ from .records import (
     VerifiedClassificationManifest,
 )
 
+from .report_artifacts import ReportArtifacts, is_report_package_complete
+
 ReportingSafetyVerdict = Literal["PASS", "FAIL"]
 FinalAssuranceVerdict = Literal["READY_FOR_EXPORT", "BLOCKED"]
 
@@ -414,3 +416,25 @@ def evaluate_final_assurance(
     failed = [c.name for c in checks if not c.passed]
     verdict: FinalAssuranceVerdict = "READY_FOR_EXPORT" if not failed else "BLOCKED"
     return FinalAssuranceResult(verdict=verdict, checks=checks, failed_conditions=failed)
+
+
+# --- report_package_complete: real producer (Phase 11b wave 2) -------------
+# Closes the gap this module's own docstring disclosed above: Phase 11b's
+# ReportGenerator now exists (``control/report_artifacts.py``), so a caller
+# of ``evaluate_final_assurance`` no longer has to supply
+# ``report_package_complete`` as a hand-picked boolean -- it can derive the
+# real value from the run's actual ``ReportArtifacts`` instance instead.
+# Pure addition: no existing name in this module changes shape, and
+# ``evaluate_final_assurance``'s own signature (still a plain ``bool``
+# parameter) is untouched, so every existing caller and test keeps working
+# unchanged.
+
+
+def derive_report_package_complete(artifacts: ReportArtifacts, *, human_review_occurred: bool) -> bool:
+    """The real producer for the ``report_package_complete`` condition:
+    delegates to :func:`control.report_artifacts.is_report_package_complete`
+    (not duplicated here) so this module and ``ZIPBuilder``/
+    ``IntegrityService`` (``control/zip_builder.py``,
+    ``control/integrity_service.py``) share exactly one definition of
+    "complete" for a report bundle."""
+    return is_report_package_complete(artifacts, human_review_occurred=human_review_occurred)
