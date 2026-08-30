@@ -476,10 +476,38 @@ async def execute_decisions(
                 else ExecutionResult(task_id=f"execution:{manifest.manifest_id}", run_id=run_id,
                                      manifest_id=manifest.manifest_id, success=True)
             )
+            # Reviewer Final audits what is ACTUALLY being shipped, not
+            # the raw pre-filter pass: a per-file DeterministicVerifier
+            # failure that `op_failed_ids`/`reviewer_blocked_ids` already
+            # excluded from `exports` is this run's existing, legitimate
+            # `partially_complete` degradation path -- it must not ALSO
+            # trip a second, competing FAIL/rewind escalation here for
+            # the exact same already-handled fact. `final_verification_
+            # result`/`final_safe_output_metadata` are scoped to the
+            # surviving `exports` only; the `verification_result`
+            # persisted above (docs #54/Phase 9's exact contract) stays
+            # the full, unfiltered record, unchanged.
+            surviving_verdicts = [v for v in op_out["verdicts"] if v.get("file_id") in exports]
+            final_verification_result = build_verification_result(
+                run_id=run_id, task_id=f"execution:{manifest.manifest_id}:final", attempt_id="",
+                manifest_id=manifest.manifest_id, manifest_version=str(manifest.schema_version),
+                input_artifact_version=0, output_artifact_version=0,
+                operator_result={
+                    "status": "clean" if all(v.get("verdict") == "pass" for v in surviving_verdicts) else "issues",
+                    "verdicts": surviving_verdicts, "failed_file_ids": [],
+                },
+            )
+            final_safe_output_metadata = dict(op_out)
+            final_safe_output_metadata["column_counts"] = {
+                fid: counts for fid, counts in (op_out.get("column_counts") or {}).items() if fid in exports
+            }
+            final_safe_output_metadata["schema_valid"] = {
+                fid: ok for fid, ok in (op_out.get("schema_valid") or {}).items() if fid in exports
+            }
             reviewer_final = await Reviewer(reviewer_ctx).finalize(
                 manifest=manifest, execution_result=execution_result,
-                verification_result=verification_result, decisions=decisions,
-                human_decisions=[], safe_output_metadata=op_out,
+                verification_result=final_verification_result, decisions=decisions,
+                human_decisions=[], safe_output_metadata=final_safe_output_metadata,
             )
             await on_phase("reviewer_final", {"verdict": reviewer_final["verdict"]})
         except Exception as exc:
@@ -492,6 +520,67 @@ async def execute_decisions(
             await manager._log("reviewer_final.crashed", "info",
                                {"error_kind": f"exception:{type(exc).__name__}"})
             reviewer_final = None
+
+    if reviewer_final is not None and reviewer_final["verdict"] == "FAIL" and reviewer_final.get("signal"):
+        # Root-cause classification + rewind routing (docs #56, Phase
+        # 10): never implement "FINAL FAIL -> STOP FOREVER" -- classify
+        # the failure, try to route the run back to the earliest
+        # affected node via the EXISTING `SuperOrchestrator.rewind` (no
+        # second rewind mechanism built here), then fall back to the
+        # same human-review escalation mechanism every other "this run
+        # cannot silently succeed" branch in this function already uses.
+        # Deliberately OUTSIDE the try/except above: a failure inside
+        # `_escalate_to_human_review` itself must propagate/return
+        # normally, never be swallowed as if it were merely a
+        # `finalize()` crash (which would wrongly let a real FAIL fall
+        # through to Publish Guard as if nothing happened).
+        #
+        # Disclosed structural limitation: `execute_decisions` is
+        # dispatched as ONE opaque unit from `run_pipeline`'s own coarse
+        # D9 registry (see `_dispatch_execute`'s docstring) -- the
+        # durable `WorkflowRun.node` is still `"execute"` for this
+        # call's entire duration, so a resolved target of `"execute"`
+        # itself (EXECUTION_ERROR) or `"human_review_audit"` (the
+        # default post-execution UNRESOLVED_UNCERTAINTY target, later
+        # than `"execute"` in D9's checkpoint order) can never be
+        # strictly earlier than the run's current node -- `rewind()`
+        # correctly refuses both with `WorkflowError`, caught below
+        # rather than propagated. This is the one disclosed case rewind
+        # "genuinely cannot apply" today: the actual re-execution loop
+        # that would let a later phase resume a run from an arbitrary
+        # rewound checkpoint is explicitly out of this phase's scope
+        # (section 56: "do not implement").
+        from phi_core.control.rewind import RewindRouter, record_rewind_decision
+        from phi_core.control.superorchestrator import SuperOrchestrator as _SuperOrchestratorForRewind
+        from phi_core.control.workflow import WorkflowError as _WorkflowError
+
+        rewind_orchestrator = _SuperOrchestratorForRewind(store, TaskService(store, CapabilityPolicy(None)))
+        escalation_node = "human_review_audit"
+        rewind_reasons = ["reviewer_final_fail"]
+        try:
+            decision, _rewound_run = await RewindRouter.route(
+                super_orchestrator=rewind_orchestrator, run_id=run_id,
+                signal=reviewer_final["signal"],
+            )
+            await record_rewind_decision(store, run_id=run_id, decision=decision)
+            await on_phase("rewind", decision.to_dict())
+            escalation_node = decision.to_node
+            rewind_reasons = [f"reviewer_final_fail_rewind:{decision.category}"]
+        except _WorkflowError as exc:
+            await manager._log("reviewer_final.rewind_structurally_refused", "info", {"detail": str(exc)})
+            rewind_reasons = ["reviewer_final_fail_rewind_unavailable"]
+        await db.sessions.update_one(session_filter, {"$set": {
+            "reviewer_final": reviewer_final, "reviewer_findings": rv_out["findings"],
+            "operator_failures": op_failed_ids,
+        }})
+        await _cancel_and_await(scout_task)
+        return await _escalate_to_human_review(
+            db=db, session_filter=session_filter, reasons=rewind_reasons,
+            reasons_plain=plain_human_review_reasons(rewind_reasons),
+            close_last_phase=close_last_phase, phase_timings=phase_timings,
+            run_elapsed_s=time.perf_counter() - run_started,
+            approved_decisions=decisions, sentinel_report=sentinel_report,
+            manager=manager, store=store, run_id=run_id, node=escalation_node)
 
     # Publish Guard: deterministic last-mile PHI scan on emitted exports.
     # GOAL invariant: exports are only 'ready to share publicly' after this
