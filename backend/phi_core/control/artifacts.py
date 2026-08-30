@@ -92,6 +92,28 @@ MANIFEST_COLLECTION = "verified_classification_manifests"
 RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "30"))
 REVIEW_RETENTION_DAYS = int(os.environ.get("REVIEW_RETENTION_DAYS", str(RETENTION_DAYS)))
 
+# Phase 12 item 1 (docs #75 "export lifecycle"): a READY_FOR_EXPORT package's
+# own, separate retention clock. No numeric value is given anywhere in the
+# spec text (same gap Wave R-a documented for other unspecified defaults);
+# 14 days is a chosen default, shorter than the general RETENTION_DAYS
+# default (30) on purpose -- section 75's own words are "do not retain final
+# packages indefinitely", a narrower and typically shorter-lived concern
+# than a whole session's retention window. Configurable independently via
+# EXPORT_RETENTION_WINDOW_DAYS so an operator can tighten or relax it
+# without touching RETENTION_DAYS.
+EXPORT_RETENTION_WINDOW_DAYS = int(os.environ.get("EXPORT_RETENTION_WINDOW_DAYS", "14"))
+
+
+def export_expires_at(anchor: datetime) -> str:
+    """The instant a READY_FOR_EXPORT package downloaded/servable since
+    ``anchor`` (the session's completion timestamp) stops being
+    downloadable. Server.py computes ``anchor`` from the session
+    document's own ``updated_at`` at the moment it last wrote
+    ``status``/``guard_report`` together (see
+    ``server._export_expires_at``'s docstring for why that timestamp is a
+    safe anchor without this module reaching into the session schema)."""
+    return (anchor + timedelta(days=EXPORT_RETENTION_WINDOW_DAYS)).isoformat()
+
 
 def _expires_at(retention_class: str) -> str:
     days = REVIEW_RETENTION_DAYS if retention_class == "review" else RETENTION_DAYS
