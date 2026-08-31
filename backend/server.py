@@ -4014,6 +4014,89 @@ async def session_human_review_source(sid: str, file_id: str, principal: str = D
     return await session_dataset_file(sid, file_id, principal)
 
 
+@app.post("/api/sessions/{sid}/post-run-report", dependencies=[Depends(rate_limited("post_run_report", 10, 3600))])
+async def session_post_run_report(sid: str, principal: str = Depends(resolve_principal)):
+    """Phase 17-B: the opt-in publication bundle (Scout -> Ledger -> Herald),
+    triggered explicitly for an ALREADY-COMPLETE session.
+
+    Never runs as part of ``POST /api/sessions/{sid}/handle`` or the
+    human-review resume tail -- Phase 17-B retired Scout/Ledger/Herald
+    (and Auditor) from ``execute_decisions``'s mandatory flow; Reviewer
+    Final is the sole post-execution safety net there now. This route is
+    the only caller of ``phi_core.agents.outward.run_post_run_report``.
+
+    Requires the session to have already reached a settled, exportable
+    state (``complete`` or ``partially_complete``); there is nothing to
+    report on before that. Each call re-runs the three agents and
+    overwrites the prior report -- there is no cached "already generated"
+    short-circuit, since a study team may reasonably want a fresh
+    competitive-landscape/ledger/manuscript draft on demand.
+    """
+    from phi_core.agents.manager import ExecutionHealthSupervisor
+    from phi_core.agents.outward import run_post_run_report
+    from phi_core.control.activation import ActivationFactory
+    from phi_core.control.store import MongoControlStore
+
+    db = get_db()
+    session = await _owned_session(sid, principal, {"_id": 0})
+    if session.get("status") not in ("complete", "partially_complete"):
+        raise HTTPException(
+            403,
+            "session must be complete or partially_complete to generate a post-run report "
+            f"(status={session.get('status')!r})",
+        )
+    run_id = session.get("_pipeline_run_id")
+    if not run_id:
+        raise HTTPException(403, "session has no completed pipeline run to report on")
+    decisions = session.get("agent_decisions") or []
+
+    cfg = await _current_llm_cfg()
+    store = MongoControlStore(db)
+    factory = ActivationFactory(db, cfg, store=store)
+    manager_box: dict[str, "ExecutionHealthSupervisor | None"] = {"value": None}
+
+    async def _actx(agent: str):
+        return await factory.activate(session_id=sid, run_id=run_id, agent=agent, manager=manager_box["value"])
+
+    async def _child_actx(agent: str, parent_task_id: str):
+        return await factory.activate_child(
+            session_id=sid, run_id=run_id, parent_task_id=parent_task_id, agent=agent,
+            manager=manager_box["value"],
+        )
+
+    async def _complete_and_accept(ctx, result: dict) -> bool:
+        return await factory.complete_and_accept(ctx, result)
+
+    manager = ExecutionHealthSupervisor(await _actx("Manager"), db=db)
+    manager_box["value"] = manager
+    await manager.run(
+        roster=["Scout", "Ledger", "Ledger.Compare", "Ledger.Aggregate",
+                "Herald", "Herald.Abstract", "Herald.Sections"],
+        phase_plan=["scout", "ledger", "herald"],
+    )
+
+    try:
+        report = await asyncio.wait_for(
+            run_post_run_report(
+                make_ctx=_actx, make_child_ctx=_child_actx, complete_and_accept=_complete_and_accept,
+                decisions=decisions, target_venue=session.get("target_venue") or "JAMIA Open",
+            ),
+            timeout=300,
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(504, "post-run report generation exceeded its 5-minute wall-clock ceiling") from exc
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    await db.sessions.update_one(_owned_filter(sid, principal), {"$set": {
+        "agent_scout": report["scout"],
+        "agent_ledger": report["ledger"],
+        "agent_herald": report["herald"],
+        "post_run_report_generated_at": generated_at,
+    }})
+    return {**report, "generated_at": generated_at}
+
+
+
 @app.get("/api/sessions/{sid}/results")
 async def session_results(sid: str, principal: str = Depends(resolve_principal)):
     """Consolidated agent outputs (decisions, audit, ledger, herald)."""
