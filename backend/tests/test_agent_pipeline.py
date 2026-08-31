@@ -302,15 +302,33 @@ def test_human_review_and_export(api, session_id):
                 assert all(c in "0123456789abcdefABCDEF" for c in stripped), f"col {col} pseudonymize got {v!r}"
 
 
-def test_results_audit_ledger_herald_populated(api, session_id):
+def test_results_no_longer_include_audit_ledger_herald_by_default(api, session_id):
+    """Phase 17-B: Auditor is retired and Scout/Ledger/Herald moved off the
+    mandatory PHI path into an opt-in post-run report
+    (POST /api/sessions/{sid}/post-run-report). A normal completed session's
+    results must not carry populated audit/ledger/herald fields; those keys
+    are either absent or present-but-empty until the opt-in endpoint below
+    is explicitly called."""
     r = api.get(f"{BASE_URL}/api/sessions/{session_id}/results", timeout=TIMEOUT)
     res = r.json()
-    audit = res.get("audit") or {}
-    ledger = res.get("ledger") or {}
-    herald = res.get("herald") or {}
+    assert not (res.get("audit") or {}).get("verdict"), \
+        f"audit populated by default, but Auditor is retired: {res.get('audit')}"
+    assert not (res.get("ledger") or {}).get("headline"), \
+        f"ledger populated by default, but Ledger is opt-in: {res.get('ledger')}"
+    assert not (res.get("herald") or {}).get("title"), \
+        f"herald populated by default, but Herald is opt-in: {res.get('herald')}"
 
-    assert audit.get("verdict"), f"audit missing verdict: {audit}"
-    assert audit.get("summary"), f"audit missing summary: {audit}"
+
+def test_post_run_report_endpoint_populates_scout_ledger_herald(api, session_id):
+    """The opt-in POST /post-run-report endpoint (Phase 17-B) is the only
+    way to generate Scout/Ledger/Herald output; it must never run
+    automatically and must produce real content when explicitly called."""
+    r = api.post(f"{BASE_URL}/api/sessions/{session_id}/post-run-report", timeout=TIMEOUT)
+    assert r.status_code == 200, r.text
+    report = r.json()
+
+    ledger = report.get("ledger") or {}
+    herald = report.get("herald") or {}
 
     assert ledger.get("headline"), f"ledger missing headline: {ledger}"
     assert isinstance(ledger.get("comparisons"), list), f"ledger comparisons not list: {ledger}"
@@ -318,6 +336,8 @@ def test_results_audit_ledger_herald_populated(api, session_id):
     assert herald.get("title"), f"herald missing title: {herald}"
     assert herald.get("abstract"), f"herald missing abstract: {herald}"
     assert isinstance(herald.get("sections"), list) and herald["sections"], f"herald sections empty: {herald}"
+
+    assert report.get("generated_at"), f"post-run-report missing generated_at: {report}"
 
 
 # ------------------------- Anti-loop & Sentinel escalate (live) -----------
