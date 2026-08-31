@@ -1,6 +1,6 @@
 # Assurance runbook
 
-Operator procedures for the control-plane failure categories `GET
+Operational procedures for the control-plane failure categories `GET
 /api/admin/assurance` (Phase 7 step 5, role `lead_reviewer`) reports. Each
 section gives the dashboard field, the direct Mongo query for deeper
 investigation, and the remediation path.
