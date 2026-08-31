@@ -354,10 +354,6 @@ def test_stale_pipeline_worker_cannot_publish_over_newer_claim(monkeypatch):
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
-    monkeypatch.setattr(orchestrator, "Auditor", EmptyAgent)
-    monkeypatch.setattr(orchestrator, "Scout", EmptyAgent)
-    monkeypatch.setattr(orchestrator, "Ledger", EmptyAgent)
-    monkeypatch.setattr(orchestrator, "Herald", EmptyAgent)
 
     async def emit(_message):
         return None
@@ -1027,18 +1023,6 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
             await _complete(self._ctx, result)
             return result
 
-    class FakeAuditor:
-        def __init__(self, ctx=None, *_a, **_kwargs):
-            self._ctx = ctx
-
-        async def _log(self, *_a, **_kw):
-            return None
-
-        async def run(self, **_kwargs):
-            result = {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
-            await _complete(self._ctx, result)
-            return result
-
     class FakeOperator:
         def __init__(self, ctx=None, *_a, **_kwargs):
             self._ctx = ctx
@@ -1057,35 +1041,6 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
             await _complete(self._ctx, result)
             return result
 
-    class FakeScout:
-        def __init__(self, ctx=None, *_a, **_kwargs):
-            self._ctx = ctx
-
-        async def _log(self, *_a, **_kw):
-            return None
-
-        async def run(self, **_kwargs):
-            await _complete(self._ctx, {})
-            return {}
-
-    class FakeLedger:
-        def __init__(self, ctx=None, compare_ctx=None, aggregate_ctx=None, **_kwargs):
-            self._ctxs = [c for c in (ctx, compare_ctx, aggregate_ctx) if c is not None]
-
-        async def run(self, **_kwargs):
-            for c in self._ctxs:
-                await _complete(c, {})
-            return {}
-
-    class FakeHerald:
-        def __init__(self, ctx=None, abstract_ctx=None, sections_ctx=None, **_kwargs):
-            self._ctxs = [c for c in (ctx, abstract_ctx, sections_ctx) if c is not None]
-
-        async def run(self, **_kwargs):
-            for c in self._ctxs:
-                await _complete(c, {})
-            return {}
-
     async def fake_cfg():
         return SimpleNamespace(provider="anthropic", model="test")
 
@@ -1098,10 +1053,6 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
     monkeypatch.setattr(orchestrator, "DeterministicVerifier", FakeOperator)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
-    monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
-    monkeypatch.setattr(orchestrator, "Scout", FakeScout)
-    monkeypatch.setattr(orchestrator, "Ledger", FakeLedger)
-    monkeypatch.setattr(orchestrator, "Herald", FakeHerald)
     monkeypatch.setattr(paths, "cleanup_session_unpacked", lambda _sid: None)
 
     review_resp = await srv.session_human_review(

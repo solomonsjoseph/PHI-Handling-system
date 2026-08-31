@@ -524,15 +524,18 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
     assert "sentinel_blocking_after_cap" in update_doc["$set"]["human_review_reasons"]
 
 
-
-def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
-    """Phase 4 step 5: the coverage-advice escalation path (Reviewer stage)
-    previously returned without ever cancelling or awaiting Scout's
-    background `asyncio.create_task` -- the exact "Scout leak" the plan
-    names. `execute_decisions` must fence it before returning."""
+def test_coverage_escalation_reaches_awaiting_human_review(monkeypatch):
+    """Phase 4 step 5 / Phase 17-B: the coverage-advice escalation path
+    (Reviewer stage's `manager.consult` returning `escalate_human_review`)
+    must still route the run to `awaiting_human_review` with the right
+    reason. Migrated from `test_coverage_escalation_fences_scouts_
+    background_task` (see docs/PHASE_STATUS.md DELETED_TESTS): that test's
+    Scout-background-task-fencing assertions are gone because Scout no
+    longer runs during `execute_decisions` at all (Phase 17-B: opt-in
+    post-run report), so there is no "Scout leak" left to prove fenced --
+    but the coverage-advice-escalation behavior itself is still real and
+    still needs a test, hence this trimmed replacement."""
     from phi_core.agents import orchestrator
-
-    scout_started = asyncio.Event()
 
     class FakeManager:
         def __init__(self, ctx, *_a, **_kwargs):
@@ -557,7 +560,6 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
 
         async def close_run(self, outcome):
             return {}
-
 
     class FakeRegulationsExpert:
         def __init__(self, ctx=None, *_a, **_kwargs):
@@ -630,18 +632,6 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
         async def run(self, decisions, operator_result, exports, omit_by_file=None):
             return await complete_fake_task(self.ctx, {"exports": exports, "findings": []})
 
-    class FakeScout:
-        def __init__(self, *_a, **_kwargs):
-            pass
-
-        async def _log(self, *_a, **_kw):
-            return None
-
-        async def run(self, **_kwargs):
-            scout_started.set()
-            await asyncio.sleep(300)  # never legitimately reached
-            return {}
-
     monkeypatch.setattr(orchestrator, "ExecutionHealthSupervisor", FakeManager)
     monkeypatch.setattr(orchestrator, "RegulationsExpert", FakeRegulationsExpert)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
@@ -650,18 +640,6 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
     monkeypatch.setattr(orchestrator, "DeterministicVerifier", FakeOperator)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
-    monkeypatch.setattr(orchestrator, "Scout", FakeScout)
-
-    captured_scout_tasks: list = []
-    real_create_task = orchestrator.asyncio.create_task
-
-    def _capture_create_task(coro, *a, **kw):
-        task = real_create_task(coro, *a, **kw)
-        if coro.__qualname__.endswith("FakeScout.run"):
-            captured_scout_tasks.append(task)
-        return task
-
-    monkeypatch.setattr(orchestrator.asyncio, "create_task", _capture_create_task)
 
     db = FakeDb()
 
@@ -685,16 +663,6 @@ def test_coverage_escalation_fences_scouts_background_task(monkeypatch):
     filt, update_doc = db.sessions.updates[-1]
     assert filt == {"id": "s"}
     assert update_doc["$set"]["human_review_reasons"] == ["manager_advisory_coverage_escalation"]
-    # `run_pipeline` already returned; a fenced Scout must be cancelled and
-    # done, not still sleeping in the background with no one left to
-    # observe it (`Task.done()`/`.cancelled()` read plain object state,
-    # no running loop required, so this is safe to assert post-`asyncio.run`).
-    # Whether Scout's body ever reached `scout_started.set()` before the
-    # cancellation landed is a scheduling-timing detail, not the property
-    # under test -- either way the task must not be left pending.
-    assert len(captured_scout_tasks) == 1
-    assert captured_scout_tasks[0].done()
-    assert captured_scout_tasks[0].cancelled()
 
 
 # ---- constructor parity: Ledger / Herald accept a manager-bearing context --

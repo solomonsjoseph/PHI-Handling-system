@@ -66,6 +66,48 @@ removal justifies it, and the commit that removed that symbol.
   counts) is still exercised, just not through a batch-log assertion -- see
   `tests/test_deterministic_verifier.py`'s other 30+ migrated tests.
   commit: Phase 10 item 3 commit (Operator retirement)
+- nodeid: `tests/test_manager_checkpoints.py::test_materialize_auditor_disagreements_makes_a_resolvable_decision`
+  removed symbol: `phi_core.agents.reasoning.materialize_auditor_disagreements`
+  reason: Phase 17-B retired the `Auditor` top-level role (an LLM
+  re-derivation call); this helper only ever converted Auditor's
+  per-column LLM disagreement findings into resolvable `human_review`
+  decisions, and had no caller once Auditor's call site was removed from
+  `execute_decisions`. `auditor_escalation_reason` (the sibling
+  deterministic gate in the same module) is NOT removed and is NOT
+  recorded here: it remains the deterministic assurance core
+  `control.final_assurance.evaluate_final_assurance`'s
+  `no_unresolved_audit_finding` condition consumes (docs #57/#94), and
+  its own tests (`test_manager_checkpoints.py`,
+  `test_control_decisions.py`, `test_hardening_gates.py`,
+  `test_final_assurance.py`) are untouched and still pass.
+  commit: `4e464d5` (Phase 17-B, Auditor retirement)
+- nodeid: `tests/test_manager_checkpoints.py::test_materialize_auditor_disagreements_is_a_noop_with_no_column_issues`
+  removed symbol: `phi_core.agents.reasoning.materialize_auditor_disagreements`
+  reason: same as the entry immediately above.
+  commit: `4e464d5` (Phase 17-B, Auditor retirement)
+- nodeid: `tests/test_manager.py::test_coverage_escalation_fences_scouts_background_task`
+  removed symbol: `phi_core.agents.orchestrator._cancel_and_await` and the
+  `scout_task = asyncio.create_task(scout_agent.run())` background task
+  in `execute_decisions`
+  reason: Phase 17-B relocated Scout out of `execute_decisions`'s
+  mandatory flow entirely (it is now an opt-in post-run agent, invoked
+  synchronously and awaited by `outward.run_post_run_report`, never as a
+  fire-and-forget background task). This specific test's Scout-leak-
+  fencing assertions (`captured_scout_tasks[0].done()`/`.cancelled()`)
+  are gone because the scenario they proved -- an early-return path could
+  leave Scout's background task running unobserved -- is now structurally
+  impossible: Scout never starts during `execute_decisions`, so there is
+  nothing to leak and nothing to fence. `_cancel_and_await`, the helper
+  this test exercised indirectly, has zero remaining callers and was
+  deleted in the same commit. MIGRATED, not fully deleted: the coverage-
+  advice-escalation behavior itself (Reviewer stage's `manager.consult`
+  returning `escalate_human_review` routes the run to
+  `awaiting_human_review` with `human_review_reasons ==
+  ["manager_advisory_coverage_escalation"]`) is still real and still
+  needed a test -- `test_coverage_escalation_reaches_awaiting_human_review`
+  in the same file is the trimmed replacement (same fixture setup minus
+  FakeScout and the `asyncio.create_task` capture machinery).
+  commit: `4e464d5` (Phase 17-B, Scout/Ledger/Herald relocation)
 
 Note: `test_judge_typed_proposal.py`'s whole premise (Judge.run returning a
 `JudgeDecision`/`JudgeProposal`-typed proposal) is superseded by the ColumnDecision

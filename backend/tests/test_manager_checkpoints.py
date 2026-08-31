@@ -13,7 +13,6 @@ from phi_core.agents.reasoning import (
     AUDITOR_CONFIDENCE_FLOOR,
     PseudonymRegistry,
     auditor_escalation_reason,
-    materialize_auditor_disagreements,
     plain_human_review_reasons,
 )
 from phi_core.control.store import MemoryControlStore
@@ -238,38 +237,6 @@ def test_executor_crash_escalates_to_human_review_not_left_uncaught():
     assert "executor_crashed" in completion_update["human_review_reasons"]
     # The plain-English rendering must never leak the raw internal code.
     assert "executor_crashed" not in " ".join(completion_update["human_review_reasons_plain"])
-
-
-# ---- Auditor disagreements become resolvable decisions, not a dead end ---
-
-
-def test_materialize_auditor_disagreements_makes_a_resolvable_decision():
-    decisions = [
-        {"file_id": "f1", "column": "dob", "action": "drop", "phi_category": "C"},
-        {"file_id": "f1", "column": "age", "action": "cap_age_90", "phi_category": "C"},
-    ]
-    audit = {"confidence": 0.5, "issues": [
-        {"file": "f1.csv", "column": "dob", "problem": "should be year_only, not drop"},
-    ]}
-    out = materialize_auditor_disagreements(decisions, audit, {"dob": "date of birth"})
-
-    flagged = next(d for d in out if d["column"] == "dob")
-    untouched = next(d for d in out if d["column"] == "age")
-
-    assert flagged["action"] == "human_review"
-    assert flagged["stage"] == "auditor_final"
-    assert flagged["auditor_original_action"] == "drop"
-    assert flagged["suggested_action"] == "drop"  # approve = reaffirm, comment = override
-    assert flagged["reviewer_prompt"]  # populated via the standard plain-English builder
-    assert "0.5" not in flagged["reviewer_prompt"]  # no raw confidence number
-    assert untouched["action"] == "cap_age_90"  # only the flagged column changes
-
-
-def test_materialize_auditor_disagreements_is_a_noop_with_no_column_issues():
-    decisions = [{"file_id": "f1", "column": "dob", "action": "drop"}]
-    audit = {"confidence": 0.5, "issues": []}
-    out = materialize_auditor_disagreements(decisions, audit)
-    assert out == decisions
 
 
 # ---- verify_keep_decisions: an explicit human approval must stick -------

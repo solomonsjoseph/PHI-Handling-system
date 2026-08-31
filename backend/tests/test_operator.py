@@ -397,44 +397,6 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
             await _complete(self._ctx, result)
             return result
 
-    class FakeAuditor:
-        def __init__(self, ctx=None, *_a, **_kwargs):
-            self._ctx = ctx
-
-        async def _log(self, *_args, **_kwargs):
-            return None
-
-        async def run(self, **_kwargs):
-            result = {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
-            await _complete(self._ctx, result)
-            return result
-
-    class FakeScout:
-        def __init__(self, ctx=None, *_a, **_kwargs):
-            self._ctx = ctx
-
-        async def run(self, **_kwargs):
-            await _complete(self._ctx, {})
-            return {}
-
-    class FakeLedger:
-        def __init__(self, ctx=None, compare_ctx=None, aggregate_ctx=None, **_kwargs):
-            self._ctxs = [c for c in (ctx, compare_ctx, aggregate_ctx) if c is not None]
-
-        async def run(self, **_kwargs):
-            for c in self._ctxs:
-                await _complete(c, {})
-            return {}
-
-    class FakeHerald:
-        def __init__(self, ctx=None, abstract_ctx=None, sections_ctx=None, **_kwargs):
-            self._ctxs = [c for c in (ctx, abstract_ctx, sections_ctx) if c is not None]
-
-        async def run(self, **_kwargs):
-            for c in self._ctxs:
-                await _complete(c, {})
-            return {}
-
     monkeypatch.setattr(orchestrator, "RegulationsExpert", FakeRegulationsExpert)
     monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Lexicon", FakeLexicon)
@@ -443,10 +405,6 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
-    monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
-    monkeypatch.setattr(orchestrator, "Scout", FakeScout)
-    monkeypatch.setattr(orchestrator, "Ledger", FakeLedger)
-    monkeypatch.setattr(orchestrator, "Herald", FakeHerald)
 
     phase_events = []
 
@@ -616,39 +574,6 @@ def test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor(tmp_
                 self.ctx, {"exports": {"f1": str(f1_export), "f2": str(f2_export)}}
             )
 
-    class FakeAuditor:
-        def __init__(self, ctx=None, *_a, **_kwargs):
-            self.ctx = ctx
-
-        async def _log(self, *_args, **_kwargs):
-            return None
-
-        async def run(self, **_kwargs):
-            return await complete_fake_task(
-                self.ctx, {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
-            )
-
-    class FakeScout:
-        def __init__(self, ctx=None, *_a, **_kwargs):
-            self.ctx = ctx
-
-        async def run(self, **_kwargs):
-            return await complete_fake_task(self.ctx, {})
-
-    class FakeLedger:
-        def __init__(self, ctx=None, *_a, **_kwargs):
-            self.ctx = ctx
-
-        async def run(self, **_kwargs):
-            return await complete_fake_task(self.ctx, {})
-
-    class FakeHerald:
-        def __init__(self, ctx=None, *_a, **_kwargs):
-            self.ctx = ctx
-
-        async def run(self, **_kwargs):
-            return await complete_fake_task(self.ctx, {})
-
     monkeypatch.setattr(orchestrator, "RegulationsExpert", FakeRegulationsExpert)
     monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
     monkeypatch.setattr(orchestrator, "Lexicon", FakeLexicon)
@@ -657,10 +582,6 @@ def test_run_pipeline_duplicate_judge_decision_fails_closed_before_executor(tmp_
     monkeypatch.setattr(orchestrator, "Judge", FakeJudge)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
-    monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
-    monkeypatch.setattr(orchestrator, "Scout", FakeScout)
-    monkeypatch.setattr(orchestrator, "Ledger", FakeLedger)
-    monkeypatch.setattr(orchestrator, "Herald", FakeHerald)
 
     phase_events = []
 

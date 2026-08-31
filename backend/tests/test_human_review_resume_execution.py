@@ -190,56 +190,9 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
             await _complete(self._ctx, result)
             return result
 
-    class FakeAuditor:
-        def __init__(self, ctx=None, *_a, **_kw):
-            self._ctx = ctx
-
-        async def _log(self, *_a, **_kw):
-            return None
-
-        async def run(self, **_kw):
-            result = {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
-            await _complete(self._ctx, result)
-            return result
-
-    class FakeScout:
-        def __init__(self, ctx=None, *_a, **_kw):
-            self._ctx = ctx
-
-        async def _log(self, *_a, **_kw):
-            return None
-
-        async def run(self, **_kw):
-            await _complete(self._ctx, {})
-            return {}
-
-    class FakeLedger:
-        def __init__(self, ctx=None, compare_ctx=None, aggregate_ctx=None, **_kw):
-            self._ctxs = [c for c in (ctx, compare_ctx, aggregate_ctx) if c is not None]
-
-        async def run(self, **_kw):
-            result = {"summary": "ledger"}
-            for c in self._ctxs:
-                await _complete(c, result)
-            return result
-
-    class FakeHerald:
-        def __init__(self, ctx=None, abstract_ctx=None, sections_ctx=None, **_kw):
-            self._ctxs = [c for c in (ctx, abstract_ctx, sections_ctx) if c is not None]
-
-        async def run(self, **_kw):
-            result = {"abstract": "herald"}
-            for c in self._ctxs:
-                await _complete(c, result)
-            return result
-
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
     monkeypatch.setattr(orchestrator, "DeterministicVerifier", FakeOperator)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
-    monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
-    monkeypatch.setattr(orchestrator, "Scout", FakeScout)
-    monkeypatch.setattr(orchestrator, "Ledger", FakeLedger)
-    monkeypatch.setattr(orchestrator, "Herald", FakeHerald)
 
     body = srv.HumanReviewSubmit(
         resolutions=[{"file_id": "f1", "column": "field", "mode": "approve"}],
@@ -258,14 +211,13 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
     await srv._handle_pipeline_resume(MongoControlStore(db), work_item)
 
     # The final state proves the shared `execute_decisions` tail actually
-    # ran: Ledger/Herald outputs landed, status reflects a clean run with
-    # no columns still pending, and the resume-specific bookkeeping
-    # (`session_review`, `pending_review`, `human_review_required`) that
-    # only `execute_decisions`'s `extra_completion_fields` merge produces
-    # is present.
+    # ran: status reflects a clean run with no columns still pending, and
+    # the resume-specific bookkeeping (`session_review`, `pending_review`,
+    # `human_review_required`) that only `execute_decisions`'s
+    # `extra_completion_fields` merge produces is present. Phase 17-B:
+    # Ledger/Herald no longer run as part of this tail (opt-in post-run
+    # report instead), so their outputs are no longer asserted here.
     assert session_doc["status"] == "complete"
-    assert session_doc["agent_ledger"] == {"summary": "ledger"}
-    assert session_doc["agent_herald"] == {"abstract": "herald"}
     assert session_doc["export_paths"] == {"f1": str(tmp_path / "f1_export.csv")}
     assert session_doc["pending_review"] == []
     assert session_doc["human_review_required"] is False
@@ -349,54 +301,9 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
             await _complete(self._ctx, result)
             return result
 
-    class FakeAuditor:
-        def __init__(self, ctx=None, *_a, **_kw):
-            self._ctx = ctx
-
-        async def _log(self, *_a, **_kw):
-            return None
-
-        async def run(self, **_kw):
-            result = {"verdict": "clean", "issues": [], "metrics": {}, "confidence": 1.0, "summary": "ok"}
-            await _complete(self._ctx, result)
-            return result
-
-    class FakeScout:
-        def __init__(self, ctx=None, *_a, **_kw):
-            self._ctx = ctx
-
-        async def _log(self, *_a, **_kw):
-            return None
-
-        async def run(self, **_kw):
-            await _complete(self._ctx, {})
-            return {}
-
-    class FakeLedger:
-        def __init__(self, ctx=None, compare_ctx=None, aggregate_ctx=None, **_kw):
-            self._ctxs = [c for c in (ctx, compare_ctx, aggregate_ctx) if c is not None]
-
-        async def run(self, **_kw):
-            for c in self._ctxs:
-                await _complete(c, {})
-            return {}
-
-    class FakeHerald:
-        def __init__(self, ctx=None, abstract_ctx=None, sections_ctx=None, **_kw):
-            self._ctxs = [c for c in (ctx, abstract_ctx, sections_ctx) if c is not None]
-
-        async def run(self, **_kw):
-            for c in self._ctxs:
-                await _complete(c, {})
-            return {}
-
     monkeypatch.setattr(orchestrator, "Executor", FakeExecutor)
     monkeypatch.setattr(orchestrator, "DeterministicVerifier", FakeOperator)
     monkeypatch.setattr(orchestrator, "Reviewer", FakeReviewer)
-    monkeypatch.setattr(orchestrator, "Auditor", FakeAuditor)
-    monkeypatch.setattr(orchestrator, "Scout", FakeScout)
-    monkeypatch.setattr(orchestrator, "Ledger", FakeLedger)
-    monkeypatch.setattr(orchestrator, "Herald", FakeHerald)
 
     body = srv.HumanReviewSubmit(
         resolutions=[
