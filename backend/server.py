@@ -3275,22 +3275,9 @@ class HumanReviewSubmit(BaseModel):
     # never a client-supplied value) and this endpoint never read it.
     client_event_id: str
     comment: str = ""         # optional submission-level note for the audit trail
-    # Auditor's confidence-floor gate (design doc "second human review") can
-    # fire with zero actionable per-column issues -- just a bare self-
-    # reported number below the floor. There is no per-column decision to
-    # resolve in that case, so approve/comment/defer cannot clear it.
-    #
-    # D13 step 4/7: `audit_version` (below) must be supplied and must match
-    # the open `HumanReviewRequest.audit_version` whenever this is true --
-    # see the check in `session_human_review` -- so a confirmation always
-    # binds to the exact Auditor verdict the reviewer actually saw, never a
-    # stale one superseded by a later run.
-    confirm_auditor_confidence: bool = False
     # D13 step 4: a content hash of the Auditor verdict this confirmation
     # answers, minted by the orchestrator at escalation time and echoed
     # back by the client from the `HumanReviewRequest` it was given.
-    # Required (non-empty) exactly when `confirm_auditor_confidence` is
-    # true; ignored otherwise.
     audit_version: str = ""
     # HHS §164.514(b)(2)(ii) "actual knowledge" attestation. Required only
     # when this submission resolves (approves/comments) at least one column;
@@ -3389,8 +3376,7 @@ async def _build_review_event(
                         mode=r.get("mode", "defer"), comment=(r.get("comment") or ""))
         for r in body.resolutions
     ]
-    kind = ("audit_confidence_confirmation" if body.confirm_auditor_confidence
-            else "defer" if all(r.get("mode") == "defer" for r in body.resolutions)
+    kind = ("defer" if all(r.get("mode") == "defer" for r in body.resolutions)
             else "resolution")
     prior_events = await control_store.find_many("human_review_events", {"request_id": request_id})
     return HumanReviewEvent(
@@ -3532,26 +3518,9 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         if open_requests:
             open_request_doc = open_requests[0]
             request_id = open_request_doc["request_id"]
-    if body.confirm_auditor_confidence:
-        # D13 step 4/7: required field, and (when a durable request is
-        # open and actually carries a minted audit_version) must match it
-        # exactly -- a reviewer confirming against a since-superseded
-        # Auditor verdict is a stale confirmation, not a valid one.
-        if not body.audit_version:
-            raise HTTPException(
-                400,
-                "audit_version is required when confirm_auditor_confidence is true",
-            )
-        request_audit_version = (open_request_doc or {}).get("audit_version") or ""
-        if request_audit_version and body.audit_version != request_audit_version:
-            raise HTTPException(
-                409,
-                "audit_version does not match the open human-review request's audit "
-                "verdict; the Auditor's report has changed since this confirmation was "
-                "prepared -- reload and confirm against the current verdict",
-            )
+
     body_hash = hashlib.sha256(json.dumps(
-        {"resolutions": body.resolutions, "confirm_auditor_confidence": body.confirm_auditor_confidence,
+        {"resolutions": body.resolutions,
          "audit_version": body.audit_version, "actual_knowledge_ack": body.actual_knowledge_ack},
         sort_keys=True, default=str,
     ).encode("utf-8")).hexdigest()

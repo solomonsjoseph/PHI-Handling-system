@@ -19,9 +19,7 @@ export default function HumanReviewPanel({
   fileReviewAck,
   setFileReviewAck,
   downloadDatasetFile,
-  session,
   busy,
-  confirmAuditorConfidence,
   resolutions,
   setResolutions,
   actualKnowledgeAck,
@@ -86,42 +84,6 @@ export default function HumanReviewPanel({
               I have downloaded and reviewed the original file(s) above in my own tool.
             </span>
           </label>
-        </div>
-      )}
-
-      {/* D13 step 4/7/8: the Auditor's own second-review escalation.
-          Distinct from the per-column resolutions below -- confidence
-          is telemetry (D12), never evidence, so it is labelled as
-          such; confirming answers only "I have seen this verdict",
-          never "I agree the export is clean". */}
-      {session?.audit_version && (
-        <div className="rule-top pt-5 mb-6" data-testid="auditor-confirmation-panel">
-          <div className="kicker mb-3">Auditor second review</div>
-          <div className="text-[12px] text-ink-2 mb-2">
-            Verdict: <span className="font-mono text-ink">{session.audit?.verdict || 'unknown'}</span>
-            {' · '}Confidence (telemetry, not evidence):{' '}
-            <span className="font-mono text-ink">
-              {typeof session.audit?.confidence === 'number' ? session.audit.confidence.toFixed(2) : '—'}
-            </span>
-          </div>
-          {session.audit?.summary && (
-            <div className="text-[12px] text-ink-2 mb-2">{session.audit.summary}</div>
-          )}
-          {(session.audit?.issues || []).length > 0 && (
-            <ul className="text-[12px] text-ink-2 list-disc pl-5 mb-3 space-y-1" data-testid="auditor-issues-list">
-              {session.audit.issues.map((iss, i) => (
-                <li key={i}>
-                  {iss.file ? <span className="font-mono">{iss.file}</span> : null}
-                  {iss.column ? <span className="font-mono"> · {iss.column}</span> : null}
-                  {': '}{iss.problem || JSON.stringify(iss)}
-                </li>
-              ))}
-            </ul>
-          )}
-          <Btn size="sm" variant="ghost" onClick={confirmAuditorConfidence}
-               disabled={busy || !principal} testId="btn-confirm-auditor-confidence">
-            Confirm I have reviewed this verdict
-          </Btn>
         </div>
       )}
 

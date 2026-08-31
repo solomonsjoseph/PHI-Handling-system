@@ -152,30 +152,3 @@ test('refetches session state when the stream delivers an event', async () => {
   await waitFor(() => expect(getSession).toHaveBeenCalledTimes(1));
 });
 
-test('confirms Auditor confidence with the open request audit_version', async () => {
-  const user = userEvent.setup();
-  renderDetail([], {
-    audit_version: 'verdict-abc123',
-    audit: {
-      verdict: 'issues', confidence: 0.4, summary: 'Two columns disagree.',
-      issues: [{ file: 'dataset-1', column: 'zip', problem: 'zip3_truncate mismatch' }],
-    },
-  });
-
-  const btn = await screen.findByTestId('btn-confirm-auditor-confidence');
-  expect(screen.getByTestId('auditor-confirmation-panel')).toHaveTextContent('issues');
-  expect(screen.getByTestId('auditor-issues-list')).toHaveTextContent('zip3_truncate mismatch');
-
-  await user.click(btn);
-
-  await waitFor(() => {
-    expect(axios.post).toHaveBeenCalledWith(
-      '/api/sessions/session-1/human-review',
-      expect.objectContaining({
-        confirm_auditor_confidence: true,
-        audit_version: 'verdict-abc123',
-        resolutions: [],
-      }),
-    );
-  });
-});

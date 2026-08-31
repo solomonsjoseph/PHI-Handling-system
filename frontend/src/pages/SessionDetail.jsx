@@ -265,26 +265,6 @@ export default function SessionDetail() {
     } finally { setBusy(false); }
   };
 
-  const confirmAuditorConfidence = async () => {
-    // D13 step 4/7/8: a confidence-only control, distinct from the
-    // per-column resolutions above -- it answers the Auditor's own
-    // second-review escalation and must echo the exact `audit_version`
-    // that opened it, or the backend rejects it as a stale confirmation.
-    if (!principal) { toast.error('Not authenticated -- reload the page'); return; }
-    if (!session?.audit_version) { toast.error('No open Auditor confirmation on this run'); return; }
-    setBusy(true);
-    try {
-      const r = await axios.post(`${API}/sessions/${sid}/human-review`, {
-        resolutions: [], client_event_id: crypto.randomUUID(),
-        confirm_auditor_confidence: true, audit_version: session.audit_version,
-      });
-      toast.success(`Auditor confidence confirmed (${r.data.status})`);
-      await refresh();
-    } catch (e) {
-      toast.error(`confirmation failed: ${e?.response?.data?.detail || e.message}`);
-    } finally { setBusy(false); }
-  };
-
   if (notFound) return (
     <div className="max-w-4xl mx-auto px-10 py-24" data-testid="session-not-found">
       <div className="kicker text-oxblood">Study not found</div>
@@ -380,9 +360,7 @@ export default function SessionDetail() {
           fileReviewAck={fileReviewAck}
           setFileReviewAck={setFileReviewAck}
           downloadDatasetFile={downloadDatasetFile}
-          session={session}
           busy={busy}
-          confirmAuditorConfidence={confirmAuditorConfidence}
           resolutions={resolutions}
           setResolutions={setResolutions}
           actualKnowledgeAck={actualKnowledgeAck}
