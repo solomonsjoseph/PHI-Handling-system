@@ -11,19 +11,20 @@ this file documents both.
 
 **Version:** 2.0.0
 **Address:** Sir. **Style:** no emojis, no em-dashes, cite authorities.
-
 A study team drops in a ZIP (datasets + at least one of forms / data_dictionary /
-mappings), a 15-agent pipeline (12 original agents plus Manager, Operator, and
-Reviewer) classifies every column, applies HIPAA §164.514 Safe Harbor
-transformations deterministically, and emits an IRB-grade bundle with
-attestation, benchmark, and manuscript draft. See `CLAUDE.md`'s "PHI Console"
-section for the full agent roster, structure, and API surface -- this file
-gives the north star and operational summary; `CLAUDE.md` is the source of
-truth for the running implementation.
+mappings). The pipeline classifies every column, applies HIPAA §164.514 Safe Harbor
+transformations deterministically, and, after a deterministic release-content scan,
+emits a bundle with attestation and a benchmark report. A manuscript draft and
+competitor-landscape report are available on request after the run (see "Workflow"
+below). See `CLAUDE.md`'s "PHI Console" section for the full structure, roster, and API
+surface; this file gives the north star and operational summary.
 
-This service is mid-migration to a new target architecture; see `CLAUDE.md`'s
-"Migration status" note. Everything below describes the current, running
-implementation.
+This service has migrated from the earlier 15-agent framing to its target architecture
+(a Supervisor/Observer Manager, a Judge/Reviewer/Executor core, and a
+HandoffGateway-mediated specialist topology), which is now the running implementation.
+Everything below describes that current pipeline. A few components are built and
+tested but not yet wired into the live path; `SECURITY.md` and
+`docs/THREAT_MODEL_BACKEND.md` disclose those precisely rather than omit them.
 
 ### Core PHI safety constraint
 
@@ -50,7 +51,11 @@ feed Instrument/Lexicon extraction, never raw dataset rows.
   backend/
     server.py               FastAPI service on :8001
     phi_core/
-      agents/                15-agent pipeline: specialists, experts, reasoning core, manager/operator/reviewer, outward
+      agents/                pipeline agents + Manager (Schema, Lexicon, Instrument, Judge,
+                              RegulationsExpert, PHIMethodsExpert, Reviewer, Executor)
+      control/               deterministic service layer (DeterministicVerifier, HandoffGateway,
+                              SandboxManager, SuperOrchestrator, FinalAssuranceGate,
+                              CleanupManager, trace sanitizer and projections)
       intake.py, file_readers.py, anonymizer.py, publish_guard.py, bundle.py, crypto.py, jurisdictions.py
     phi_corpus/              adversarial corpus generator + benchmark report
     tests/                   340+ regression tests
@@ -93,26 +98,48 @@ variable and what refuses to boot without it (4.1).
 
 ### Workflow
 
-1. Create session, upload the intake ZIP.
-2. Specialists (Lexicon, Schema, Instrument) and experts (Statute, Praxis)
-   run in parallel: headers, dictionary text, and form fields only, never
-   dataset rows.
-3. Judge<->Sentinel reasoning loop decides a per-column action (keep, drop,
-   cap_age_90, year_only, zip3_truncate, hash, pseudonymize, scrub_text,
-   human_review), tagged with 45 CFR 164.514 categories A-R.
-4. Human review checkpoint for blocking cases; advisory issues log only.
-5. Executor applies approved actions to dataset rows (pure Python, no LLM);
-   Operator and Reviewer deterministically verify the output; Publish Guard
-   scans every export byte before any download is authorized.
-6. Auditor produces the precision/recall/F1 audit-of-record; Scout/Ledger/
-   Herald produce the competitor landscape and manuscript draft.
+The live pipeline runs in stages: parallel specialists build a study knowledge package,
+Judge classifies each column, experts research on demand, Reviewer Preview confirms,
+human review runs only when triggered, Executor transforms rows inside the sandbox,
+deterministic verification and Reviewer Final confirm the result, and Publish Guard
+scans release content before the session closes.
+
+1. Create session, upload the intake ZIP (manifest v3 validation, fail-closed).
+2. Schema, Lexicon, and Instrument specialists run in parallel per artifact type and
+   build a `StudyKnowledgePackage`: headers, dictionary text, and form fields only,
+   never dataset rows.
+3. Judge classifies each column (keep, drop, or a Safe Harbor transformation).
+4. RegulationsExpert and PHIMethodsExpert run targeted research, deduplicated across
+   columns and timeout-bounded.
+5. Reviewer Preview confirms the classification.
+6. Human Review runs only when triggered (unresolved uncertainty, low confidence, or a
+   policy-required checkpoint), via `POST /api/sessions/{sid}/human-review`.
+7. Executor applies the verified transformation plan to dataset rows inside the
+   `SandboxManager` sandbox; no LLM ever touches row values.
+8. DeterministicVerifier checks the applied output.
+9. Reviewer Final confirms verification and may trigger one of five typed rewind routes
+   (EXECUTION_ERROR, METHOD_ERROR, REGULATION_ERROR, SEMANTIC_ERROR,
+   UNRESOLVED_UNCERTAINTY), each returning control to its correct earliest stage.
+10. Publish Guard scans the release content.
+11. The session closes as `complete`, `partially_complete`, `failed`,
+    `awaiting_human_review`, or `blocked`.
+
+Agent handoffs run through `HandoffGateway`, which enforces a deny-by-default directed
+topology and records every governed exchange as a `TraceEvent`. Supervision is split:
+Manager brokers Judge-to-specialist queries (each recorded as a governed handoff) and
+writes a per-run charter, while SuperOrchestrator owns `workflow_runs` lifecycle
+(holds, run start/cancel, cleanup, human-review creation, export-window bookkeeping).
+
+Scout, Ledger, and Herald are optional and post-run, not part of the mandatory path.
+After a session completes, `POST /api/sessions/{sid}/post-run-report` runs them
+synchronously to produce the competitor landscape, benchmark comparison, and manuscript
+draft; they can never block or slow the mandatory pipeline.
 
 ### Benchmark
 
-`phi_corpus/benchmark.py` builds a per-run report (precision/recall/F1 per
-HIPAA category, completeness narrative) from the adversarial corpus, attached
-to each session and downloadable alongside the publication bundle. See
-`CLAUDE.md`'s Auditor description for what the audit-of-record covers.
+`phi_corpus/benchmark.py` builds a deterministic per-run report (precision/recall/F1 per
+HIPAA category, completeness narrative) from the adversarial corpus, attached to each
+session and downloadable alongside the publication bundle.
 
 ### Authority
 
