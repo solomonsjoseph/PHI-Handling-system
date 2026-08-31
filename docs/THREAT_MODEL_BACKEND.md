@@ -145,8 +145,9 @@ sandboxed raw-data worker can therefore read:
 `validate_sandbox_path` (`sandbox.py`) constrains *callers* -- it refuses to
 let the rest of the codebase hand the worker a path outside its own
 workspace -- it does not, and cannot, constrain what the worker's own code
-reads once it is running as that uid. The env-var denylist (`_DENYLIST_ENV_FRAGMENTS`,
-D7) reduces what the child's *environment variables* carry; it has no
+reads once it is running as that uid. The env-var allowlist (`_ALLOWLISTED_ENV_KEYS`,
+D7 -- see section 7 for how this superseded the earlier denylist design) reduces what
+the child's *environment variables* carry; it has no
 bearing on what the child can open directly from the filesystem by path,
 which is the entire class of exposure this section describes. A real
 process-identity or container/namespace boundary (a dedicated low-privilege
@@ -284,3 +285,89 @@ code could choose to open once running as that uid. The no-container
 architectural decision this codebase has made leaves full process-identity
 isolation undeliverable; this residual risk is disclosed, not remediated,
 and stays open by the same design section 3 already records it under.
+
+## 8. `SECURITY_BOUNDARY_VIOLATION` handling (spec section 71)
+
+`control/security_incident.py` implements the durable handling spec section 71
+requires: a `SecurityIncident` (a `ControlRecord`) is opened the moment
+`ProviderGateway`'s live leak-canary-hit branch fires (see section 9 below), and is
+deliberately typed with no field capable of holding the raw leaked value itself -- the
+record documents that an incident happened, not what leaked. An open incident:
+
+- **Blocks release**: `derive_security_incident_active` reads the durable
+  `security_incidents` collection and feeds `FinalAssuranceGate`'s
+  `no_unresolved_security_incident` condition, which returns `BLOCKED` while any
+  incident for the run is open.
+- **Does not auto-resume**: nothing clears an incident on its own.
+  `resolve_security_incident` requires an explicit, authorized principal call.
+
+**This condition's correctness does not close the export gap in section 10 below.**
+`no_unresolved_security_incident` is a real, correctly-implemented condition inside
+`evaluate_final_assurance` -- but `evaluate_final_assurance` itself has no live caller
+in the current bundle/export path, so this condition, like every other
+`FinalAssuranceGate` condition, does not actually run before a session is downloaded
+today. What still runs regardless of the gate: `ProviderGateway`'s own
+leak-canary-hit branch opens the incident record live, independent of whether
+`FinalAssuranceGate` is ever invoked. The detection and the durable record are real;
+only the release-blocking consequence tied to `FinalAssuranceGate` is currently
+dormant on the live export path.
+
+## 9. Leak-canary harness (`control/canary.py`, Wave R-d, spec section 72)
+
+A run-scoped, in-process detection layer, separate from the sandbox controls in
+sections 1-4: `activate_canary_set` plants literal strings tied to a run's ground
+truth, and a scan of an outbound payload raises `SecurityBoundaryViolation` -- a
+plain `Exception`, not a typed-hierarchy subclass, so it cannot be silently caught by
+exception handling written for an unrelated error family -- the instant a planted
+literal appears. The registry lives only in a module-level, process-local dict
+(`_ACTIVE`) for the interval between `activate_canary_set()` and
+`deactivate_canary_set()`: never a `ControlStore` collection, never serialized to
+disk, never logged.
+
+The harness covers 13 live surfaces: exports, plus 8 non-export surfaces
+(`trace_events`, `workflow_runs.opaque_map`, agent logs, `HandoffEnvelope` payloads,
+the learning store, research queries, errors, and ZIP metadata). A hit on any of
+these surfaces is what feeds the `SECURITY_BOUNDARY_VIOLATION` incident described in
+section 8 above.
+
+## 10. The live export path does not pass through `FinalAssuranceGate` (open,
+disclosed residual risk)
+
+**This is the most important accuracy point in this document.** The live download
+endpoints (`session_bundle`, `session_export`, `session_reversal_key`,
+`session_acknowledge`, `session_cleanup_status`) gate on session status
+(`complete`/`partially_complete`), an `EXPORT_RETENTION_WINDOW_DAYS` (default 14)
+410-Gone check once elapsed, and `export_expires_at` surfaced on session reads. The
+bundle bytes themselves are assembled by `phi_core/bundle.py::build_bundle`, a
+self-contained ZIP assembler with its own coverage rendering, its own attestation
+payload, its own README/methods/results/discussion generation, and its own SHA-256
+hashing.
+
+**`build_bundle` is not gated by `FinalAssuranceGate`.** `control/final_assurance.py`'s
+`evaluate_final_assurance` is the master-architecture-mandated (section 57),
+fifteen-condition "deterministic non-bypassable release gate... model confidence
+cannot override it" -- and it has zero live call sites anywhere in `server.py`,
+`superorchestrator.py`, or `agents/` (verified directly against the current
+`server.py`'s bundle/export handlers: `build_bundle` is imported and called there,
+`evaluate_final_assurance` is not referenced at all). This was disclosed
+deliberately, not discovered late: the gate was built and extensively tested but
+never force-wired into the download path, to avoid a regression risk across the
+~100+ existing download tests, and remains open today. The same applies to
+`ReportGenerator`/`ZIPBuilder`/`IntegrityService` -- a separate, fully built,
+gate-verified report-pipeline cluster that is downstream of this same gap and is
+also not part of the live export path.
+
+**What this means in practice:** today, a session that reaches `complete` or
+`partially_complete` can be downloaded through `build_bundle` without ever passing
+the 15-condition `FinalAssuranceGate` check -- including the
+`no_unresolved_security_incident` condition described in section 8 above.
+`build_bundle` is not undefended: Publish Guard's deterministic release-content scan
+is real and wired into the pipeline before a session can reach `complete` in the
+first place, and the leak-canary detection in section 9 runs independently of
+`FinalAssuranceGate`. But the specific mandatory-per-spec, non-bypassable release
+gate -- the one condition set the architecture names as the backstop that "model
+confidence cannot override" -- is simply not in the call path a real download
+request takes. Treat this as an open, unresolved item: a deployment that requires
+`FinalAssuranceGate`'s full condition set as an actual precondition for release
+needs to wire `evaluate_final_assurance` into the bundle/export handlers before that
+guarantee is real, not just tested.
