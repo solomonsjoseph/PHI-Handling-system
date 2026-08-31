@@ -105,17 +105,6 @@ def test_unmodelled_outcome_fails_closed() -> None:
         workflow.next_node("not_a_real_node", "ok")
 
 
-def test_no_transition_is_declared_from_a_terminal_node() -> None:
-    for terminal in workflow.TERMINAL_NODES:
-        assert workflow.possible_outcomes(terminal) == ()
-
-
-def test_possible_outcomes_lists_every_declared_branch() -> None:
-    assert set(workflow.possible_outcomes("gate_decisions")) == {
-        "proceed", "human_review_needed", "coverage_failed",
-    }
-
-
 def test_checkpoint_validates_its_node_on_construction() -> None:
     workflow.Checkpoint(node="execute")
     with pytest.raises(workflow.WorkflowError):

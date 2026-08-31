@@ -160,8 +160,6 @@ def test_session_status_is_derived_from_run_state_not_an_independent_enum():
     # an independent 13-value SessionStatus Literal.
     assert hasattr(models, "Session")
     assert models.Session.model_fields["status"].annotation is records.RunState
-    # The old SessionStatus enum is gone; only the display projection remains.
-    assert callable(models.session_status_display)
 
 
 # --- Partial-contract completion: TraceEvent and AgentManifest ---

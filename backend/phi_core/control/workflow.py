@@ -222,12 +222,6 @@ def next_node(current: str, outcome: str) -> str:
         ) from exc
 
 
-def possible_outcomes(current: str) -> tuple[str, ...]:
-    """Every outcome ``next_node`` accepts for ``current``, in table order."""
-    node(current)
-    return tuple(outcome for (from_node, outcome) in TRANSITIONS if from_node == current)
-
-
 # The checkpoint every node commits to ``workflow_runs.checkpoint`` in the
 # same update that records the node transition (D9). ``payload_refs`` holds
 # artifact/evidence/decision identifiers only, never inline blobs -- see

@@ -43,11 +43,6 @@ PROVIDER_HOSTS: dict[str, tuple[str, ...]] = {
 }
 
 
-class UploadTooLarge(HTTPException):
-    def __init__(self, max_bytes: int):
-        super().__init__(413, f"upload exceeds {max_bytes} byte limit")
-
-
 def allowed_providers() -> set[str]:
     if _custom_hosts():
         return ALLOWED_PROVIDERS_WITH_CUSTOM
@@ -421,25 +416,3 @@ def resolve_principal_soft(x_api_token: str | None, phi_session: str | None) -> 
                 return name
     return None
 
-
-async def enforce_upload_size(file, max_bytes: int) -> int:
-    """Copy an UploadFile stream in chunks with a hard byte cap.
-
-    Returns the number of bytes written. Kept as a small helper because the
-    caller decides where to write (temp file / session dir).
-    """
-    # Callers pass an already-opened destination; this helper just meters bytes.
-    total = 0
-    while True:
-        chunk = await _read_chunk(file, 1 << 20)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_bytes:
-            raise UploadTooLarge(max_bytes)
-        yield chunk
-
-
-async def _read_chunk(file, n: int) -> bytes:
-    # UploadFile.read is async
-    return await file.read(n)

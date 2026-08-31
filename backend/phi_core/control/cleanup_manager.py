@@ -103,16 +103,6 @@ async def _empty() -> "tuple[bool, list[str]]":
     return True, []
 
 
-class CleanupError(RuntimeError):
-    """Raised with a fixed, testable ``reason`` on any refusal, matching
-    this package's established error convention (``LearningError``,
-    ``ArtifactError``, ``SandboxError``)."""
-
-    def __init__(self, reason: str, detail: str = "") -> None:
-        self.reason = reason
-        super().__init__(f"{reason}: {detail}" if detail else reason)
-
-
 class CleanupManager:
     """Orchestrates one run's terminal-path destruction (docs #76) and
     produces a fully-populated, self-verified :class:`CleanupManifest`

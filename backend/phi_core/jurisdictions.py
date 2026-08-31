@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 
 from .detectors import luhn
 
@@ -59,9 +59,6 @@ class JurisdictionPack:
     restricted_zip3_prefixes: frozenset[str] = frozenset()
     patterns: tuple[GuardPattern, ...] = field(default_factory=tuple)
     notes: str = ""
-
-    def pattern_ids(self) -> list[str]:
-        return [p.pid for p in self.patterns]
 
 
 # ---- Shared universal patterns ------------------------------------------
@@ -451,20 +448,3 @@ def get_pack(jurisdiction: str | None) -> JurisdictionPack:
     """Return the jurisdiction pack for ``jurisdiction`` (defaults to US)."""
     key = (jurisdiction or "us").strip().lower()
     return REGISTRY.get(key, US_HIPAA)
-
-
-def list_packs() -> list[dict[str, Any]]:
-    """Summary suitable for ``GET /api/jurisdictions``."""
-    return [
-        {
-            "id": p.id,
-            "label": p.label,
-            "regulation": p.regulation,
-            "supported": p.supported,
-            "age_aggregation_threshold": p.age_aggregation_threshold,
-            "pattern_count": len(p.patterns),
-            "identifier_categories": p.identifier_categories,
-            "notes": p.notes,
-        }
-        for p in REGISTRY.values()
-    ]

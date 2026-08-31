@@ -52,19 +52,6 @@ OCR_TEXT_THRESHOLD = 50
 OCR_MAX_PAGES = 100  # bounded so a giant scan can't wedge the pipeline
 
 
-DATASET_EXTS = {"csv", "tsv", "xlsx", "xls", "parquet"}
-NARRATIVE_EXTS = {"pdf", "docx", "txt", "md", "eml", "html", "htm"}
-
-
-def classify_ext(name: str) -> tuple[str, str]:
-    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-    if ext in DATASET_EXTS:
-        return "dataset", ext
-    if ext in NARRATIVE_EXTS:
-        return "narrative", ext
-    return "narrative", ext or "txt"
-
-
 # --- Dataset readers -------------------------------------------------------
 
 def read_csv_columns(path: Path) -> tuple[list[str], int]:

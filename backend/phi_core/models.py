@@ -22,18 +22,6 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def session_status_display(state: RunState) -> str:
-    """Display projection of a run's ``RunState``.
-
-    The session-level status the API surfaces is the ``RunState`` value
-    itself (the section-78 lifecycle names are already the display string).
-    This function replaces the former independent ``SessionStatus`` Literal:
-    ``Session.status`` is typed by ``RunState`` directly, so the lifecycle
-    vocabulary can no longer drift in two places.
-    """
-    return state
-
-
 class DetectedSpan(BaseModel):
     start: int
     end: int
