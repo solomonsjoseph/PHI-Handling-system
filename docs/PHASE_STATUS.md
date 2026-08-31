@@ -108,6 +108,18 @@ removal justifies it, and the commit that removed that symbol.
   in the same file is the trimmed replacement (same fixture setup minus
   FakeScout and the `asyncio.create_task` capture machinery).
   commit: `4e464d5` (Phase 17-B, Scout/Ledger/Herald relocation)
+- nodeid: `tests/test_agent_pipeline.py::test_results_audit_ledger_herald_populated`
+  removed symbol: none (production code untouched by this entry) — the test's own
+  premise (that `GET /results` always carries a populated `audit`/`ledger`/`herald`)
+  became structurally false once Phase 17-B moved Scout/Ledger/Herald to an opt-in
+  post-run endpoint and removed Auditor.
+  reason: split into two tests in the same file, same commit as the fix:
+  `test_results_no_longer_include_audit_ledger_herald_by_default` (proves the new
+  default-absent invariant) and `test_post_run_report_endpoint_populates_scout_
+  ledger_herald` (exercises the new opt-in `POST /post-run-report` endpoint with
+  the same field-shape assertions this test used to make against `GET /results`).
+  No coverage lost; the assertions moved to the correct trigger point.
+  commit: `b2c2c45` (Phase 17-B follow-up fix)
 
 Note: `test_judge_typed_proposal.py`'s whole premise (Judge.run returning a
 `JudgeDecision`/`JudgeProposal`-typed proposal) is superseded by the ColumnDecision
@@ -2174,3 +2186,52 @@ now-empty `KNOWN_XFAIL` section's "Resolved in Phase 17-A" note.
 Proceeding to Phase 17-B: move Scout, Ledger, and Herald out of the core PHI path into
 an opt-in post-run add-on, and remove the Auditor top-level role, per the plan's explicit
 decision.
+
+### Phase 17-B: retire Auditor, relocate Scout/Ledger/Herald off the mandatory
+PHI path — COMPLETE
+
+Three subagent commits (`4e464d5`, `8254401`, `8b38d24`): `class Auditor` and its
+LLM re-derivation call removed from `phi_core/agents/reasoning.py`; the orchestrator
+no longer instantiates or calls Scout/Ledger/Herald as part of the mandatory
+execute_decisions() flow; a new opt-in `POST /api/sessions/{sid}/post-run-report`
+endpoint (requires session status `complete` or `partially_complete`) generates
+Scout/Ledger/Herald output on demand.
+
+Investigated whether Reviewer Final's `HUMAN_REVIEW_REQUIRED` checklist needed
+extending to literally re-implement Auditor's 5 escalation grounds: confirmed no —
+every ground is structurally covered elsewhere (D11 deterministic gates,
+`privacy_intent_preserved`, Publish Guard's residual-PHI scan; full reasoning in
+`agent://Phase17bAuditorScoutExtraction`).
+
+One piece of now-dead code found and honestly disclosed rather than silently
+left or scope-crept into fixing: `confirm_auditor_confidence` in the human-review
+flow can now never succeed (its only producer, Auditor's escalation, is gone), so
+it always 400s. Not a safety regression (fails closed, strictly more conservative),
+left for Phase 17-C's cleanup-audit since fixing it would require touching
+`test_human_review_invariant.py` and `test_control_superorchestrator.py` outside
+this phase's named scope.
+
+**Follow-up fix (mine, commit `b2c2c45`):** `test_agent_pipeline.py`'s
+`test_results_audit_ledger_herald_populated` asserted `GET .../results` always
+carries populated `audit`/`ledger`/`herald` — structurally false after this phase's
+opt-in architecture change, currently masked by the pre-existing no-provider-key
+failure but would become a permanent, wrongly-reasoned failure once Phase 20 runs
+with a real key. Replaced with two tests: `test_results_no_longer_include_audit_
+ledger_herald_by_default` (proves the new default-absent invariant; now passes) and
+`test_post_run_report_endpoint_populates_scout_ledger_herald` (exercises the new
+opt-in endpoint; still fails today for the correct reason — 403 precondition, no
+completed session available without a provider key — not a false assertion).
+
+**Genuine canonical gate (live, fresh restart, clean state):** **8 failed, 1864
+passed, 4 skipped, 2 errors, 107.12s** -- same failure count as the Step 0/Phase
+15a-17A baseline; `test_results_audit_ledger_herald_populated` legitimately
+replaced by `test_post_run_report_endpoint_populates_scout_ledger_herald` (correct
+403-precondition reason, recorded below), plus one net-new passing test. Non-live:
+**3 failed, 1859 passed, 5 skipped, 98.00s** -- exactly baseline, unaffected (the
+two new/changed tests are in the live-only file). `ruff check .` clean both times.
+Root suite unchanged (85 failed / 909 passed / 3 skipped, `phi_engine`, out of
+scope). Confirmed `class Auditor` and all `Scout(`/`Ledger(`/`Herald(` orchestrator
+call sites gone via direct grep.
+
+Proceeding to Phase 17-C: whole-repo `cleanup-audit` (report-only first, review
+findings, then apply what's genuinely dead/duplicated/legacy).
