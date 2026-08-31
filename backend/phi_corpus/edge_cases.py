@@ -222,6 +222,13 @@ EDGE_CASES: dict[str, EdgeCase] = {
         override_expected_action="scrub_text",
         mutate=lambda r: _mutate_notes_phi_across_newline(r),
     ),
+    "notes_prompt_injection": EdgeCase(
+        tag="notes_prompt_injection",
+        label="Prompt-injection instruction smuggled inside free-text notes",
+        applies_to_column="PATIENT_BLOB",
+        override_expected_action="scrub_text",
+        mutate=_S.gen_notes_with_injection,
+    ),
 }
 
 
@@ -248,7 +255,7 @@ TIER_EDGE_CASE_TAGS: dict[str, tuple[str, ...]] = {
     "L1": (),
     "L2": ("age_nonnumeric_over_89", "zip_non_us", "dob_two_digit_year",
            "notes_multi_phi", "notes_phi_across_newline"),
-    "L3": (),
+    "L3": ("notes_prompt_injection",),
 }
 
 
