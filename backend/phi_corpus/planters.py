@@ -34,6 +34,8 @@ disk); the pipeline never sees it. Structure::
                             "semantic_conflicts": [{"column": ..., "dictionary_says": ...,
                                                      "actual_category": ...}]},
       "dictionary_plants": [{"column_name": "patient_id", "value": "MRN1234567"}, ...],
+      "form_plants": [{"field_label": "Patient Name", "value": "James Smith"}, ...],
+                      # present only when plant(..., include_instruments=True)
     }
 
 Every planted cell -- whether it is a base PHI value from the column
@@ -46,8 +48,11 @@ The seven fields beyond the original six (``plant_id``, ``tier``,
 ``expectation``, ``leak_literals``, ``link_group``, ``difficulty_note``,
 ``sensitivity_class``) are additive; every existing key and its meaning is
 unchanged, so ``backend/tests/test_corpus.py`` needs no edit. The top-level
-``dictionary_plants`` key and ``dictionary_drift``'s ``semantic_conflicts``
-key are likewise additive.
+``dictionary_plants`` and ``form_plants`` keys, and ``dictionary_drift``'s
+``semantic_conflicts`` key, are likewise additive -- ``form_plants`` is only
+present in the returned dict when ``plant()`` is called with
+``include_instruments=True``; every existing caller's ground-truth dict
+shape is unchanged.
 """
 from __future__ import annotations
 
@@ -61,6 +66,7 @@ from typing import Any
 
 from phi_core.jurisdictions import get_pack as _get_pack
 
+from . import instruments as _instruments
 from . import realism as _realism
 from .edge_cases import EDGE_CASES, EdgeCase
 from .scenarios import REDCAP_DICTIONARIES, REDCAP_DICTIONARY_HEADERS, SCENARIOS, ColumnSpec, DatasetSpec, Scenario
@@ -524,18 +530,25 @@ def plant(
     *,
     profile: str = "",
     tier: str = "",
+    include_instruments: bool = False,
 ) -> CorpusArtifact:
     """Plant PHI/PII per the scenario + edge-cases and emit both the corpus
     ZIP and the ground-truth dict.
 
-    Emits two study components only:
+    Emits two study components by default, a third when requested:
       1. ``datasets/*.csv`` -- tabular data with per-row PHI plants
       2. ``dictionary/*.csv`` -- data dictionary describing each column
+      3. ``forms/*.pdf`` -- a flat-text collection form (only when
+         ``include_instruments=True``; see ``instruments.generate_form_pdf``)
 
     ``profile`` overrides the scenario's own declared realism profile when
     non-empty (controls only the ZIP member text encoding here; per-value
     messiness is baked into each scenario's own generators).  ``tier``
     overrides the scenario's own declared tier for ground-truth stamping.
+    ``include_instruments`` defaults to ``False`` so every existing caller
+    sees byte-identical output; set it ``True`` to additionally plant and
+    emit a Tier-2-readable PDF form (``forms/<scenario_id>_form.pdf``) with
+    its own ground-truth entries under the ``form_plants`` key.
     """
     scn = SCENARIOS[scenario_id]
     rng = random.Random(seed)
@@ -558,6 +571,7 @@ def plant(
 
     zbuf = io.BytesIO()
     planted: list[PlantedCell] = []
+    form_plants: list[dict[str, str]] = []
     with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
         for ds in scn.datasets:
             matrix = matrices[ds.filename]
@@ -566,6 +580,9 @@ def plant(
             for row in matrix:
                 planted.extend(row)
         _write_deterministic_zip_entry(z, "dictionary/columns.csv", dict_text.encode(prof.encoding))
+        if include_instruments:
+            pdf_bytes, form_plants = _instruments.generate_form_pdf(scn, rng)
+            _write_deterministic_zip_entry(z, f"forms/{scenario_id}_form.pdf", pdf_bytes)
 
     columns_meta = [
         {
@@ -593,6 +610,8 @@ def plant(
         "dictionary_drift": _dictionary_drift(scn),
         "dictionary_plants": dictionary_plants,
     }
+    if include_instruments:
+        ground_truth["form_plants"] = form_plants
     summary = _summarise(planted)
     return CorpusArtifact(
         zip_bytes=zbuf.getvalue(),
