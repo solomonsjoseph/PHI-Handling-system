@@ -2608,3 +2608,133 @@ Zero code files touched by this phase (confirmed via `git diff --stat`: 9 files,
 `.md`).
 
 **`PHASE_18_STATUS = PASS`.** Proceeding to Phase 19: fresh-clone validation.
+
+## Phase 19 (fresh-clone validation) — COMPLETE
+
+Section 102, solo. Two subagent dispatches failed before this phase was actually
+completed directly by the orchestrator: the first (a giant single-dispatch covering all 8
+steps at once) spent 1h35m purely investigating and crashed the instant it began writing
+code, zero commits; the second (a concrete, step-numbered dispatch, learning from the
+first failure) got through steps 1-3 cleanly in 32m47s and then crashed at the start of
+step 4 for unclear infrastructure reasons, again zero commits, leaving only an orphaned
+temp clone directory (cleaned up by the orchestrator, no orphaned `hub` process existed
+since the crash predated step 5's server start). Given two sequential-task failures, the
+orchestrator executed the remaining validation directly rather than risk a third.
+
+**Step 0's disclosed gap resolved first** (commit `c985bca`): pinned `faker==40.37.0` and
+`xlwt==1.3.0` in `backend/requirements-dev.txt` (they were installed but never pinned),
+per the plan's explicit instruction that a fresh clone must either pin them or record the
+root suite out of scope -- Step 0 already chose "in scope" (ran and recorded the root
+suite as the baseline floor every phase gate since), so pinning is the consistent
+resolution.
+
+**Steps 1-3 (fresh clone, backend install, frontend install): clean.** Cloned to
+`/tmp/phi-fresh-clone-19-<ts>`, checked out `feat/phi-infrastructure-v2`, confirmed HEAD
+matches the working tree exactly. Backend: fresh venv, `pip install -r
+requirements-dev.txt` installs cleanly; confirmed `numpy==1.26.4`, `faker==40.37.0`,
+`xlwt==1.3.0`, `presidio_analyzer` imports, and Phase 17-C's removed deps (`PyJWT`,
+`python-jose`, `passlib`) are genuinely absent (`pip show` -> "not found"). Frontend:
+`npm install` (1316 packages, "added" not "changed" -- exact lockfile resolution, no
+drift from Phase 17-C's dependency removals), `react-scripts build` compiles with zero
+errors.
+
+**Step 4 (configuration): one genuine gap found and fixed** (commit `bb90cac`).
+`backend/.env` is correctly gitignored (`git ls-files` empty). Cross-checked
+`.env.example` against every `os.environ.get(...)` call in `server.py`/`paths.py`: 5
+real env vars the app reads were undocumented -- `REVIEWER_PRINCIPALS` (the significant
+one: boot-required in production, security-critical, controls who may act in Human
+Review, and the only place a 45 CFR 164.514(b)(1) Expert Determination principal gets
+configured; a fresh deployer following the old `.env.example` alone would have no idea
+this exists), `GOOGLE_API_KEY` (alternate spelling accepted alongside `GEMINI_API_KEY`),
+`MAX_COLUMNS_PER_STUDY`, `PHI_SANDBOX_DIR`, `REVIEW_RETENTION_DAYS` (the latter three all
+optional with sane defaults, lower severity). Added all 5 with accurate documentation.
+Along the way, found the working tree's own untracked `backend/.env` (gitignored, not a
+committed-secret violation) has accumulated 3 duplicate `APP_ENCRYPTION_KEY` lines and a
+real BYO `OPENAI_API_KEY` -- expected local dev-key hygiene debt this session has
+repeatedly cleaned before gate runs (see Phase 17-C's `RESIDUAL_RISK`), not a Phase 19
+finding; the clone was given a clean, minimal, isolated `.env` instead of a copy of the
+working tree's messy one, precisely to avoid this contaminating the validation.
+
+**Step 5 (database initialization): clean.** Backend started against a brand-new,
+never-before-used database (`phi_handling_freshclone19` on the same already-running
+`mongod` at `55292`, isolated from the working tree's `phi_handling`) on port 8011.
+`/api/health` returns 200. The fresh database self-initializes 9 collections on first use
+with zero manual migration step, consistent with `docs/MIGRATION.md`'s own documented
+"no separate migration tool" design (remaining collections like `settings`,
+`security_incidents`, `cleanup_manifests` are created lazily on first genuine use, not at
+boot -- expected).
+
+**Step 6 (full suite from clean): two genuine findings, both root-caused and resolved,
+one pre-existing flake correctly identified and left alone.** First full run: 6 failed
+(3 pre-existing `test_human_review_invariant.py` baseline + 3 new). Investigated each new
+failure individually rather than accepting the raw count:
+- `test_spa_mount.py::test_no_static_mount_without_a_build_directory`: not a defect --
+  this validation's own step 3 `npm run build` created `frontend/build/`, which the test
+  correctly detects and asserts against. Removing the build artifact before the suite run
+  (the same procedure Phase 13's own record already documented) restores the pass.
+- `test_control_phase2_sandbox_and_raw_data_boundary.py::test_validate_sandbox_path_rejects_traversal`:
+  a genuine, if minor, **test bug**, fixed (commit `0ed79c7`). The test compared the
+  unresolved `record.workspace_path` string against `validate_sandbox_path`'s internally
+  `.resolve()`-d return value's `.parents` -- passes by coincidence whenever `DATA_DIR`
+  has no symlink component (the working tree's own path under `/Users/...`), fails
+  whenever it does (macOS's `/tmp -> /private/tmp`, which this validation's own throwaway
+  clone correctly used). Independently confirmed the *production* function's actual
+  traversal-rejection logic (the `../../../etc/passwd` and `/etc/passwd` denial asserts)
+  was never affected -- it already resolves both sides internally for its real security
+  check; only the test's own containment assertion compared the wrong pair of strings.
+  Fixed to `.resolve()` both sides; re-verified passing in both the clone (under `/tmp`)
+  and the working tree (under `/Users/...`, unaffected either way).
+- `test_control_migrate.py::test_backfill_export_artifacts_round_trips_a_legacy_export`:
+  investigated and conclusively classified as **pre-existing, order-dependent test
+  flakiness, not a fresh-clone-specific defect**. Ran in isolation in the clone (passed
+  further than in full-suite context, but still eventually failed at a different
+  assertion) and, decisively, ran in the **working tree** against a brand-new,
+  never-before-used database name (`phi_handling_freshdb_check`, non-destructive to the
+  real `phi_handling` data) with only this file selected: **all 8 tests passed cleanly**.
+  This proves the failure is not caused by a fresh database, a fresh clone, or anything
+  this rewrite changed -- it is specific to this one file's full-suite execution-order
+  interaction (per `conftest.py`'s own docstring, one of exactly 3 files that call the
+  real `phi_core.db.get_db()` directly rather than through the normal test fixture
+  machinery, a documented unusual pattern). `test_control_migrate.py` was not created,
+  modified, or exercised by any phase of this rewrite. Left alone -- not this rewrite's
+  defect to fix, and not evidence against a fresh clone's genuine usability.
+
+**Final clean run** (fresh database drop, `frontend/build/` removed, clone re-synced to
+the working tree's latest HEAD including both fixes above): **4 failed, 1848 passed, 5
+skipped, 115.47s** -- exactly the 3 pre-existing `test_human_review_invariant.py`
+failures plus the one independently-confirmed pre-existing `test_control_migrate.py`
+flake, nothing else. `ruff check .`: all checks passed. Root suite (`PYTHONDONTWRITEBYTECODE=1
+pytest tests` from the clone root): **85 failed, 909 passed, 3 skipped, 64.31s** -- exact
+match to the Step 0 baseline, all `phi_engine`, out of scope. Frontend:
+`CI=true npx react-scripts test --watchAll=false` -> **2 suites, 5 passed**, exact match.
+
+**Step 8, the four explicit "verify" checks, all clean:**
+1. **No hidden local dependency**: proven substantively by the matching counts above;
+   additionally, zero references to `/Users/sj1136` or any absolute path baked into
+   `backend/phi_core`, `server.py`, `backend/tests`, or `frontend/src`.
+2. **No committed secret**: `backend/.env` correctly untracked; `.env.example`'s key
+   fields are all empty placeholders; a targeted grep for real credential-shaped strings
+   (`sk-ant-api03-`, `sk-proj-`, `AKIA[0-9A-Z]{16}`, PEM private-key headers) across every
+   tracked file found exactly 3 hits, all in deliberate, obviously-synthetic test
+   fixtures used to test the secret-scanner itself (`AKIA1234567890EXAMPLE`,
+   `AKIAABCDEFGHIJKLMNOP`, `sk-ant-api03-abcdefghijklmnopqrstuvwx` -- sequential-alphabet
+   and literal-"EXAMPLE" placeholders, plus their nodeid entries in the committed
+   baseline nodeid list). Zero real credentials committed.
+3. **No committed real PHI**: exactly 2 committed data-shaped files, both under
+   `phi_corpus/study_data/` (the level-1 tuberculosis synthetic study fixture, explicitly
+   marked `KEEP` per the plan and the canary/fixture substrate for Phases 15b/20).
+   Spot-read: fabricated names, dates, and format-valid-but-randomly-generated SSNs --
+   realistic-looking synthetic data by design (the whole point of `phi_corpus/`), not
+   real patient records.
+4. **No generated junk**: zero `__pycache__`/`.pyc`/`node_modules`/`.DS_Store`/`build/`/
+   `dist/` paths tracked by git.
+5. **No obsolete runtime architecture**: zero `class Sentinel`/`class Operator`/
+   `class Auditor`/`class Statute`/`class Praxis` definitions anywhere in `backend/`.
+   (Comment/docstring/phase-key-string leftovers are the separate, already-disclosed,
+   non-blocking Phase 17-C/18 finding -- not re-litigated here.)
+
+**Cleanup confirmed:** `phi19-backend` hub process stopped; `phi_handling_freshclone19`
+database dropped; `/tmp/phi-fresh-clone-19-*` deleted; no orphaned state of any kind
+survives this phase.
+
+**`PHASE_19_STATUS = PASS`.** Proceeding to Phase 20: synthetic end-to-end acceptance run.
