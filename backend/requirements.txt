@@ -77,7 +77,6 @@ openai==2.24.0
 openpyxl==3.1.5
 packaging==26.2
 pandas==3.0.3
-passlib==1.7.4
 pathspec==1.1.1
 pdf2image==1.17.0
 pdfplumber==0.11.8
@@ -96,7 +95,6 @@ pydantic==2.12.5
 pydantic_core==2.41.5
 pyflakes==3.4.0
 Pygments==2.20.0
-PyJWT==2.13.0
 pymongo==4.9.1
 pyparsing==3.3.2
 pypdf==5.0.1
@@ -104,7 +102,6 @@ pytesseract==0.3.13
 python-dateutil==2.9.0.post0
 python-docx==1.1.2
 python-dotenv==1.0.1
-python-jose==3.5.0
 python-multipart==0.0.9
 pytokens==0.4.1
 PyYAML==6.0.3
@@ -130,8 +127,6 @@ tiktoken==0.12.0
 tldextract==5.3.1
 tokenizers==0.22.2
 tqdm==4.69.0
-typer==0.27.0
-typer-slim==0.24.0
 typing-inspection==0.4.2
 typing_extensions==4.16.0
 tzdata==2026.3
