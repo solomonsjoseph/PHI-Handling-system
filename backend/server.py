@@ -709,9 +709,8 @@ async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
         manager = ExecutionHealthSupervisor(await _actx("Manager"), db=db)
         manager_box["value"] = manager
         await manager.run(
-            roster=["Executor", "Operator", "Reviewer", "Auditor", "Scout", "Ledger", "Herald"],
-            phase_plan=["executor", "operator", "reviewer", "publish_guard",
-                        "auditor_scout", "ledger", "herald"],
+            roster=["Executor", "Reviewer"],
+            phase_plan=["executor", "reviewer", "publish_guard"],
         )
         resolved_decisions = [d for d in decisions if d.get("action") != "human_review"]
         scrubbed_decisions = [scrub_decision(d) for d in resolved_decisions]
