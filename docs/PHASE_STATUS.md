@@ -120,6 +120,62 @@ removal justifies it, and the commit that removed that symbol.
   the same field-shape assertions this test used to make against `GET /results`).
   No coverage lost; the assertions moved to the correct trigger point.
   commit: `b2c2c45` (Phase 17-B follow-up fix)
+- nodeid: `tests/test_certification_invalidation.py::test_confirm_auditor_confidence_requires_audit_version`
+  removed symbol: `backend/server.py` `HumanReviewSubmit.confirm_auditor_confidence` field
+  and its 400-on-missing-`audit_version` validation branch
+  reason: Phase 17-B retired `Auditor`; this field could only ever be satisfied by
+  Auditor's own escalation (which minted `audit_version`), so post-retirement it always
+  400s regardless of input. Confirmed dead per Phase 17-B's own disclosure and
+  independently re-verified during Phase 17-C (zero remaining producers of an
+  `audit_confidence_confirmation` verdict).
+  commit: `2b58d67` (Phase 17-C)
+- nodeid: `tests/test_certification_invalidation.py::test_confirm_auditor_confidence_rejects_stale_audit_version`
+  removed symbol: same field, its 409-on-stale-`audit_version` branch
+  commit: `2b58d67` (Phase 17-C)
+- nodeid: `tests/test_certification_invalidation.py::test_confirm_auditor_confidence_accepts_matching_audit_version`
+  removed symbol: same field, its accept-and-record success path
+  commit: `2b58d67` (Phase 17-C)
+- nodeid: `frontend/src/pages/__tests__/SessionDetail.review.test.jsx` — "confirms Auditor
+  confidence with the open request audit_version"
+  removed symbol: `SessionDetail.jsx`'s `confirmAuditorConfidence` handler,
+  `HumanReviewPanel.jsx`'s `data-testid="auditor-confirmation-panel"`
+  reason: the only UI flow that called the now-removed backend field; a complete
+  dead-end panel that could only ever surface a 400.
+  commit: `2b58d67` (Phase 17-C)
+- nodeid: `tests/test_control_workflow.py::test_no_transition_is_declared_from_a_terminal_node`
+  removed symbol: `backend/phi_core/control/workflow.py` `possible_outcomes()`
+  reason: zero production callers; small mechanical `TRANSITIONS`-table lookup with no
+  other consumer (`TRANSITIONS`/`node()` remain fully live).
+  commit: `68dc624` (Phase 17-C)
+- nodeid: `tests/test_control_workflow.py::test_possible_outcomes_lists_every_declared_branch`
+  removed symbol: same function
+  commit: `68dc624` (Phase 17-C)
+- nodeid: `tests/test_llm_catalog.py::test_web_search_tool_selection_per_family`
+  removed symbol: `backend/phi_core/llm_catalog.py` `web_search_tool_for`
+  reason: zero production callers; the live web-search mechanism
+  (`agents/base.py`'s `call_with_web_search` -> `self.ctx.tools.search(...)`) is a
+  completely different, higher-level gateway abstraction that never calls this or reads
+  `PROVIDER_FAMILIES`.
+  commit: `240567d` (Phase 17-C)
+- nodeid: `tests/test_control_phase2_authorization_and_provider_control.py::test_list_contracts_matches_manifests_keys`
+  removed symbol: `backend/phi_core/control/authorization.py` `list_contracts`
+  reason: zero production callers; `get_contract`, the module's other function, is
+  untouched and confirmed live.
+  commit: `240567d` (Phase 17-C)
+- nodeid: `tests/test_schema_guardian.py::test_cardinality_returns_integers_only`
+  removed symbol: `backend/phi_core/agents/specialists.py` `Schema.cardinality`
+  reason: zero production callers; `orchestrator.py:1160` reads `Schema._stats` directly
+  (`getattr(state.schema_agent, "_stats", {})`), never through this public accessor.
+  commit: `240567d` (Phase 17-C)
+- nodeid: `tests/test_realworld_file_shapes.py::test_read_table_flat_dispatches_docx`
+  removed symbol: `backend/phi_core/agents/specialists.py` `_read_table_flat`
+  reason: zero callers anywhere (production or test) beyond these two tests; standalone
+  module-level helper with no internal caller in `specialists.py`. Dropped the
+  now-unused `openpyxl` import in the same commit.
+  commit: `240567d` (Phase 17-C)
+- nodeid: `tests/test_realworld_file_shapes.py::test_read_table_flat_returns_empty_for_xls`
+  removed symbol: same function
+  commit: `240567d` (Phase 17-C)
 
 Note: `test_judge_typed_proposal.py`'s whole premise (Judge.run returning a
 `JudgeDecision`/`JudgeProposal`-typed proposal) is superseded by the ColumnDecision
@@ -2162,7 +2218,7 @@ Proceeding to Phase 17 (repository clean slate), which must resolve all four rec
 
 ---
 
-## Phase 17 (repository clean slate) — IN PROGRESS
+## Phase 17 (repository clean slate) — COMPLETE
 
 Section 100, solo. Decomposed into sequential sub-dispatches given its scope (whole-repo
 cleanup-audit plus a genuine architectural extraction). Progress recorded incrementally.
@@ -2235,3 +2291,241 @@ call sites gone via direct grep.
 
 Proceeding to Phase 17-C: whole-repo `cleanup-audit` (report-only first, review
 findings, then apply what's genuinely dead/duplicated/legacy).
+
+### Phase 17-C: whole-repo `cleanup-audit` — COMPLETE
+
+Report-only pass first (`skill://cleanup-audit`, no `--fix`), dispatched to a subagent
+scoping `backend/phi_core`, `backend/` root, `backend/phi_corpus`, `frontend/src`
+(`phi_engine/`, root `tests/`, `harness/` excluded per ground rules; `phi_corpus/` marked
+`KEEP` per the plan's explicit instruction, never a deletion target). Full report at
+`history://CleanupAuditReport`. Raw tool output (vulture/deptry/depcheck): 458 raw
+candidates; report's own cross-check narrowed to ~65 genuine findings. **The report's own
+methodology itself later proved to have real gaps** (below) -- every finding was
+independently re-verified a second time before anything was applied, per the skill's
+mandatory cross-check rule and this phase's own "never apply a finding labelled
+unverifiable" instruction.
+
+**Applied (mechanical, zero architecture decision required), 6 commits:**
+- `2b58d67` **A1+D1**: removed the dead `confirm_auditor_confidence` field/branches from
+  `server.py`, its 3 dead-path tests, and the frontend's fully-wired-but-dead-end
+  auditor-confirmation panel (`SessionDetail.jsx`/`HumanReviewPanel.jsx`) plus its test.
+  Verified empirically: `HumanReviewSubmit` has no `model_config`/`extra=`, so Pydantic
+  v2's default `extra="ignore"` silently drops a legacy client's stray
+  `confirm_auditor_confidence` field post-removal -- no error, no behavior change.
+- `783b7cc` **A2**: fixed `_handle_pipeline_resume`'s stale
+  `roster=["Executor","Operator","Reviewer","Auditor","Scout","Ledger","Herald"]` /
+  matching `phase_plan` (a persisted `agent_log` charter record that had been lying about
+  the pipeline shape on every resumed run) to `roster=["Executor","Reviewer"]` /
+  `phase_plan=["executor","reviewer","publish_guard"]`, matching
+  `agents/orchestrator.py`'s own docstring exactly. Descriptive-only; no test asserts on it.
+- `2f4080c` **C1+C2+C3+C6**: dropped unused deps -- backend `PyJWT`, `python-jose`,
+  `typer`, `typer-slim`, `passlib` (zero import sites; JWT-adjacent logic in
+  `chatgpt_auth.py` deliberately decodes without a JWT library); frontend
+  `@phosphor-icons/react`, `clsx`, `recharts`, `tailwind-merge` (zero imports in
+  `frontend/src`, removed via `npm uninstall` to keep `package-lock.json` in sync). Left
+  untouched per the report's own caveats: `pandas`, `bcrypt`, `spacy` and its transitive
+  tree (whether Presidio's active `NlpEngine` config actually uses spaCy is unverifiable
+  from this repo alone).
+- `30b74af` **B4 (safe piece only)**: removed `file_readers.sha256_of_file` (zero
+  callers; the live hashing routine is `publish_guard._sha256_of_file`, imported by
+  `manifest_export.py`).
+- `68dc624` + `240567d` **B7 batch**: removed 9 confirmed-orphaned symbols across two
+  commits (first pass, then a follow-up pass after the first exhausted its budget):
+  `file_readers.classify_ext` + its `DATASET_EXTS`/`NARRATIVE_EXTS` constants,
+  `security.enforce_upload_size`/`UploadTooLarge`/`_read_chunk` (superseded by
+  `server.py`'s own live `_stream_to_disk`), `cleanup_manager.CleanupError` (zero
+  raise/catch sites), `jurisdictions.pattern_ids`/`list_packs` (bypassed/built for a
+  `GET /api/jurisdictions` endpoint that was never added), `models.session_status_display`
+  (trivial identity wrapper), `workflow.possible_outcomes`, `llm_catalog.web_search_tool_for`
+  (superseded by `base.py`'s `call_with_web_search`), `authorization.list_contracts`
+  (`get_contract`, the module's live sibling, untouched), `specialists.Schema.cardinality`
+  (orchestrator reads `_stats` directly) and `specialists._read_table_flat` (also dropped
+  the now-unused `openpyxl` import). `resolve_family(provider, model_id)` ->
+  `resolve_family(provider)`: dropped only the unused parameter, kept the function (has
+  test-only callers).
+
+**The report's methodology had real, independently-caught gaps** (three separate
+instances, each verified against actual code before trusting the report):
+1. **B6 `MethodRegistry`**: report claimed zero callers based on grepping for `.promote(`
+   (dot-prefixed); the real usage is a bare `promote(store, ...)` call that pattern never
+   matches. Real caller found: `test_control_phase2_methodregistry.py` (9+ calls) plus
+   `test_eval_phase16_method_recommendation.py`. **Not touched.**
+2. **`trace_projection.py`'s `user_agent_trace`/`maintainer_trace`**: report claimed "none
+   found anywhere, including tests"; real test coverage exists
+   (`test_control_phase2_phase2c_observability.py`). **Not touched** -- see RESIDUAL_RISK.
+3. **`records.py`'s `_unresolved_items_blocks_verified`**: report misclassified this as a
+   dead-code `DELETE` candidate. It is in fact a live `@field_validator("status",
+   mode="after")` on `VerifiedClassificationManifest`, Pydantic's own auto-invoked
+   validation machinery enforcing a real, load-bearing safety invariant (a manifest can
+   never be marked `verified_for_execution` while `unresolved_items != 0`), exercised by
+   `test_final_assurance.py::test_unresolved_human_review_blocks`. Deleting it would have
+   removed a genuine safety check from the manifest class central to the execution
+   pipeline. **Not touched -- this would have been a dangerous deletion had it gone
+   unverified.**
+
+**Skipped after independent re-verification (report called these "safe DELETE
+candidates"; each has real production coupling, deliberate test infrastructure, or is
+architecturally identical to a REVIEW_REQUIRED finding below):** `superorchestrator.py`'s
+`resume`/`dependencies_satisfied`/`observe_handoff`/`require_artifacts_current`/
+`evaluate_handoff_budget`/`route_budget_exceeded`/`authorize_execution`/`begin_export`/
+`confirm_export`/`authorize_publication` (confirmed by re-reading Phase 4's own record
+above: every one of these is an explicitly-designed "forward-compatible hook," not
+accidental dead code); `manager.py`'s `respond_to_handoff`/`respond_to_handoff_budget`/
+`ask_schema`/`ask_instrument`/`ask_lexicon` (the paired response-half of
+`SuperOrchestrator.observe_handoff`, and the only readers of live-written
+`self._schema`/`self._instrument`/`self._lexicon` state -- deleting them would strand
+production writes); `canary.py`'s `activate_canary_set`/`deactivate_canary_set` (live
+security-test tooling across 4 adversarial test files, not a production feature awaiting
+a caller); `events.py`'s `seal_and_archive_range`/`purge_range` (documented "D15 step 4c"
+planned feature); `artifacts.py`'s `invalidate_descendants` (the exact `docs/
+PHASE_STATUS.md` row-108-disclosed "artifact lineage invalidation" gap, safety-relevant);
+`records.py`'s `RunPrivacyPolicy`/`HumanReviewPacket` (part of the deliberate multi-record
+contract sets from Wave R-a/Phase 1, sibling to confirmed-live records);
+`control/evidence.py`'s `evaluate_evidence` (6+ deliberately-designed adversarial security
+tests -- `test_adv_evidence.py`, `test_control_evidence.py` -- prove evidence-integrity
+properties end-to-end specifically through this wrapper, one comment explicitly noting it
+tests "the end-to-end `evaluate_evidence` path, not merely `evaluate_claim` called by
+hand"; gutting that coverage for an unused-but-harmless convenience function was not worth
+it). `phi_corpus/scenarios.py`'s `gen_aadhaar`/`gen_pan`: never considered for removal,
+out of scope per the plan's explicit `phi_corpus/` `KEEP` instruction.
+
+**Investigated in depth and classified `REVIEW_REQUIRED`, matching the report's own
+terminal classification for genuinely undecided architecture questions -- none touched,
+none force-wired, none deleted:**
+
+- **B1/B2/B3 (linked): a second, parallel "built but not integrated" gap, the same defect
+  class Phase R itself exists to fix.** `control/final_assurance.py`'s
+  `evaluate_final_assurance` (`FinalAssuranceGate`, master architecture section 57, a
+  *named, mandatory* Phase 11 deliverable -- "a deterministic non-bypassable release
+  gate... model confidence cannot override it") has **zero live call sites** anywhere in
+  `server.py`/`superorchestrator.py`/`agents/`. This is not an oversight: Phase 11a's own
+  record (above) and Phase 12's own record (above) **both explicitly disclosed this gap
+  at the time**, deliberately deferring it rather than force-wiring it, citing a real
+  regression risk across ~100+ existing download tests. Independently re-confirmed this
+  session: `server.py`'s live `session_bundle`/`session_export` endpoints call
+  `phi_core/bundle.py::build_bundle`, an entirely separate, independent ZIP-assembly
+  implementation that never touches `evaluate_final_assurance`,
+  `report_generator.ReportGenerator`, `zip_builder.ZIPBuilder`, or
+  `integrity_service.IntegrityService` (Phase 11b's own report-pipeline cluster, "genuinely
+  gate-verified" by its own tests, but never swapped in as the live path). Per master
+  architecture section 81 (legacy migration map), `FinalAssuranceGate`/`ReportGenerator`/
+  `ZIPBuilder`/`IntegrityService` are one cohesive subsystem explicitly designed to replace
+  Auditor+Publish Guard's ad-hoc release checks -- none of Phase 11a, 11b, 12, or 17's own
+  text in the execution plan ever schedules the actual integration/swap-in step. This is a
+  genuine gap in the execution plan itself, not something Phase 17-C's cleanup-audit scope
+  (which the plan explicitly limits to `KEEP`/`MODIFY`/`MERGE`/`MIGRATE`/`DELETE`/
+  `REVIEW_REQUIRED` classification, remove/relocate actions for retired roles, and
+  dependency/dead-code hygiene) authorizes resolving unilaterally. Wiring it in would be a
+  real, scoped feature-completion phase with its own test-regression risk (exactly what
+  Phase 12 already declined to attempt in-scope); deleting it would remove a named,
+  fully-tested, architecturally-mandated safety gate. **Neither was done.** `auditor_
+  escalation_reason` (`agents/reasoning.py:1340`, deliberately kept in Phase 17-B per its
+  own record specifically because `evaluate_final_assurance` was believed to consume it)
+  is reachable only through this same unreached gate today -- its fate is tied to B2's,
+  not resolved independently.
+- **B4's main cluster** (linked to B2): `control/report_generator.py::ReportGenerator`,
+  `control/zip_builder.py::ZIPBuilder`, `control/integrity_service.py::IntegrityService`,
+  `control/schema_validation.py::validate_response_schema`,
+  `control/sandbox.py::validate_sandbox_path` -- all fully built, fully tested (Phase 11b's
+  own extensive suite, still passing), zero production callers, all downstream of the same
+  B2 decision. Not touched.
+- **B5**: `control/learning.py`'s `LearningService`/`LearningCaseService` (`propose`/
+  `record_evaluation`/`approve`/`promote_rollout`/`record_monitor_result`/`rollback`,
+  `create_candidate`/`get_case`) -- a human-governance/approval layer for promoting a
+  learning candidate into active use, distinct from Phase 12's own automated candidate
+  generation pipeline (`candidate -> sanitize -> scan -> check -> validate`, confirmed
+  live and genuinely tested per Phase 12's record above). Zero endpoint or production
+  caller for the approval/promotion half specifically. Unlike B4, no live equivalent
+  silently does this job elsewhere -- this looks like an unstarted integration (no human
+  ever gets to call approve/promote through the API today), consistent with section 74's
+  "no autonomous self-modification" requirement (any promotion into active use must
+  require a genuine human action, which was never wired to a UI/API surface). A real
+  feature decision, not a cleanup call. Not touched.
+
+**Environment findings, independently investigated and corrected this phase (not code
+regressions, but real gaps in this session's own Step 0 documentation):**
+1. **`backend/.env`'s `MONGO_URL` is `mongodb://localhost:55292`** (the brew
+   `mongodb-community` service), **not** the dedicated port-27017 `mongod` this session's
+   own Step 0 started and documented as the intended target.
+   `tests/conftest.py` calls `load_dotenv(_ENV)` (loading `.env`, which sets `MONGO_URL`)
+   *before* its own `os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")`
+   (`setdefault` is a no-op once a value already exists), so the `.env` value has always
+   won for both pytest and the live `phi-backend` server. **Both have consistently used
+   55292 this entire session** -- no correctness impact (one shared DB throughout, not two
+   diverging ones), but the dedicated `phi-mongo` hub process on 27017 documented in Step 0
+   has been unused since it was started. Step 0's environment record above is left
+   unedited as the historical record of what was *set up*; this note corrects what was
+   *actually used*.
+2. **`test_security_paths.py` and `test_security_llm_and_auth.py` always make real HTTP
+   calls** to `PHI_TEST_BASE_URL` (default `http://localhost:8001`) regardless of whether
+   the rest of a given suite run is "live" or "non-live" -- there is no suite-level flag
+   that makes these two files skip live network calls. Every "non-live" suite run this
+   whole session has silently included live traffic against the long-running `phi-backend`
+   process for these two files specifically. This explains two things previously
+   attributed to generic test-order flakiness: (a) `test_intake_rejects_zip_with_evil_
+   entry_path`'s intermittent 429s (the `session_intake` rate bucket, 20/hour, accumulates
+   across *every* prior run this session, not just the current pytest process -- a
+   `conftest.py` autouse fixture resetting the in-process `server` module's own
+   `_RATE_BUCKETS` cannot reach a separate OS process's memory); (b) an intermittent 409
+   `test_get_settings_never_returns_api_key_plaintext` failure, caused by a `settings.llm`
+   document encrypted under an earlier ephemeral `APP_ENCRYPTION_KEY` (`.env`'s value is
+   empty, so one is auto-generated per process start) becoming permanently undecryptable
+   after a `phi-backend` restart regenerated the key. Added `conftest.py`'s
+   `_reset_rate_limit_buckets` autouse fixture (harmless and correct for any in-process
+   TestClient-based test; documented, in its own docstring, exactly why it cannot fix
+   these two specific files). The durable fix for these two files is what this session's
+   established gate procedure already does: **restart `phi-backend` and clear any stale
+   `settings.llm` document immediately before a canonical gate run.**
+
+**Genuine canonical gate, after restarting `phi-backend` and clearing the stale
+`settings.llm` document:** **3 failed, 1849 passed, 5 skipped, 102.56s** -- exactly the
+pre-existing 3 `test_human_review_invariant.py` baseline failures, zero new ones. Count
+reconciles exactly: 1859 (Phase 17-B baseline) minus 10 removed backend tests across this
+phase's 6 commits (3 + 2 + 1 + 1 + 1 + 2, see the DELETED_TESTS entries above) = **1849**.
+`ruff check .` clean. Frontend: 2 suites / 5 passed (the D1 frontend test removed
+alongside its dead panel). Root suite unchanged (85 failed / 909 passed / 3 skipped,
+`phi_engine`, out of scope). No file under `phi_engine/`, root `tests/`, `harness/`, or
+`phi_corpus/` was touched.
+
+**`PHASE_17_STATUS = PASS`** for the cleanup-audit and Auditor/Scout/Ledger/Herald
+relocation work explicitly in this phase's scope. The B1/B2/B3/B4-main-cluster/B5
+architecture questions above remain genuinely open and are surfaced prominently in the
+final report to the user rather than silently resolved either direction.
+
+### RESIDUAL_RISK (Phase 17-C additions)
+
+Disclosed, investigated, and deliberately left open -- each entry's full evidence and
+reasoning is in the "classified `REVIEW_REQUIRED`" block above; this is the summary index.
+
+- **`FinalAssuranceGate` (`control/final_assurance.py::evaluate_final_assurance`) has
+  zero live call sites.** A named, mandatory Phase 11 deliverable (master architecture
+  section 57: "a deterministic non-bypassable release gate... model confidence cannot
+  override it"), fully built and tested, but the live `/bundle`/`/export` endpoints call
+  a separate, independent implementation (`phi_core/bundle.py::build_bundle`) that never
+  passes through it. Disclosed by Phase 11a and Phase 12 at the time; re-confirmed still
+  true this phase. Wiring it in or removing it is a real architecture decision outside
+  Phase 17's scope -- see the analysis above for why neither was done.
+- **`ReportGenerator`/`ZIPBuilder`/`IntegrityService`** (Phase 11b's own report-pipeline
+  cluster, "genuinely gate-verified" by its own tests) are downstream of the same gap:
+  fully built, fully tested, zero production callers.
+- **`LearningService`/`LearningCaseService`** (`control/learning.py`): the human-
+  governance approval/promotion half of the learning-candidate pipeline has zero endpoint
+  caller. Phase 12's own automated candidate-generation half (sanitize/scan/validate) is
+  confirmed live and separate from this gap.
+- **Two orchestration engines coexist** (`agents/orchestrator.py`'s live PHI-handling
+  pipeline and `control/superorchestrator.py`'s workflow-run-state authority): a large
+  fraction of `SuperOrchestrator`'s own published lifecycle API (`resume`,
+  `dependencies_satisfied`, `observe_handoff`, `evaluate_handoff_budget`,
+  `authorize_execution`, `authorize_publication`, and siblings) has zero production
+  caller. Confirmed these are explicitly-designed "forward-compatible hooks" per Phase
+  4's own record, not accidental dead code -- deciding whether to finish wiring them or
+  trim them back is an architecture call, not a cleanup one.
+- **`test_security_paths.py`/`test_security_llm_and_auth.py` always hit a real,
+  separate long-running server process over HTTP**, regardless of "live"/"non-live"
+  suite selection. No in-process reset can clear that process's rate-limit or
+  settings-encryption state; the durable practice is restarting `phi-backend` (and
+  clearing any stale `settings.llm` document) immediately before a canonical gate run,
+  which this phase's own gate does. Not a code defect; a standing operational note for
+  every future phase gate in this session and any future one.
+
+Proceeding to Phase 18: documentation synchronization.
