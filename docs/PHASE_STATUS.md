@@ -2529,3 +2529,82 @@ reasoning is in the "classified `REVIEW_REQUIRED`" block above; this is the summ
   every future phase gate in this session and any future one.
 
 Proceeding to Phase 18: documentation synchronization.
+
+## Phase 18 (documentation synchronization) — COMPLETE
+
+Section 101, solo per the plan. First dispatch (single subagent covering all 8+ files)
+failed after 1h35m of pure investigation with zero commits (context/budget exhaustion
+right as it began writing) -- redone as 4 parallel subagents on disjoint file sets, each
+handed a distilled "delivered architecture summary" (built by the orchestrator from this
+file, to avoid every subagent re-digesting 2500+ lines independently) as shared source of
+truth. 8 commits total, zero conflicts across the disjoint file sets (one benign git-add
+staging collision between two siblings mid-flight, self-caught and self-corrected by the
+sibling who caused it, verified clean by both parties independently).
+
+**CLAUDE.md** (`9a3db5c`): PHI Console half (now lines 1-446) fully rewritten. "Migration
+status" section removed entirely. Documents the delivered pipeline, the Manager/
+SuperOrchestrator dual-authority split (with SuperOrchestrator's dormant API surface named
+explicitly), HandoffGateway's actual current reach (found and corrected a subtlety the
+shared summary itself hadn't captured: `HandoffGateway` **is** invoked today, for
+Manager's guardian query broker specifically, not merely "unwired" as the pre-rewrite doc
+implied), the sandbox boundary, RunPrivacyPolicy/artifact-lineage/observability honestly
+as built-but-unwired, the five rewind routes (verified against `rewind.py`, including that
+`SuperOrchestrator.rewind` **is** called live from Reviewer Final's FAIL path, while
+automatic re-execution from a rewound checkpoint is deliberately not implemented), and
+export with the `FinalAssuranceGate` gap stated as its own flagged subsection. Also
+dropped a stale "Recent (Feb 2026)" section whose "parallel launch" claim for
+RegulationsExpert/PHIMethodsExpert was independently found to now be false (they launch
+on-demand post-triage, not at t=0). `phi_engine` half (line 447 onward) untouched.
+
+**README.md** (`4e4c46c`) and **SECURITY.md** (`76171f3`): synced to the same delivered
+architecture. SECURITY.md gained a new "PHI Console (backend) release-safety disclosure"
+section stating the `FinalAssuranceGate` export gap as its lead item, plus the
+SuperOrchestrator/LearningService/artifact-lineage/observability dormant-surface list,
+sandbox boundary limits, and the dev-key ciphertext-orphaning behavior.
+
+**docs/THREAT_MODEL_BACKEND.md** (`aaa0032`) and **docs/RUNBOOK.md** (`4578145`): fixed one
+genuine internal inconsistency found independently (section 3 still named the retired
+`_DENYLIST_ENV_FRAGMENTS` symbol that section 7 of the same file had already replaced with
+`_ALLOWLISTED_ENV_KEYS`); added SECURITY_BOUNDARY_VIOLATION handling, the 13-surface
+leak-canary harness, and the `FinalAssuranceGate` export gap as new threat-model sections.
+RUNBOOK.md needed almost no change (already accurate); one generic "Operator procedures"
+heading reworded to "Operational procedures" to stop it tripping the invariant grep on the
+generic, non-agent sense of the word. Flagged for a later pass, not fixed (outside this
+dispatch's file assignment): `docs/RUNBOOK.md` cross-references `docs/THREAT_MODEL.md`
+(the out-of-scope `phi_engine`-scoped threat model) for a backend control-plane security
+topic that plausibly should point at `docs/THREAT_MODEL_BACKEND.md`'s new section 8
+instead -- a pre-existing misdirected cross-reference, not introduced by this phase.
+
+**docs/BRANCH_MIGRATION_INVENTORY.md and the 8 ADRs** (`21e8496`, `0fa0b2e`): migration
+inventory needed no change (its retired-role mentions are inside a legitimate historical
+Wave-R-b branch-diff listing). ADRs 0002, 0003, 0004, 0008 needed no change (no
+retired-role references). 0001 and 0005 fixed in place (renamed/removed references, core
+decisions intact). 0006 and 0007 marked `Status: Superseded` with a precise explanation of
+what changed and a pointer to this file, per the repo's own rule against silently deleting
+historical decision records -- their retained Context/Decision text still uses the old
+names because it is describing what was decided at the time, which the plan's own
+invariant-check rule explicitly allows.
+
+**Additional naming leftovers found, outside Phase 18's doc-only scope (code, not docs;
+recorded here, not fixed):** `control/policy.py` still has an `Operator` manifest entry,
+`Operator` in `TEAMS`, and `Operator` in `allowed_child_task_types`; `manager.py`'s
+`ROLES` dict still has an `'Operator'` key. These mirror the same disclosed
+`"operator"` phase-key leftover A2 already found and left alone in Phase 17-C (the
+*label* survives even though the *agent class* was retired Phase 10) -- harmless, but a
+genuine, now-doubly-confirmed naming cleanup candidate for a future pass, not this
+session's remaining scope.
+
+**Invariant check** (orchestrator-independently re-run after all 4 dispatches landed):
+`grep -nE '\bSentinel\b|\bOperator\b|\bAuditor\b|\bStatute\b|\bPraxis\b|15-agent'` across
+`README.md SECURITY.md CLAUDE.md docs/*.md docs/adr/*.md`, excluding
+`docs/MASTER_ARCHITECTURE_V2.md` (gitignored master-prompt source, never in scope),
+`docs/PHASE_STATUS.md` and `docs/PRE_IMPLEMENTATION_AUDIT.md` (both historical append-only
+phase-log records, exempt by their own established convention), and `docs/MIGRATION.md`
+(explicitly excluded by the plan). **Result: every remaining hit is compliant** --
+`README.md:22`'s "migrated from the earlier 15-agent framing" (a historical statement
+disclosing retirement, not describing it as current) and every hit inside
+`docs/adr/0006`/`0007`, both properly marked `Superseded` with retained historical text.
+Zero code files touched by this phase (confirmed via `git diff --stat`: 9 files, all
+`.md`).
+
+**`PHASE_18_STATUS = PASS`.** Proceeding to Phase 19: fresh-clone validation.
