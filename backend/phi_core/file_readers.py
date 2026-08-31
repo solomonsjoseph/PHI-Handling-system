@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import csv
 import email
-import hashlib
 from itertools import islice
 from pathlib import Path
 from typing import Iterator
@@ -64,14 +63,6 @@ def classify_ext(name: str) -> tuple[str, str]:
     if ext in NARRATIVE_EXTS:
         return "narrative", ext
     return "narrative", ext or "txt"
-
-
-def sha256_of_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 # --- Dataset readers -------------------------------------------------------
