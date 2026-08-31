@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted: `control/superorchestrator.py::SuperOrchestrator` exists, is tested against `MemoryControlStore`, and owns every production entry path that starts provider or workflow work -- `session_handle`, `session_human_review`, `session_cancel`, `session_delete`, `corpus_study_research`, `settings_warmup`. `session_intake` and `corpus_study_generate` do no such work (pure file/DB I/O) and are correctly out of scope; `corpus_study_run` delegates to `session_handle` directly.
+Superseded. `control/superorchestrator.py::SuperOrchestrator` still exists and is tested, but the core claim here (that it is the exclusive workflow-state authority) no longer holds. As of Phase 17-C the system has two separate, both-live supervision authorities: `Manager` (a broker owning `ROLES`/`BUDGET_S` bookkeeping and Judge-specialist handoffs) and `SuperOrchestrator` (owning `workflow_runs` lifecycle state). A large fraction of `SuperOrchestrator`'s published API (`resume`, `dependencies_satisfied`, `observe_handoff`, `require_artifacts_current`, `evaluate_handoff_budget`, `route_budget_exceeded`, `authorize_execution`, `begin_export`, `confirm_export`, `authorize_publication`) is built and tested but dormant, with zero production callers. See `docs/PHASE_STATUS.md` (Phase 17-C).
 
 ## Context
 

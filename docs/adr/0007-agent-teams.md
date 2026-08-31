@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Superseded. The five non-authoritative team labels this ADR records still exist in `control/policy.py::TEAMS`, but the member sets recorded below are stale: `Statute` and `Praxis` were renamed `RegulationsExpert` and `PHIMethodsExpert` (Phase 5/6), `Sentinel` was retired into `Reviewer` (Phase 8), and `Auditor` was retired (Phase 17-B). The current mapping in `control/policy.py::TEAMS` is authoritative. See `docs/PHASE_STATUS.md`.
 
 ## Context
 
