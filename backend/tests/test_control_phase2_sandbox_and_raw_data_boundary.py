@@ -105,7 +105,12 @@ def test_validate_sandbox_path_rejects_traversal():
     record = create_sandbox(_run_id())
     try:
         inside = validate_sandbox_path(record, "sub/file.csv")
-        assert Path(record.workspace_path) in inside.parents
+        # Compare resolved-to-resolved: DATA_DIR sitting under a symlinked
+        # location (e.g. macOS /tmp -> /private/tmp) means
+        # record.workspace_path's own string form is not the same string
+        # validate_sandbox_path's internal .resolve() produces, even
+        # though both name the same real directory.
+        assert Path(record.workspace_path).resolve() in inside.parents
 
         with pytest.raises(SandboxPathViolation):
             validate_sandbox_path(record, "../../../etc/passwd")
