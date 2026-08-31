@@ -30,7 +30,10 @@ disk); the pipeline never sees it. Structure::
         ...
       ],
       "columns": [...],
-      "dictionary_drift": {"undocumented_columns": [...], "phantom_columns": [...]},
+      "dictionary_drift": {"undocumented_columns": [...], "phantom_columns": [...],
+                            "semantic_conflicts": [{"column": ..., "dictionary_says": ...,
+                                                     "actual_category": ...}]},
+      "dictionary_plants": [{"column_name": "patient_id", "value": "MRN1234567"}, ...],
     }
 
 Every planted cell -- whether it is a base PHI value from the column
@@ -42,7 +45,9 @@ clinical-data preservation.
 The seven fields beyond the original six (``plant_id``, ``tier``,
 ``expectation``, ``leak_literals``, ``link_group``, ``difficulty_note``,
 ``sensitivity_class``) are additive; every existing key and its meaning is
-unchanged, so ``backend/tests/test_corpus.py`` needs no edit.
+unchanged, so ``backend/tests/test_corpus.py`` needs no edit. The top-level
+``dictionary_plants`` key and ``dictionary_drift``'s ``semantic_conflicts``
+key are likewise additive.
 """
 from __future__ import annotations
 
@@ -429,41 +434,84 @@ def _write_deterministic_zip_entry(archive: zipfile.ZipFile, name: str, data: by
     archive.writestr(info, data)
 
 
-def _generate_dictionary(scn: Scenario) -> str:
+def _generate_dictionary(scn: Scenario, rng: random.Random) -> tuple[str, list[dict[str, str]]]:
     """Generate a per-scenario codebook CSV that the Lexicon agent reads.
 
     Two REDCap scenarios ship the real fixed 18-column REDCap data
     dictionary shape instead of the generic 3-column one, because
     ``Identifier?`` flag coverage IS the scenario under test.
+
+    Returns ``(csv_text, dictionary_plants)``. ``dictionary_plants`` lists
+    one ``{"column_name": ..., "value": ...}`` entry per ``DictionaryRow``
+    whose ``literal_generator`` filled its description template with a
+    per-plant value (e.g. an MRN quoted as a documentation example) --
+    this tests whether an agent that reads dictionary rows (Lexicon) gives
+    a documentation example the same PHI scrutiny the underlying data
+    would get, instead of a free pass for being "documentation, not
+    data". The rendered value is substituted into ``dict_text`` before
+    this function returns, so it already participates in
+    ``_enforce_canary_uniqueness``'s existing dictionary-blob check
+    exactly like every other planted PHI value -- no separate uniqueness
+    pass is needed here.
     """
+    plants: list[dict[str, str]] = []
     if scn.id in REDCAP_DICTIONARIES:
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(list(REDCAP_DICTIONARY_HEADERS))
         for row in REDCAP_DICTIONARIES[scn.id]:
             w.writerow(list(row))
-        return buf.getvalue()
+        return buf.getvalue(), plants
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["column_name", "description", "type"])
     for r in scn.dictionary:
-        w.writerow([r.column_name, r.description, r.type])
-    return buf.getvalue()
+        description = r.description
+        if r.literal_generator is not None:
+            value = r.literal_generator(rng)
+            description = description.format(value=value)
+            plants.append({"column_name": r.column_name, "value": value})
+        w.writerow([r.column_name, description, r.type])
+    return buf.getvalue(), plants
 
 
-def _dictionary_drift(scn: Scenario) -> dict[str, list[str]]:
+def _dictionary_drift(scn: Scenario) -> dict[str, list[Any]]:
     """Columns documented in the dictionary but absent from every dataset
-    (phantom), and columns present in a dataset but undocumented."""
+    (phantom), columns present in a dataset but undocumented, and
+    documented columns whose description asserts a safety/sensitivity
+    claim that structurally conflicts with the column's own declared
+    ``hipaa_category`` / ``sensitivity_class`` (e.g. a dictionary row
+    claiming "de-identified, safe to share" for a column the scenario
+    itself tags as a direct HIPAA identifier) -- tests whether Lexicon
+    trusts documentation text over the data's own declared sensitivity.
+    """
     dataset_columns: set[str] = set()
+    column_by_name: dict[str, ColumnSpec] = {}
     for ds in scn.datasets:
-        dataset_columns.update(c.name for c in ds.columns)
+        for c in ds.columns:
+            dataset_columns.add(c.name)
+            column_by_name.setdefault(c.name, c)
     if scn.id in REDCAP_DICTIONARIES:
         documented = {row[0] for row in REDCAP_DICTIONARIES[scn.id]}
+        dictionary_rows: tuple[Any, ...] = ()
     else:
         documented = {r.column_name for r in scn.dictionary}
+        dictionary_rows = scn.dictionary
+    semantic_conflicts: list[dict[str, str]] = []
+    for row in dictionary_rows:
+        if not row.claimed_category:
+            continue
+        spec = column_by_name.get(row.column_name)
+        if spec is not None and (spec.hipaa_category not in ("", "NONE") or spec.sensitivity_class):
+            semantic_conflicts.append({
+                "column": row.column_name,
+                "dictionary_says": row.claimed_category,
+                "actual_category": spec.hipaa_category or spec.sensitivity_class,
+            })
     return {
         "undocumented_columns": sorted(dataset_columns - documented),
         "phantom_columns": sorted(documented - dataset_columns),
+        "semantic_conflicts": semantic_conflicts,
     }
 
 
@@ -504,7 +552,7 @@ def plant(
             scn, ds, edge_cases, row_count, rng, use_tier, roster, plant_seq, prof
         )
 
-    dict_text = _generate_dictionary(scn)
+    dict_text, dictionary_plants = _generate_dictionary(scn, rng)
 
     _enforce_canary_uniqueness(scn, edge_cases, matrices, dict_text, rng, use_tier, roster, prof)
 
@@ -543,6 +591,7 @@ def plant(
         "planted": [c.to_dict() for c in planted],
         "columns": columns_meta,
         "dictionary_drift": _dictionary_drift(scn),
+        "dictionary_plants": dictionary_plants,
     }
     summary = _summarise(planted)
     return CorpusArtifact(
