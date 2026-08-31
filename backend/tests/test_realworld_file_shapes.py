@@ -173,14 +173,6 @@ def test_narrative_read_docx_still_reads_normal_docx(tmp_path):
     assert "Signed 2024-05-20" in out
 
 
-def test_read_table_flat_dispatches_docx(tmp_path):
-    from phi_core.agents.specialists import _read_table_flat
-    p = tmp_path / "dict.docx"
-    _make_docx(p)
-    out = _read_table_flat(p)
-    assert "patient_id" in out
-
-
 def test_intake_accepts_docx_dictionary():
     from phi_core.intake import COMPONENT_SUFFIXES
     assert ".docx" in COMPONENT_SUFFIXES["dictionary"]
@@ -190,16 +182,6 @@ def test_intake_accepts_docx_dictionary():
     # empty dictionary instead of failing loudly.
     assert ".xls" not in COMPONENT_SUFFIXES["dictionary"]
     assert ".xls" not in COMPONENT_SUFFIXES["datasets"]
-
-
-def test_read_table_flat_returns_empty_for_xls(tmp_path):
-    """4.19: `_read_xls_tables` is gone; the dispatcher no longer has an
-    .xls branch at all, so it falls through to the empty-string default
-    regardless of what bytes are actually on disk."""
-    from phi_core.agents.specialists import _read_table_flat
-    p_xls = tmp_path / "dict.xls"
-    p_xls.write_bytes(b"anything")
-    assert _read_table_flat(p_xls) == ""
 
 
 def test_metadata_xlsx_scrubs_every_sheet_and_intake_rejects_multisheet_dictionary(tmp_path):

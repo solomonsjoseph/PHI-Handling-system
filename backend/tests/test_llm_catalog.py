@@ -45,21 +45,10 @@ def test_default_model_for_each_ui_provider():
 
 def test_family_resolution_byok_provider_maps_to_itself():
     from phi_core.llm_catalog import resolve_family
-    assert resolve_family("anthropic", "claude-opus-5") == "anthropic"
-    assert resolve_family("openai", "gpt-5.6-terra") == "openai"
-    assert resolve_family("gemini", "gemini-3.1-pro-preview") == "gemini"
-    assert resolve_family("openrouter", "openrouter/anthropic/claude-sonnet-5") == "openrouter"
-
-
-def test_web_search_tool_selection_per_family():
-    from phi_core.llm_catalog import web_search_tool_for
-    assert web_search_tool_for("anthropic") == {
-        "type": "web_search_20250305", "name": "web_search"
-    }
-    assert web_search_tool_for("gemini") == {"googleSearch": {}}
-    assert web_search_tool_for("openai") is None
-    assert web_search_tool_for("openrouter") is None
-    assert web_search_tool_for("bogus-family") is None
+    assert resolve_family("anthropic") == "anthropic"
+    assert resolve_family("openai") == "openai"
+    assert resolve_family("gemini") == "gemini"
+    assert resolve_family("openrouter") == "openrouter"
 
 
 @pytest.mark.parametrize(

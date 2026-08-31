@@ -32,11 +32,6 @@ def get_contract(agent: str) -> AgentManifest:
     return manifest
 
 
-def list_contracts() -> tuple[str, ...]:
-    """Every agent name with a registered contract, for enumeration/audit."""
-    return tuple(sorted(MANIFESTS))
-
-
 def authorize_capability(
     policy: CapabilityPolicy,
     grant: CapabilityGrant,

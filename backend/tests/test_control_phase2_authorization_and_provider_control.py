@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 from phi_core.agents.llm import LlmConfig
-from phi_core.control.authorization import authorize_capability, get_contract, list_contracts
+from phi_core.control.authorization import authorize_capability, get_contract
 from phi_core.control.egress import canonical_payload
 from phi_core.control.gateway import GatewayRequest, ProviderGateway
 from phi_core.control.policy import MANIFESTS, CapabilityDenied, CapabilityPolicy
@@ -109,10 +109,6 @@ def test_get_contract_returns_the_manifest_for_a_known_agent() -> None:
 def test_get_contract_denies_an_unknown_agent() -> None:
     with pytest.raises(CapabilityDenied):
         get_contract("NotAnAgent")
-
-
-def test_list_contracts_matches_manifests_keys() -> None:
-    assert list_contracts() == tuple(sorted(MANIFESTS))
 
 
 def test_authorize_capability_denies_a_provider_mismatch() -> None:

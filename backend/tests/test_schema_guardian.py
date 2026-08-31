@@ -137,29 +137,6 @@ def test_verify_present_and_absent_case_insensitive():
     }
 
 
-def test_cardinality_returns_integers_only(tmp_path):
-    path = tmp_path / "dataset.csv"
-    headers = ["site", "outcome"]
-    rows = [["north", "yes"], ["south", "no"], ["north", "no"], ["north", "yes"]]
-    _write_csv(path, headers, rows)
-
-    schema = _schema()
-    dataset_files = [{
-        "file_id": "f1",
-        "original_name": "dataset.csv",
-        "stored_path": str(path),
-        "subtype": "csv",
-        "columns": headers,
-    }]
-    asyncio.run(schema.run(dataset_files=dataset_files))
-
-    stats = schema.cardinality("site", file_id="f1")
-    assert stats == {"distinct": 2, "rows": 4}
-    assert all(isinstance(v, int) for v in stats.values())
-    assert schema.cardinality("SITE") == stats
-    assert schema.cardinality("missing_column") == {}
-
-
 def test_judge_never_structurally_required_schema_classification_fields():
     """A schema dict with no candidate_phi_category still satisfies Judge's
     deliverable contract -- proving Judge never depended on the removed

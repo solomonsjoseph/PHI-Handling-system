@@ -253,14 +253,7 @@ def catalog_for_ui() -> dict[str, Any]:
     }
 
 
-def web_search_tool_for(provider_family: str) -> dict[str, Any] | None:
-    """Return the provider-hosted web_search tool descriptor for the family,
-    or ``None`` if the provider does not expose a native web_search tool."""
-    entry = PROVIDER_FAMILIES.get(provider_family)
-    return entry["web_search_tool"] if entry else None
-
-
-def resolve_family(provider: str, model_id: str) -> str:
+def resolve_family(provider: str) -> str:
     """Given the top-level provider (anthropic/openai/gemini/...), resolve
     the provider family used for tool routing. BYOK providers map 1:1 to a
     family, so this is currently an identity mapping kept as its own

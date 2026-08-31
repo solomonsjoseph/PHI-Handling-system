@@ -104,6 +104,39 @@ def _reset_pipeline_admission_control():
         pass
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limit_buckets():
+    """server._RATE_BUCKETS (4.20/D15 4b: a process-local sliding-window
+    rate limiter, e.g. the 20/hour `session_intake` bucket) is a
+    module-level OrderedDict with no reset between tests. Resets the
+    in-process `server` module's own bucket state so any test using the
+    in-process FastAPI TestClient path can't leak rate-limit hits to a
+    later test in the same pytest process.
+
+    Note: this does NOT fix test_security_paths.py's/
+    test_security_llm_and_auth.py's own flakiness. Those files make real
+    `requests` calls over HTTP to whatever is listening at
+    PHI_TEST_BASE_URL (default localhost:8001) -- a *separate*,
+    long-running OS process (e.g. the dev `phi-backend` supervisor
+    process), not this pytest process's imported `server` module. Their
+    rate-limit and encrypted-settings state lives entirely in that other
+    process's memory and this fixture cannot reach it. Root-caused during
+    Phase 17-C: restart that live process before a canonical gate run to
+    clear its accumulated state (matches this repo's own established
+    "restart phi-backend before the live gate" pattern)."""
+    try:
+        import server as srv
+        srv._RATE_BUCKETS.clear()
+    except Exception:
+        pass
+    yield
+    try:
+        import server as srv
+        srv._RATE_BUCKETS.clear()
+    except Exception:
+        pass
+
+
 # Wave R-c Step 4 makes sandboxing implicit across many previously-plain
 # Executor-exercising tests (dataset transforms, metadata redaction, header
 # reads, narrative export). On a platform that cannot enforce RLIMIT_AS

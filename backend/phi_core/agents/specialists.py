@@ -15,8 +15,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-import openpyxl
-
 from ..control import limits
 from ..control.opaque import OpaqueMap
 from ..control.records import StudyKnowledgePackage
@@ -483,15 +481,6 @@ class Schema(Agent):
             "explanation": "not present in the dataset headers -- this is the final list, nothing else exists",
         }
 
-    def cardinality(self, column: str, file_id: str | None = None) -> dict[str, Any]:
-        key = column.lower()
-        if file_id is not None:
-            return self._stats.get((file_id, key), {})
-        for (_fid, name), stats in self._stats.items():
-            if name == key:
-                return stats
-        return {}
-
 
 class Instrument(Agent):
     NAME = "Instrument"
@@ -694,33 +683,3 @@ def _read_docx_tables(path: Path) -> str:
         lines.extend(prose[:40])   # cap at 40 paragraphs to keep prompt bounded
     return "\n".join(lines)
 
-def _read_table_flat(path: Path) -> str:
-    """Flatten a small dictionary/mapping table to text for the LLM.
-
-    Supports .csv/.tsv (raw read), .xlsx (openpyxl), and .docx (Word
-    tables via stdlib zipfile + ET). Legacy .xls is rejected outright at
-    intake (4.19); this dispatcher never sees that extension. Sir Q
-    "dictionary is word doc here but if large then it would be excel
-    workbook -- align it accordingly".
-    """
-    ext = path.suffix.lower()
-    if ext in {".csv", ".tsv"}:
-        try:
-            return path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            return ""
-    if ext == ".xlsx":
-        try:
-            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-            lines = []
-            for ws in wb.worksheets:
-                lines.append(f"# sheet: {ws.title}")
-                for row in ws.iter_rows(values_only=True):
-                    lines.append(",".join("" if v is None else str(v) for v in row))
-            wb.close()
-            return "\n".join(lines)
-        except Exception:
-            return ""
-    if ext == ".docx":
-        return _read_docx_tables(path)
-    return ""
