@@ -1,9 +1,8 @@
-"""Reasoning agents: Judge, Sentinel, Executor, Auditor.
+"""Reasoning agents: Judge, Sentinel, Executor.
 
 Judge     - synthesises specialist + statute + praxis outputs into per-column decisions.
 Sentinel  - preview reviewer, enforces 0% leak and 100% accuracy.
 Executor  - applies the transformations decided by Judge.
-Auditor   - reviews Executor's work and produces the final compliance report.
 """
 from __future__ import annotations
 
@@ -19,7 +18,6 @@ from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 import openpyxl as _openpyxl
-from pydantic import BaseModel
 
 from ..anonymizer import apply_to_text
 from ..control.records import (
@@ -39,7 +37,6 @@ from ..detectors import detect_text
 from ..file_readers import iter_dataset_rows, read_narrative
 from ..jurisdictions import get_pack
 from ..publish_guard import should_fire
-from ..security import scrub_persisted_text
 from .base import Agent
 from .deterministic_rules import _HARD_RULE_TABLE as _HARD_RULE_TABLE
 from .deterministic_rules import BLOCKING_ISSUE_FLOOR as BLOCKING_ISSUE_FLOOR
@@ -1400,127 +1397,6 @@ def auditor_escalation_reason(
     if any(value(result, "status", "") in {"fail", "blocked"} for result in results):
         return "auditor_deterministic_gate_failed"
     return None
-
-
-def materialize_auditor_disagreements(decisions: list[dict[str, Any]], audit: dict[str, Any],
-                                      dictionary_by_column: dict[str, str] | None = None) -> list[dict[str, Any]]:
-    """Turn Auditor's per-column disagreement findings into resolvable
-    human_review decisions, distinct from Sentinel's pre-execution round.
-
-    Without this, a session can reach 'awaiting_human_review' on Auditor's
-    say-so with no per-column entry for a reviewer to act on -- resolving
-    nothing changes anything, and resubmitting only re-asks the same
-    question of a non-deterministic model. This routes the disagreement
-    through the same annotate_pending_review/_reviewer_prompt_for path
-    every other escalation uses, so the reviewer sees one more plain-
-    English question, not a dead end.
-
-    Matches by column name only (Auditor's findings carry a file name, not
-    a file_id) -- a real limitation in a multi-file study with a repeated
-    column name across files; both would be flagged. Acceptable for a
-    first pass; tracked as a follow-up, not silently ignored.
-    """
-    issues_by_column = {i["column"]: i for i in (audit.get("issues") or []) if i.get("column")}
-    if not issues_by_column:
-        return decisions
-    out = []
-    for d in decisions:
-        col = d.get("column")
-        issue = issues_by_column.get(col)
-        if issue and d.get("action") != "human_review":
-            d = dict(d)
-            d["suggested_action"] = d.get("action")
-            d["suggested_reason"] = d.get("reason") or ""
-            d["auditor_original_action"] = d.get("action")
-            d["action"] = "human_review"
-            d["stage"] = "auditor_final"
-            problem = scrub_persisted_text(str(issue.get("problem") or "")).strip()
-            d["reason"] = f"Auditor disagreement: {problem}" if problem else "Auditor disagreement:"
-        out.append(d)
-    return annotate_pending_review(out, dictionary_by_column)
-
-
-class Auditor(Agent):
-    NAME = "Auditor"
-    PROMPT = (
-        "You are Auditor, the final independent check before a study bundle can be trusted. "
-        "You do two things: (1) re-derive, from the cited rulebook and technique text alone, "
-        "what action each column's HIPAA category calls for, and flag any column where the "
-        "action actually taken disagrees with that independent re-derivation; (2) verify overall "
-        "output is consistent with the decisions and that no residual PHI slipped through. "
-        "You never see row values, only column names, categories, actions, and regulation text. "
-        'Return JSON: {"verdict": "clean|issues", '
-        '"issues": [{"file": str, "column": str, "problem": str}], '
-        '"metrics": {"columns_dropped": int, "columns_transformed": int, "columns_kept": int, '
-        '"human_review_required": int, "estimated_leak_prob": 0..1, "action_disagreement_count": int}, '
-        '"artifacts_checked": [{"file_id": str, "sha256": str}], '
-        '"confidence": 0..1, "summary": str}. '
-        "artifacts_checked must echo back, EXACTLY as given to you below, the file_id and sha256 of "
-        "every export you reviewed -- never invented, never from memory of a prior run. "
-        "confidence is your own honest self-assessment that this audit is correct -- report it "
-        "truthfully; a low number here is what sends a genuinely uncertain case to a human, which "
-        "is the safe outcome, not a failure. Base every judgment only on file-level summaries, "
-        "decision counts, and regulation text (never row values)."
-    )
-
-    async def run(
-        self,
-        decisions: list[dict[str, Any]],
-        exports: dict[str, str],
-        files: list[dict[str, Any]],
-        artifact_refs: list[tuple[str, str]],
-        statute: dict[str, Any] | None = None,
-        praxis_methods: dict[str, Any] | None = None,
-        audit_controls: tuple[
-            Sequence[EvidenceClaim | Mapping[str, Any]],
-            Sequence[GateResult | Mapping[str, Any]],
-        ] = ((), ()),
-    ) -> dict[str, Any]:
-        # Summarise deterministically (no row values sent to LLM)
-        summary_by_file: dict[str, dict[str, int]] = {}
-        per_column: list[dict[str, Any]] = []
-        for d in decisions:
-            fid = d.get("file_id", "")
-            b = summary_by_file.setdefault(fid, {"keep": 0, "drop": 0, "transform": 0, "human_review": 0})
-            a = d.get("action", "human_review")
-            if a == "keep":
-                b["keep"] += 1
-            elif a == "drop":
-                b["drop"] += 1
-            elif a == "human_review":
-                b["human_review"] += 1
-            else:
-                b["transform"] += 1
-            per_column.append({"file_id": fid, "column": d.get("column", ""),
-                               "hipaa_category": d.get("phi_category") or d.get("hipaa_category") or d.get("category"),
-                               "action_taken": a})
-
-        file_meta = [{"file_id": f["file_id"], "name": f["file_id"], "component": f.get("component")} for f in files]
-        artifact_lines = [{"file_id": file_id, "sha256": sha256} for file_id, sha256 in artifact_refs]
-        prompt = (
-            f"Per-column decisions to re-derive and check (no row values): {per_column}\n\n"
-            f"File summary counts: {summary_by_file}\n\n"
-            f"Jurisdiction rulebook (RegulationsExpert): {statute or {}}\n\n"
-            f"Best-practice technique per category (PHIMethodsExpert): {praxis_methods or {}}\n\n"
-            f"Files: {file_meta}\n\nExports: {list(exports.keys())}\n\n"
-            f"Artifacts to echo back exactly in artifacts_checked: {artifact_lines}\n"
-            "Respond with JSON only."
-        )
-        audit = await self.call_json(
-            prompt,
-            phase="auditor.verify",
-            default={"verdict": "issues", "issues": [], "metrics": {},
-                     "artifacts_checked": [], "confidence": 0.0,
-                     "summary": "Auditor call failed; treated as below the confidence floor."},
-            status_text="Independently re-deriving the correct action per column",
-        )
-        def record_dict(record: EvidenceClaim | GateResult | Mapping[str, Any]) -> dict[str, Any]:
-            return record.model_dump(mode="json") if isinstance(record, BaseModel) else dict(record)
-
-        evidence_claims, gate_results = audit_controls
-        audit["evidence_claims"] = [record_dict(claim) for claim in evidence_claims]
-        audit["gate_results"] = [record_dict(result) for result in gate_results]
-        return audit
 
 
 # --- deterministic dataset transformer ------------------------------------

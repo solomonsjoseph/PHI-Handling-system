@@ -9,9 +9,16 @@ Pipeline:
   3. Human review gate if Sentinel still has blocking issues
   4. Executor applies decisions
   5. Publish Guard (deterministic residual PHI scan)
-  6. Auditor + Scout in parallel (Scout doesn't depend on Auditor)
-  7. Ledger (Compare + Aggregate) sub-agent split
-  8. Herald (Abstract + Sections) sub-agent split
+  6. Reviewer Final (docs #55): completeness/authorization/privacy/utility gate,
+     the sole post-execution "second review" safety net (Auditor's LLM
+     re-derivation role was retired; see Phase 17-B).
+
+Scout, Ledger, and Herald (competitive-landscape research, benchmark ledger,
+publication draft) are NOT part of this path. They are an opt-in, post-run
+add-on triggered explicitly via ``POST /api/sessions/{sid}/post-run-report``
+for an already-complete session -- see ``outward.run_post_run_report``. They
+never run automatically and can never block, slow, or contaminate the PHI
+handling path.
 
 Cancellation: the orchestrator checks ``is_cancelled(sid)`` between
 phases. When True the pipeline exits early with status='cancelled' and
@@ -21,8 +28,6 @@ followed by a cancel check.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping
@@ -53,10 +58,8 @@ from .base import ITERATION_CAP, AgentMessage
 from .experts import PHIMethodsExpert, RegulationsExpert
 from .llm import LlmConfig
 from .manager import ExecutionHealthSupervisor
-from .outward import Herald, Ledger, Scout
 from .reasoning import (
     BLOCKING_ISSUE_FLOOR,
-    Auditor,
     Executor,
     Judge,
     annotate_pending_review,
@@ -66,8 +69,6 @@ from .reasoning import (
     apply_sentinel_escalations,
     apply_sentinel_hard_rules,
     apply_site_cardinality_rule,
-    auditor_escalation_reason,
-    materialize_auditor_disagreements,
     plain_human_review_reasons,
     validate_decisions,
 )
@@ -120,28 +121,6 @@ async def _check_cancel(db: AsyncIOMotorDatabase, sid: str, on_phase: PhaseCb) -
         raise PipelineCancelled()
 
 
-async def _cancel_and_await(task: "asyncio.Task[Any]") -> None:
-    """Cancel ``task`` and wait for the cancellation to actually land.
-
-    ``Task.cancel()`` alone only requests cancellation; the task keeps
-    running until it next reaches an await point, and a caller that
-    never awaits it again never observes whether that landed cleanly or
-    raised something else. Every exit path this helper is used on is
-    about to return or re-raise, so this is the last chance to fence
-    Scout's still-running background task before the caller moves on.
-    """
-    if task.done():
-        return
-    task.cancel()
-    try:
-        await task
-    except (asyncio.CancelledError, Exception):
-        # The cancellation itself, or any exception the task raised on
-        # its way out, is expected here and not this function's problem
-        # to surface -- the caller has already decided the run is done.
-        pass
-
-
 async def _escalate_to_human_review(
     *, db: AsyncIOMotorDatabase, session_filter: dict[str, Any], reasons: list[str],
     reasons_plain: list[str], close_last_phase: Callable[[], Awaitable[None]],
@@ -166,11 +145,13 @@ async def _escalate_to_human_review(
     depends on; the durable request is additive until every entry path
     reliably opens a run through ``SuperOrchestrator.start_run`` first.
 
-    ``audit_version`` (D13 step 4/7): non-empty only for an Auditor-verdict
-    escalation (``node="human_review_audit"`` with a real audit content
-    hash); the reviewer's later ``confirm_auditor_confidence`` submission
-    must echo it back, so a confirmation against a since-superseded audit
-    verdict is rejected rather than silently accepted.
+    ``audit_version`` (D13 step 4/7): historically non-empty only for the
+    now-retired Auditor-verdict escalation (``node="human_review_audit"``
+    with a content hash of Auditor's verdict, so ``confirm_auditor_confidence``
+    could be checked against a since-superseded audit). Phase 17-B removed
+    Auditor and its only producer of a non-empty value here; the parameter
+    stays (a caller may still pass one) but no current call site does, so
+    it is effectively always empty now.
     """
     # Mirrors what the deleted `Manager.escalate_to_human_review` set
     # internally, so `close_run`'s report still carries the same
@@ -241,8 +222,9 @@ async def execute_decisions(
     store: "ControlStore | None" = None,
 ) -> dict[str, Any]:
     """The D9 ``execute`` node onward -- Executor, Operator, Reviewer,
-    Publish Guard, Auditor/Scout, Ledger, Herald, and the terminal
-    completion write.
+    Reviewer Final, Publish Guard, and the terminal completion write.
+    Scout/Ledger/Herald are no longer part of this path (Phase 17-B: opt-in
+    post-run report, see ``outward.run_post_run_report``).
 
     Reached identically whether ``gate_decisions`` transitioned here
     directly (``proceed``: a fresh run with no ``human_review`` decisions
@@ -330,12 +312,6 @@ async def execute_decisions(
             "reversal_key_blob": exec_out["reversal_key_blob"],
             "reversal_key_created_at": datetime.now(timezone.utc).isoformat(),
         }})
-
-    # Scout has no dependency on Operator, Reviewer, Publish Guard, or
-    # Auditor, so it starts here and runs in the background across all of
-    scout_ctx = await make_ctx("Scout")
-    scout_agent = Scout(scout_ctx)
-    scout_task = asyncio.create_task(scout_agent.run())
 
     # DeterministicVerifier (docs #54): deterministic self-verification of
     # what Executor wrote, one stage before Publish Guard, mirroring the
@@ -435,11 +411,6 @@ async def execute_decisions(
     if coverage_advice.action == "escalate_human_review":
         await db.sessions.update_one(session_filter, {"$set": {
             "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids}})
-        # Recursive cancellation (D9/Phase 4 step 5): this return path
-        # previously left Scout's background task running unobserved --
-        # the "Scout leak" the plan names explicitly. Fence it here,
-        # before returning, same as every other exit path below.
-        await _cancel_and_await(scout_task)
         return await _escalate_to_human_review(
             db=db, session_filter=session_filter, reasons=["manager_advisory_coverage_escalation"],
             reasons_plain=plain_human_review_reasons(["manager_advisory_coverage_escalation"]),
@@ -573,7 +544,6 @@ async def execute_decisions(
             "reviewer_final": reviewer_final, "reviewer_findings": rv_out["findings"],
             "operator_failures": op_failed_ids,
         }})
-        await _cancel_and_await(scout_task)
         return await _escalate_to_human_review(
             db=db, session_filter=session_filter, reasons=rewind_reasons,
             reasons_plain=plain_human_review_reasons(rewind_reasons),
@@ -627,149 +597,17 @@ async def execute_decisions(
                 "operator_failures": op_failed_ids,
             }},
         )
-        await _cancel_and_await(scout_task)
         cleanup_session_unpacked(sid)
         return {"status": "blocked", "guard": guard_report,
                 "decisions": decisions, "phase_timings": phase_timings}
 
-    try:
-        await _check_cancel(db, sid, on_phase)
-    except PipelineCancelled:
-        await _cancel_and_await(scout_task)
-        raise
-
-    # Auditor (Scout already started earlier, in parallel with
-    # Operator/Reviewer/Publish Guard). Ledger + Herald still need
-    # Auditor's metrics + Scout's landscape so they wait on both here.
-    await on_phase("auditor_scout", {})
-    from phi_core.control.artifacts import _hash_file
-    artifact_refs: list[tuple[str, str]] = []
-    for file_id, path in exports.items():
-        try:
-            sha256, _size = _hash_file(path)
-        except OSError:
-            continue
-        artifact_refs.append((file_id, sha256))
-    auditor_agent = Auditor(await make_ctx("Auditor"))
-    audit, scout, benchmark = await asyncio.gather(
-        auditor_agent.run(
-            decisions=decisions, exports=exports, files=files, artifact_refs=artifact_refs,
-            statute=statute, praxis_methods=praxis_methods,
-            audit_controls=(
-                await asyncio.gather(
-                    store.find_many("evidence_claims", {"run_id": run_id}),
-                    store.find_many("gate_results", {"run_id": run_id}),
-                )
-                if store is not None and run_id else ([], [])
-            ),
-        ),
-        scout_task,
-        _empty(None),   # placeholder for future synthetic benchmark run
-        return_exceptions=True,
-    )
-    # Auditor/Scout are presentational (Publish Guard already gated the
-    # export above); an unhandled exception here must not crash a run that
-    # already succeeded. Log it and fall back to a report that visibly says
-    # "not verified" rather than claiming a clean audit it never performed.
-    audit_crashed = isinstance(audit, Exception)
-    if audit_crashed:
-        await auditor_agent._log("auditor.crashed", "info",
-                                  {"error": f"{type(audit).__name__}: {audit}"})
-        audit = {"verdict": "issues", "issues": [{"file": "", "problem": "Auditor crashed; not verified"}],
-                 "metrics": {}, "confidence": 0.0,
-                 "summary": "Auditor raised an exception; audit not performed."}
-    if isinstance(scout, Exception):
-        await scout_agent._log("scout.crashed", "info", {"error": f"{type(scout).__name__}: {scout}"})
-        scout = {}
-    if isinstance(benchmark, Exception):
-        benchmark = None
-
-    audit_advice = await manager.consult(
-        agent_name="Auditor", phase="auditor_scout",
-        signal={"audit_verdict": str(audit.get("verdict")), "audit_crashed": audit_crashed})
-    # The confidence-floor escalation is a deterministic gate, not an LLM
-    # advisory: this is the design doc's "second human review", distinct
-    # from Sentinel's pre-execution round -- it must fire on the numbers
-    # every time, never fail open the way `consult()` legitimately does.
-    auditor_reason = auditor_escalation_reason(audit, artifact_refs=dict(artifact_refs))
-    if audit_advice.action == "escalate_human_review" or auditor_reason:
-        reasons = [r for r in ("manager_advisory_audit_escalation" if audit_advice.action == "escalate_human_review" else None,
-                               auditor_reason) if r]
-        # Turn any per-column Auditor disagreement into a resolvable
-        # human_review decision, so this second review has an actual
-        # lever for the reviewer to pull rather than only a status flag
-        # that can be blindly resubmitted against a non-deterministic model.
-        decisions = materialize_auditor_disagreements(decisions, audit, dictionary_by_column)
-        # D13 step 4/7: a content hash of the actual verdict, not an
-        # incrementing counter -- any change to Auditor's issues/metrics
-        # for this run mints a new value, so a reviewer's later
-        # `confirm_auditor_confidence` submission can be checked against
-        # exactly the verdict they saw, not merely "some verdict existed".
-        # Persisted onto the session document (not just the durable
-        # `HumanReviewRequest`) so the frontend's plain `GET
-        # /api/sessions/{sid}` poll can render the confirm control without
-        # a second endpoint.
-        audit_version = hashlib.sha256(
-            json.dumps(audit, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()[:16]
-        await db.sessions.update_one(session_filter, {"$set": {
-            "guard_report": guard_report, "export_paths": exports,
-            "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids,
-            "audit": audit, "agent_decisions": decisions, "audit_version": audit_version,
-        }})
-        return await _escalate_to_human_review(
-            db=db, session_filter=session_filter, reasons=reasons,
-            reasons_plain=plain_human_review_reasons(reasons),
-            close_last_phase=close_last_phase, phase_timings=phase_timings,
-            run_elapsed_s=time.perf_counter() - run_started,
-            approved_decisions=decisions, sentinel_report=sentinel_report,
-            manager=manager, store=store, run_id=run_id, node="human_review_audit",
-            audit_version=audit_version)
-
     await _check_cancel(db, sid, on_phase)
-
-    # Ledger (split into Compare + Aggregate under the hood). D5 plan step
-    # 5: Compare/Aggregate are durable child work under Ledger's own task,
-    # not a bare root enqueue, with SuperOrchestrator.accept_result as the
-    # sole authority accepting each subagent's material result.
-    await on_phase("ledger", {})
-    ledger_ctx = await make_ctx("Ledger")
-    ledger = await Ledger(
-        ledger_ctx,
-        await make_child_ctx("Ledger.Compare", ledger_ctx.task_id),
-        await make_child_ctx("Ledger.Aggregate", ledger_ctx.task_id),
-        complete_and_accept=complete_and_accept,
-    ).run(decisions=decisions, audit=audit, scout=scout, benchmark_result=benchmark)
-    if ledger_ctx.tasks is not None:
-        await ledger_ctx.tasks.complete(ledger)
-    await require_accepted(ledger_ctx, ledger, "Ledger")
-
-    await _check_cancel(db, sid, on_phase)
-
-    # Herald (split into Abstract + Sections under the hood so no LLM
-    # call exceeds the 90 s hard timeout). Same durable-child-work
-    # treatment as Ledger above.
-    await on_phase("herald", {})
-    herald_ctx = await make_ctx("Herald")
-    herald = await Herald(
-        herald_ctx,
-        await make_child_ctx("Herald.Abstract", herald_ctx.task_id),
-        await make_child_ctx("Herald.Sections", herald_ctx.task_id),
-        complete_and_accept=complete_and_accept,
-    ).run(ledger=ledger, audit=audit, target_venue=session.get("target_venue") or "JAMIA Open")
-    if herald_ctx.tasks is not None:
-        await herald_ctx.tasks.complete(herald)
-    await require_accepted(herald_ctx, herald, "Herald")
 
     await close_last_phase()
     manager_report = await manager.close_run(final_status)
     result = {
         "status": final_status,
         "decisions": decisions,
-        "audit": audit,
-        "scout": scout,
-        "ledger": ledger,
-        "herald": herald,
         "exports": exports,
         "guard": guard_report,
         "phase_timings": phase_timings,
@@ -781,10 +619,6 @@ async def execute_decisions(
     }
     result.update(extra_result_fields or {})
     completion_set = {
-        "agent_audit": audit,
-        "agent_ledger": ledger,
-        "agent_herald": herald,
-        "agent_scout": scout,
         "guard_report": guard_report,
         "export_paths": exports,
         "status": final_status,
@@ -974,9 +808,9 @@ async def _prepare_pipeline_state(state: _PipelineDriverState) -> None:
     state.manager = manager
     manager_result = await manager.run(
         roster=["Lexicon", "Schema", "Instrument", "RegulationsExpert", "PHIMethodsExpert", "Judge",
-                "Reviewer", "Executor", "Auditor", "Scout", "Ledger", "Herald"],
+                "Reviewer", "Executor"],
         phase_plan=["specialists", "statute", "praxis", "judge_iter", "sentinel_iter",
-                    "executor", "publish_guard", "auditor_scout", "ledger", "herald"],
+                    "executor", "publish_guard"],
     )
     await require_accepted(manager.ctx, manager_result, "Manager")
 
@@ -1710,14 +1544,15 @@ async def _dispatch_human_review_decisions(state: _PipelineDriverState) -> dict[
 async def _dispatch_execute(state: _PipelineDriverState) -> dict[str, Any]:
     """The ``execute`` node onward: delegates to ``execute_decisions``,
     which already covers -- by its own docstring -- "Executor, Operator,
-    Reviewer, Publish Guard, Auditor/Scout, Ledger, Herald, and the
-    terminal completion write" as one unit. This registry entry's
-    granularity matches that existing, natural function boundary rather
-    than re-decomposing it onto the state machine's finer per-node
-    vocabulary (verify_operator/verify_reviewer/publish_guard/audit/
-    human_review_audit/report_ledger/report_herald/publish) -- none of
-    that internal sequencing is itself a governed agent handoff Wave 4b
-    is asked to arbitrate; it is deterministic verification chaining
+    Reviewer, Reviewer Final, Publish Guard, and the terminal completion
+    write" as one unit (Scout/Ledger/Herald are opt-in post-run, no longer
+    part of this node -- see ``outward.run_post_run_report``). This
+    registry entry's granularity matches that existing, natural function
+    boundary rather than re-decomposing it onto the state machine's finer
+    per-node vocabulary (verify_operator/verify_reviewer/publish_guard/
+    reviewer_final/human_review_audit/publish) -- none of that internal
+    sequencing is itself a governed agent handoff Wave 4b is asked to
+    arbitrate; it is deterministic verification chaining
     ``execute_decisions`` already owns unchanged.
     """
     return await execute_decisions(

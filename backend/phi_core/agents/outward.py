@@ -4,6 +4,13 @@ Ledger and Herald are each split into two subagents so no single LLM
 call has to fit a whole comparative benchmark or a whole manuscript into
 one 90 s call. The split cuts wall-clock time by roughly half in the
 worst case (parallel + smaller prompts) without dropping any deliverable.
+
+Phase 17-B: none of these three agents runs as part of the mandatory PHI
+handling path (``agents.orchestrator.execute_decisions``) any more. They
+form an opt-in, post-run publication bundle a user explicitly requests for
+an already-complete session via ``run_post_run_report`` below (wired to
+``POST /api/sessions/{sid}/post-run-report`` in ``server.py``). They never
+run automatically and can never block, slow, or contaminate the PHI path.
 """
 from __future__ import annotations
 
@@ -341,3 +348,67 @@ class Herald:
             "target_venue": target_venue,
             "alt_venues": sections_out.get("alt_venues", []),
         }
+
+
+# ---------------- opt-in post-run report (Phase 17-B) --------------------
+
+
+async def run_post_run_report(
+    *,
+    make_ctx: Callable[[str], Awaitable[AgentContext]],
+    make_child_ctx: Callable[[str, str], Awaitable[AgentContext]],
+    complete_and_accept: Callable[[AgentContext, dict[str, Any]], Awaitable[bool]] | None,
+    decisions: list[dict[str, Any]],
+    target_venue: str = "JAMIA Open",
+) -> dict[str, Any]:
+    """Scout -> Ledger -> Herald, on demand, for an ALREADY-COMPLETE
+    session. Never called from ``agents.orchestrator.execute_decisions``
+    (Phase 17-B retired that call site); the only caller is the opt-in
+    ``POST /api/sessions/{sid}/post-run-report`` route in ``server.py``.
+
+    Ledger/Herald historically consumed Auditor's LLM-derived metrics and
+    summary (``audit["metrics"]``/``audit["summary"]``). Auditor is
+    retired (Phase 17-B): the ``audit``-shaped input they still expect is
+    synthesized here, deterministically, from the same decision list
+    Executor actually ran -- ``_count_actions`` below is the same pure,
+    no-LLM roll-up ``Ledger.run`` already used for its own
+    ``decision_counts`` field, so this is not a new source of truth, only
+    a second, compatible use of one that already existed.
+    """
+    counts = _count_actions(decisions)
+    audit_summary = {
+        "verdict": "clean",
+        "issues": [],
+        "metrics": {
+            "columns_dropped": counts.get("drop", 0),
+            "columns_transformed": sum(v for a, v in counts.items() if a not in ("keep", "drop", "human_review")),
+            "columns_kept": counts.get("keep", 0),
+            "human_review_required": counts.get("human_review", 0),
+            "estimated_leak_prob": 0.0,
+            "action_disagreement_count": 0,
+        },
+        "confidence": 0.0,
+        "summary": "Deterministic decision summary (Auditor retired Phase 17-B; "
+                    "this publication bundle is opt-in and post-run).",
+    }
+
+    scout_ctx = await make_ctx("Scout")
+    scout = await Scout(scout_ctx).run()
+
+    ledger_ctx = await make_ctx("Ledger")
+    ledger = await Ledger(
+        ledger_ctx,
+        await make_child_ctx("Ledger.Compare", ledger_ctx.task_id),
+        await make_child_ctx("Ledger.Aggregate", ledger_ctx.task_id),
+        complete_and_accept=complete_and_accept,
+    ).run(decisions=decisions, audit=audit_summary, scout=scout, benchmark_result=None)
+
+    herald_ctx = await make_ctx("Herald")
+    herald = await Herald(
+        herald_ctx,
+        await make_child_ctx("Herald.Abstract", herald_ctx.task_id),
+        await make_child_ctx("Herald.Sections", herald_ctx.task_id),
+        complete_and_accept=complete_and_accept,
+    ).run(ledger=ledger, audit=audit_summary, target_venue=target_venue)
+
+    return {"scout": scout, "ledger": ledger, "herald": herald}

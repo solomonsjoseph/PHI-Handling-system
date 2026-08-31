@@ -132,7 +132,14 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
             providers=frozenset(),
             artifact_roots=frozenset({"staging"}),
         ),
-        "Auditor": _manifest("Auditor", purpose="Audit staged output metadata.", input_class="restricted_metadata", output_schema="audit_report"),
+        # Phase 17-B: Auditor (LLM re-derivation role) retired; Reviewer's
+        # FINAL mode (docs #55) is the sole post-execution safety net now.
+        # Scout/Ledger/Herald manifests below stay: they are no longer
+        # children of the core Pipeline root (see allowed_child_task_types
+        # below), but the opt-in `POST /api/sessions/{sid}/post-run-report`
+        # route (`outward.run_post_run_report`) still activates them as
+        # fresh root tasks, which requires their manifests to authorize
+        # the grant (`CapabilityPolicy.issue_grant` -> `MANIFESTS[agent]`).
         "Scout": _manifest("Scout", purpose="Research reporting context.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS, max_attempts=1),
         "Ledger": _manifest("Ledger", purpose="Build a reporting ledger.", input_class="internal", output_schema="report",
                              allowed_child_task_types=frozenset({"ledger_compare", "ledger_aggregate"})),
@@ -171,11 +178,14 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
             budget=ResourceBudget(**{
                 **_MANIFEST_MAX_BUDGET.model_dump(), "wall_seconds": 900.0, "max_children": 48,
             }),
+            # Phase 17-B: Scout/Ledger/Herald (and Auditor, fully retired)
+            # are no longer Pipeline children -- they run only via the
+            # opt-in post-run report as fresh root-level activations (see
+            # the Scout manifest comment above).
             allowed_child_task_types=frozenset(
                 _task_type(agent) for agent in (
                     "Manager", "PHIMethodsExpert", "RegulationsExpert", "Lexicon", "Schema", "Instrument",
-                    "Judge", "Executor", "Scout", "Operator", "Reviewer",
-                    "Auditor", "Ledger", "Herald",
+                    "Judge", "Executor", "Operator", "Reviewer",
                 )
             ),
             max_depth=3,
@@ -189,7 +199,14 @@ TEAMS: Mapping[str, frozenset[str]] = MappingProxyType(
         "regulatory_evidence": frozenset({"RegulationsExpert", "PHIMethodsExpert", "CorpusResearcher"}),
         "data_and_instrument": frozenset({"Lexicon", "Schema", "Instrument"}),
         "proposal_and_challenge": frozenset({"Judge", "Reviewer"}),
-        "verification_and_audit": frozenset({"Executor", "Operator", "Reviewer", "Auditor"}),
+        # Phase 17-B: Auditor retired; Reviewer's FINAL mode is the sole
+        # post-execution safety net now.
+        "verification_and_audit": frozenset({"Executor", "Operator", "Reviewer"}),
+        # Phase 17-B: no longer part of the core PHI path -- an opt-in,
+        # post-run publication bundle (`outward.run_post_run_report`).
+        # The team grouping itself is unchanged (still the exact set of
+        # agents that do publication/reporting work); only how they are
+        # triggered changed.
         "publication_and_reporting": frozenset(
             {"Scout", "Ledger", "Ledger.Compare", "Ledger.Aggregate", "Herald", "Herald.Abstract", "Herald.Sections"}
         ),

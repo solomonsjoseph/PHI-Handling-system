@@ -91,13 +91,13 @@ class ExecutionHealthSupervisor(Agent):
         "Operator": "deterministic; self-verifies what Executor wrote against decisions",
         "Reviewer": "PREVIEW: challenges Judge's decisions before execution, zero leak/100% "
                     "accuracy; FINAL: confirms Operator covered every decision",
-        "Auditor": "verifies executor output against decisions; returns metrics",
-        "Scout": "returns the competitive landscape",
-        "Ledger.Compare": "returns per-competitor delta notes",
-        "Ledger.Aggregate": "returns the benchmark rollup",
-        "Herald.Abstract": "drafts title, abstract, methods",
-        "Herald.Sections": "drafts results, discussion, limitations, conclusion",
     }
+
+    # Phase 17-B: Auditor (LLM re-derivation role) is retired; Reviewer's
+    # FINAL mode is the sole post-execution safety net now. Scout, Ledger,
+    # and Herald moved out of the core PHI path into an opt-in post-run
+    # report (``outward.run_post_run_report``) and are no longer part of
+    # this manager's per-run charter/budget bookkeeping.
 
     # Soft per-call expectations, seeded from measured warm-cache baselines
     # and rounded up so they do not cry wolf.
@@ -106,9 +106,7 @@ class ExecutionHealthSupervisor(Agent):
     # recorded, and is shown to the Manager when that call also fails.
     BUDGET_S = {
         "Judge": 40.0, "Reviewer": 40.0, "Lexicon": 40.0, "Schema": 25.0,
-        "Auditor": 25.0, "Scout": 40.0, "Instrument": 40.0,
-        "Ledger.Compare": 35.0, "Ledger.Aggregate": 35.0,
-        "Herald.Abstract": 75.0, "Herald.Sections": 75.0,
+        "Instrument": 40.0,
         "RegulationsExpert": 60.0, "PHIMethodsExpert": 60.0,
     }
     DEFAULT_BUDGET_S = 45.0
