@@ -19,6 +19,7 @@ is identical.
 from __future__ import annotations
 
 import csv
+import io
 import re
 import zipfile
 from dataclasses import dataclass
@@ -295,6 +296,64 @@ def _scan_zip_metadata(
     except (OSError, zipfile.BadZipFile):
         return []
     return hits
+
+
+def scan_zip_contents_for_leaks(
+    ground_truth: dict[str, Any],
+    zip_bytes: bytes,
+) -> dict[str, Any]:
+    """Scan a bundle ZIP's member CONTENTS for any planted PHI literal.
+
+    Companion to ``_scan_zip_metadata``, which only scans entry filenames and
+    comments. This scans the bytes that actually leave the console (the
+    ``safe_to_share/`` exports, attestation, README) using the exact same
+    planted-literal partition (``_partition_leak_literals``), matching
+    (``_scan_value_for_hits``) and masking discipline (``_leak_hit_for_surface``)
+    every other scanner in this module uses. Binary members are decoded
+    best-effort (utf-8 with replacement), which still surfaces ASCII planted
+    literals embedded in uncompressed PDF/form streams.
+
+    Added for the Phase 20 acceptance harness ("ZIP safe / raw source absent")
+    and is deliberately additive: it never raises, never mutates state, and
+    reuses the module's existing leak machinery rather than reimplementing it.
+    """
+    planted = ground_truth.get("planted") or []
+    single_token, multi_token, phi_plants = _partition_leak_literals(planted)
+
+    empty = {
+        "status": "clean", "hit_count": 0, "phi_plants": phi_plants,
+        "leak_rate": 0.0, "scanned_members": 0, "hits": [],
+    }
+
+    hits: list[dict[str, Any]] = []
+    scanned = 0
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                try:
+                    data = zf.read(info.filename)
+                except (OSError, RuntimeError, zipfile.BadZipFile):
+                    continue
+                text = data.decode("utf-8", errors="replace")
+                scanned += 1
+                for row_idx, line in enumerate(text.splitlines(), start=1):
+                    for owner, sample in _scan_value_for_hits(line, single_token, multi_token):
+                        hits.append(_leak_hit_for_surface(
+                            owner, "zip_content", f"{info.filename}:{row_idx}", sample))
+    except zipfile.BadZipFile:
+        return empty
+
+    hit_count = len(hits)
+    return {
+        "status": "leaked" if hit_count else "clean",
+        "hit_count": hit_count,
+        "phi_plants": phi_plants,
+        "leak_rate": round(hit_count / phi_plants, 4) if phi_plants else 0.0,
+        "scanned_members": scanned,
+        "hits": hits,
+    }
 
 
 async def scan_run_surfaces_for_leaks(
