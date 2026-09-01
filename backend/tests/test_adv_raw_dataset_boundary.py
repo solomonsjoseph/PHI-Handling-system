@@ -97,13 +97,13 @@ def _return_raw_multi_row_payload():
 def test_sandboxed_worker_returning_raw_row_dicts_is_rejected_before_reaching_caller():
     """A raw-data worker dispatched through the sandbox must never be able
     to smuggle row content back out as its return value: run_isolated's
-    conforming-payload check (str/count/status only) rejects a raw
+    conforming-payload check (per declared return_kind) rejects a raw
     list[dict] of PHI-shaped row values outright, and the planted values
     never surface in the raised exception's own text."""
     record = create_sandbox(_run_id())
     try:
         with pytest.raises(SandboxError) as excinfo:
-            run_isolated(record, _return_raw_multi_row_payload)
+            run_isolated(record, _return_raw_multi_row_payload, return_kind="json")
         message = str(excinfo.value)
         assert "Marcus Whitfield" not in message
         assert "Sofia Delgado" not in message

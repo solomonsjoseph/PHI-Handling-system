@@ -130,7 +130,7 @@ def _spin_forever() -> None:
 
 
 def _read_secret_env() -> str:
-    return os.environ.get("ANTHROPIC_API_KEY", "")
+    return "present" if os.environ.get("ANTHROPIC_API_KEY") else "absent"
 
 
 def _attempt_network() -> str:
@@ -139,14 +139,14 @@ def _attempt_network() -> str:
     try:
         _socket.socket()
         return "socket-created"
-    except OSError as exc:
-        return f"denied: {exc}"
+    except OSError:
+        return "denied"
 
 
 def test_run_isolated_executes_in_separate_process_and_returns_result():
     record = create_sandbox(_run_id())
     try:
-        assert run_isolated(record, _add, 2, 3) == 5
+        assert run_isolated(record, _add, 2, 3, return_kind="count") == 5
     finally:
         destroy_sandbox(record)
 
@@ -156,7 +156,7 @@ def test_run_isolated_strips_provider_credentials_from_worker_env():
     try:
         record = create_sandbox(_run_id())
         try:
-            assert run_isolated(record, _read_secret_env) == ""
+            assert run_isolated(record, _read_secret_env, return_kind="status") == "absent"
         finally:
             destroy_sandbox(record)
     finally:
@@ -187,7 +187,7 @@ def test_run_isolated_allowlists_env_and_strips_all_credential_shapes():
     try:
         record = create_sandbox(_run_id())
         try:
-            raw = run_isolated(record, _read_env_snapshot)
+            raw = run_isolated(record, _read_env_snapshot, return_kind="json")
         finally:
             destroy_sandbox(record)
     finally:
@@ -198,16 +198,19 @@ def test_run_isolated_allowlists_env_and_strips_all_credential_shapes():
     assert snapshot["APP_ENCRYPTION_KEY"] is None
     assert snapshot["ATTESTATION_SIGNING_KEY"] is None
     assert snapshot["ANTHROPIC_API_KEY"] is None
-    assert snapshot["PATH"] is not None
-    assert snapshot["HOME"] is not None
+    # PATH is a fixed, runner-controlled value now (never the parent's own,
+    # arbitrarily wide PATH); HOME is not passed at all. See
+    # sandbox.py::_CHILD_CONTROLLED_PATH and _ALLOWLISTED_ENV_KEYS.
+    assert snapshot["PATH"] == "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    assert snapshot["HOME"] is None
     assert snapshot["TMPDIR"] is not None
 
 
 def test_run_isolated_denies_network_by_default():
     record = create_sandbox(_run_id())
     try:
-        result = run_isolated(record, _attempt_network)
-        assert result.startswith("denied:")
+        result = run_isolated(record, _attempt_network, return_kind="status")
+        assert result == "denied"
     finally:
         destroy_sandbox(record)
 
@@ -217,7 +220,7 @@ def test_run_isolated_enforces_wall_clock_timeout():
     try:
         start = time.monotonic()
         with pytest.raises(SandboxTimeout):
-            run_isolated(record, _spin_forever)
+            run_isolated(record, _spin_forever, return_kind="status")
         elapsed = time.monotonic() - start
         assert elapsed < 10  # killed promptly, not left running
     finally:
@@ -228,7 +231,7 @@ def test_run_isolated_refuses_on_non_active_sandbox():
     record = create_sandbox(_run_id())
     destroyed, _ = destroy_sandbox(record)
     with pytest.raises(SandboxError):
-        run_isolated(destroyed, _add, 1, 1)
+        run_isolated(destroyed, _add, 1, 1, return_kind="count")
 
 
 def _memory_limit_enforceable_probe() -> bool:
@@ -285,18 +288,23 @@ def _read_fsize_soft_limit() -> int:
 def test_run_isolated_bounds_output_size_via_rlimit_fsize():
     record = create_sandbox(_run_id())
     try:
-        soft_limit = run_isolated(record, _read_fsize_soft_limit)
+        soft_limit = run_isolated(record, _read_fsize_soft_limit, return_kind="count")
         assert soft_limit == record.max_output_bytes
         assert record.max_output_bytes > 0
     finally:
         destroy_sandbox(record)
 
 
-_LARGE_PAYLOAD_BYTES = 200 * 1024  # comfortably above the ~64 KiB pipe buffer
+# 100 KiB: comfortably above the ~64 KiB OS pipe buffer this test exists
+# to exercise, and comfortably under sandbox.py's 128 KiB return_kind="json"
+# cap once wrapped as a JSON string literal below.
+_LARGE_PAYLOAD_BYTES = 100 * 1024
 
 
 def _return_large_payload() -> str:
-    return "x" * _LARGE_PAYLOAD_BYTES
+    import json as _json_mod
+
+    return _json_mod.dumps("x" * _LARGE_PAYLOAD_BYTES)
 
 
 def test_run_isolated_round_trips_large_payload_without_deadlock():
@@ -310,8 +318,8 @@ def test_run_isolated_round_trips_large_payload_without_deadlock():
     SandboxTimeout instead of returning the real payload."""
     record = create_sandbox(_run_id(), max_wall_seconds=8)
     try:
-        result = run_isolated(record, _return_large_payload)
-        assert result == "x" * _LARGE_PAYLOAD_BYTES
+        result = run_isolated(record, _return_large_payload, return_kind="json")
+        assert json.loads(result) == "x" * _LARGE_PAYLOAD_BYTES
     finally:
         destroy_sandbox(record)
 
@@ -332,7 +340,7 @@ def test_run_isolated_scrubs_exception_text_before_forwarding_to_parent():
     record = create_sandbox(_run_id())
     try:
         with pytest.raises(SandboxError) as excinfo:
-            run_isolated(record, _raise_with_phi_shaped_message)
+            run_isolated(record, _raise_with_phi_shaped_message, return_kind="status")
     finally:
         destroy_sandbox(record)
     message = str(excinfo.value)
@@ -345,7 +353,7 @@ def test_run_isolated_caps_forwarded_exception_text_length():
     record = create_sandbox(_run_id())
     try:
         with pytest.raises(SandboxError) as excinfo:
-            run_isolated(record, _raise_with_huge_message)
+            run_isolated(record, _raise_with_huge_message, return_kind="status")
     finally:
         destroy_sandbox(record)
     assert len(str(excinfo.value)) < 5000
@@ -356,17 +364,17 @@ def _return_raw_row_payload():
 
 
 def test_run_isolated_rejects_non_conforming_return_payload():
-    """A child worker's return value must be a path/count/status (str,
-    int, float, bool, or None) only -- never an arbitrary object. An
-    arbitrary payload crossing back into the parent process (the same
-    process that runs every LLM agent) would relocate the raw-data read
-    into the parent without creating a real boundary; the caller must
-    write real row data to a workspace artifact and hand back its path
-    instead."""
+    """A child worker's return value must conform to its declared
+    return_kind ("path"/"count"/"status"/"json") -- never an arbitrary
+    object. An arbitrary payload crossing back into the parent process
+    (the same process that runs every LLM agent) would relocate the
+    raw-data read into the parent without creating a real boundary; the
+    caller must write real row data to a workspace artifact and hand
+    back its path instead, or return an already-vetted small summary."""
     record = create_sandbox(_run_id())
     try:
         with pytest.raises(SandboxError):
-            run_isolated(record, _return_raw_row_payload)
+            run_isolated(record, _return_raw_row_payload, return_kind="json")
     finally:
         destroy_sandbox(record)
 

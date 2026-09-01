@@ -365,7 +365,9 @@ async def verify_maybe_sandboxed(
         "files": files, "decisions": decisions, "exports": exports,
         "omit_by_file": {k: sorted(v) for k, v in (omit_by_file or {}).items()},
     })
-    encoded = await asyncio.to_thread(run_isolated, sandbox, _sandboxed_compute_verification, payload)
+    encoded = await asyncio.to_thread(
+        run_isolated, sandbox, _sandboxed_compute_verification, payload, return_kind="json",
+    )
     return _json.loads(encoded)
 
 

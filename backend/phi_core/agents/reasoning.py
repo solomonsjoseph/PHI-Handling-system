@@ -618,6 +618,7 @@ async def verify_keep_decisions_maybe_sandboxed(
     encoded = await asyncio.to_thread(
         run_isolated, sandbox, _sandboxed_verify_keep_decisions,
         _json.dumps(decisions), _json.dumps({fid: str(p) for fid, p in dataset_paths.items()}), jurisdiction,
+        return_kind="json",
     )
     verified, demotions = _json.loads(encoded)
     return verified, demotions
@@ -904,8 +905,10 @@ def _sandboxed_read_dataset_headers(src: str, ext: str) -> str:
 
 
 def _sandboxed_read_narrative(src: str, ext: str) -> str:
-    """Sandboxed dispatch target for `read_narrative`."""
-    return read_narrative(Path(src), ext)
+    """Sandboxed dispatch target for `read_narrative`. Wrapped in
+    `_json.dumps` so it crosses as `return_kind="json"`: plain extracted
+    narrative text is not itself valid JSON on its own."""
+    return _json.dumps(read_narrative(Path(src), ext))
 
 
 def _read_columns(path: "str | Path", ext: str) -> tuple[list[str], dict[str, list[str]]]:
@@ -1002,6 +1005,7 @@ class Executor(Agent):
             return _read_dataset_headers(src, ext)
         encoded = await asyncio.to_thread(
             run_isolated, self.ctx.sandbox, _sandboxed_read_dataset_headers, str(src), ext,
+            return_kind="json",
         )
         return set(_json.loads(encoded))
 
@@ -1009,28 +1013,35 @@ class Executor(Agent):
         """Route `read_narrative` through the sandbox when this run has
         one; call it in-process otherwise (see
         `_read_dataset_headers_maybe_sandboxed`'s docstring for the
-        direct-call fallback's rationale). `str` is already inside
-        `run_isolated`'s return contract, so the extracted text crosses
-        the boundary unchanged."""
+        direct-call fallback's rationale). Crosses as `return_kind="json"`
+        (see `_sandboxed_read_narrative`): plain text is not itself valid
+        JSON, so it is wrapped/unwrapped at each end."""
         if self.ctx.sandbox is None:
             return read_narrative(src, ext)
-        return await asyncio.to_thread(
+        encoded = await asyncio.to_thread(
             run_isolated, self.ctx.sandbox, _sandboxed_read_narrative, str(src), ext,
+            return_kind="json",
         )
+        return _json.loads(encoded)
 
     async def _redact_metadata_maybe_sandboxed(self, src: Path, dst: Path) -> Path:
         """Route `_redact_metadata_file` through the sandbox when this run
         has one; call it in-process otherwise (see
         `_read_dataset_headers_maybe_sandboxed`'s docstring for the
-        direct-call fallback's rationale). `Path` is not in
-        `run_isolated`'s return contract, so the resolved output path
-        crosses the boundary as `str`."""
+        direct-call fallback's rationale). `_redact_metadata_file` writes
+        its real output directly to `dst` (outside the sandbox
+        workspace, at a location the caller already provided and
+        already trusts) -- so what crosses the `run_isolated` boundary is
+        only the closed-set `return_kind="status"` token naming which
+        suffix it actually wrote, and this method reconstructs the same
+        path `_redact_metadata_file` itself would have returned."""
         if self.ctx.sandbox is None:
             return _redact_metadata_file(src, dst)
-        written = await asyncio.to_thread(
+        status = await asyncio.to_thread(
             run_isolated, self.ctx.sandbox, _sandboxed_redact_metadata_file, str(src), str(dst),
+            return_kind="status",
         )
-        return Path(written)
+        return dst.with_suffix(_METADATA_REDACTION_SUFFIX_BY_STATUS[status])
 
     async def _apply_column_actions_maybe_sandboxed(
         self, src: Path, dst: Path, ext: str, decisions: list[dict[str, Any]],
@@ -1058,6 +1069,7 @@ class Executor(Agent):
             run_isolated, self.ctx.sandbox, _sandboxed_apply_column_actions_to_dataset,
             self.ctx.sandbox.workspace_path, registry._salt, dict(registry._map),
             str(src), str(dst), ext, decisions, sorted(omit_columns or ()),
+            return_kind="path",
         )
         updated_map = _json.loads(
             (Path(self.ctx.sandbox.workspace_path) / out_name).read_text(encoding="utf-8")
@@ -1595,12 +1607,30 @@ def _redact_metadata_file(src: Path, dst: Path) -> Path:
     return withheld
 
 
+# Closed set of suffixes `_redact_metadata_file` can ever apply to its
+# `dst` argument -- see that function's body. `_redact_metadata_maybe_
+# sandboxed` uses this to reconstruct the exact same output path from
+# the short `return_kind="status"` token that crosses the sandbox
+# boundary (the resolved path itself lives outside the sandbox
+# workspace, at a location the caller already provided and trusts, so
+# it is not a valid `return_kind="path"` payload -- see that method's
+# docstring).
+_METADATA_REDACTION_SUFFIX_BY_STATUS = {
+    "csv": ".csv", "tsv": ".tsv", "xlsx": ".xlsx", "withheld": ".withheld.txt",
+}
+
+
 def _sandboxed_redact_metadata_file(src: str, dst: str) -> str:
-    """Sandboxed dispatch target for `_redact_metadata_file`. `Path` is
-    not in `run_isolated`'s return contract, so the resolved output path
-    crosses the boundary as `str` (see
+    """Sandboxed dispatch target for `_redact_metadata_file`. Only a
+    short, closed-set `return_kind="status"` token crosses the
+    `run_isolated` boundary -- never the resolved output path, which
+    already lives outside the sandbox workspace at a location the caller
+    supplied and already trusts (see
     `Executor._redact_metadata_maybe_sandboxed`)."""
-    return str(_redact_metadata_file(Path(src), Path(dst)))
+    written = _redact_metadata_file(Path(src), Path(dst))
+    if written.name.endswith(".withheld.txt"):
+        return "withheld"
+    return written.suffix.lstrip(".")
 
 
 def _sandboxed_apply_column_actions_to_dataset(

@@ -53,7 +53,7 @@ def test_sandboxed_exception_with_five_distinct_phi_shapes_never_forwards_any_of
     record = create_sandbox(_run_id())
     try:
         with pytest.raises(SandboxError) as excinfo:
-            run_isolated(record, _raise_with_multiple_phi_shapes)
+            run_isolated(record, _raise_with_multiple_phi_shapes, return_kind="status")
         message = str(excinfo.value)
         assert "ValueError" in message  # the exception type is preserved
         for planted in (
