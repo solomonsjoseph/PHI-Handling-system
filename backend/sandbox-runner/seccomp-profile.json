@@ -1,0 +1,62 @@
+{
+  "comment": "Rewrite plan step 5. Deliberately default-ALLOW with an explicit DENY list, not a reproduction of Docker's own default-DENY allowlist: a hand-rolled allowlist risks silently breaking a legitimate pandas/numpy/openpyxl operation in a way that is hard to diagnose from outside the container, while a default-allow denylist can only ever remove a specific named capability, never accidentally grant one. Every name below is a syscall a CSV/Excel data-transformation process never legitimately needs: process introspection/injection (ptrace, process_vm_*), filesystem-namespace/mount manipulation, kernel-module and kexec loading, raw device/IO-port access, time manipulation, and the whole socket family (redundant with --network none at the namespace level, but seccomp denies it at the syscall level too -- defense in depth, not the only layer). This still runs underneath, not instead of, Docker's own default profile: --security-opt seccomp replaces it wholesale, so anything Docker's default already denies (Docker's default is itself a default-DENY allowlist) is preserved only insofar as it is re-denied here; the plan's four named syscalls (ptrace, mount, unshare, kexec_load) and their close relatives are all listed explicitly below for that reason.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32", "SCMP_ARCH_AARCH64", "SCMP_ARCH_ARM"],
+  "syscalls": [
+    {
+      "comment": "process introspection / injection",
+      "names": ["ptrace", "process_vm_readv", "process_vm_writev"],
+      "action": "SCMP_ACT_ERRNO"
+    },
+    {
+      "comment": "filesystem namespace / mount manipulation",
+      "names": ["mount", "umount", "umount2", "pivot_root", "chroot"],
+      "action": "SCMP_ACT_ERRNO"
+    },
+    {
+      "comment": "namespace-escape primitives specifically (unshare/setns create or join a NEW namespace -- never blocking plain fork/clone, which multiprocessing and pandas/numpy's own worker pools may legitimately use, and which the --pids-limit cgroup ceiling bounds instead)",
+      "names": ["unshare", "setns"],
+      "action": "SCMP_ACT_ERRNO"
+    },
+    {
+      "comment": "kernel/module/kexec loading",
+      "names": ["kexec_load", "kexec_file_load", "init_module", "finit_module", "delete_module"],
+      "action": "SCMP_ACT_ERRNO"
+    },
+    {
+      "comment": "system-wide state changes",
+      "names": ["reboot", "swapon", "swapoff", "acct", "vhangup", "sysfs", "uselib", "_sysctl"],
+      "action": "SCMP_ACT_ERRNO"
+    },
+    {
+      "comment": "raw device / I/O-port / privilege-boundary access",
+      "names": ["iopl", "ioperm", "modify_ldt", "personality", "quotactl", "nfsservctl", "ustat"],
+      "action": "SCMP_ACT_ERRNO"
+    },
+    {
+      "comment": "kernel keyring / eBPF / perf introspection",
+      "names": ["add_key", "request_key", "keyctl", "bpf", "perf_event_open"],
+      "action": "SCMP_ACT_ERRNO"
+    },
+    {
+      "comment": "system clock manipulation -- a data transform reads, never sets, time",
+      "names": ["adjtimex", "clock_adjtime", "clock_settime", "settimeofday", "stime"],
+      "action": "SCMP_ACT_ERRNO"
+    },
+    {
+      "comment": "NUMA / memory-policy manipulation and handle-based filesystem escapes",
+      "names": ["mbind", "migrate_pages", "move_pages", "set_mempolicy", "name_to_handle_at", "open_by_handle_at", "lookup_dcookie"],
+      "action": "SCMP_ACT_ERRNO"
+    },
+    {
+      "comment": "module/syslog introspection",
+      "names": ["get_kernel_syms", "query_module", "syslog"],
+      "action": "SCMP_ACT_ERRNO"
+    },
+    {
+      "comment": "the entire socket family: --network none already removes every routable interface, this denies the syscalls outright as well (defense in depth). A CSV/Excel transform never legitimately opens a socket of any kind.",
+      "names": ["socket", "socketpair", "connect", "bind", "listen", "accept", "accept4", "sendto", "sendmsg", "sendmmsg", "recvfrom", "recvmsg", "recvmmsg", "setsockopt", "getsockopt"],
+      "action": "SCMP_ACT_ERRNO"
+    }
+  ]
+}

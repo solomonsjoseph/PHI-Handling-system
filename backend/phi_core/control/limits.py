@@ -98,3 +98,14 @@ HANDOFF_ATTEMPT_BUDGET: dict[str, int] = {
 # "uncertain" before the run is forced to human review; the spec gives no
 # exact number, so 50 is a documented default, not a derived one.
 MAX_UNCERTAIN_HEADERS_PER_RUN = _int_env("MAX_UNCERTAIN_HEADERS_PER_RUN", 50)
+# Rewrite plan step 5: cgroup/runtime ceilings for ContainerRunner's
+# per-execution hardened Docker boundary (model-generated code only --
+# see control/runner.py's module docstring for why this is a separate
+# ceiling family from the MAX_SANDBOX_* ones above, which bound the
+# multiprocessing path for trusted first-party raw-data helpers).
+MAX_CONTAINER_CPUS = _float_env("MAX_CONTAINER_CPUS", 1.0)
+MAX_CONTAINER_MEMORY_BYTES = _int_env("MAX_CONTAINER_MEMORY_BYTES", 536870912)
+MAX_CONTAINER_WALL_SECONDS = _int_env("MAX_CONTAINER_WALL_SECONDS", 60)
+MAX_CONTAINER_PIDS = _int_env("MAX_CONTAINER_PIDS", 64)
+MAX_CONTAINER_WORKSPACE_MB = _int_env("MAX_CONTAINER_WORKSPACE_MB", 256)
+MAX_CONTAINER_OUTPUT_BYTES = _int_env("MAX_CONTAINER_OUTPUT_BYTES", 104857600)

@@ -88,6 +88,17 @@ CACHE_DIR = DATA_DIR / "cache"
 # a deployment can point it at ephemeral/encrypted storage distinct from
 # DATA_DIR without code changes.
 SANDBOX_DIR = Path(os.environ.get("PHI_SANDBOX_DIR", str(DATA_DIR / "sandbox")))
+# Rewrite plan step 5: per-run host-side staging for ContainerRunner's
+# hardened Docker boundary -- generated source files land here before
+# being bind-mounted read-only into the container, and the container's
+# tmpfs /workspace is bind-mounted from this same tree's "workspace"
+# subdirectory so the host can read the result file back after exit.
+# A distinct root from SANDBOX_DIR: that one is the multiprocessing
+# path's own workspace family for trusted first-party helpers, this one
+# is the container path's, for model-generated code.
+CONTAINER_STAGING_DIR = Path(
+    os.environ.get("PHI_CONTAINER_STAGING_DIR", str(DATA_DIR / "container_staging"))
+)
 for _d in (
     UPLOAD_DIR,
     CHATGPT_TOKEN_DIR,
@@ -97,6 +108,7 @@ for _d in (
     PUBLISHED_DIR,
     CACHE_DIR,
     SANDBOX_DIR,
+    CONTAINER_STAGING_DIR,
 ):
     _d.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(_d, 0o700)
