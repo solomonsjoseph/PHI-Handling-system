@@ -342,5 +342,33 @@ The standalone `phi_engine` package was the pre-Console pipeline. Its CLI surfac
 
 Its one unique capability that was not lost: `phi_engine/security/kanon_gate.py` and
 `pycanon_gate.py` provided the k-anonymity and l-diversity gate. That gate was lifted into
-the backend as `backend/phi_core/control/reidentification.py` (see ADR and tests), so the
-capability survives even though the package is gone.
+the backend as `backend/phi_core/control/reidentification.py` (see ADR and tests), so the capability survives even though the package is gone.
+
+---
+
+## FinalAssuranceGate disposition table (pre-deletion record)
+
+`control/final_assurance.py` was split and the gate itself deleted. All fifteen
+`FINAL_ASSURANCE_CONDITIONS` are accounted for below: each survives as a tool inside
+`OutputVerifier`, is subsumed by another check, or is intentionally dropped.
+
+| # | Condition | Disposition | Detail |
+| --- | --- | --- | --- |
+| 1 | `input_inventory_complete` | Subsumed | `control/gates.py::assert_exact_coverage` proves every file and column has exactly one decision; OutputVerifier re-proves it post-execution. |
+| 2 | `all_logical_columns_accounted` | Subsumed | Same coverage proof, computed from the verified decision set rather than a boolean input. |
+| 3 | `reviewer_preview_pass` | Survives as a gate, restructured | The `review_classification` workflow node: ClassificationReviewer must return `ok` before `code_generate` can run. |
+| 4 | `no_unresolved_human_review` | Subsumed | Workflow sequencing: `execute` is unreachable while a `human_review` node is open. |
+| 5 | `manifest_current` | Subsumed | `_next_decision_version` CAS counter on the run record invalidates stale decision sets. |
+| 6 | `manifest_frozen` | Subsumed | The decision set is version-locked by `control/gates.py` before `review_classification` can pass. |
+| 7 | `executor_complete` | Survives, restructured | The `execute` node's `ok` outcome plus `workspace_diff_check` (generated code produced exactly its declared outputs). |
+| 8 | `deterministic_verifier_pass` | Survives as OutputVerifier tool | DeterministicVerifier's row-transform checks are folded into OutputVerifier. |
+| 9 | `reviewer_final_pass` | Survives as OutputVerifier tool | Reviewer.finalize's section-55 gate is folded into OutputVerifier. |
+| 10 | `no_unresolved_privacy_finding` | Subsumed | Hardened Publish Guard byte scan plus the reporting-safety gate, both OutputVerifier tools. |
+| 11 | `no_unresolved_security_incident` | Survives as OutputVerifier check | OutputVerifier reads `security_incident_active` from the durable `security_incidents` store before yielding `ok`. |
+| 12 | `report_package_complete` | Subsumed | The `package` node structurally cannot ship an incomplete bundle; `ReportingSafetyRefused` is a refusal path. |
+| 13 | `reporting_safety_gate_pass` | Survives as OutputVerifier tool | `run_reporting_safety_gate` runs over generated reports before packaging. |
+| 14 | `integrity_checks_pass` | Subsumed | `IntegrityService`/`zip_builder` sha256-bind every artifact at the download boundary. |
+| 15 | `no_unresolved_audit_finding` | Intentionally dropped | It existed to stop a model's self-reported confidence from promoting itself. The new pipeline has no self-reported-confidence channel at all (the loop-exit gate is computed from reviewer tool outcomes), so the condition has nothing left to gate. Its companion `reasoning.auditor_escalation_reason` was deleted with it. |
+
+`run_integrity_checks` (the producer for condition 14's own hash re-computation) was deleted
+with the gate; hash re-verification lives in `IntegrityService` at the boundary.

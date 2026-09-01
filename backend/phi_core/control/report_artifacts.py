@@ -63,7 +63,7 @@ def is_report_package_complete(artifacts: ReportArtifacts, *, human_review_occur
     """docs #57's ``report_package_complete`` condition, computed from a
     real :class:`ReportArtifacts` instance rather than accepted as an
     opaque flag -- closes the gap Phase 11a explicitly disclosed
-    (``control/final_assurance.py``'s own docstring: "no live code in this
+    (``control/reporting_safety.py``'s own docstring: "no live code in this
     session computes that boolean from an actually-generated report
     bundle").
 

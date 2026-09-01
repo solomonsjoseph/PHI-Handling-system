@@ -10,7 +10,6 @@ from pathlib import Path
 
 import openpyxl
 from phi_core.control.column_ledger import COLUMN_LEDGER_HEADERS
-from phi_core.control.final_assurance import ReviewerFinalResult
 from phi_core.control.records import (
     ColumnDecision,
     EvidenceRecord,
@@ -25,6 +24,7 @@ from phi_core.control.records import (
 )
 from phi_core.control.report_artifacts import ReportArtifacts, is_report_package_complete
 from phi_core.control.report_generator import ReportGenerator, RunReportInputs
+from phi_core.control.reporting_safety import ReviewerFinalResult
 from phi_core.file_readers import read_pdf
 
 

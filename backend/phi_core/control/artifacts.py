@@ -73,7 +73,6 @@ CONSEQUENTIAL_ARTIFACT_TYPES = frozenset({
     "ExecutionResult",
     "VerificationResult",
     "ReviewerFinalResult",
-    "FinalAssuranceResult",
     "ReportPackage",
     "CleanupManifest",
 })

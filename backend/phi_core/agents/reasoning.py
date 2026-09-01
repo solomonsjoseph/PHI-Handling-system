@@ -22,10 +22,8 @@ import openpyxl as _openpyxl
 from ..anonymizer import apply_to_text
 from ..control.records import (
     ColumnDecision,
-    EvidenceClaim,
     ExecutionResult,
     ExecutionTask,
-    GateResult,
     MethodRecord,
     SandboxRecord,
     StudyKnowledgePackage,
@@ -1300,9 +1298,6 @@ class Executor(Agent):
                 "reversal_key_blob": reversal_key_blob}
 
 
-AUDITOR_CONFIDENCE_FLOOR = 0.98
-
-
 _ESCALATION_REASON_PLAIN: dict[str, str] = {
     "decision_routed_human_review": "one or more columns need a person's decision",
     "judge_call_failure": "the automated reviewer could not finish its work",
@@ -1335,68 +1330,6 @@ def plain_human_review_reasons(reasons: list[str]) -> list[str]:
         else:
             out.append("the automated review could not finish deciding on its own")
     return out
-
-
-def auditor_escalation_reason(
-    audit: dict[str, Any],
-    *,
-    artifact_refs: dict[str, str] | None = None,
-    evidence_claims: Sequence[EvidenceClaim | Mapping[str, Any]] | None = None,
-    gate_results: Sequence[GateResult | Mapping[str, Any]] | None = None,
-) -> str | None:
-    """Deterministic gate on Auditor's output. Fails toward the safer path
-    (second human review) on any of five independent grounds, never
-    toward silent pass-through -- same fail-closed shape as every other
-    boundary check in this pipeline:
-
-    1. Self-reported confidence below ``AUDITOR_CONFIDENCE_FLOOR`` (a
-       missing or unparseable confidence counts as 0.0).
-    2. A high-confidence ``"issues"`` verdict with at least one recorded
-       issue. Confidence is telemetry (D12): it can raise a review request
-       but it can never turn a genuine issues finding into a silent pass.
-    3. Artifact identity: when ``artifact_refs`` (``{file_id: sha256}`` for
-       every export actually on disk) is supplied, every entry Auditor's
-       response names in ``artifacts_checked`` must reference a real
-       ``file_id`` in that map with a matching ``sha256``.
-    4. Any covered claim requiring ``VERIFIED`` evidence is in any other
-       evidence state.
-    5. Any covered deterministic gate has a ``fail`` or ``blocked`` status.
-
-    ``Auditor.run`` attaches the control records it received to ``audit`` so
-    the production caller cannot omit them while evaluating this gate.
-    Explicit arguments keep the pure gate directly testable.
-    """
-    def value(
-        record: EvidenceClaim | GateResult | Mapping[str, Any],
-        field: str,
-        default: Any = "",
-    ) -> Any:
-        return record.get(field, default) if isinstance(record, Mapping) else getattr(record, field, default)
-
-    try:
-        confidence = float(audit.get("confidence"))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    if confidence < AUDITOR_CONFIDENCE_FLOOR:
-        return f"auditor_confidence_below_floor:{confidence:.2f}"
-    if audit.get("verdict") == "issues" and audit.get("issues"):
-        return "auditor_issues_verdict"
-    if artifact_refs is not None:
-        for checked in audit.get("artifacts_checked") or []:
-            if not isinstance(checked, dict):
-                return "auditor_artifact_identity_mismatch"
-            file_id = checked.get("file_id")
-            sha256 = checked.get("sha256")
-            if file_id not in artifact_refs or artifact_refs.get(file_id) != sha256:
-                return "auditor_artifact_identity_mismatch"
-    claims = evidence_claims if evidence_claims is not None else audit.get("evidence_claims") or []
-    if any(value(claim, "required_state", "VERIFIED") == "VERIFIED"
-           and value(claim, "state", "UNKNOWN") != "VERIFIED" for claim in claims):
-        return "auditor_evidence_unverified"
-    results = gate_results if gate_results is not None else audit.get("gate_results") or []
-    if any(value(result, "status", "") in {"fail", "blocked"} for result in results):
-        return "auditor_deterministic_gate_failed"
-    return None
 
 
 # --- deterministic dataset transformer ------------------------------------

@@ -29,7 +29,6 @@ from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .column_ledger import ColumnLedgerRow
-from .final_assurance import ReviewerFinalResult
 from .records import (
     EvidenceRecord,
     ExecutionResult,
@@ -39,6 +38,7 @@ from .records import (
     VerificationResult,
     VerifiedClassificationManifest,
 )
+from .reporting_safety import ReviewerFinalResult
 
 _STYLES = getSampleStyleSheet()
 _TABLE_STYLE = TableStyle([

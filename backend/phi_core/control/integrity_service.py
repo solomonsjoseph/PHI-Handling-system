@@ -10,7 +10,7 @@ refuses (``ExactOutputBindingViolation``) rather than silently certifying a
 package whenever any of the six pieces disagree on ``(run_id, manifest_id,
 manifest_version)``.
 
-``ReviewerFinalResult`` (``control/final_assurance.py``) carries no
+``ReviewerFinalResult`` (``control/reporting_safety.py``) carries no
 run/manifest identity field of its own -- Phase 11a's frozen contract,
 pinned by its own tests, is not reopened here. Its binding is therefore the
 ``(run_id, manifest_id, manifest_version)`` the caller *declares* it was

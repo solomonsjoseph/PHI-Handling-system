@@ -5,10 +5,8 @@ Covers the module's own contract (record / active / resolve / destruction
 decision / no-auto-resume), the "never copies the leaked value" guarantee
 that section 71 explicitly requires, durability across a simulated backend
 restart (an open incident is a release-blocking safety fact and must not be
-lost when the process restarts), the FinalAssuranceGate wiring
-(``derive_security_incident_active`` -> ``no_unresolved_security_incident``),
-and the live gateway integration where a real canary hit now also opens a
-durable security incident (not just a trace event).
+lost when the process restarts), and the live gateway integration where a real
+canary hit now also opens a durable security incident (not just a trace event).
 """
 from __future__ import annotations
 
@@ -19,21 +17,11 @@ from types import SimpleNamespace
 import pytest
 from phi_core.control import canary
 from phi_core.control import security_incident as si
-from phi_core.control.final_assurance import (
-    ReportPackageContent,
-    ReviewerFinalResult,
-    derive_security_incident_active,
-    evaluate_final_assurance,
-    run_reporting_safety_gate,
-)
 from phi_core.control.gateway import GatewayRequest, ProviderGateway
 from phi_core.control.policy import POLICY_VERSION, CapabilityPolicy
 from phi_core.control.records import (
-    ExecutionResult,
     ResourceBudget,
     ResourceUsage,
-    VerificationResult,
-    VerifiedClassificationManifest,
     WorkflowRun,
 )
 from phi_core.control.store import MemoryControlStore, MongoControlStore
@@ -291,8 +279,7 @@ async def test_open_incident_survives_a_simulated_backend_restart():
 
         # BLOCK release still holds against the fresh store, and DO NOT
         # auto-resume: the incident is still open, nothing cleared it.
-        assert derive_security_incident_active is not None  # sanity: module wired
-        assert await derive_security_incident_active(fresh_store, run_id) is True
+        assert await si.security_incident_active(fresh_store, run_id) is True
 
         # Only an explicit authorized resolve against the fresh store closes
         # it -- and that closure is itself durable across a further restart.
@@ -303,68 +290,6 @@ async def test_open_incident_survives_a_simulated_backend_restart():
         assert await si.security_incident_active(second_fresh_store, run_id) is False
     finally:
         await db.security_incidents.delete_many({"run_id": run_id})
-
-
-# ---------------------------------------------------------------------------
-# FinalAssuranceGate wiring: no_unresolved_security_incident
-# ---------------------------------------------------------------------------
-
-
-def _manifest(**overrides) -> VerifiedClassificationManifest:
-    base = dict(
-        run_id=RUN_ID, preview_review_id="pr1", status="verified_for_execution",
-        source_artifact_versions={"f1": 1}, decision_refs=["f1:id"], unresolved_items=0,
-    )
-    base.update(overrides)
-    return VerifiedClassificationManifest(**base)
-
-
-def _evaluate(security_incident_active: bool) -> object:
-    return evaluate_final_assurance(
-        expected_file_ids=["f1"],
-        manifest=_manifest(),
-        reviewer_preview_verdict="PASS",
-        execution_result=ExecutionResult(task_id="t1", run_id=RUN_ID, manifest_id="m1", success=True),
-        verification_result=VerificationResult(run_id=RUN_ID, passed=True, failed_checks=[], manifest_coverage_percent=100),
-        reviewer_final=ReviewerFinalResult(verdict="PASS"),
-        privacy_findings_unresolved=0,
-        security_incident_active=security_incident_active,
-        report_package_complete=True,
-        reporting_safety=run_reporting_safety_gate(ReportPackageContent()),
-        integrity_checks_passed=True,
-    )
-
-
-@pytest.mark.asyncio
-async def test_derive_security_incident_active_is_false_with_a_clean_registry():
-    store = _store()
-    assert await derive_security_incident_active(store, RUN_ID) is False
-
-
-@pytest.mark.asyncio
-async def test_derive_security_incident_active_is_true_once_an_incident_is_open():
-    store = _store()
-    await si.record_security_incident(store, RUN_ID, "cross_run_data_access")
-    assert await derive_security_incident_active(store, RUN_ID) is True
-
-
-@pytest.mark.asyncio
-async def test_open_incident_blocks_final_assurance_release():
-    store = _store()
-    await si.record_security_incident(store, RUN_ID, "cross_run_data_access")
-    result = _evaluate(await derive_security_incident_active(store, RUN_ID))
-    assert result.verdict == "BLOCKED"
-    assert "no_unresolved_security_incident" in result.failed_conditions
-
-
-@pytest.mark.asyncio
-async def test_resolved_incident_no_longer_blocks_final_assurance_release():
-    store = _store()
-    incident = await si.record_security_incident(store, RUN_ID, "cross_run_data_access")
-    await si.resolve_security_incident(store, incident.incident_id, resolved_by="security-officer-1")
-    result = _evaluate(await derive_security_incident_active(store, RUN_ID))
-    assert result.verdict == "READY_FOR_EXPORT"
-    assert "no_unresolved_security_incident" not in result.failed_conditions
 
 
 # ---------------------------------------------------------------------------
@@ -444,9 +369,9 @@ async def test_real_canary_hit_at_the_gateway_opens_a_security_incident(monkeypa
         assert "ZZZLIVECANARY9911" not in dumped
         assert "zzzlivecanary9911" not in dumped.lower()
 
-        # BLOCK release: FinalAssuranceGate would see this run as blocked,
-        # reading through the same store the gateway just wrote to.
-        assert await derive_security_incident_active(store, RUN_ID) is True
+        # The run reads as release-blocking through the same durable store
+        # the gateway just wrote to.
+        assert await si.security_incident_active(store, RUN_ID) is True
     finally:
         canary.deactivate_canary_set(RUN_ID)
 

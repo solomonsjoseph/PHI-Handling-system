@@ -33,7 +33,6 @@ from phi_core.paths import is_safe_scoped_id
 from phi_core.security import reviewer_role, scrub_persisted_text
 
 from .events import canonical_json
-from .final_assurance import ReportingSafetyFinding, _scan_text_surface
 from .records import (
     LearningActivation,
     LearningCase,
@@ -41,6 +40,7 @@ from .records import (
     LearningEvaluation,
     LearningProposal,
 )
+from .reporting_safety import ReportingSafetyFinding, _scan_text_surface
 from .store import ControlStore
 
 _ROLLOUT_ORDER = ("shadow", "canary", "full")
@@ -252,7 +252,7 @@ class LearningService:
 # Reuses this codebase's existing PHI/PII primitives rather than rebuilding
 # any of them: `phi_core.security.scrub_persisted_text` (the same scrubber
 # `trace_sanitizer.sanitize_status_text` already reuses) for sanitize, and
-# `final_assurance._scan_text_surface` (itself a thin wrapper around
+# `reporting_safety._scan_text_surface` (itself a thin wrapper around
 # `publish_guard._scan_text`/`publish_guard.scan_names`) for the PHI/PII
 # scan stage.
 

@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from .column_ledger import build_column_ledger_rows, write_column_ledger_xlsx
-from .final_assurance import ReviewerFinalResult
 from .manifest_export import (
     export_evidence_manifest,
     export_run_manifest,
@@ -50,6 +49,7 @@ from .report_artifacts import (
     ReportArtifacts,
 )
 from .report_pdf import build_audit_report_pdf, build_human_review_summary_pdf, build_technical_appendix_pdf
+from .reporting_safety import ReviewerFinalResult
 
 
 @dataclass

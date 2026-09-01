@@ -10,68 +10,12 @@ import asyncio
 
 from phi_core.agents.llm import LlmConfig
 from phi_core.agents.reasoning import (
-    AUDITOR_CONFIDENCE_FLOOR,
     PseudonymRegistry,
-    auditor_escalation_reason,
     plain_human_review_reasons,
 )
 from phi_core.control.store import MemoryControlStore
 from phi_core.control.testing import complete_fake_task, start_test_run
 from phi_core.crypto import decrypt_reversal_map, encrypt_reversal_map
-
-
-def test_auditor_escalation_reason_fires_below_floor():
-    assert auditor_escalation_reason({"confidence": 0.5}) is not None
-    assert auditor_escalation_reason({"confidence": AUDITOR_CONFIDENCE_FLOOR}) is None
-    assert auditor_escalation_reason({"confidence": 0.999}) is None
-
-
-def test_auditor_escalation_reason_fails_closed_on_missing_or_bad_confidence():
-    # A missing/unparseable confidence must fail toward the safer path
-    # (second human review), never toward silent pass-through.
-    assert auditor_escalation_reason({}) is not None
-    assert auditor_escalation_reason({"confidence": "not a number"}) is not None
-    assert auditor_escalation_reason({"confidence": None}) is not None
-
-
-def test_auditor_escalation_reason_blocks_a_high_confidence_issues_verdict():
-    """D12/plan step 2: confidence is telemetry only. A high-confidence
-    'issues' verdict must not silently pass just because the number is
-    high -- confidence can raise a review, it can never suppress one."""
-    audit = {
-        "verdict": "issues",
-        "issues": [{"file": "dataset", "column": "mrn", "problem": "action disagreement"}],
-        "confidence": 0.999,
-    }
-    reason = auditor_escalation_reason(audit)
-    assert reason == "auditor_issues_verdict"
-    # A clean verdict at the same confidence, or an issues verdict with an
-    # empty issues list (nothing concrete to act on), does not trip this.
-    assert auditor_escalation_reason({"verdict": "clean", "confidence": 0.999}) is None
-    assert auditor_escalation_reason({"verdict": "issues", "issues": [], "confidence": 0.999}) is None
-
-
-def test_auditor_escalation_reason_catches_unknown_or_mismatched_artifact_identity():
-    """A verdict naming an artifact absent from the real export set, or
-    whose hash no longer matches, is untrustworthy regardless of
-    confidence or verdict -- it was computed against something other than
-    what is about to ship (a stale replay or a hallucinated check)."""
-    refs = {"dataset": "abc123"}
-    clean_audit = {"verdict": "clean", "confidence": 0.999,
-                   "artifacts_checked": [{"file_id": "dataset", "sha256": "abc123"}]}
-    assert auditor_escalation_reason(clean_audit, artifact_refs=refs) is None
-
-    unknown_file = {"verdict": "clean", "confidence": 0.999,
-                     "artifacts_checked": [{"file_id": "not-a-real-file", "sha256": "abc123"}]}
-    assert auditor_escalation_reason(unknown_file, artifact_refs=refs) == "auditor_artifact_identity_mismatch"
-
-    stale_hash = {"verdict": "clean", "confidence": 0.999,
-                  "artifacts_checked": [{"file_id": "dataset", "sha256": "stale-hash-from-a-prior-run"}]}
-    assert auditor_escalation_reason(stale_hash, artifact_refs=refs) == "auditor_artifact_identity_mismatch"
-
-    # No artifact_refs supplied at all (call site opted out): the check is
-    # simply not applied, same as any other None-defaulted optional gate.
-    assert auditor_escalation_reason(unknown_file, artifact_refs=None) is None
 
 
 def test_plain_human_review_reasons_never_leaks_raw_codes():

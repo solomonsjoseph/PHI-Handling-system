@@ -9,7 +9,7 @@ Not wired into a live execution path this phase -- a standalone,
 independently testable module, exactly matching the precedent
 ``control/manifest.py`` (Phase 9), ``control/verification.py`` (Phase 9),
 ``control/deterministic_verifier.py`` (Phase 10), and ``control/
-final_assurance.py`` (Phase 11a) each already set: build and test the gate
+reporting_safety.py`` (Phase 11a) each already set: build and test the gate
 in isolation first, wire it into ``agents/orchestrator.py`` in a later
 phase's own target-file list.
 
@@ -49,11 +49,6 @@ from pathlib import Path
 from typing import Mapping
 
 from ..file_readers import read_pdf
-from .final_assurance import (
-    ReportingSafetyResult,
-    ReportPackageContent,
-    run_reporting_safety_gate,
-)
 from .records import VerifiedClassificationManifest
 from .report_artifacts import (
     AUDIT_REPORT_NAME,
@@ -65,6 +60,11 @@ from .report_artifacts import (
     TECHNICAL_APPENDIX_NAME,
     VERIFICATION_MANIFEST_NAME,
     ReportArtifacts,
+)
+from .reporting_safety import (
+    ReportingSafetyResult,
+    ReportPackageContent,
+    run_reporting_safety_gate,
 )
 
 _PROCESSED_DATASETS_DIR = "01_Processed_Datasets"
@@ -134,7 +134,7 @@ def build_report_package_content(
     *,
     manifest_display_fields: Mapping[str, str] | None = None,
 ) -> ReportPackageContent:
-    """The real :class:`~.final_assurance.ReportPackageContent` docs #60
+    """The real :class:`~.reporting_safety.ReportPackageContent` docs #60
     needs, built from an actual :class:`ReportArtifacts` instance's
     on-disk content plus the archive's own filenames -- never a hand-typed
     stand-in. ``manifest_display_fields`` (safe, already-aliased display

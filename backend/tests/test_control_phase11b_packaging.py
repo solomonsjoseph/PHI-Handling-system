@@ -1,7 +1,6 @@
 """Phase 11b wave 2 (Packaging and Integration): ``ZIPBuilder`` (docs
 #58/#61), ``IntegrityService`` (docs #62), and the real
-``report_package_complete`` producer (``control/report_artifacts.py``,
-``control/final_assurance.py::derive_report_package_complete``).
+``report_package_complete`` producer (``control/report_artifacts.py``).
 
 Covers: the section-61 canonical ZIP structure (with and without
 ``04_Human_Review/``), the reporting-safety refusal path (docs #60, a
@@ -19,7 +18,6 @@ from pathlib import Path
 
 import openpyxl
 import pytest
-from phi_core.control.final_assurance import derive_report_package_complete
 from phi_core.control.integrity_service import (
     BindingKey,
     ExactOutputBindingViolation,
@@ -112,7 +110,7 @@ def _verification_result(manifest: VerifiedClassificationManifest, **overrides) 
     return VerificationResult(**base)
 
 
-# ---- is_report_package_complete / derive_report_package_complete ----------
+# ---- is_report_package_complete ---------------------------------------------
 
 
 def test_is_report_package_complete_true_with_no_human_review(tmp_path: Path):
@@ -134,16 +132,6 @@ def test_is_report_package_complete_requires_summary_when_review_occurred(tmp_pa
 def test_is_report_package_complete_true_when_review_occurred_and_summary_present(tmp_path: Path):
     artifacts = _artifacts(tmp_path, with_human_review=True)
     assert is_report_package_complete(artifacts, human_review_occurred=True) is True
-
-
-def test_derive_report_package_complete_delegates_to_report_artifacts(tmp_path: Path):
-    """The final_assurance.py wiring must not fork its own competing
-    definition of "complete" -- it delegates to
-    control.report_artifacts.is_report_package_complete verbatim."""
-    artifacts = _artifacts(tmp_path, with_human_review=False)
-    assert derive_report_package_complete(artifacts, human_review_occurred=False) == \
-        is_report_package_complete(artifacts, human_review_occurred=False)
-    assert derive_report_package_complete(artifacts, human_review_occurred=True) is False
 
 
 # ---- ZIPBuilder: canonical structure ----------------------------------------

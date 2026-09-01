@@ -8,7 +8,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from phi_core.control.column_ledger import ColumnLedgerRow
-from phi_core.control.final_assurance import ReviewerFinalResult
 from phi_core.control.records import (
     EvidenceRecord,
     ExecutionResult,
@@ -24,6 +23,7 @@ from phi_core.control.report_pdf import (
     build_human_review_summary_pdf,
     build_technical_appendix_pdf,
 )
+from phi_core.control.reporting_safety import ReviewerFinalResult
 from phi_core.file_readers import read_pdf
 
 
