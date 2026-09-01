@@ -2738,3 +2738,140 @@ database dropped; `/tmp/phi-fresh-clone-19-*` deleted; no orphaned state of any 
 survives this phase.
 
 **`PHASE_19_STATUS = PASS`.** Proceeding to Phase 20: synthetic end-to-end acceptance run.
+
+## Phase 20 (synthetic end-to-end acceptance run) — BLOCKED (corpus + harness complete)
+
+Section 103. **Hard external blocker confirmed at the start of this phase**: no valid LLM
+provider API key exists anywhere in this environment. Directly verified via real API
+calls (not inferred from symptoms): `curl`-equivalent request to `api.openai.com/v1/models`
+with the configured `OPENAI_API_KEY` returns HTTP 401 "Incorrect API key provided";
+`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY` are all
+empty in `backend/.env`. This retroactively explains every "pipeline failed"/"0
+decisions" symptom observed throughout this entire session's live test runs. Per the
+plan's own explicit design, `IMPLEMENTATION_BLOCKED` is a named, legitimate terminal
+status for exactly this situation -- everything reachable without a live key was
+completed and independently verified before reaching that conclusion.
+
+### Corpus extension (the plan's three named items) -- COMPLETE
+
+Three commits, `2a91c5e` / `fb4f055` / `736b389` (the first two dispatched together since
+both landed in `scenarios.py`; the third serialized after since it also touches
+`planters.py`, avoiding a shared-file conflict):
+
+- **Item 2, prompt-injection generator**: `scenarios.py::gen_notes_with_injection` +
+  `edge_cases.py`'s new `notes_prompt_injection` tag (targets `l3_i2b2_crosswalk_v1`'s
+  `PATIENT_BLOB` column -- the only unclaimed `scrub_text` free-text column in the whole
+  corpus). Wiring independently verified live: the injected literal flows through the
+  exact same `sem['literals'] -> PlantedCell.leak_literals -> ExportExpectation` path
+  `_mutate_notes_multi_phi`'s literals already use, with zero special-casing needed.
+  **Genuine, honestly-disclosed finding surfacing from this work** (independently
+  re-verified this session by reading `reasoning.py::_scrub_text_cell` directly): the
+  injected instruction text will very likely survive verbatim into the dataset export,
+  because `scrub_text`'s deterministic Presidio+regex scan only redacts PHI-*shaped*
+  spans, and a prompt-injection sentence is not PHI-shaped by construction. This does
+  **not** violate any of master architecture section 106's 17 enumerated security
+  invariants (none concern non-PHI text survival) and does **not** represent an LLM
+  prompt-injection vulnerability in the classification-decision sense -- the
+  zero-row-read invariant (no LLM agent ever reads raw row values; only deterministic
+  Executor/Publish Guard code does) remains structurally intact regardless. It is a real,
+  disclosable content-integrity gap for the *exported dataset* specifically, now
+  discoverable by the Phase 20 harness's leak scan the moment a live run can complete.
+- **Item 3, dictionary-text PHI + semantic conflict**: `planters.py::_generate_dictionary`
+  gained an optional per-row `literal_generator` (an MRN drawn from the same `gen_mrn`
+  generator the dataset itself uses, so it participates in `_enforce_canary_uniqueness`
+  like every other planted value -- no hardcoded literal); `_dictionary_drift()` gained a
+  third, purely additive key, `semantic_conflicts` (a declarative comparison of a new
+  `claimed_category` field against the column's real `hipaa_category`/`sensitivity_class`,
+  not NLP-based prose parsing). Both plants land on `hipaa_max_adversarial_v1` (`patient_id`
+  for the dictionary-PHI plant, `account_number` -- documented "de-identified" while its
+  real category is `J`, a direct identifier -- for the conflict). New top-level ground-truth
+  key `dictionary_plants: list[{"column_name": str, "value": str}]`.
+- **Item 1, forms**: new `phi_corpus/instruments.py::generate_form_pdf(scn, rng) ->
+  (pdf_bytes, form_plants)` renders a flat-text (Tier-2, non-AcroForm) collection-form PDF
+  via `reportlab`, selecting up to 5 PHI-bearing columns (identification block first:
+  name/DOB/MRN), every value drawn from the scenario's own `ColumnSpec.generator` (never a
+  hardcoded literal). `planters.py::plant()` gained `include_instruments: bool = False`
+  (default preserves every existing caller byte-for-byte, verified by direct `==`
+  comparison); when `True`, writes `forms/<scenario_id>_form.pdf` into the ZIP and adds
+  `ground_truth['form_plants']`. **Independently verified against the real pipeline, not
+  just code inspection**: extracted the generated PDF and ran both
+  `file_readers.read_pdf_form_fields` (confirmed `None` -- genuinely Tier-2, no AcroForm)
+  and `file_readers.read_pdf` (the exact function `Instrument.run()` calls) -- every
+  planted field label and value was found verbatim in the extracted text. Also ran the
+  real `phi_core.intake.build_manifest()` against a generated corpus ZIP end-to-end:
+  the form is classified `component='forms'`, `blocking=True`, zero rejection, overall
+  manifest `status='ready'`.
+
+**Verification throughout**: `ruff check .` clean after every commit; the full existing
+corpus test suite (`test_corpus.py`, `test_phi_corpus_verify_run_surfaces.py`,
+`test_corpus_researcher.py`, `test_corpus_tiers.py`, `test_corpus_replay.py`,
+`test_corpus_gc.py`, `test_corpus_benchmark.py`) stayed green throughout -- **78 passed,
+1 expected skip** (the `ANTHROPIC_API_KEY`-gated one), matching before and after every
+commit exactly. Zero files outside `backend/phi_corpus/` touched.
+
+### Acceptance harness -- COMPLETE, proven ready
+
+Commit `3a2e6e0`: `backend/tests/test_acceptance_phase20.py` (547 lines) plus one small,
+additive extension to `phi_corpus/verify.py` (`scan_zip_contents_for_leaks`, complementing
+the pre-existing filename/comment-only `_scan_zip_metadata` with a ZIP member *content*
+scan, reusing the existing leak-literal partition/scan/hit machinery verbatim). Drives a
+live `hipaa_max_adversarial_v1` corpus (the curated L0 adversarial preset plus
+`notes_prompt_injection` appended per the plan's "extend, not replace" instruction --
+empirically confirmed a harmless no-op in this specific scenario since the tag targets a
+different scenario's column, with a dedicated supplementary test proving the item is
+genuinely real and exercisable in its actual home scenario rather than silently claiming
+coverage that isn't there; `include_instruments=True`, 15 rows) through the real pipeline,
+then asserts:
+
+- **All 8 section-103 corpus-completion properties**, each a real, specific assertion
+  against real field names confirmed by reading the actual code (not vague comments):
+  every planted column has a decision; transformations verified via `verify.py`'s
+  existing scoring machinery (reused, not reimplemented); review history via the real
+  `session_review` field; evidence references via the real `citation` field; canary
+  absence via `verify.scan_exports_for_leaks` (reused); report/ZIP safety via the new
+  `scan_zip_contents_for_leaks` plus the pre-existing metadata scan; raw-source absence
+  verified against `build_bundle`'s own real ZIP-member-naming convention; cleanup
+  verified via explicit `DELETE` (documented, reasoned deviation from a literal
+  `cleanup-status` HTTP check, which the real code path makes unreachable post-erasure --
+  found by reading `server.py`'s deletion order, not from a failed run).
+- **All 6 runtime-trajectory properties**, read from real `orchestrator.py` phase-name
+  strings (`judge_iter_N`, `phase=='statute'`/`'praxis'` for targeted expert dispatch,
+  `human_review_required`/`human_review_audit`, `executor.crashed`, `rewind`). Two of the
+  six (deliberate execution failure, Final Review rewind) are honestly implemented as
+  if-present-then-check-shape assertions, never fabricated or mocked, exactly matching the
+  plan's own explicit framing that these cannot be deterministically forced by corpus
+  content alone.
+
+**Proof run against the live backend** (`PHI_TEST_BASE_URL=http://127.0.0.1:8001`,
+`mongod` up): **2 passed** (corpus build + prompt-injection supplementary proof; intake +
+manifest linking, all 3 components) **, 1 failed exactly at the expected boundary** --
+`test_pipeline_reaches_completion`, with the failure message explicitly distinguishing a
+provider-key failure from a harness bug -- **, 3 skipped cleanly** (every test correctly
+gated behind session completion, which the run never reaches). Root-caused via the live
+backend's own process logs, not assumed: every LLM-dependent phase
+(`lexicon.gist`/`judge.decide`/`reviewer.preview`) raises `RuntimeError` (the provider
+gateway rejecting the call), producing the deterministic downstream
+`phi_core.agents.orchestrator.ResultAcceptanceError: Reviewer result was not accepted`.
+Two genuine bugs were found and fixed in the harness itself during this proof run (a
+too-narrow failure-detection regex; a structural test-ordering bug where cleanup would
+have deleted `trace_events` before the trajectory-properties test could read them) --
+both fixed and re-verified; the final proof run has **zero remaining bugs in the harness
+code**, only the one expected, correctly-attributed provider-key failure.
+
+`ruff check .` clean. Full non-live suite unaffected: **3 failed, 1849 passed, 6 skipped**
+(the 6th being the new module's own clean self-skip without `PHI_TEST_BASE_URL`) --
+exactly the established baseline plus one new skip, zero regressions.
+
+### Final status
+
+**`PHASE_20_STATUS = BLOCKED` (external: no valid provider key in this environment).**
+Every phase from Step 0 through Phase 19 is `PASS`. Full final implementation report
+(sections A through AB of master architecture section 114) at
+`docs/FINAL_IMPLEMENTATION_REPORT.md`, concluding **`IMPLEMENTATION_BLOCKED`** -- not
+`IMPLEMENTATION_COMPLETE` or `IMPLEMENTATION_COMPLETE_WITH_LIMITATIONS`, because no
+acceptance verdict of any kind can be reached without a live provider call, and this
+rewrite must not claim a status it cannot support with evidence. Exact unblock steps
+(supply a valid key, restart `phi-backend`, re-run the harness) are in that report's
+closing section. Independent of the key blocker, that report also names
+`FinalAssuranceGate`'s non-integration into the live export path as the single most
+consequential open architecture decision for whoever continues this repo's development.
