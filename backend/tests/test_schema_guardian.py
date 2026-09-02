@@ -1,5 +1,18 @@
-"""Deterministic-guardian contract for Schema (Task 6): headers and
-cardinality only, no LLM call, no classification.
+"""Deterministic-guardian contract for Schema (Task 6, inverted by Task 10):
+headers and cardinality still gate through the exact same deterministic
+header-safety machinery, but Schema itself is now a code-writing agent
+(step 10) -- it never reads a dataset file in-process, only through
+generated code run inside ``agents/codegen.py``'s sandboxed/containerized
+boundary.
+
+These tests never touch Docker or a live LLM: ``StubExtractionSchema``
+overrides ``Schema._extract_via_codegen`` -- the one seam that does --
+with a canned ``ExtractedSchema`` built from a real on-disk file via the
+same plain csv/xlsx readers the pre-step-10 deterministic Schema used to
+call directly. Everything downstream of that call (``Schema.run``'s
+header-safety gate, opaque projection, uncertain-ceiling raise,
+cardinality suppression, ``verify()``) is the real, unstubbed
+production code -- exactly what these tests pin.
 
 Follows the dependency-free convention of test_manager.py and
 test_keep_verification_pipeline.py: plain ``def test_...()`` driving
@@ -9,26 +22,51 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import openpyxl
 import pytest
+from phi_core.agents.codegen import CodeGenerationExhausted
+from phi_core.agents.extract_model import ExtractedColumn, ExtractedSchema
 from phi_core.agents.specialists import Schema
 from phi_core.control.testing import make_ctx
+from phi_core.file_readers import read_csv_columns, read_xlsx_columns
 
 
-class NoLlmSchema(Schema):
-    """Raises if Schema ever reaches for an LLM -- proves the deterministic
-    rewrite never calls out, not just that it happens not to in this test."""
+class StubExtractionSchema(Schema):
+    """Overrides only ``_extract_via_codegen``, so ``call``/``call_json``
+    are never even reachable through the normal ``run()`` path -- proven
+    below by making them raise, matching this test file's original
+    "Schema must never call an LLM through this seam" intent, just
+    scoped to the correct seam now that Schema legitimately calls one
+    through ``generate_with_retry`` elsewhere."""
 
     async def call(self, *a, **kw):
-        raise AssertionError("Schema must never call an LLM")
+        raise AssertionError("StubExtractionSchema must never reach an LLM directly -- override _extract_via_codegen instead")
 
     async def call_json(self, *a, **kw):
-        raise AssertionError("Schema must never call an LLM")
+        raise AssertionError("StubExtractionSchema must never reach an LLM directly -- override _extract_via_codegen instead")
+
+    async def _extract_via_codegen(self, f: dict[str, Any], sandbox: Any) -> ExtractedSchema | None:
+        headers = f.get("columns")
+        if headers is None:
+            path = Path(f["stored_path"])
+            ext = self._dataset_ext(f)
+            if ext == "xlsx":
+                headers, _rows = read_xlsx_columns(path)
+            else:
+                headers, _rows = read_csv_columns(path)
+        if not headers:
+            return None
+        columns = [
+            ExtractedColumn(name=h, position=i, distinct_count=2, null_count=0, inferred_type="string")
+            for i, h in enumerate(headers)
+        ]
+        return ExtractedSchema(columns=columns, row_count=10)
 
 
-def _schema() -> NoLlmSchema:
-    return NoLlmSchema(make_ctx("Schema"))
+def _schema() -> StubExtractionSchema:
+    return StubExtractionSchema(make_ctx("Schema"))
 
 
 def _write_csv(path: Path, headers: list[str], rows: list[list[str]]) -> None:
@@ -76,12 +114,16 @@ def test_schema_reports_exactly_the_headers_with_no_judgment_fields(tmp_path, ex
         assert "candidate_phi_category" not in c
         assert "inferred_meaning" not in c
         assert "confidence" not in c
+    assert result["header_notice"] == ""
 
 
-def test_schema_falls_back_to_file_readers_when_columns_unpopulated(tmp_path):
-    """Intake normally pre-populates `columns`; when it hasn't (a resumed
-    or otherwise incompletely-hydrated session), Schema still reads the
-    real header row deterministically rather than failing loud."""
+def test_schema_reads_a_real_file_via_the_extraction_seam_when_columns_absent(tmp_path):
+    """Schema never uses a pre-populated ``columns`` field in production
+    (step 10 deletes that fallback entirely -- the code-writing agent is
+    the only extraction path); this test's stub simulates a successful
+    generated-code round reading the real file directly, proving the
+    rest of ``run()`` does not itself depend on ``columns`` being
+    present."""
     path = tmp_path / "dataset.csv"
     headers = ["mrn", "visit_date"]
     _write_csv(path, headers, [["1", "2024-01-01"], ["2", "2024-01-02"]])
@@ -92,7 +134,7 @@ def test_schema_falls_back_to_file_readers_when_columns_unpopulated(tmp_path):
         "original_name": path.name,
         "stored_path": str(path),
         "subtype": "csv",
-        # No "columns" key.
+        # No "columns" key -- forces the stub's file_readers fallback.
     }]
 
     result = asyncio.run(schema.run(dataset_files=dataset_files))
@@ -119,6 +161,74 @@ def test_schema_logs_and_skips_a_file_with_no_headers(tmp_path):
     error_rows = [r for r in schema.ctx.trace.legacy_messages if r.phase == "schema.error:f1"]
     assert len(error_rows) == 1
     assert error_rows[0].payload["error"] == "no headers provided"
+
+
+def test_schema_logs_no_headers_when_code_generation_is_exhausted():
+    """A real (unstubbed-at-this-seam) codegen exhaustion must degrade
+    exactly like an empty extraction -- same "no headers provided"
+    message the pre-step-10 fail-loud path always used -- with the
+    exhaustion reason recorded alongside it for diagnosability."""
+
+    class ExhaustingSchema(Schema):
+        async def _extract_via_codegen(self, f, sandbox):
+            raise CodeGenerationExhausted("exhausted", diagnostics=["empty_reply: the model returned no source"])
+
+    schema = ExhaustingSchema(make_ctx("Schema"))
+    dataset_files = [{"file_id": "f1", "stored_path": "/nonexistent.csv", "subtype": "csv"}]
+
+    result = asyncio.run(schema.run(dataset_files=dataset_files))
+
+    assert result["columns"] == []
+    error_rows = [r for r in schema.ctx.trace.legacy_messages if r.phase == "schema.error:f1"]
+    assert len(error_rows) == 1
+    assert error_rows[0].payload["error"] == "no headers provided"
+    assert error_rows[0].payload["reason"] == "code_generation_exhausted"
+
+
+def test_schema_logs_no_headers_when_the_extraction_artifact_is_invalid():
+    """An artifact that runs but fails ExtractedSchema's strict contract
+    (a duplicate name, here) must fail this file closed, not raise past
+    run() -- ``_extract_via_codegen`` propagates the ValueError/pydantic
+    ValidationError, and ``run()`` converts it to the same structured
+    error row a codegen exhaustion produces."""
+
+    class InvalidArtifactSchema(Schema):
+        async def _extract_via_codegen(self, f, sandbox):
+            from phi_core.agents.extract_model import ExtractedSchema
+
+            return ExtractedSchema.model_validate({
+                "columns": [
+                    {"name": "dup", "position": 0, "distinct_count": 1, "null_count": 0, "inferred_type": "string"},
+                    {"name": "dup", "position": 1, "distinct_count": 1, "null_count": 0, "inferred_type": "string"},
+                ],
+                "row_count": 5,
+            })
+
+    schema = InvalidArtifactSchema(make_ctx("Schema"))
+    dataset_files = [{"file_id": "f1", "stored_path": "/nonexistent.csv", "subtype": "csv"}]
+
+    result = asyncio.run(schema.run(dataset_files=dataset_files))
+
+    assert result["columns"] == []
+    error_rows = [r for r in schema.ctx.trace.legacy_messages if r.phase == "schema.error:f1"]
+    assert len(error_rows) == 1
+    assert error_rows[0].payload["reason"] == "invalid_artifact"
+
+
+def test_schema_reports_a_header_notice_when_headers_were_tokenised(tmp_path):
+    """Step 10's ``header_notice`` field: a plain-English sentence naming
+    how many headers were tokenised and why, empty when none were."""
+    path = tmp_path / "dataset.csv"
+    headers = ["patient_id", "123-45-6789", "age"]
+    _write_csv(path, headers, [["1", "x", "40"]])
+
+    schema = _schema()
+    dataset_files = [{"file_id": "f1", "stored_path": str(path), "subtype": "csv"}]
+
+    result = asyncio.run(schema.run(dataset_files=dataset_files))
+
+    assert result["header_notice"] != ""
+    assert "1 of 3" in result["header_notice"]
 
 
 def test_verify_present_and_absent_case_insensitive():

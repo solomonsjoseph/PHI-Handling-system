@@ -252,6 +252,23 @@ def _write_schema_csv(path: Path, file_index: int) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_schema_reads_many_dataset_files_with_many_columns_without_dropping_any() -> None:
+    from phi_core.agents.extract_model import ExtractedColumn, ExtractedSchema
+    from phi_core.file_readers import read_csv_columns
+
+    class _FileReadingSchema(Schema):
+        """Stubs only the codegen/LLM/Docker extraction seam (step 10);
+        every other line of ``Schema.run`` -- the per-file grouping this
+        test actually pins -- is the real, unmodified production
+        method, matching this file's own module-level intent."""
+
+        async def _extract_via_codegen(self, f, sandbox):
+            headers, _rows = read_csv_columns(Path(f["stored_path"]))
+            columns = [
+                ExtractedColumn(name=h, position=i, distinct_count=2, null_count=0, inferred_type="string")
+                for i, h in enumerate(headers)
+            ]
+            return ExtractedSchema(columns=columns, row_count=10)
+
     dataset_files = []
     expected: dict[str, list[str]] = {}
     for fi in range(_N_SCHEMA_FILES):
@@ -261,7 +278,7 @@ async def test_schema_reads_many_dataset_files_with_many_columns_without_droppin
         expected[file_id] = columns
         dataset_files.append({"file_id": file_id, "stored_path": str(path), "subtype": "csv"})
 
-    schema = Schema(make_ctx("Schema"))
+    schema = _FileReadingSchema(make_ctx("Schema"))
     result = await schema.run(dataset_files=dataset_files)
 
     by_file: dict[str, list[str]] = {}

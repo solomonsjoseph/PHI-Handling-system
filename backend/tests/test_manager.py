@@ -235,10 +235,16 @@ def test_judge_min_items_zero_on_empty_study():
 
 
 def test_schema_declares_deliverable_contract():
-    """Schema is deterministic (Task 6): it never calls call_json, and its
-    deliverable is exactly the dataset headers it parsed, one entry per
-    header, tagged with the file that produced them."""
+    """Schema is a code-writing agent (step 10): it calls an LLM through
+    ``call`` (inside ``generate_with_retry``, to get back generated
+    source text) but never through ``call_json`` -- its deliverable is
+    exactly the dataset headers its generated extraction reported, one
+    entry per header, tagged with the file that produced them. This
+    test stubs the extraction seam (``_extract_via_codegen``) rather
+    than the LLM call itself, so it exercises the real, unstubbed
+    header-safety gate in ``Schema.run`` while staying offline."""
     import phi_core.agents.specialists as specialists
+    from phi_core.agents.extract_model import ExtractedColumn, ExtractedSchema
 
     called = {"call_json": False}
 
@@ -246,6 +252,14 @@ def test_schema_declares_deliverable_contract():
         async def call_json(self, *a, **kw):
             called["call_json"] = True
             return {"columns": []}
+
+        async def _extract_via_codegen(self, f, sandbox):
+            headers = f.get("columns") or []
+            columns = [
+                ExtractedColumn(name=h, position=i, distinct_count=2, null_count=0, inferred_type="string")
+                for i, h in enumerate(headers)
+            ]
+            return ExtractedSchema(columns=columns, row_count=10)
 
     s = StubSchema(make_ctx("Schema"))
     dataset_files = [{"file_id": "f1", "original_name": "d.csv",

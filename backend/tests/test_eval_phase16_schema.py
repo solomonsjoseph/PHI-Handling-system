@@ -1,14 +1,20 @@
 """Phase 16 evaluation 1/9: Schema interpretation.
 
-Schema (``phi_core.agents.specialists.Schema``) never calls an LLM (its own
-``PROMPT = ""``) -- its "interpretation" of a header is entirely the
-deterministic HEADER SAFETY GATE, ``phi_core.control.source_projection.
-classify_header``: does the header TEXT itself constitute or embed a real
-identifier value someone typed into a column name by mistake ("sensitive"),
-an ambiguous unclassified digit run ("uncertain"), or neither ("safe")?
-That disposition is Schema's actual per-header semantic judgment, and it is
-exercised here with zero stubbing -- Schema's real code, unedited, run
-end-to-end through a real ``AgentContext``.
+Schema (``phi_core.agents.specialists.Schema``) is a code-writing agent
+(step 10): it calls an LLM to generate the extraction module that reads
+a dataset's headers, but the actual per-header semantic judgment is
+still entirely the deterministic HEADER SAFETY GATE, ``phi_core.control.
+source_projection.classify_header`` -- applied unchanged, verbatim, to
+whatever raw header name the generated extraction reports back. Does
+the header TEXT itself constitute or embed a real identifier value
+someone typed into a column name by mistake ("sensitive"), an ambiguous
+unclassified digit run ("uncertain"), or neither ("safe")? That
+disposition is Schema's actual per-header semantic judgment, exercised
+here with zero stubbing of ``classify_header`` itself -- Schema's real
+gate code, unedited, run end-to-end through a real ``AgentContext``.
+The extraction seam (``_extract_via_codegen``, the LLM/Docker-touching
+part) is stubbed below to keep this evaluation file offline and fast;
+the gate it feeds is not.
 
 Ground truth: 21 synthetic headers hand-labeled with the disposition the
 HEADER SAFETY GATE's own documented rules (source_projection.py's
@@ -103,19 +109,34 @@ def test_classify_header_matches_the_label_for_every_synthetic_header():
 
 @pytest.mark.asyncio
 async def test_schema_run_end_to_end_propagates_the_same_dispositions(tmp_path):
-    """The same labeled headers run through the real, unstubbed
-    ``Schema.run()`` (temp CSV -> real AgentContext -> real header-safety
-    gate): a "safe" header's literal name must survive into Schema's
-    output columns; a "sensitive"/"uncertain" header must never appear
-    under its literal text, only as an opaque token -- proving Schema's
-    per-header classification is not merely correct in isolation but is
-    the one actually enforced end-to-end."""
+    """The same labeled headers run through the real, unstubbed header
+    safety gate inside ``Schema.run()`` (temp CSV -> real AgentContext
+    -> real gate): a "safe" header's literal name must survive into
+    Schema's output columns; a "sensitive"/"uncertain" header must
+    never appear under its literal text, only as an opaque token --
+    proving Schema's per-header classification is not merely correct in
+    isolation but is the one actually enforced end-to-end. Only the
+    codegen/LLM/Docker extraction seam is stubbed, reading the real
+    temp CSV this test wrote via a plain csv reader in place of a
+    generated extraction module."""
+    from phi_core.agents.extract_model import ExtractedColumn, ExtractedSchema
+
+    class _FileReadingSchema(Schema):
+        async def _extract_via_codegen(self, f, sandbox):
+            with open(f["stored_path"], newline="", encoding="utf-8") as fh:
+                headers = next(csv.reader(fh))
+            columns = [
+                ExtractedColumn(name=h, position=i, distinct_count=2, null_count=0, inferred_type="string")
+                for i, h in enumerate(headers)
+            ]
+            return ExtractedSchema(columns=columns, row_count=10)
+
     headers = [h for h, _ in LABELED_HEADERS]
     path = _write_csv(tmp_path, headers)
     trace = MemoryTrace()
     ctx = make_ctx("Schema", trace=trace)
-    schema = Schema(ctx)
-    result = await schema.run([{"file_id": "f1", "stored_path": str(path), "columns": headers}])
+    schema = _FileReadingSchema(ctx)
+    result = await schema.run([{"file_id": "f1", "stored_path": str(path)}])
     output_names = {c["name"] for c in result["columns"]}
 
     mismatches: list[str] = []

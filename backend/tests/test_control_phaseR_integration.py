@@ -230,15 +230,37 @@ def test_classify_header_uncertain_for_ambiguous_embedded_digit_run() -> None:
     assert classify_header("patient_id")[0] == "safe"
 
 
+def _stub_schema(ctx):
+    """A ``Schema`` whose extraction seam reads ``f["columns"]``
+    directly instead of driving ``agents/codegen.py``'s
+    sandboxed/containerized boundary -- these tests exercise the
+    header-safety gate in ``Schema.run`` itself, not the code-writing
+    extraction step (step 10), which has its own dedicated coverage in
+    ``test_schema_guardian.py`` and ``test_generated_code_guard.py``."""
+    from phi_core.agents.extract_model import ExtractedColumn, ExtractedSchema
+    from phi_core.agents.specialists import Schema
+
+    class _StubSchema(Schema):
+        async def _extract_via_codegen(self, f, sandbox):
+            headers = f.get("columns") or []
+            if not headers:
+                return None
+            columns = [
+                ExtractedColumn(name=h, position=i, distinct_count=2, null_count=0, inferred_type="string")
+                for i, h in enumerate(headers)
+            ]
+            return ExtractedSchema(columns=columns, row_count=10)
+
+    return _StubSchema(ctx)
+
+
 @pytest.mark.asyncio
 async def test_schema_projects_sensitive_header_to_opaque_token_never_raw_text() -> None:
     """A header carrying a typed-in SSN never reaches Schema's
     agent-facing/LLM-facing ``columns`` output under its literal text --
     only the opaque token does."""
-    from phi_core.agents.specialists import Schema
-
     ctx = make_ctx("Schema")
-    schema = Schema(ctx)
+    schema = _stub_schema(ctx)
     out = await schema.run(dataset_files=[
         {"file_id": "f1", "columns": ["patient_id", "123-45-6789"]},
     ])
@@ -256,10 +278,8 @@ async def test_schema_uncertain_header_is_projected_not_blocked_and_raises_revie
     ``HumanReviewRequest`` (which pauses the run; confirmed by reading
     ``Manager.request_human_review``, the wrong tool for a
     non-blocking flag)."""
-    from phi_core.agents.specialists import Schema
-
     ctx = make_ctx("Schema")
-    schema = Schema(ctx)
+    schema = _stub_schema(ctx)
     out = await schema.run(dataset_files=[
         {"file_id": "f1", "columns": ["patient_id", "site_02139"]},
     ])
@@ -280,7 +300,7 @@ async def test_schema_exceeding_uncertain_header_ceiling_blocks_with_failure_cla
 
     monkeypatch.setattr(specialists.limits, "MAX_UNCERTAIN_HEADERS_PER_RUN", 1)
     ctx = make_ctx("Schema")
-    schema = specialists.Schema(ctx)
+    schema = _stub_schema(ctx)
     with pytest.raises(specialists.UncertainHeaderCeilingExceeded) as excinfo:
         await schema.run(dataset_files=[
             {"file_id": "f1", "columns": ["site_02139", "id_1234"]},
@@ -618,9 +638,8 @@ async def test_judge_prompt_never_carries_a_raw_sensitive_header_only_the_opaque
     into a header never reaches the LLM-facing Judge prompt, only the
     ``header_...`` opaque token does."""
     from phi_core.agents.reasoning import Judge
-    from phi_core.agents.specialists import Schema
 
-    schema = Schema(make_ctx("Schema"))
+    schema = _stub_schema(make_ctx("Schema"))
     schema_out = await schema.run(dataset_files=[
         {"file_id": "f1", "columns": ["patient_id", "123-45-6789"]},
     ])

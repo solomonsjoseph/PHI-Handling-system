@@ -18,18 +18,12 @@ from typing import Any
 from ..control import limits
 from ..control.opaque import OpaqueMap
 from ..control.records import StudyKnowledgePackage
+from ..control.sandbox import create_sandbox, destroy_sandbox
 from ..control.source_projection import classify_header, source_projection
-from ..file_readers import (
-    column_value_stats,
-    read_csv_columns,
-    read_docx,
-    read_parquet_columns,
-    read_pdf,
-    read_pdf_form_fields,
-    read_table_rows,
-    read_xlsx_columns,
-)
+from ..file_readers import read_docx, read_pdf, read_pdf_form_fields, read_table_rows
 from .base import Agent
+from .codegen import CodeGenerationExhausted, generate_with_retry
+from .extract_model import CardKind, ExtractedSchema, card_kind
 
 _SPAN_COUNT_RE = re.compile(r"^(\d+) PHI detector span")
 
@@ -373,12 +367,53 @@ def _dict_rows(path: Path) -> tuple[list[str], list[list[str]]]:
 
 class Schema(Agent):
     NAME = "Schema"
-    PROMPT = ""  # deterministic; Schema never calls an LLM
+    PROMPT = (
+        "You are Schema, a specialist that writes a small, self-contained Python module "
+        "to extract a dataset's own structure -- never its content. You never see a real "
+        "column name or a real cell value: you write code that discovers them at execution "
+        "time, inside a network-denied sandbox.\n\n"
+        "Write a module with exactly one top-level function, `def run():`. It must:\n"
+        "1. Read the dataset mounted at the fixed path you are given, using pandas with "
+        "dtype=str and keep_default_na=False (never a raw-string encoding guess).\n"
+        "2. For every column, in the file's own left-to-right order, compute: its name "
+        "exactly as it appears in the file, its 0-based position, the count of distinct "
+        "non-null values, the count of null/empty values, and your best single-word guess "
+        "at its type (string, integer, float, date, boolean, categorical, or unknown).\n"
+        "3. Write a JSON object to the fixed output path you are given, shaped exactly as: "
+        '{"columns": [{"name": str, "position": int, "distinct_count": int, '
+        '"null_count": int, "inferred_type": str}], "row_count": int}\n'
+        "4. Return the output filename (just the name, e.g. \"schema_out.json\") from run().\n\n"
+        "Report every column exactly once. Never invent, omit, merge, or reorder a column. "
+        "Never hardcode a value you have not read from the file at runtime -- every count "
+        "must come from the pandas operations you write, computed when the module actually "
+        "runs, not typed in by you."
+    )
+
+    # Excel/LibreOffice/Sheets-shaped file extensions this agent's generated
+    # extraction module may be asked to read; kept in sync with the
+    # container's own pandas capability (read_csv/read_excel), never a
+    # superset of what `check_generated_code`'s import allowlist permits.
+    _TABULAR_EXTENSIONS: frozenset[str] = frozenset({"csv", "tsv", "xlsx", "xls"})
+
+    # Cap on the raw JSON text this agent will attempt to parse from a
+    # generated module's own output artifact -- a defensive ceiling
+    # against a runaway or malicious result file, independent of
+    # ContainerRunner's own workspace-size ceiling (which bounds the
+    # whole staging tree, not this one file).
+    _MAX_ARTIFACT_CHARS = 2_000_000
 
     async def run(self, dataset_files: list[dict[str, Any]]) -> dict[str, Any]:
+        """Extract every dataset file's headers and cardinality via
+        generated code (step 10), then apply the unchanged deterministic
+        header safety gate (below) to every name the generated code
+        reports -- the gate never trusted, never bypassed, and never
+        aware of how the names arrived. Schema itself never reads a
+        dataset file directly; ``_extract_via_codegen`` is the only
+        seam that touches ``stored_path``, and it always does so
+        through the sandboxed/containerized boundary."""
         results: list[dict[str, Any]] = []
         self._headers: dict[str, list[str]] = {}
-        self._stats: dict[tuple[str, str], dict[str, int]] = {}
+        self._stats: dict[tuple[str, str], dict[str, Any]] = {}
         # Wave R-c (v3 section 7 HEADER SAFETY GATE): a header carrying a
         # typed-in real value must never reach `results` (agent/LLM-facing)
         # under its literal text -- only the opaque token does. Falls back
@@ -388,85 +423,163 @@ class Schema(Agent):
         # leak the literal) holds even outside the live pipeline.
         local_opaque = OpaqueMap(self.ctx.run_id, {})
         uncertain_count = 0
-        for f in dataset_files:
-            file_id = f["file_id"]
-            headers = f.get("columns") or self._read_headers(f)
-            if not headers:
-                # Fail loud instead of hallucinating - orchestrator must have populated columns before us.
-                await self._log(f"schema.error:{file_id}", "info",
-                                {"error": "no headers provided", "file": _opaque_file_id(f)})
-                continue
-            projected_headers: list[str] = []
-            for header in headers:
-                disposition, reasons = classify_header(header)
-                if disposition == "safe":
-                    projected_headers.append(header)
+        file_notices: list[str] = []
+        # A code-writing run needs a real sandbox for generate_with_retry's
+        # own two data-touching checks (assert_no_dataset_literals,
+        # assert_no_formula_injection_in_outputs). Reuses ctx.sandbox when
+        # the pipeline attached one for this run; otherwise opens and
+        # tears down its own -- the same fallback shape the pre-existing
+        # `_read_dataset_headers_maybe_sandboxed` pattern in reasoning.py
+        # already establishes for a make_ctx-built unit-test context that
+        # never attaches one.
+        owns_sandbox = self.ctx.sandbox is None
+        sandbox = self.ctx.sandbox or create_sandbox(run_id=self.ctx.run_id)
+        try:
+            for f in dataset_files:
+                file_id = f["file_id"]
+                try:
+                    artifact = await self._extract_via_codegen(f, sandbox)
+                except CodeGenerationExhausted as exc:
+                    await self._log(f"schema.error:{file_id}", "info", {
+                        "error": "no headers provided", "file": _opaque_file_id(f),
+                        "reason": "code_generation_exhausted",
+                        "diagnostics": exc.diagnostics[:5],
+                    })
                     continue
-                if disposition == "uncertain":
-                    uncertain_count += 1
-                    if uncertain_count > limits.MAX_UNCERTAIN_HEADERS_PER_RUN:
-                        raise UncertainHeaderCeilingExceeded(
-                            uncertain_count, limits.MAX_UNCERTAIN_HEADERS_PER_RUN,
+                except (ValueError, TypeError) as exc:
+                    # The generated module ran and returned a file, but its
+                    # content did not satisfy ExtractedSchema's strict
+                    # contract (extra field, wrong type, duplicate name,
+                    # out-of-order position, ...) or was not valid JSON at
+                    # all. Fail closed for this file rather than coercing --
+                    # exactly the same outward shape as codegen exhaustion,
+                    # since the practical consequence (this file contributes
+                    # zero columns this run) is identical either way.
+                    await self._log(f"schema.error:{file_id}", "info", {
+                        "error": "no headers provided", "file": _opaque_file_id(f),
+                        "reason": "invalid_artifact", "detail": type(exc).__name__,
+                    })
+                    continue
+                if artifact is None or not artifact.columns:
+                    await self._log(f"schema.error:{file_id}", "info",
+                                    {"error": "no headers provided", "file": _opaque_file_id(f)})
+                    continue
+                headers = [c.name for c in artifact.columns]
+                projected_headers: list[str] = []
+                tokenised_count = 0
+                for header in headers:
+                    disposition, reasons = classify_header(header)
+                    if disposition == "safe":
+                        projected_headers.append(header)
+                        continue
+                    if disposition == "uncertain":
+                        uncertain_count += 1
+                        if uncertain_count > limits.MAX_UNCERTAIN_HEADERS_PER_RUN:
+                            raise UncertainHeaderCeilingExceeded(
+                                uncertain_count, limits.MAX_UNCERTAIN_HEADERS_PER_RUN,
+                            )
+                    if self.ctx.opaque is not None:
+                        token = await self.ctx.opaque.to_opaque("header", header)
+                    else:
+                        token = local_opaque.to_opaque("header", header)
+                    projected_headers.append(token)
+                    tokenised_count += 1
+                    if disposition == "uncertain":
+                        # Non-blocking review item: a recorded trace event,
+                        # never a `HumanReviewRequest` (which pauses the run --
+                        # the wrong tool for a disposition this system already
+                        # treats identically to `sensitive` for the rest of
+                        # this run). If no human ever resolves it, the
+                        # disposition simply stays sensitive permanently: no
+                        # code path anywhere reverses an opaque projection
+                        # back to its literal header.
+                        await self._log(
+                            "schema.header_uncertain_review", "info",
+                            {"file_id": file_id, "opaque_token": token, "reasons": reasons},
                         )
-                if self.ctx.opaque is not None:
-                    token = await self.ctx.opaque.to_opaque("header", header)
-                else:
-                    token = local_opaque.to_opaque("header", header)
-                projected_headers.append(token)
-                if disposition == "uncertain":
-                    # Non-blocking review item: a recorded trace event,
-                    # never a `HumanReviewRequest` (which pauses the run --
-                    # the wrong tool for a disposition this system already
-                    # treats identically to `sensitive` for the rest of
-                    # this run). If no human ever resolves it, the
-                    # disposition simply stays sensitive permanently: no
-                    # code path anywhere reverses an opaque projection
-                    # back to its literal header.
-                    await self._log(
-                        "schema.header_uncertain_review", "info",
-                        {"file_id": file_id, "opaque_token": token, "reasons": reasons},
+                self._headers[file_id] = [h.lower() for h in projected_headers]
+                await self._log(f"schema.headers:{file_id}", "info", {"header_count": len(headers)})
+                raw_to_projected = {raw.lower(): proj for raw, proj in zip(headers, projected_headers, strict=True)}
+                for col in artifact.columns:
+                    projected_name = raw_to_projected.get(col.name.lower(), col.name)
+                    kind = card_kind(col.distinct_count, artifact.row_count)
+                    # Disclosive-statistics suppression: a cardinality of
+                    # exactly 1 (constant) or exactly the row count
+                    # (unique) is reportable structure -- on a small
+                    # dataset either fact can narrow a quasi-identifier
+                    # to a single row. Report the categorical flag
+                    # instead of the raw integer in exactly those two
+                    # cases; the ordinary "some distinct values, some
+                    # repeats" case keeps its real number.
+                    stat_entry: dict[str, Any] = {"rows": artifact.row_count}
+                    if kind is CardKind.normal:
+                        stat_entry["distinct"] = col.distinct_count
+                    else:
+                        stat_entry["cardinality"] = kind.value
+                    self._stats[(file_id, projected_name.lower())] = stat_entry
+                await self._log(f"schema.cardinality:{file_id}", "info", {"columns": len(artifact.columns)})
+                if tokenised_count:
+                    file_notices.append(
+                        f"{_opaque_file_id(f)}: {tokenised_count} of {len(headers)} header(s) "
+                        "tokenised because they carried a real value or an ambiguous digit run."
                     )
-            self._headers[file_id] = [h.lower() for h in projected_headers]
-            await self._log(f"schema.headers:{file_id}", "info", {"header_count": len(headers)})
-            stats = self._column_stats(f, headers)
-            raw_to_projected = {raw.lower(): proj for raw, proj in zip(headers, projected_headers, strict=True)}
-            for name, s in stats.items():
-                projected_name = raw_to_projected.get(name.lower(), name)
-                self._stats[(file_id, projected_name.lower())] = s
-            await self._log(f"schema.cardinality:{file_id}", "info", {"columns": len(stats)})
-            for h in projected_headers:
-                results.append({"name": h, "_file_id": file_id})
-        return {"columns": results}
+                for h in projected_headers:
+                    results.append({"name": h, "_file_id": file_id})
+        finally:
+            if owns_sandbox:
+                destroy_sandbox(sandbox)
+        return {"columns": results, "header_notice": "; ".join(file_notices)}
 
     @staticmethod
     def _dataset_ext(f: dict[str, Any]) -> str:
         path = Path(f["stored_path"])
         return (f.get("subtype") or path.suffix.lstrip(".")).lower()
 
-    @classmethod
-    def _read_headers(cls, f: dict[str, Any]) -> list[str]:
-        """Fallback header read when intake left `columns` unpopulated."""
-        path = Path(f["stored_path"])
-        ext = cls._dataset_ext(f)
-        try:
-            if ext in ("csv", "tsv"):
-                cols, _rows = read_csv_columns(path)
-            elif ext in ("xlsx", "xls"):
-                cols, _rows = read_xlsx_columns(path)
-            elif ext == "parquet":
-                cols, _rows = read_parquet_columns(path)
-            else:
-                cols = []
-        except Exception:
-            cols = []
-        return cols
+    async def _extract_via_codegen(self, f: dict[str, Any], sandbox: Any) -> "ExtractedSchema | None":
+        """Generate and run one extraction module for one dataset file.
 
-    @classmethod
-    def _column_stats(cls, f: dict[str, Any], headers: list[str]) -> dict[str, dict[str, int]]:
+        The prompt names only the opaque file id and the fixed container
+        mount path -- never a raw header or row value. The generated
+        source computes headers/cardinality itself, inside
+        ``generate_with_retry``'s sandboxed/containerized boundary
+        (``agents/codegen.py``, step 9); this method never opens
+        ``stored_path`` itself. Raises :class:`CodeGenerationExhausted`
+        on exhaustion (the caller escalates to the same fail-loud path
+        as an empty extraction); raises :class:`ValueError` on a
+        artifact that ran but failed :class:`ExtractedSchema`'s strict
+        contract, or that exceeded ``_MAX_ARTIFACT_CHARS``.
+        """
+        ext = self._dataset_ext(f)
+        mount_name = f"dataset.{ext}" if ext in self._TABULAR_EXTENSIONS else "dataset"
+        opaque_id = _opaque_file_id(f)
+
+        def build_prompt(previous_source: str | None, previous_diagnostics: list[str] | None) -> str:
+            retry_note = ""
+            if previous_diagnostics:
+                retry_note = (
+                    "\n\nYour previous attempt failed. Fix these exact problems, "
+                    f"do not repeat them: {previous_diagnostics}"
+                )
+            return (
+                f"The dataset is mounted read-only at /data/{mount_name}. "
+                'Write the output JSON to /workspace/schema_out.json and return '
+                'the string "schema_out.json" from run().' + retry_note
+            )
+
+        source, result = await generate_with_retry(
+            self, build_prompt, phase=f"schema.extract:{opaque_id}",
+            dataset_path=f["stored_path"], inputs={mount_name: f["stored_path"]},
+            entrypoint="extract.py", declared_outputs=frozenset({"schema_out.json"}),
+            sandbox=sandbox,
+        )
         try:
-            return column_value_stats(Path(f["stored_path"]), cls._dataset_ext(f), headers)
-        except Exception:
-            return {}
+            raw = (result.workspace_path / "schema_out.json").read_text(encoding="utf-8")
+        finally:
+            result.cleanup()
+        if len(raw) > self._MAX_ARTIFACT_CHARS:
+            raise ValueError(f"extraction artifact exceeds the {self._MAX_ARTIFACT_CHARS}-char cap")
+        data = json.loads(raw)
+        return ExtractedSchema.model_validate(data)
 
     def verify(self, column: str, file_id: str | None = None) -> dict[str, Any]:
         """No LLM call: a column is present iff it is literally in the
