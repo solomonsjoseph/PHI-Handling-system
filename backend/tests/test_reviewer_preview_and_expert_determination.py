@@ -97,8 +97,8 @@ async def test_reviewer_preview_flags_unsafe_keep_as_correction_required_determi
     `deterministic_only` mode (no LLM call, no configured provider
     required) -- the exact shape a human resolution that re-approves an
     unsafe column would take. This is the structural half of "nothing
-    unresolved reaches execution": the gate `_handle_pipeline_resume`
-    wires before `execute_decisions` calls this same code path."""
+    unresolved reaches execution": ``orchestrator._resume_human_review_
+    decisions`` wires before the execute tail calls this same code path."""
     reviewer = Reviewer(make_ctx("Reviewer"))
     decisions = [{"file_id": "f1", "column": "ssn", "action": "keep", "reason": "reviewer approved"}]
     out = await reviewer.preview(decisions=decisions, deterministic_only=True)

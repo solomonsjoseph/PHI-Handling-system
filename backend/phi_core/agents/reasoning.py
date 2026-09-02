@@ -1093,7 +1093,7 @@ class Executor(Agent):
 
         ``manifest`` (docs #49/#50) is the current, authorized
         ``VerifiedClassificationManifest`` the caller froze immediately
-        before this call (``agents/orchestrator.py``'s ``execute_decisions``,
+        before this call (``agents/orchestrator.py``'s ``_dispatch_execute``,
         via ``control.manifest.ensure_frozen_manifest``) -- ``None`` for
         every pre-existing unit test's direct ``Executor(ctx).run(...)``
         call, the same permanent ``make_ctx``-built compatibility path

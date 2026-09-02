@@ -6,7 +6,8 @@ one 90 s call. The split cuts wall-clock time by roughly half in the
 worst case (parallel + smaller prompts) without dropping any deliverable.
 
 Phase 17-B: none of these three agents runs as part of the mandatory PHI
-handling path (``agents.orchestrator.execute_decisions``) any more. They
+handling path (the ``_dispatch_execute_tail`` combinator, step 6;
+formerly ``agents.orchestrator.execute_decisions``) any more. They
 form an opt-in, post-run publication bundle a user explicitly requests for
 an already-complete session via ``run_post_run_report`` below (wired to
 ``POST /api/sessions/{sid}/post-run-report`` in ``server.py``). They never
@@ -362,9 +363,11 @@ async def run_post_run_report(
     target_venue: str = "JAMIA Open",
 ) -> dict[str, Any]:
     """Scout -> Ledger -> Herald, on demand, for an ALREADY-COMPLETE
-    session. Never called from ``agents.orchestrator.execute_decisions``
-    (Phase 17-B retired that call site); the only caller is the opt-in
-    ``POST /api/sessions/{sid}/post-run-report`` route in ``server.py``.
+    session. Never called from the ``_dispatch_execute_tail`` combinator
+    (Phase 17-B retired that call site; step 6 later renamed it from
+    ``agents.orchestrator.execute_decisions``); the only caller is the
+    opt-in ``POST /api/sessions/{sid}/post-run-report`` route in
+    ``server.py``.
 
     Ledger/Herald historically consumed Auditor's LLM-derived metrics and
     summary (``audit["metrics"]``/``audit["summary"]``). Auditor is

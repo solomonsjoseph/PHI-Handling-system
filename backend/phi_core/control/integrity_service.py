@@ -17,12 +17,12 @@ pinned by its own tests, is not reopened here. Its binding is therefore the
 computed from: exactly the arguments a real caller already has in hand,
 since ``Reviewer.finalize()`` is only ever invoked immediately after the
 same ``manifest``/``execution_result``/``verification_result`` triple is
-already in scope (``agents/orchestrator.py::execute_decisions``). A caller
-that declares a binding inconsistent with the manifest's own real identity
-is caught here exactly like any other mismatch -- this is what makes the
-check meaningful rather than vacuous: it does not merely trust the caller's
-assertion, it cross-checks it against the four pieces that do carry their
-own real identity fields.
+already in scope (``agents/orchestrator.py::_dispatch_verify_output``). A
+caller that declares a binding inconsistent with the manifest's own real
+identity is caught here exactly like any other mismatch -- this is what
+makes the check meaningful rather than vacuous: it does not merely trust
+the caller's assertion, it cross-checks it against the four pieces that
+do carry their own real identity fields.
 """
 from __future__ import annotations
 

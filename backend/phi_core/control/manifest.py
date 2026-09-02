@@ -23,7 +23,7 @@ superorchestrator.py``) -- ``authorize_manifest_freeze`` already
 implements the run-eligibility check (refuses a terminal/paused run) and
 the ``MANIFEST_COLLECTION`` upsert; this module's ``ensure_frozen_manifest``
 is the one caller a real execution path (``agents/orchestrator.py``'s
-``execute_decisions``) needs, wrapping that pre-existing, previously
+``_dispatch_execute``) needs, wrapping that pre-existing, previously
 unwired (Wave R-b) authority with the four freeze conditions and the
 idempotent "reuse a current manifest instead of minting a second one for
 the same decision set" rule docs #49's own docstring on

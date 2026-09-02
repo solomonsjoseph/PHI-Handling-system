@@ -1,9 +1,9 @@
 """ZIPBuilder (Phase 11b wave 2, docs #58/#61): assembles the canonical
 section-61 ``PHI_Handled_Study_<run-id>.zip`` from ReportGeneration's
 :class:`~.report_artifacts.ReportArtifacts` and Executor's own surviving
-dataset exports (``agents/orchestrator.py::execute_decisions``'s ``exports``
-dict, ``file_id -> Path``, itself the DeterministicVerifier/Reviewer-filtered
-view built at that function's ``exports = rv_out["exports"]`` line).
+dataset exports (``agents/orchestrator.py::_dispatch_verify_output``'s
+``exports`` dict, ``file_id -> Path``, itself the DeterministicVerifier/
+Reviewer-filtered view built at that function's ``exports = rv_out["exports"]`` line).
 
 Not wired into a live execution path this phase -- a standalone,
 independently testable module, exactly matching the precedent

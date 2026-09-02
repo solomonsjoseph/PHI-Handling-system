@@ -7,8 +7,9 @@ tests now live in ``tests/test_deterministic_verifier.py``. The Task 28/
 30 full-pipeline proofs below never referenced the ``Operator`` class
 directly (they exercise ``orchestrator.run_pipeline`` end to end, with
 every OTHER agent faked) and are unaffected by the retirement -- both
-still pass against the real ``DeterministicVerifier`` now wired in
-``execute_decisions``.
+still pass against the real ``DeterministicVerifier`` now wired into
+the ``_dispatch_verify_output`` stage (step 6; formerly a plain part of
+``execute_decisions``).
 """
 from __future__ import annotations
 
@@ -270,7 +271,7 @@ def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
 # ---- Task 28: Operator wired between Executor and Publish Guard -----------
 
 
-def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_path, monkeypatch):
+def test_run_pipeline_excludes_corrupted_export_and_ends_blocked(tmp_path, monkeypatch):
     """Full-pipeline-shaped proof, run directly against
     `orchestrator.run_pipeline` with the same fake-agent-double pattern
     `test_keep_verification_pipeline.py` uses against this same function:
@@ -282,7 +283,12 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
     A corrupted export must: (1) be excluded from the final `exports`
     dict used everywhere downstream (Publish Guard, Auditor, the
     completion `$set`), (2) be named in `operator_failures`, and (3)
-    leave the run `partially_complete`, not `complete`.
+    leave the run `blocked`, not `complete` or `partially_complete`
+    (rewrite plan step 6, Ruling 13: a missing or unverified column
+    decision is never `partially_complete` -- that status is reserved
+    for a column deliberately deferred by a human, never attempted at
+    all; a column that WAS attempted but could not be verified is a
+    genuine failure).
     """
     from phi_core.agents import orchestrator
     from phi_core.agents.reviewer import Reviewer as _RealReviewer
@@ -441,14 +447,14 @@ def test_run_pipeline_excludes_corrupted_export_and_ends_partially_complete(tmp_
     assert "f1" not in result["exports"]
     assert result["exports"] == {"f2": str(good_export)}
     assert result["operator_failures"] == ["f1"]
-    assert result["status"] == "partially_complete"
+    assert result["status"] == "blocked"
 
     operator_events = [e for e in phase_events if e[0] == "operator"]
     assert len(operator_events) == 1
     assert operator_events[0][1]["decision_count"] == 2
 
     completion_update = db.sessions.updates[-1]["$set"]
-    assert completion_update["status"] == "partially_complete"
+    assert completion_update["status"] == "blocked"
     assert completion_update["operator_failures"] == ["f1"]
     assert completion_update["export_paths"] == {"f2": str(good_export)}
 

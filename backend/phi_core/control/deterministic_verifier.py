@@ -403,7 +403,7 @@ class DeterministicVerifier:
         safe metadata (file readability, row/column counts, sha256
         digests of already-written export files) -- never from a raw
         cell value, so they need no sandbox boundary of their own (the
-        same reasoning ``execute_decisions``'s own ``artifact_refs``
+        same reasoning the execute tail's own ``artifact_refs``
         computation already relies on for its post-execution
         ``_hash_file`` pass).
         """

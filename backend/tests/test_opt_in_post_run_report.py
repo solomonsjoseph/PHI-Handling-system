@@ -1,16 +1,17 @@
 """Phase 17-B: proof that the opt-in post-run publication report (Scout ->
 Ledger -> Herald, ``phi_core.agents.outward.run_post_run_report``) genuinely
-runs only on demand, never as part of ``execute_decisions``'s mandatory PHI
-handling flow, and that the ``POST /api/sessions/{sid}/post-run-report``
-route works correctly against an already-complete session's persisted state.
+runs only on demand, never as part of ``_dispatch_execute_tail``'s (step 6;
+formerly ``execute_decisions``) mandatory PHI handling flow, and that the
+``POST /api/sessions/{sid}/post-run-report`` route works correctly against
+an already-complete session's persisted state.
 """
 from __future__ import annotations
 
-import time
 from types import SimpleNamespace
 
 import pytest
 from phi_core.agents import orchestrator
+from phi_core.control.testing import make_execute_state
 
 
 def _matches(doc: dict, query: dict) -> bool:
@@ -104,16 +105,17 @@ class _StubDB:
 
 
 # ---------------------------------------------------------------------------
-# (b) execute_decisions never touches Scout/Ledger/Herald
+# (b) _dispatch_execute_tail never touches Scout/Ledger/Herald
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_execute_decisions_never_instantiates_scout_ledger_herald(monkeypatch):
-    """A full, clean ``execute_decisions`` completion must never construct
-    Scout, Ledger, or Herald. Phase 17-B relocated all three to the opt-in
-    post-run report; ``orchestrator.py`` does not even import them any
-    more, but this proves the runtime behavior directly (against the real
+async def test_dispatch_execute_tail_never_instantiates_scout_ledger_herald(monkeypatch):
+    """A full, clean ``_dispatch_execute_tail`` (step 6; formerly
+    ``execute_decisions``) completion must never construct Scout, Ledger,
+    or Herald. Phase 17-B relocated all three to the opt-in post-run
+    report; ``orchestrator.py`` does not even import them any more, but
+    this proves the runtime behavior directly (against the real
     ``phi_core.agents.outward`` module, not merely by grepping imports) --
     a spy on each class's ``__init__`` must never fire, and the produced
     result/completion-set must carry no ``scout``/``ledger``/``herald``/
@@ -190,12 +192,6 @@ async def test_execute_decisions_never_instantiates_scout_ledger_herald(monkeypa
     async def make_ctx(_agent):
         return _FakeCtx()
 
-    async def make_child_ctx(_agent, _parent_task_id):
-        raise AssertionError(
-            "execute_decisions must never build a child context for Scout/Ledger/Herald "
-            "sub-agents -- they are opt-in post-run only (Phase 17-B)."
-        )
-
     async def complete_and_accept(_ctx, _result):
         return True
 
@@ -205,20 +201,18 @@ async def test_execute_decisions_never_instantiates_scout_ledger_herald(monkeypa
     async def close_last_phase():
         return None
 
-    result = await orchestrator.execute_decisions(
+    state = await make_execute_state(
         db=_FakeDb(), sid="s", session={}, session_filter={"id": "s"},
-        files=[], decisions=[], statute={}, praxis_methods={},
-        dictionary_by_column={}, make_ctx=make_ctx, make_child_ctx=make_child_ctx,
+        files=[], decisions=[], make_ctx=make_ctx,
         complete_and_accept=complete_and_accept, manager=_FakeManager(),
         on_phase=on_phase, close_last_phase=close_last_phase,
-        phase_timings={}, run_started=time.perf_counter(),
     )
+    result = await orchestrator._dispatch_execute_tail(state)
 
     assert result["status"] == "complete"
-    assert constructed == [], f"execute_decisions constructed unexpected opt-in agents: {constructed}"
+    assert constructed == [], f"_dispatch_execute_tail constructed unexpected opt-in agents: {constructed}"
     for key in ("scout", "ledger", "herald", "audit"):
-        assert key not in result, f"execute_decisions result unexpectedly carries {key!r}"
-
+        assert key not in result, f"_dispatch_execute_tail result unexpectedly carries {key!r}"
 
 # ---------------------------------------------------------------------------
 # (a)/(c) the opt-in endpoint genuinely runs Scout+Ledger+Herald on demand,

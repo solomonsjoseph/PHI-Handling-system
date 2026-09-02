@@ -1,13 +1,19 @@
-"""Phase 9 item 7: the manifest-freeze gate's invariant, exercised at the
-real call site (``orchestrator.py::execute_decisions``), not just at the
-``control/manifest.py`` unit level. A run whose frozen manifest has
-already been flipped to ``invalidated`` (R-b's lineage invalidation)
-must be refused before Executor ever runs -- not merely refused by
-``ensure_frozen_manifest`` in isolation.
+"""Phase 9 item 7 (migrated for step 6): the manifest-freeze gate's
+invariant, exercised at the real call site
+(``orchestrator.py::_dispatch_execute``, reached through the
+``_dispatch_execute_tail`` combinator registered under the ``"execute"``
+node), not just at the ``control/manifest.py`` unit level. A run whose
+frozen manifest has already been flipped to ``invalidated`` (R-b's
+lineage invalidation) must be refused before Executor ever runs -- not
+merely refused by ``ensure_frozen_manifest`` in isolation.
+
+Migrated from the retired ``execute_decisions`` monolith's own direct
+calls (step 6, progress ledger Ruling 12): builds a
+``_PipelineDriverState`` via ``control.testing.make_execute_state``
+instead of calling a plain function, matching every other
+``_dispatch_*`` handler's own test pattern.
 """
 from __future__ import annotations
-
-import time
 
 import pytest
 from phi_core.agents import orchestrator
@@ -15,7 +21,7 @@ from phi_core.control.artifacts import MANIFEST_COLLECTION
 from phi_core.control.manifest import manifest_artifact_id
 from phi_core.control.records import VerifiedClassificationManifest
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.testing import start_test_run
+from phi_core.control.testing import make_execute_state, start_test_run
 
 
 class _FakeSessions:
@@ -57,7 +63,7 @@ async def _seed_invalidated_manifest(store: MemoryControlStore, run_id: str) -> 
 
 
 @pytest.mark.asyncio
-async def test_execute_decisions_refuses_execution_from_an_invalidated_manifest(monkeypatch) -> None:
+async def test_dispatch_execute_tail_refuses_execution_from_an_invalidated_manifest(monkeypatch) -> None:
     store = MemoryControlStore()
     run = await start_test_run(store, "s" * 32)
     run_id = run.run_id
@@ -79,9 +85,6 @@ async def test_execute_decisions_refuses_execution_from_an_invalidated_manifest(
     async def make_ctx(_agent):
         raise AssertionError("make_ctx('Executor') must never be reached once the manifest gate refuses")
 
-    async def make_child_ctx(_agent, _parent_task_id):
-        raise AssertionError("no child context should be built before the manifest gate resolves")
-
     async def complete_and_accept(_ctx, _result):
         return True
 
@@ -94,19 +97,17 @@ async def test_execute_decisions_refuses_execution_from_an_invalidated_manifest(
     manager = _FakeManager()
     db = _FakeDb()
 
-    result = await orchestrator.execute_decisions(
+    state = await make_execute_state(
         db=db, sid="s", session={"id": "s"}, session_filter={"id": "s"},
         files=[{"file_id": "f1", "kind": "dataset", "stored_path": "/no/such/file.csv",
                 "subtype": "csv", "columns": ["name"]}],
         decisions=[{"file_id": "f1", "column": "name", "action": "drop"}],
-        statute={}, praxis_methods={}, dictionary_by_column={},
-        make_ctx=make_ctx, make_child_ctx=make_child_ctx,
-        complete_and_accept=complete_and_accept,
+        make_ctx=make_ctx, complete_and_accept=complete_and_accept,
         manager=manager, on_phase=on_phase, close_last_phase=close_last_phase,
-        phase_timings={}, run_started=time.perf_counter(),
         sentinel_report={"preview_status": "PASS"},
         run_id=run_id, store=store,
     )
+    result = await orchestrator._dispatch_execute_tail(state)
 
     assert executor_calls == [], "Executor must never run once the manifest is invalidated"
     assert result["status"] == "awaiting_human_review"
@@ -123,9 +124,9 @@ async def test_execute_decisions_refuses_execution_from_an_invalidated_manifest(
 
 
 @pytest.mark.asyncio
-async def test_execute_decisions_freezes_and_runs_when_no_manifest_exists_yet(monkeypatch, tmp_path) -> None:
+async def test_dispatch_execute_tail_freezes_and_runs_when_no_manifest_exists_yet(monkeypatch, tmp_path) -> None:
     """Contrast case: with no prior manifest and clean freeze conditions,
-    execute_decisions freezes one and Executor genuinely runs -- the gate
+    the execute tail freezes one and Executor genuinely runs -- the gate
     blocks a stale manifest, not every execution."""
     from uuid import uuid4
 
@@ -171,9 +172,6 @@ async def test_execute_decisions_freezes_and_runs_when_no_manifest_exists_yet(mo
         from phi_core.control.testing import make_ctx as _make_ctx
         return _make_ctx(agent, run_id=run_id, store=store)
 
-    async def make_child_ctx(agent, _parent_task_id):
-        return await make_ctx(agent)
-
     async def complete_and_accept(_ctx, _result):
         return True
 
@@ -186,25 +184,23 @@ async def test_execute_decisions_freezes_and_runs_when_no_manifest_exists_yet(mo
     manager = _FakeManager()
     db = _FakeDb()
 
+    state = await make_execute_state(
+        db=db, sid="s", session={"id": "s"}, session_filter={"id": "s"},
+        files=[{"file_id": "f1", "kind": "dataset", "stored_path": str(src),
+                "subtype": "csv", "columns": ["name"]}],
+        decisions=[{"file_id": "f1", "column": "name", "action": "drop"}],
+        make_ctx=make_ctx, complete_and_accept=complete_and_accept,
+        manager=manager, on_phase=on_phase, close_last_phase=close_last_phase,
+        sentinel_report={"preview_status": "PASS"},
+        run_id=run_id, store=store,
+    )
     try:
-        await orchestrator.execute_decisions(
-            db=db, sid="s", session={"id": "s"}, session_filter={"id": "s"},
-            files=[{"file_id": "f1", "kind": "dataset", "stored_path": str(src),
-                    "subtype": "csv", "columns": ["name"]}],
-            decisions=[{"file_id": "f1", "column": "name", "action": "drop"}],
-            statute={}, praxis_methods={}, dictionary_by_column={},
-            make_ctx=make_ctx, make_child_ctx=make_child_ctx,
-            complete_and_accept=complete_and_accept,
-            manager=manager, on_phase=on_phase, close_last_phase=close_last_phase,
-            phase_timings={}, run_started=time.perf_counter(),
-            sentinel_report={"preview_status": "PASS"},
-            run_id=run_id, store=store,
-        )
+        await orchestrator._dispatch_execute_tail(state)
     except Exception:
-        # Downstream stages (Publish Guard, Auditor, Ledger, Herald) are
-        # not faked here -- only the manifest-gate-to-Executor boundary
-        # this test targets matters; a later-stage error is acceptable as
-        # long as Executor was actually reached and ran.
+        # Downstream stages (Publish Guard) are not faked here -- only
+        # the manifest-gate-to-Executor boundary this test targets
+        # matters; a later-stage error is acceptable as long as Executor
+        # was actually reached and ran.
         pass
 
     assert executor_calls == [1], "Executor must run once a fresh manifest is legitimately frozen"

@@ -1,5 +1,6 @@
 """End-to-end proof that `session_human_review`'s resume worker actually
-drives `orchestrator.execute_decisions` to completion -- the extraction
+drives the `_dispatch_execute_tail` combinator (step 6; formerly
+`orchestrator.execute_decisions`) to completion -- the extraction
 Phase 4 step 4 introduced (deleting `_run_tail` in favor of the same
 shared tail a fresh run uses). Every other `test_human_review_invariant.py`
 test only exercises the synchronous decision-resolution half of the route;
@@ -125,7 +126,7 @@ def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> str:
 
 
 @pytest.mark.asyncio
-async def test_session_human_review_resume_worker_runs_execute_decisions_to_completion(tmp_path, monkeypatch):
+async def test_session_human_review_resume_worker_runs_dispatch_execute_tail_to_completion(tmp_path, monkeypatch):
     import server as srv
     from phi_core.agents import orchestrator
     from phi_core.control.records import WorkItem
@@ -185,6 +186,10 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
         def __init__(self, ctx=None, *_a, **_kw):
             self._ctx = ctx
 
+        async def preview(self, decisions, statute=None, instrument=None, files=None,
+                           parent_id=None, deterministic_only=False):
+            return {"preview_status": "PASS", "verdict": "approved", "issues": [], "findings": []}
+
         async def run(self, decisions, operator_result, exports, omit_by_file=None):
             result = {"exports": exports, "findings": []}
             await _complete(self._ctx, result)
@@ -210,10 +215,10 @@ async def test_session_human_review_resume_worker_runs_execute_decisions_to_comp
     work_item = WorkItem.model_validate(db["work_items"].docs[0])
     await srv._handle_pipeline_resume(MongoControlStore(db), work_item)
 
-    # The final state proves the shared `execute_decisions` tail actually
+    # The final state proves the shared execute-tail dispatch actually
     # ran: status reflects a clean run with no columns still pending, and
     # the resume-specific bookkeeping (`session_review`, `pending_review`,
-    # `human_review_required`) that only `execute_decisions`'s
+    # `human_review_required`) that only `_dispatch_package`'s
     # `extra_completion_fields` merge produces is present. Phase 17-B:
     # Ledger/Herald no longer run as part of this tail (opt-in post-run
     # report instead), so their outputs are no longer asserted here.
@@ -233,7 +238,8 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
     column via `omit_by_file`), but the final status must be
     `partially_complete`, not `complete` -- exactly the property that
     made `_run_tail` a separate implementation from the fresh path before
-    this extraction shared `omit_by_file` through `execute_decisions`."""
+    this extraction shared `omit_by_file` through the execute-tail
+    dispatch (formerly `execute_decisions`)."""
     import server as srv
     from phi_core.agents import orchestrator
     from phi_core.control.records import WorkItem
@@ -295,6 +301,10 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
     class FakeReviewer:
         def __init__(self, ctx=None, *_a, **_kw):
             self._ctx = ctx
+
+        async def preview(self, decisions, statute=None, instrument=None, files=None,
+                           parent_id=None, deterministic_only=False):
+            return {"preview_status": "PASS", "verdict": "approved", "issues": [], "findings": []}
 
         async def run(self, decisions, operator_result, exports, omit_by_file=None):
             result = {"exports": exports, "findings": []}

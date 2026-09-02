@@ -931,6 +931,9 @@ async def test_human_review_resume_persists_and_exposes_phase_timings(monkeypatc
         def __init__(self, ctx=None, *_a, **_kwargs):
             self._ctx = ctx
 
+        async def preview(self, decisions, **_kwargs):
+            return {"preview_status": "PASS", "verdict": "approved", "issues": [], "findings": []}
+
         async def run(self, exports, **_kwargs):
             result = {"exports": exports, "findings": []}
             await _complete(self._ctx, result)

@@ -48,6 +48,7 @@ from phi_core.control.records import (
 from phi_core.control.store import ControlStore
 
 if TYPE_CHECKING:
+    from phi_core.control.records import VerifiedClassificationManifest
     from phi_core.control.superorchestrator import SuperOrchestrator
 
 from phi_core.control.deterministic_verifier import DeterministicVerifier
@@ -195,49 +196,22 @@ async def _escalate_to_human_review(
             "manager_report": report}
 
 
-async def execute_decisions(
-    *,
-    db: AsyncIOMotorDatabase,
-    sid: str,
-    session: dict[str, Any],
-    session_filter: dict[str, Any],
-    files: list[dict[str, Any]],
-    decisions: list[dict[str, Any]],
-    statute: dict[str, Any],
-    praxis_methods: dict[str, Any],
-    dictionary_by_column: dict[str, str],
-    make_ctx: Callable[[str], Awaitable[AgentContext]],
-    make_child_ctx: Callable[[str, str], Awaitable[AgentContext]],
-    complete_and_accept: Callable[[AgentContext, dict[str, Any]], Awaitable[bool]],
-    manager: ExecutionHealthSupervisor,
-    on_phase: PhaseCb,
-    close_last_phase: Callable[[], Awaitable[None]],
-    phase_timings: dict[str, dict[str, float]],
-    run_started: float,
-    omit_by_file: dict[str, set[str]] | None = None,
-    sentinel_report: dict[str, Any] | None = None,
-    extra_completion_fields: dict[str, Any] | None = None,
-    extra_result_fields: dict[str, Any] | None = None,
-    run_id: str = "",
-    store: "ControlStore | None" = None,
-) -> dict[str, Any]:
-    """The D9 ``execute`` node onward -- Executor, Operator, Reviewer,
-    Reviewer Final, Publish Guard, and the terminal completion write.
-    Scout/Ledger/Herald are no longer part of this path (Phase 17-B: opt-in
-    post-run report, see ``outward.run_post_run_report``).
+async def _dispatch_execute(state: _PipelineDriverState) -> "str | dict[str, Any]":
+    """The ``execute`` node (step 6, first third of the retired
+    ``execute_decisions`` monolith): manifest freeze plus Executor.
 
-    Reached identically whether ``gate_decisions`` transitioned here
-    directly (``proceed``: a fresh run with no ``human_review`` decisions
-    left) or via ``human_review_decisions`` (``resolved``: a resume,
-    possibly with some columns still deferred through ``omit_by_file``).
+    Returns the bare string ``"ok"`` to hand off to
+    ``_dispatch_verify_output`` (chained in-process by
+    ``_dispatch_execute_tail`` below, not through ``advance()`` --
+    ``verify_output``/``package`` are the FINAL, post-step-8/9-12
+    architecture's node names; see progress ledger Ruling 12), or a
+    terminal escalation dict on ``crashed`` (Executor raised) /
+    ``blocked`` (the manifest-freeze gate refused).
     """
-    async def require_accepted(ctx: AgentContext, result: dict[str, Any], agent: str) -> None:
-        if not await complete_and_accept(ctx, result):
-            raise ResultAcceptanceError(f"{agent} result was not accepted")
-
-    await on_phase("executor", {"decision_count": len(decisions)})
+    decisions = state.approved_decisions
+    await state.on_phase("executor", {"decision_count": len(decisions)})
     manifest = None
-    if store is not None and run_id:
+    if state.control_store is not None and state.effective_run_id:
         from phi_core.control.manifest import (
             ManifestFreezeRefused,
             ManifestInvalidated,
@@ -250,17 +224,17 @@ async def execute_decisions(
 
         unresolved_items = sum(1 for d in decisions if d.get("action") == "human_review")
         reviewer_preview_status = (
-            sentinel_report.get("preview_status") if isinstance(sentinel_report, dict) else None
+            state.sentinel_report.get("preview_status") if isinstance(state.sentinel_report, dict) else None
         )
         try:
             manifest = await ensure_frozen_manifest(
-                store=store,
-                orchestrator=SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None))),
-                run_id=run_id, artifact_id=manifest_artifact_id(run_id),
-                source_artifact_versions={f["file_id"]: 0 for f in files if f.get("file_id")},
+                store=state.control_store,
+                orchestrator=SuperOrchestrator(state.control_store, TaskService(state.control_store, CapabilityPolicy(None))),
+                run_id=state.effective_run_id, artifact_id=manifest_artifact_id(state.effective_run_id),
+                source_artifact_versions={f["file_id"]: 0 for f in state.files if f.get("file_id")},
                 decision_refs=[f"{d.get('file_id', '')}:{d.get('column', '')}" for d in decisions],
                 evidence_refs=[],
-                preview_review_id=str((sentinel_report or {}).get("finding_id", "")),
+                preview_review_id=str((state.sentinel_report or {}).get("finding_id", "")),
                 human_review_refs=[],
                 judge_complete=True,
                 reviewer_preview_status=reviewer_preview_status,
@@ -274,44 +248,74 @@ async def execute_decisions(
             # escalation route -- there is exactly one path a run takes
             # to 'awaiting_human_review' (D10), and inventing a second
             # one for this case would fork that invariant for no reason.
-            await manager._log("manifest.freeze_refused", "info", {"detail": str(exc)})
+            await state.manager._log("manifest.freeze_refused", "info", {"detail": str(exc)})
             return await _escalate_to_human_review(
-                db=db, session_filter=session_filter, reasons=["manifest_freeze_refused"],
+                db=state.db, session_filter=state.session_filter, reasons=["manifest_freeze_refused"],
                 reasons_plain=plain_human_review_reasons(["manifest_freeze_refused"]),
-                close_last_phase=close_last_phase, phase_timings=phase_timings,
-                run_elapsed_s=time.perf_counter() - run_started,
-                approved_decisions=decisions, sentinel_report=sentinel_report,
-                manager=manager, store=store, run_id=run_id, node="human_review_decisions")
+                close_last_phase=state.close_last_phase, phase_timings=state.phase_timings,
+                run_elapsed_s=time.perf_counter() - state.run_started,
+                approved_decisions=decisions, sentinel_report=state.sentinel_report,
+                manager=state.manager, store=state.control_store, run_id=state.effective_run_id,
+                node="human_review_decisions")
 
     try:
-        executor_ctx = await make_ctx("Executor")
+        executor_ctx = await state.make_ctx("Executor")
         exec_out = await Executor(executor_ctx).run(
-            files=files, decisions=decisions, omit_by_file=omit_by_file,
-            manifest=manifest, store=store)
-        await require_accepted(executor_ctx, exec_out, "Executor")
+            files=state.files, decisions=decisions, omit_by_file=state.omit_by_file,
+            manifest=manifest, store=state.control_store)
+        await state.require_accepted(executor_ctx, exec_out, "Executor")
     except Exception as exc:
         # Executor is deterministic and irreversible (writes exports to disk);
         # a crash here must never be papered over by an LLM's advice.
         # consult() fails open by design and is never a safety gate, so the
         # escalation itself is unconditional, fixed code -- see manager.py.
-        await manager._log("executor.crashed", "info",
+        await state.manager._log("executor.crashed", "info",
                            {"error_kind": f"exception:{type(exc).__name__}"})
         return await _escalate_to_human_review(
-            db=db, session_filter=session_filter, reasons=["executor_crashed"],
+            db=state.db, session_filter=state.session_filter, reasons=["executor_crashed"],
             reasons_plain=plain_human_review_reasons(["executor_crashed"]),
-            close_last_phase=close_last_phase, phase_timings=phase_timings,
-            run_elapsed_s=time.perf_counter() - run_started,
-            approved_decisions=decisions, sentinel_report=sentinel_report,
-            manager=manager, store=store, run_id=run_id, node="human_review_decisions")
+            close_last_phase=state.close_last_phase, phase_timings=state.phase_timings,
+            run_elapsed_s=time.perf_counter() - state.run_started,
+            approved_decisions=decisions, sentinel_report=state.sentinel_report,
+            manager=state.manager, store=state.control_store, run_id=state.effective_run_id,
+            node="human_review_decisions")
 
     # Reversal key: the mandatory second deliverable (PHI-handled output
     # plus the key to reverse it), distinct from the optional publishing
     # stack below. Persisted now, separate from `exports`, never bundled.
     if exec_out.get("reversal_key_blob"):
-        await db.sessions.update_one(session_filter, {"$set": {
+        await state.db.sessions.update_one(state.session_filter, {"$set": {
             "reversal_key_blob": exec_out["reversal_key_blob"],
             "reversal_key_created_at": datetime.now(timezone.utc).isoformat(),
         }})
+
+    state.manifest = manifest
+    state.executor_ctx = executor_ctx
+    state.exec_out = exec_out
+    return "ok"
+
+
+async def _dispatch_verify_output(state: _PipelineDriverState) -> "str | dict[str, Any]":
+    """The (pre-step-8) ``verify_output`` stage (step 6, second third of
+    the retired ``execute_decisions`` monolith, chained in-process by
+    ``_dispatch_execute_tail`` -- see ``_dispatch_execute``'s docstring
+    for why this is not yet its own ``advance()``-routed node):
+    DeterministicVerifier (Operator), Reviewer's coverage audit, the
+    Manager advisory checkpoint, Reviewer Final, and Publish Guard.
+
+    Returns ``"ok"`` on success (every check clear; ``_dispatch_package``
+    still applies its own ``partially_complete`` rule for deferred
+    columns), or a terminal/escalation dict on ``leak_detected``
+    (Publish Guard found residual PHI -- genuinely terminal, not an
+    escalation), ``corrections_needed`` (the Manager's advisory coverage
+    checkpoint asked for human eyes), or ``failed`` (Reviewer Final FAIL,
+    routed through the existing rewind mechanism).
+    """
+    decisions = state.approved_decisions
+    exec_out = state.exec_out
+    manifest = state.manifest
+    executor_ctx = state.executor_ctx
+    omit_by_file = state.omit_by_file
 
     # DeterministicVerifier (docs #54): deterministic self-verification of
     # what Executor wrote, one stage before Publish Guard, mirroring the
@@ -325,21 +329,21 @@ async def execute_decisions(
     # boundary Executor itself already opted into for this run (`None`
     # for every pre-existing unit test's make_ctx-built context, exactly
     # as before).
-    await on_phase("operator", {"decision_count": len(decisions)})
+    await state.on_phase("operator", {"decision_count": len(decisions)})
     try:
         op_out = await DeterministicVerifier().run(
-            files=files, decisions=decisions, exports=exec_out["exports"],
+            files=state.files, decisions=decisions, exports=exec_out["exports"],
             omit_by_file=omit_by_file, sandbox=executor_ctx.sandbox)
     except Exception as exc:
         # Fail open into the existing failed-file machinery: a file the
         # verifier cannot verify is dropped from exports exactly like an
         # unreadable file already is, rather than trusting it or
         # inventing a new path.
-        await manager._log("operator.crashed", "info",
+        await state.manager._log("operator.crashed", "info",
                            {"error_kind": f"exception:{type(exc).__name__}"})
         op_out = {"failed_file_ids": list(exec_out["exports"].keys()), "verdicts": []}
     verification_result = None
-    if manifest is not None and store is not None:
+    if manifest is not None and state.control_store is not None:
         # docs #54/Phase 9 item 5: migrate Operator's useful deterministic
         # verification into a governed VerificationResult rather than
         # letting it live only as an ephemeral dict Reviewer's coverage
@@ -350,11 +354,11 @@ async def execute_decisions(
         from phi_core.control.verification import build_verification_result, record_verification_result
 
         verification_result = build_verification_result(
-            run_id=run_id, task_id=f"execution:{manifest.manifest_id}", attempt_id="",
+            run_id=state.effective_run_id, task_id=f"execution:{manifest.manifest_id}", attempt_id="",
             manifest_id=manifest.manifest_id, manifest_version=str(manifest.schema_version),
             input_artifact_version=0, output_artifact_version=0, operator_result=op_out,
         )
-        await record_verification_result(store, verification_result)
+        await record_verification_result(state.control_store, verification_result)
     # Operator's own `failed_file_ids` only covers a file it could not read
     # or that never made it into `exports` at all (see operator.py). A
     # shape-check or reverse-completeness failure surfaces as a per-column
@@ -371,53 +375,42 @@ async def execute_decisions(
     # filtered exports become canonical for every remaining step below,
     # starting with Publish Guard.
     try:
-        reviewer_ctx = await make_ctx("Reviewer")
+        reviewer_ctx = await state.make_ctx("Reviewer")
         rv_out = await Reviewer(reviewer_ctx).run(
             decisions=decisions,
             operator_result={"failed_file_ids": op_failed_ids, "verdicts": op_out["verdicts"]},
             exports=exports,
             omit_by_file=omit_by_file,
         )
-        await require_accepted(reviewer_ctx, rv_out, "Reviewer")
+        await state.require_accepted(reviewer_ctx, rv_out, "Reviewer")
     except Exception as exc:
         # Same fail-open shape as Operator above: an unverifiable file is
         # dropped from exports, never trusted.
-        await manager._log("reviewer.crashed", "info",
+        await state.manager._log("reviewer.crashed", "info",
                            {"error_kind": f"exception:{type(exc).__name__}"})
         rv_out = {"exports": {}, "findings": []}
     reviewer_blocked_ids = sorted(set(exports) - set(rv_out["exports"]))
     exports = rv_out["exports"]
-    # A run with any column still deferred via `omit_by_file` (a resume
-    # that left some columns pending) can never be "complete" -- a fresh
-    # run's `omit_by_file` is always empty, since `gate_decisions` never
-    # reaches this function while a `human_review` decision is present,
-    # so this reduces to the original `op_failed_ids or reviewer_blocked_ids`
-    # check there. `decisions` itself is deliberately not consulted here:
-    # a resume caller pre-filters `decisions` to exclude every still-
-    # pending column before calling this function (its `omit_by_file` is
-    # the authoritative record of what remains pending).
-    final_status = ("partially_complete" if (op_failed_ids or reviewer_blocked_ids or omit_by_file)
-                    else "complete")
 
     # Advisory checkpoint: a Manager consult here is never a safety gate
     # (Publish Guard below remains the deterministic boundary regardless of
     # its advice); it only lets a systemically bad run reach a human sooner
     # than Publish Guard's blunter "blocked" report would.
-    coverage_advice = await manager.consult(
+    coverage_advice = await state.manager.consult(
         agent_name="Reviewer", phase="reviewer",
         signal={"operator_failed_count": len(op_failed_ids),
                 "reviewer_blocked_count": len(reviewer_blocked_ids),
                 "decision_count": len(decisions)})
     if coverage_advice.action == "escalate_human_review":
-        await db.sessions.update_one(session_filter, {"$set": {
+        await state.db.sessions.update_one(state.session_filter, {"$set": {
             "reviewer_findings": rv_out["findings"], "operator_failures": op_failed_ids}})
         return await _escalate_to_human_review(
-            db=db, session_filter=session_filter, reasons=["manager_advisory_coverage_escalation"],
+            db=state.db, session_filter=state.session_filter, reasons=["manager_advisory_coverage_escalation"],
             reasons_plain=plain_human_review_reasons(["manager_advisory_coverage_escalation"]),
-            close_last_phase=close_last_phase, phase_timings=phase_timings,
-            run_elapsed_s=time.perf_counter() - run_started,
-            approved_decisions=decisions, sentinel_report=sentinel_report,
-            manager=manager, store=store, run_id=run_id, node="human_review_audit")
+            close_last_phase=state.close_last_phase, phase_timings=state.phase_timings,
+            run_elapsed_s=time.perf_counter() - state.run_started,
+            approved_decisions=decisions, sentinel_report=state.sentinel_report,
+            manager=state.manager, store=state.control_store, run_id=state.effective_run_id, node="human_review_audit")
 
     # Reviewer Final (docs #55, Phase 10): the real completeness/
     # authorization/privacy/utility gate for this attempt, distinct from
@@ -438,20 +431,20 @@ async def execute_decisions(
     # `human_review_refs=[]` above -- forward-compatible, not a gap this
     # function invents.
     reviewer_final: dict[str, Any] | None = None
-    if manifest is not None and store is not None and verification_result is not None:
+    if manifest is not None and state.control_store is not None and verification_result is not None:
         try:
-            execution_results = await store.find_many(
+            execution_results = await state.control_store.find_many(
                 "execution_results", {"task_id": f"execution:{manifest.manifest_id}"})
             execution_result = (
                 ExecutionResult.model_validate(execution_results[-1]) if execution_results
-                else ExecutionResult(task_id=f"execution:{manifest.manifest_id}", run_id=run_id,
+                else ExecutionResult(task_id=f"execution:{manifest.manifest_id}", run_id=state.effective_run_id,
                                      manifest_id=manifest.manifest_id, success=True)
             )
             # Reviewer Final audits what is ACTUALLY being shipped, not
             # the raw pre-filter pass: a per-file DeterministicVerifier
             # failure that `op_failed_ids`/`reviewer_blocked_ids` already
             # excluded from `exports` is this run's existing, legitimate
-            # `partially_complete` degradation path -- it must not ALSO
+            # `blocked` degradation path (Ruling 13) -- it must not ALSO
             # trip a second, competing FAIL/rewind escalation here for
             # the exact same already-handled fact. `final_verification_
             # result`/`final_safe_output_metadata` are scoped to the
@@ -460,7 +453,7 @@ async def execute_decisions(
             # the full, unfiltered record, unchanged.
             surviving_verdicts = [v for v in op_out["verdicts"] if v.get("file_id") in exports]
             final_verification_result = build_verification_result(
-                run_id=run_id, task_id=f"execution:{manifest.manifest_id}:final", attempt_id="",
+                run_id=state.effective_run_id, task_id=f"execution:{manifest.manifest_id}:final", attempt_id="",
                 manifest_id=manifest.manifest_id, manifest_version=str(manifest.schema_version),
                 input_artifact_version=0, output_artifact_version=0,
                 operator_result={
@@ -480,7 +473,7 @@ async def execute_decisions(
                 verification_result=final_verification_result, decisions=decisions,
                 human_decisions=[], safe_output_metadata=final_safe_output_metadata,
             )
-            await on_phase("reviewer_final", {"verdict": reviewer_final["verdict"]})
+            await state.on_phase("reviewer_final", {"verdict": reviewer_final["verdict"]})
         except Exception as exc:
             # Same fail-open shape as Operator/Reviewer coverage-audit
             # above: Reviewer Final is an additive audit gate, never the
@@ -488,7 +481,7 @@ async def execute_decisions(
             # of what happens here) -- a crash here (e.g. a test double
             # standing in for a role that predates this method) must
             # never take down an otherwise-successful run.
-            await manager._log("reviewer_final.crashed", "info",
+            await state.manager._log("reviewer_final.crashed", "info",
                                {"error_kind": f"exception:{type(exc).__name__}"})
             reviewer_final = None
 
@@ -506,51 +499,53 @@ async def execute_decisions(
         # `finalize()` crash (which would wrongly let a real FAIL fall
         # through to Publish Guard as if nothing happened).
         #
-        # Disclosed structural limitation: `execute_decisions` is
-        # dispatched as ONE opaque unit from `run_pipeline`'s own coarse
-        # D9 registry (see `_dispatch_execute`'s docstring) -- the
-        # durable `WorkflowRun.node` is still `"execute"` for this
-        # call's entire duration, so a resolved target of `"execute"`
-        # itself (EXECUTION_ERROR) or `"human_review_audit"` (the
-        # default post-execution UNRESOLVED_UNCERTAINTY target, later
-        # than `"execute"` in D9's checkpoint order) can never be
-        # strictly earlier than the run's current node -- `rewind()`
-        # correctly refuses both with `WorkflowError`, caught below
-        # rather than propagated. This is the one disclosed case rewind
-        # "genuinely cannot apply" today: the actual re-execution loop
-        # that would let a later phase resume a run from an arbitrary
-        # rewound checkpoint is explicitly out of this phase's scope
-        # (section 56: "do not implement").
+        # Disclosed structural limitation: `_dispatch_execute_tail`
+        # (step 6, formerly `execute_decisions`) is dispatched as ONE
+        # opaque unit from `run_pipeline`'s own coarse D9 registry (see
+        # its docstring) -- the durable `WorkflowRun.node` is still
+        # `"execute"` for this call's entire duration, so a resolved
+        # target of `"execute"` itself (EXECUTION_ERROR) or
+        # `"human_review_audit"` (the default post-execution
+        # UNRESOLVED_UNCERTAINTY target, later than `"execute"` in D9's
+        # checkpoint order) can never be strictly earlier than the run's
+        # current node -- `rewind()` correctly refuses both with
+        # `WorkflowError`, caught below rather than propagated. This is
+        # the one disclosed case rewind "genuinely cannot apply" today:
+        # the actual re-execution loop that would let a later phase
+        # resume a run from an arbitrary rewound checkpoint is explicitly
+        # out of this phase's scope (section 56: "do not implement").
+        from phi_core.control.policy import CapabilityPolicy
         from phi_core.control.rewind import RewindRouter, record_rewind_decision
         from phi_core.control.superorchestrator import SuperOrchestrator as _SuperOrchestratorForRewind
+        from phi_core.control.tasks import TaskService
         from phi_core.control.workflow import WorkflowError as _WorkflowError
 
-        rewind_orchestrator = _SuperOrchestratorForRewind(store, TaskService(store, CapabilityPolicy(None)))
+        rewind_orchestrator = _SuperOrchestratorForRewind(state.control_store, TaskService(state.control_store, CapabilityPolicy(None)))
         escalation_node = "human_review_audit"
         rewind_reasons = ["reviewer_final_fail"]
         try:
             decision, _rewound_run = await RewindRouter.route(
-                super_orchestrator=rewind_orchestrator, run_id=run_id,
+                super_orchestrator=rewind_orchestrator, run_id=state.effective_run_id,
                 signal=reviewer_final["signal"],
             )
-            await record_rewind_decision(store, run_id=run_id, decision=decision)
-            await on_phase("rewind", decision.to_dict())
+            await record_rewind_decision(state.control_store, run_id=state.effective_run_id, decision=decision)
+            await state.on_phase("rewind", decision.to_dict())
             escalation_node = decision.to_node
             rewind_reasons = [f"reviewer_final_fail_rewind:{decision.category}"]
         except _WorkflowError as exc:
-            await manager._log("reviewer_final.rewind_structurally_refused", "info", {"detail": str(exc)})
+            await state.manager._log("reviewer_final.rewind_structurally_refused", "info", {"detail": str(exc)})
             rewind_reasons = ["reviewer_final_fail_rewind_unavailable"]
-        await db.sessions.update_one(session_filter, {"$set": {
+        await state.db.sessions.update_one(state.session_filter, {"$set": {
             "reviewer_final": reviewer_final, "reviewer_findings": rv_out["findings"],
             "operator_failures": op_failed_ids,
         }})
         return await _escalate_to_human_review(
-            db=db, session_filter=session_filter, reasons=rewind_reasons,
+            db=state.db, session_filter=state.session_filter, reasons=rewind_reasons,
             reasons_plain=plain_human_review_reasons(rewind_reasons),
-            close_last_phase=close_last_phase, phase_timings=phase_timings,
-            run_elapsed_s=time.perf_counter() - run_started,
-            approved_decisions=decisions, sentinel_report=sentinel_report,
-            manager=manager, store=store, run_id=run_id, node=escalation_node)
+            close_last_phase=state.close_last_phase, phase_timings=state.phase_timings,
+            run_elapsed_s=time.perf_counter() - state.run_started,
+            approved_decisions=decisions, sentinel_report=state.sentinel_report,
+            manager=state.manager, store=state.control_store, run_id=state.effective_run_id, node=escalation_node)
 
     # Publish Guard: deterministic last-mile PHI scan on emitted exports.
     # GOAL invariant: exports are only 'ready to share publicly' after this
@@ -563,66 +558,116 @@ async def execute_decisions(
         # existing "can't certify clean" behavior, no special-casing
         # needed here.
         guard_report = _scan_all_exports(
-            exports, decisions=decisions, jurisdiction=session.get("jurisdiction", "us")
+            exports, decisions=decisions, jurisdiction=state.session.get("jurisdiction", "us")
         ).to_dict()
     else:
         # Executor itself produced nothing exportable this round (e.g.
         # every column of the only dataset is still deferred). This is a
         # legitimate empty-so-far state, not a leak.
         guard_report = {"status": "clean", "results": [], "scanned": 0, "blocked": 0}
-    if store is not None and run_id and guard_report.get("results"):
+    if state.control_store is not None and state.effective_run_id and guard_report.get("results"):
         from phi_core.control.artifacts import ArtifactService, register_guard_rejections
         await register_guard_rejections(
-            ArtifactService(store, session_id=sid, run_id=run_id), guard_report=guard_report,
+            ArtifactService(state.control_store, session_id=state.sid, run_id=state.effective_run_id),
+            guard_report=guard_report,
         )
-    await on_phase("publish_guard", {"status": guard_report["status"],
+    await state.on_phase("publish_guard", {"status": guard_report["status"],
                                      "scanned": guard_report["scanned"],
                                      "blocked": guard_report["blocked"]})
 
     if guard_report["status"] != "clean":
-        await close_last_phase()
-        manager_report = await manager.close_run("blocked")
-        await db.sessions.update_one(
-            session_filter,
+        await state.close_last_phase()
+        manager_report = await state.manager.close_run("blocked")
+        await state.db.sessions.update_one(
+            state.session_filter,
             {"$set": {
                 "status": "blocked",
                 "guard_report": guard_report,
                 "export_paths": exports,
                 "agent_decisions": decisions,
-                "phase_timings": phase_timings,
-                "run_elapsed_s": round(time.perf_counter() - run_started, 3),
+                "phase_timings": state.phase_timings,
+                "run_elapsed_s": round(time.perf_counter() - state.run_started, 3),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "manager_report": manager_report,
                 "reviewer_findings": rv_out["findings"],
                 "operator_failures": op_failed_ids,
             }},
         )
-        cleanup_session_unpacked(sid)
+        cleanup_session_unpacked(state.sid)
         return {"status": "blocked", "guard": guard_report,
-                "decisions": decisions, "phase_timings": phase_timings}
+                "decisions": decisions, "phase_timings": state.phase_timings}
 
-    await _check_cancel(db, sid, on_phase)
+    state.exports = exports
+    state.guard_report = guard_report
+    state.op_failed_ids = op_failed_ids
+    state.reviewer_blocked_ids = reviewer_blocked_ids
+    state.rv_out = rv_out
+    state.reviewer_final = reviewer_final
+    return "ok"
 
-    await close_last_phase()
-    manager_report = await manager.close_run(final_status)
+
+async def _dispatch_package(state: _PipelineDriverState) -> dict[str, Any]:
+    """The (pre-step-8) ``package`` stage (step 6, final third of the
+    retired ``execute_decisions`` monolith): the terminal completion
+    write. Always returns a dict -- this stage genuinely has no
+    "hand off to the next stage" outcome; ``execute``/``verify_output``
+    already own every dynamic escalation path.
+
+    ``final_status`` (Ruling 13, user-confirmed): ``blocked`` when
+    Operator or Reviewer could not verify a column that WAS attempted
+    (``op_failed_ids``/``reviewer_blocked_ids`` -- a genuine verification
+    failure, checked here rather than partially_complete since a
+    "missing or unverified column decision" is never partially_complete
+    per plan step 6); ``partially_complete`` when every attempted column
+    verified clean but at least one column was deliberately deferred by
+    a human (``omit_by_file`` -- never attempted, not a verification
+    failure, so it does not compete with the `blocked` rule above);
+    ``complete`` otherwise.
+    """
+    decisions = state.approved_decisions
+    exports = state.exports
+    guard_report = state.guard_report
+    op_failed_ids = state.op_failed_ids
+    reviewer_blocked_ids = state.reviewer_blocked_ids
+    rv_out = state.rv_out
+    reviewer_final = state.reviewer_final
+
+    await _check_cancel(state.db, state.sid, state.on_phase)
+
+    final_status = (
+        "blocked" if (op_failed_ids or reviewer_blocked_ids)
+        else "partially_complete" if state.omit_by_file
+        else "complete"
+    )
+
+    await state.close_last_phase()
+    manager_report = await state.manager.close_run(final_status)
+    extra_completion_fields = {"advisory_issues": state.advisory_issues, "iteration_cap": state.iteration_cap}
+    extra_result_fields = {"advisory_issues": state.advisory_issues, "iteration_cap": state.iteration_cap}
+    if state.resume_from_node == "human_review_decisions":
+        extra_completion_fields.update({
+            "session_review": state.session_review_history,
+            "pending_review": state.pending_review,
+            "human_review_required": bool(state.pending_review),
+        })
     result = {
         "status": final_status,
         "decisions": decisions,
         "exports": exports,
         "guard": guard_report,
-        "phase_timings": phase_timings,
-        "run_elapsed_s": round(time.perf_counter() - run_started, 3),
+        "phase_timings": state.phase_timings,
+        "run_elapsed_s": round(time.perf_counter() - state.run_started, 3),
         "manager_report": manager_report,
         "operator_failures": op_failed_ids,
         "reviewer_findings": rv_out["findings"],
         "reviewer_final": reviewer_final,
     }
-    result.update(extra_result_fields or {})
+    result.update(extra_result_fields)
     completion_set = {
         "guard_report": guard_report,
         "export_paths": exports,
         "status": final_status,
-        "phase_timings": phase_timings,
+        "phase_timings": state.phase_timings,
         "run_elapsed_s": result["run_elapsed_s"],
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "manager_report": manager_report,
@@ -630,10 +675,10 @@ async def execute_decisions(
         "reviewer_findings": rv_out["findings"],
         "reviewer_final": reviewer_final,
     }
-    completion_set.update(extra_completion_fields or {})
-    await db.sessions.update_one(session_filter, {"$set": completion_set})
+    completion_set.update(extra_completion_fields)
+    await state.db.sessions.update_one(state.session_filter, {"$set": completion_set})
     if final_status == "complete":
-        cleanup_session_unpacked(sid)
+        cleanup_session_unpacked(state.sid)
     return result
 
 
@@ -655,7 +700,7 @@ class _PipelineDriverState:
         self, *, session: dict[str, Any], db: AsyncIOMotorDatabase, llm_cfg: LlmConfig,
         emit: Callable[[AgentMessage], Awaitable[None]], on_phase: PhaseCb,
         run_id: str | None, control_store: "ControlStore | None", root_task_id: str | None,
-        sid: str, effective_run_id: str,
+        sid: str, effective_run_id: str, resume_from_node: str | None = None,
     ) -> None:
         self.session = session
         self.db = db
@@ -711,6 +756,28 @@ class _PipelineDriverState:
         self.sentinel_report: dict[str, Any] = {}
         self.dictionary_by_column: dict[str, str] = {}
         self.reasons: list[str] = []
+        # Step 6: set only when this run_pipeline() call is resuming a
+        # parked node (server.py's human-review-resume path) rather than
+        # advancing forward within one continuous call. Dispatch
+        # handlers that behave differently on resume (currently
+        # _dispatch_human_review_decisions) branch on this.
+        self.resume_from_node: str | None = resume_from_node
+        self.omit_by_file: dict[str, set[str]] = {}
+        self.pending_review: list[dict[str, Any]] = []
+        self.session_review_history: list[dict[str, Any]] = []
+        # Step 6: cross-stage fields threaded through the execute-tail
+        # split (_dispatch_execute -> _dispatch_verify_output ->
+        # _dispatch_package), replacing what the retired monolithic
+        # `execute_decisions` held as plain locals across the same span.
+        self.manifest: "VerifiedClassificationManifest | None" = None
+        self.executor_ctx: AgentContext | None = None
+        self.exec_out: dict[str, Any] = {}
+        self.exports: dict[str, str] = {}
+        self.guard_report: dict[str, Any] = {}
+        self.op_failed_ids: list[str] = []
+        self.reviewer_blocked_ids: list[str] = []
+        self.rv_out: dict[str, Any] = {}
+        self.reviewer_final: dict[str, Any] | None = None
 
 
 async def _noop_close_last_phase() -> None:
@@ -1029,28 +1096,16 @@ async def _dispatch_demand_driven_research(state: _PipelineDriverState, categori
 
 
 async def _dispatch_research(state: _PipelineDriverState) -> str:
-    """The ``research`` node: launches only the Lexicon/Schema/Instrument
-    specialist tasks (stashed on ``state`` for ``_dispatch_specialists``
-    to await). RegulationsExpert and PHIMethodsExpert no longer launch
-    here -- section 33 forbids an unconditional broad research call at
-    run start. See ``_dispatch_demand_driven_research`` for where and
-    when they now launch instead."""
-    await _prepare_pipeline_state(state)
-    await state.on_phase("specialists", {"agents": ["Lexicon", "Schema", "Instrument"]})
-
-    dataset_files, form_files, dict_files = state.dataset_files, state.form_files, state.dict_files
-    state.lexicon_ctx = await state.make_ctx("Lexicon") if dict_files else None
-    state.schema_ctx = await state.make_ctx("Schema") if dataset_files else None
-    state.instrument_ctx = await state.make_ctx("Instrument") if form_files else None
-    state.lexicon_agent = Lexicon(state.lexicon_ctx) if state.lexicon_ctx else None
-    state.schema_agent = Schema(state.schema_ctx) if state.schema_ctx else None
-    state.instrument_agent = Instrument(state.instrument_ctx) if state.instrument_ctx else None
-    state.lex_task = (state.lexicon_agent.run(dict_files=dict_files)
-                       if state.lexicon_agent else _empty({"columns": [], "notes": ""}))
-    state.schema_task = (state.schema_agent.run(dataset_files=dataset_files)
-                          if state.schema_agent else _empty({"columns": []}))
-    state.inst_task = (state.instrument_agent.run(form_files=form_files)
-                        if state.instrument_agent else _empty({"fields": []}))
+    """Step 6 fold: the pre-step-8 ``research`` node is now a no-op
+    pass-through. The Lexicon/Schema/Instrument launch it used to own
+    has moved into ``_dispatch_specialists`` below -- step 8 repurposes
+    the ``research`` node name for the demand-driven RegulationsExpert/
+    PHIMethodsExpert research step instead (see
+    ``_dispatch_demand_driven_research``), so nothing about *that*
+    later step belongs under this name any more. Kept only so the
+    pre-step-8 ``charter -> research -> specialists`` table hop still
+    dispatches to something; step 8 removes this node/handler entirely
+    once the table itself changes."""
     return "ok"
 
 
@@ -1062,13 +1117,12 @@ _SPECIALIST_DEGRADED_RESULT: dict[str, dict[str, Any]] = {
 
 
 async def _dispatch_specialists(state: _PipelineDriverState) -> "str | dict[str, Any]":
-    """The ``specialists`` node: await the Lexicon/Schema/Instrument
-    tasks ``_dispatch_research`` already launched, then assemble their
-    (possibly-degraded, see section 27 below) outputs into one
-    ``StudyKnowledgePackage`` (section 28) for ``_dispatch_decide`` to
-    hand Judge, instead of Judge reading three separate specialist
-    dicts.
-
+    """The ``specialists`` node: launches the Lexicon/Schema/Instrument
+    tasks (folded in from the now-retired pre-step-8 ``research`` node,
+    step 6), awaits them, then assembles their (possibly-degraded, see
+    section 27 below) outputs into one ``StudyKnowledgePackage``
+    (section 28) for ``_dispatch_decide`` to hand Judge, instead of
+    Judge reading three separate specialist dicts.
     Section 27 (failure isolation): ``return_exceptions=True`` on the
     gather means one specialist crashing never discards its siblings'
     already-successful results -- the pre-existing bare
@@ -1092,6 +1146,23 @@ async def _dispatch_specialists(state: _PipelineDriverState) -> "str | dict[str,
     second time; ``return_exceptions=True`` only changes how the
     already-failed task's exception propagates to this caller, not
     what already happened to the task before it was raised."""
+    await _prepare_pipeline_state(state)
+    await state.on_phase("specialists", {"agents": ["Lexicon", "Schema", "Instrument"]})
+
+    dataset_files, form_files, dict_files = state.dataset_files, state.form_files, state.dict_files
+    state.lexicon_ctx = await state.make_ctx("Lexicon") if dict_files else None
+    state.schema_ctx = await state.make_ctx("Schema") if dataset_files else None
+    state.instrument_ctx = await state.make_ctx("Instrument") if form_files else None
+    state.lexicon_agent = Lexicon(state.lexicon_ctx) if state.lexicon_ctx else None
+    state.schema_agent = Schema(state.schema_ctx) if state.schema_ctx else None
+    state.instrument_agent = Instrument(state.instrument_ctx) if state.instrument_ctx else None
+    state.lex_task = (state.lexicon_agent.run(dict_files=dict_files)
+                       if state.lexicon_agent else _empty({"columns": [], "notes": ""}))
+    state.schema_task = (state.schema_agent.run(dataset_files=dataset_files)
+                          if state.schema_agent else _empty({"columns": []}))
+    state.inst_task = (state.instrument_agent.run(form_files=form_files)
+                        if state.instrument_agent else _empty({"fields": []}))
+
     results = await asyncio.gather(
         state.lex_task, state.schema_task, state.inst_task, return_exceptions=True,
     )
@@ -1522,15 +1593,22 @@ async def _dispatch_gate_decisions(state: _PipelineDriverState) -> str:
     return "human_review_needed" if human_needed else "proceed"
 
 
-async def _dispatch_human_review_decisions(state: _PipelineDriverState) -> dict[str, Any]:
-    """The ``human_review_decisions`` node reached via
-    ``gate_decisions``'s ``"human_review_needed"`` outcome: persist and
-    pause. Resuming happens through a separate entry path
-    (``server.py``'s human-review-resume route calling
-    ``execute_decisions`` directly, not by continuing this same
-    ``run_pipeline`` invocation), so this handler always returns a
-    final dict -- there is no ``"resolved"`` outcome for this node to
-    report back into ``advance()`` from inside this call."""
+async def _dispatch_human_review_decisions(state: _PipelineDriverState) -> "str | dict[str, Any]":
+    """The ``human_review_decisions`` node, reached two ways (step 6):
+
+    Forward, from ``gate_decisions``'s ``"human_review_needed"`` outcome
+    within the SAME ``run_pipeline`` call: persist and pause (D10's
+    single path to ``awaiting_human_review``) -- returns a final dict,
+    since there is nothing yet to report back into ``advance()``.
+
+    Resume, via a NEW ``run_pipeline(resume_from_node=
+    "human_review_decisions")`` call once ``server.py``'s human-review
+    endpoint has already written the human's resolutions onto the
+    session document: delegates to ``_resume_human_review_decisions``,
+    which can genuinely report ``"resolved"`` back into the loop.
+    """
+    if state.resume_from_node == "human_review_decisions":
+        return await _resume_human_review_decisions(state)
     return await _escalate_to_human_review(
         db=state.db, session_filter=state.session_filter, reasons=state.reasons,
         reasons_plain=plain_human_review_reasons(state.reasons),
@@ -1541,34 +1619,93 @@ async def _dispatch_human_review_decisions(state: _PipelineDriverState) -> dict[
         node="human_review_decisions")
 
 
-async def _dispatch_execute(state: _PipelineDriverState) -> dict[str, Any]:
-    """The ``execute`` node onward: delegates to ``execute_decisions``,
-    which already covers -- by its own docstring -- "Executor, Operator,
-    Reviewer, Reviewer Final, Publish Guard, and the terminal completion
-    write" as one unit (Scout/Ledger/Herald are opt-in post-run, no longer
-    part of this node -- see ``outward.run_post_run_report``). This
-    registry entry's granularity matches that existing, natural function
-    boundary rather than re-decomposing it onto the state machine's finer
-    per-node vocabulary (verify_operator/verify_reviewer/publish_guard/
-    reviewer_final/human_review_audit/publish) -- none of that internal
-    sequencing is itself a governed agent handoff Wave 4b is asked to
-    arbitrate; it is deterministic verification chaining
-    ``execute_decisions`` already owns unchanged.
+async def _resume_human_review_decisions(state: _PipelineDriverState) -> "str | dict[str, Any]":
+    """Ports the pre-step-6 ``server.py::_handle_pipeline_resume``'s own
+    logic verbatim onto the shared driver state, so resuming re-enters
+    ``run_pipeline`` instead of calling ``execute_decisions`` directly
+    (step 6). docs #46: every human decision triggers mandatory
+    re-review -- a deterministic-only Reviewer Preview pass (no LLM
+    call) over the just-resolved decisions catches a resolution that
+    reintroduces an obvious hard-rule violation before Executor ever
+    runs. Populates the ``state`` fields ``_dispatch_execute`` needs
+    (``approved_decisions``/``omit_by_file``/``dictionary_by_column``/
+    ``pending_review``/``session_review_history``) rather than calling
+    ``execute_decisions`` itself -- that is ``advance()``'s job once
+    this returns ``"resolved"``.
     """
-    return await execute_decisions(
-        db=state.db, sid=state.sid, session=state.session, session_filter=state.session_filter,
-        files=state.files, decisions=state.approved_decisions,
-        statute=state.statute, praxis_methods=state.praxis_methods,
-        dictionary_by_column=state.dictionary_by_column,
-        make_ctx=state.make_ctx, make_child_ctx=state.make_child_ctx,
-        complete_and_accept=state.complete_and_accept,
-        manager=state.manager, on_phase=state.on_phase,
-        close_last_phase=state.close_last_phase, phase_timings=state.phase_timings,
-        run_started=state.run_started, sentinel_report=state.sentinel_report,
-        extra_completion_fields={"advisory_issues": state.advisory_issues, "iteration_cap": state.iteration_cap},
-        extra_result_fields={"advisory_issues": state.advisory_issues, "iteration_cap": state.iteration_cap},
-        run_id=state.effective_run_id, store=state.control_store,
+    await _prepare_pipeline_state(state)
+    session = state.session
+    decisions = session.get("agent_decisions") or []
+    pending_review = session.get("pending_review") or []
+    session_review_history = session.get("session_review") or []
+    dictionary_by_column = {
+        c.get("name"): c.get("description", "")
+        for c in (session.get("agent_specialists") or {}).get("lexicon", {}).get("columns", [])
+        if c.get("name")
+    }
+    resolved_decisions = [d for d in decisions if d.get("action") != "human_review"]
+    scrubbed_decisions = [scrub_decision(d) for d in resolved_decisions]
+    omit_by_file: dict[str, set[str]] = {}
+    for entry in pending_review:
+        omit_by_file.setdefault(entry["file_id"], set()).add(entry["column"])
+
+    rereview_ctx = await state.make_ctx("Reviewer")
+    rereview = await Reviewer(rereview_ctx).preview(
+        decisions=scrubbed_decisions, files=state.files, deterministic_only=True,
     )
+    if rereview.get("preview_status") == "HUMAN_REVIEW_REQUIRED":
+        reasons = ["reviewer_preview_required_after_human_decision"]
+        return await _escalate_to_human_review(
+            db=state.db, session_filter=state.session_filter, reasons=reasons,
+            reasons_plain=plain_human_review_reasons(reasons),
+            close_last_phase=state.close_last_phase, phase_timings=state.phase_timings,
+            run_elapsed_s=time.perf_counter() - state.run_started,
+            approved_decisions=decisions, sentinel_report=rereview,
+            manager=state.manager, store=state.control_store, run_id=state.effective_run_id,
+            node="human_review_decisions")
+    state.approved_decisions = scrubbed_decisions
+    state.omit_by_file = omit_by_file
+    state.dictionary_by_column = dictionary_by_column
+    state.pending_review = pending_review
+    state.session_review_history = session_review_history
+    return "resolved"
+
+
+async def _dispatch_execute_tail(state: _PipelineDriverState) -> dict[str, Any]:
+    """Registered under the ``"execute"`` node (step 6): chains
+    ``_dispatch_execute`` -> ``_dispatch_verify_output`` ->
+    ``_dispatch_package`` in-process via their own bare-string ``"ok"``
+    outcomes -- not through ``advance()``/``workflow_runs.node`` (see
+    ``_dispatch_execute``'s docstring and progress ledger Ruling 12 for
+    why ``verify_output``/``package`` are not yet their own durable
+    checkpoints). Any stage returning a dict short-circuits the chain
+    immediately -- a terminal result or a human-review escalation.
+
+    This registry entry's granularity matches the SAME natural function
+    boundary the retired ``execute_decisions`` monolith owned (Scout/
+    Ledger/Herald are opt-in post-run, no longer part of this node --
+    see ``outward.run_post_run_report``); step 6 only decomposes what
+    was previously one 440-line function into three narrowly-scoped,
+    independently unit-testable stages sharing one outcome contract.
+
+    ``omit_by_file`` is always threaded through now (step 6): empty for
+    a fresh run (``gate_decisions`` never reaches ``execute`` while any
+    column is still ``human_review``), populated with whatever columns
+    remain deferred for a resumed run
+    (``_resume_human_review_decisions`` sets it from the session's own
+    ``pending_review``). The resume-specific completion fields
+    (``session_review``/``pending_review``/``human_review_required``)
+    are merged in by ``_dispatch_package`` only on that same resumed
+    path, matching exactly what the now-retired
+    ``server.py::_handle_pipeline_resume`` used to pass.
+    """
+    step = await _dispatch_execute(state)
+    if isinstance(step, dict):
+        return step
+    step = await _dispatch_verify_output(state)
+    if isinstance(step, dict):
+        return step
+    return await _dispatch_package(state)
 
 
 _DEFAULT_DISPATCH_REGISTRY: "Mapping[str, DispatchFn]" = {
@@ -1577,7 +1714,7 @@ _DEFAULT_DISPATCH_REGISTRY: "Mapping[str, DispatchFn]" = {
     "decide": _dispatch_decide,
     "gate_decisions": _dispatch_gate_decisions,
     "human_review_decisions": _dispatch_human_review_decisions,
-    "execute": _dispatch_execute,
+    "execute": _dispatch_execute_tail,
 }
 
 
@@ -1593,6 +1730,7 @@ async def run_pipeline(
     *,
     dispatch_registry: "Mapping[str, DispatchFn] | None" = None,
     super_orchestrator: "SuperOrchestrator | None" = None,
+    resume_from_node: str | None = None,
 ) -> dict[str, Any]:
     """Thin driver (Wave 4b, docs #87): asks
     ``SuperOrchestrator.advance()`` for sequencing on every iteration and
@@ -1608,6 +1746,20 @@ async def run_pipeline(
     infrastructure required. Every existing positional/keyword caller is
     unaffected -- both new parameters are keyword-only and default to
     the real registry and a freshly constructed ``SuperOrchestrator``.
+
+    ``resume_from_node`` (step 6): set by a caller re-entering a parked
+    run (e.g. a human just answered a ``human_review_decisions``
+    request). The run's own stored node is already ``resume_from_node``
+    -- it was left there by the earlier escalation -- so seeding the
+    loop with a synthetic ``outcome="ok"`` and calling ``advance()``
+    would ask ``next_node`` to resolve a ``(resume_from_node, "ok")``
+    pair that was never declared, since a parked node's real outcomes
+    are things like ``resolved``/``approved``/``rejected``, never
+    ``ok``. Instead this recovers the run (flips ``awaiting_human_review``
+    back to ``running``, fails closed to ``RESUME_FAILSAFE_NODE`` on a
+    stale checkpoint version) and dispatches ``resume_from_node``
+    directly, feeding its real returned outcome into the same loop
+    every other node already uses.
     """
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.superorchestrator import SuperOrchestrator as _SuperOrchestrator
@@ -1627,13 +1779,36 @@ async def run_pipeline(
     state = _PipelineDriverState(
         session=session, db=db, llm_cfg=llm_cfg, emit=emit, on_phase=on_phase,
         run_id=run_id, control_store=control_store, root_task_id=root_task_id,
-        sid=sid, effective_run_id=effective_run_id,
+        sid=sid, effective_run_id=effective_run_id, resume_from_node=resume_from_node,
     )
 
-    outcome = "ok"  # charter (session admission) is satisfied by the caller
-                    # (server.py's session_handle route) before run_pipeline
-                    # is ever invoked -- this first outcome is what carries
-                    # the run past the "charter" node's own transition.
+    if resume_from_node is not None:
+        # workflow_runs tracking is not yet reliably wired into every path
+        # that can park a run "awaiting_human_review" (disclosed gap:
+        # `_escalate_to_human_review` opens a `HumanReviewRequest` via
+        # `request_human_review`, a separate mechanism from `advance()`,
+        # and nothing yet guarantees every session that can reach that
+        # status also has a `WorkflowRun` whose own `node` was advanced to
+        # match). `recover(expected_node=...)` closes that gap
+        # authoritatively: the caller already knows, from the session
+        # document's own persisted status, which node this run is
+        # genuinely parked at, so a checkpoint that disagrees is
+        # resynchronized to it rather than trusted blindly.
+        recovered = await orchestrator.recover(
+            run_id=effective_run_id, cause="pipeline_resume", expected_node=resume_from_node
+        )
+        if recovered.node in TERMINAL_NODES:
+            return {"status": recovered.node, "phase_timings": state.phase_timings}
+        step = await registry[resume_from_node](state)
+        if isinstance(step, dict):
+            return step
+        outcome = step
+    else:
+        outcome = "ok"  # charter (session admission) is satisfied by the
+                        # caller (server.py's session_handle route) before
+                        # run_pipeline is ever invoked -- this first
+                        # outcome is what carries the run past the
+                        # "charter" node's own transition.
     while True:
         run = await orchestrator.advance(run_id=effective_run_id, outcome=outcome)
         node = run.node

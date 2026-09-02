@@ -94,7 +94,6 @@ from phi_core.security import (
     resolve_principal_soft,
     reviewer_principals,
     reviewer_role,
-    scrub_decision,
     token_principals,
     validate_llm_base_url,
     validate_llm_provider,
@@ -613,20 +612,20 @@ async def _handle_pipeline_run(store, work_item) -> dict[str, Any]:
 
 
 async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
-    """Phase 4 step 2/4: the ``pipeline_resume`` ``TaskService`` handler.
-
-    Runs ``phi_core.agents.orchestrator.execute_decisions`` -- the same
-    D9 ``execute`` node a fresh run reaches, per ``docs/adr/0001-
-    workflow-engine.md`` -- for a resumed human-review round. Every
-    decision, ``pending_review``, and ``session_review`` field this needs
+    """Phase 4 step 2/4 (rewrite plan step 6): the ``pipeline_resume``
+    ``TaskService`` handler. Re-enters ``run_pipeline`` at
+    ``resume_from_node="human_review_decisions"`` instead of calling
+    the retired ``orchestrator.execute_decisions`` directly -- the
+    mandatory re-review Reviewer Preview pass, the escalate-again
+    branch, and the eventual execute-tail dispatch all now live inside
+    ``orchestrator._resume_human_review_decisions``/
+    ``_dispatch_execute_tail``, reached through the exact same
+    registry-dispatched driver loop a fresh run uses. Every decision,
+    ``pending_review``, and ``session_review`` field that logic needs
     was already persisted onto the session document by
     ``session_human_review`` before enqueuing this task; nothing is
     threaded through ``work_item.input_ref``.
     """
-    from phi_core.agents import orchestrator
-    from phi_core.agents.manager import ExecutionHealthSupervisor
-    from phi_core.control.activation import ActivationFactory
-
     sid = work_item.session_id
     run_id = work_item.run_id
     run_filter = {"id": sid, "_pipeline_run_id": run_id}
@@ -635,13 +634,6 @@ async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
     if session is None:
         return {"status": "superseded"}
     cfg = await _current_llm_cfg()
-    decisions = session.get("agent_decisions") or []
-    pending_review = session.get("pending_review") or []
-    session_review_history = session.get("session_review") or []
-    dictionary_by_column = {c.get("name"): c.get("description", "")
-                            for c in (session.get("agent_specialists") or {}).get("lexicon", {}).get("columns", [])
-                            if c.get("name")}
-    files = session.get("files", [])
 
     async def emit_msg(msg: AgentMessage) -> None:
         ev = ProgressEvent(
@@ -656,112 +648,14 @@ async def _handle_pipeline_resume(store, work_item) -> dict[str, Any]:
     async def on_phase(phase: str, payload: dict):
         await _emit(sid, ProgressEvent(phase=f"agent_phase:{phase}", message=phase, payload=payload), run_id=run_id)
 
-    phase_timings: dict[str, dict[str, float]] = {}
-    last_phase: dict[str, str | float | None] = {"key": None, "t0": 0.0}
-    run_started = time.perf_counter()
-    manager_box: dict[str, "ExecutionHealthSupervisor | None"] = {"value": None}
-
-    async def timed_on_phase(phase: str, payload: dict) -> None:
-        now = time.perf_counter()
-        previous = last_phase["key"]
-        if previous and previous != phase:
-            timing = phase_timings.setdefault(
-                str(previous), {"start_s": float(last_phase["t0"]) - run_started},
-            )
-            timing["end_s"] = now - run_started
-            timing["duration_ms"] = (now - float(last_phase["t0"])) * 1000
-        phase_timings.setdefault(phase, {"start_s": now - run_started})
-        last_phase["key"] = phase
-        last_phase["t0"] = now
-        if manager_box["value"] is not None:
-            await manager_box["value"].note_phase(phase, now - run_started)
-        await on_phase(phase, payload)
-
-    async def close_last_phase() -> None:
-        previous = last_phase["key"]
-        if not previous:
-            return
-        now = time.perf_counter()
-        timing = phase_timings.setdefault(
-            str(previous), {"start_s": float(last_phase["t0"]) - run_started},
-        )
-        timing.setdefault("end_s", now - run_started)
-        timing.setdefault("duration_ms", (now - float(last_phase["t0"])) * 1000)
-
-    _factory = ActivationFactory(db, cfg, store=store)
-
-    async def _actx(agent: str):
-        return await _factory.activate_child(
-            session_id=sid, run_id=run_id, parent_task_id=work_item.task_id, agent=agent,
-            emit=emit_msg, manager=manager_box["value"],
-        )
-
-    async def _child_actx(agent: str, parent_task_id: str):
-        return await _factory.activate_child(
-            session_id=sid, run_id=run_id, parent_task_id=parent_task_id, agent=agent,
-            emit=emit_msg, manager=manager_box["value"],
-        )
-
-    async def _complete_and_accept(ctx, result: dict) -> bool:
-        return await _factory.complete_and_accept(ctx, result)
-
-    async def _run_resume() -> dict[str, Any]:
-        manager = ExecutionHealthSupervisor(await _actx("Manager"), db=db)
-        manager_box["value"] = manager
-        await manager.run(
-            roster=["Executor", "Reviewer"],
-            phase_plan=["executor", "reviewer", "publish_guard"],
-        )
-        resolved_decisions = [d for d in decisions if d.get("action") != "human_review"]
-        scrubbed_decisions = [scrub_decision(d) for d in resolved_decisions]
-        omit_by_file: dict[str, set[str]] = {}
-        for entry in pending_review:
-            omit_by_file.setdefault(entry["file_id"], set()).add(entry["column"])
-        # docs #46: "every human decision triggers mandatory re-review" /
-        # "nothing unresolved reaches execution". A deterministic-only
-        # Reviewer Preview pass (no LLM call, so it never depends on a
-        # configured provider and never spends a review budget slot) over
-        # the just-resolved decisions catches a resolution that
-        # reintroduces an obvious hard-rule violation (e.g. approving
-        # 'keep' on a known direct identifier) before Executor ever runs.
-        from phi_core.agents.reviewer import Reviewer as _ReReviewReviewer
-
-        rereview_ctx = await _actx("Reviewer")
-        rereview = await _ReReviewReviewer(rereview_ctx).preview(
-            decisions=scrubbed_decisions, files=files, deterministic_only=True,
-        )
-        if rereview.get("preview_status") == "HUMAN_REVIEW_REQUIRED":
-            from phi_core.agents.reasoning import plain_human_review_reasons
-
-            reasons = ["reviewer_preview_required_after_human_decision"]
-            return await orchestrator._escalate_to_human_review(
-                db=db, session_filter=run_filter, reasons=reasons,
-                reasons_plain=plain_human_review_reasons(reasons),
-                close_last_phase=close_last_phase, phase_timings=phase_timings,
-                run_elapsed_s=time.perf_counter() - run_started,
-                approved_decisions=decisions, sentinel_report=rereview,
-                manager=manager_box["value"], store=store, run_id=run_id,
-                node="human_review_decisions",
-            )
-        return await orchestrator.execute_decisions(
-            db=db, sid=sid, session=session, session_filter=run_filter,
-            files=files, decisions=scrubbed_decisions,
-            statute=session.get("agent_statute"), praxis_methods=session.get("agent_praxis"),
-            dictionary_by_column=dictionary_by_column,
-            make_ctx=_actx, make_child_ctx=_child_actx, complete_and_accept=_complete_and_accept,
-            manager=manager, on_phase=timed_on_phase,
-            close_last_phase=close_last_phase, phase_timings=phase_timings,
-            run_started=run_started, omit_by_file=omit_by_file,
-            extra_completion_fields={
-                "session_review": session_review_history,
-                "pending_review": pending_review,
-                "human_review_required": bool(pending_review),
-            },
-            run_id=run_id, store=store,
-        )
-
     try:
-        result = await asyncio.wait_for(_run_resume(), timeout=900)
+        result = await asyncio.wait_for(
+            run_agent_pipeline(
+                session, db, cfg, emit_msg, on_phase, run_id=run_id, control_store=store,
+                root_task_id=work_item.task_id, resume_from_node="human_review_decisions",
+            ),
+            timeout=900,
+        )
         await _emit(sid, ProgressEvent(
             phase="complete", message=f"Resume done: {result.get('status')}", percent=100.0,
         ), run_id=run_id)
@@ -2681,7 +2575,7 @@ def _export_expires_at(session: dict) -> str | None:
     future" for a session that was never certified clean).
 
     Anchored on ``updated_at`` rather than a dedicated stored field:
-    ``agents.orchestrator.execute_decisions`` (the D9 execute-onward path)
+    ``agents.orchestrator._dispatch_package`` (the D9 execute-onward path)
     writes ``status`` and ``guard_report`` together in one
     ``completion_set`` update that also stamps ``updated_at`` to that
     exact moment (see ``completion_set["updated_at"]``). For a session
@@ -3989,7 +3883,7 @@ async def session_post_run_report(sid: str, principal: str = Depends(resolve_pri
 
     Never runs as part of ``POST /api/sessions/{sid}/handle`` or the
     human-review resume tail -- Phase 17-B retired Scout/Ledger/Herald
-    (and Auditor) from ``execute_decisions``'s mandatory flow; Reviewer
+    (and Auditor) from the execute tail's mandatory flow; Reviewer
     Final is the sole post-execution safety net there now. This route is
     the only caller of ``phi_core.agents.outward.run_post_run_report``.
 

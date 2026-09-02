@@ -514,6 +514,37 @@ async def test_recover_fails_closed_to_the_resume_failsafe_on_an_unknown_checkpo
 
 
 @pytest.mark.asyncio
+async def test_recover_resyncs_to_an_expected_node_that_disagrees_with_the_checkpoint() -> None:
+    """Rewrite plan step 6: closes the disclosed `request_human_review`/
+    `advance()` tracking gap. A caller re-entering at a specific node,
+    because the session document's own status says review is pending
+    there, must have the checkpoint agree -- not silently diverge and
+    break the next `advance()` call's transition lookup."""
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)  # still parked at "charter"
+
+    recovered = await orch.recover(
+        run_id=run.run_id, cause="pipeline_resume", expected_node="human_review_decisions"
+    )
+
+    assert recovered.node == "human_review_decisions"
+    assert recovered.checkpoint["resynced_from"] == "charter"
+    assert recovered.checkpoint["recovery_cause"] == "pipeline_resume"
+
+
+@pytest.mark.asyncio
+async def test_recover_expected_node_is_a_no_op_annotation_when_it_already_matches() -> None:
+    orch, _tasks, _store = _rig()
+    run = await _started_run(orch)
+    run = await orch.advance(run_id=run.run_id, outcome="ok")  # -> research
+
+    recovered = await orch.recover(run_id=run.run_id, cause="pipeline_resume", expected_node="research")
+
+    assert recovered.node == "research"
+    assert "resynced_from" not in recovered.checkpoint
+
+
+@pytest.mark.asyncio
 async def test_recover_on_a_terminal_run_is_a_no_op() -> None:
     orch, _tasks, _store = _rig()
     run = await _started_run(orch)

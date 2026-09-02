@@ -150,7 +150,7 @@ async def _frozen_manifest(store: MemoryControlStore, run_id: str) -> VerifiedCl
 
 
 async def _execute(manifest: VerifiedClassificationManifest, store: MemoryControlStore):
-    """The real Executor.run() call ``execute_decisions`` makes immediately
+    """The real Executor.run() call ``_dispatch_execute`` makes immediately
     after a manifest freezes (docs #50/#53's idempotency spine)."""
     ctx = make_ctx("Executor", run_id=manifest.run_id, store=store)
     src = _uploaded_csv(["name", "measurement"], [["Jane Doe", "1"], ["John Smith", "2"]])
@@ -407,7 +407,7 @@ async def test_reviewer_to_judge_correction_edge_chains_across_multiple_rounds_t
 # ==========================================================================
 # 8. Judge -> Executor via the manifest freeze  (docs #49/#50, NOT a
 #    HandoffGateway edge -- Executor has no registered handoff role.
-#    Production call site: agents/orchestrator.py::execute_decisions calls
+#    Production call site: agents/orchestrator.py::_dispatch_execute calls
 #    control.manifest.ensure_frozen_manifest immediately before
 #    Executor(...).run(). This test exercises both real outcomes: a
 #    genuinely frozen manifest unlocking Executor, and a genuinely refused
@@ -451,7 +451,7 @@ async def test_judge_manifest_freeze_unlocks_executor_and_refusal_blocks_it():
 # ==========================================================================
 # 9. Executor -> DeterministicVerifier  (docs #54, NOT a HandoffGateway
 #    edge -- DeterministicVerifier has no registered handoff role.
-#    Production call site: agents/orchestrator.py::execute_decisions calls
+#    Production call site: agents/orchestrator.py::_dispatch_verify_output calls
 #    DeterministicVerifier().run(exports=exec_out["exports"], ...)
 #    immediately after Executor returns.)
 # ==========================================================================
@@ -492,7 +492,7 @@ async def test_executor_output_feeds_deterministic_verifier_and_persists_a_real_
 # ==========================================================================
 # 10. DeterministicVerifier -> Reviewer Final  (docs #55, NOT a
 #     HandoffGateway edge -- Reviewer.finalize() is a direct method call.
-#     Production call site: agents/orchestrator.py::execute_decisions
+#     Production call site: agents/orchestrator.py::_dispatch_verify_output
 #     calls Reviewer(ctx).finalize(execution_result=..., verification_
 #     result=..., ...) immediately after DeterministicVerifier persists its
 #     VerificationResult. Covers both the real PASS path and a genuine FAIL
@@ -544,7 +544,7 @@ async def test_deterministic_verification_result_drives_reviewer_final_pass_and_
 # ==========================================================================
 # 11. Reviewer Final -> rewind router  (docs #56, NOT a HandoffGateway edge
 #     -- RewindRouter.route is a direct call. Production call site:
-#     agents/orchestrator.py::execute_decisions calls
+#     agents/orchestrator.py::_dispatch_verify_output calls
 #     control.rewind.RewindRouter.route(signal=reviewer_final["signal"])
 #     when Reviewer.finalize() returns FAIL.)
 # ==========================================================================

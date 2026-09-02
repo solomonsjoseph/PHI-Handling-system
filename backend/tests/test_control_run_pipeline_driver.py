@@ -33,7 +33,7 @@ ORCHESTRATOR_PATH = BACKEND_ROOT / "phi_core" / "agents" / "orchestrator.py"
 # the same 7 names its pre-Wave-4b body constructed directly (Lexicon,
 # Schema, Instrument, Judge, RegulationsExpert, PHIMethodsExpert, Sentinel), plus the wider
 # section-13 primary-runtime-agent vocabulary the task names explicitly
-# (Reviewer, Executor) so a future re-inlining of an `execute_decisions`
+# (Reviewer, Executor) so a future re-inlining of the execute-tail dispatch
 # agent directly into `run_pipeline` is caught too.
 _FORBIDDEN_AGENT_CLASS_NAMES = frozenset({
     "Schema", "Lexicon", "Instrument", "Judge", "RegulationsExpert", "PHIMethodsExpert",

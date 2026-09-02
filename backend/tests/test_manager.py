@@ -531,7 +531,7 @@ def test_coverage_escalation_reaches_awaiting_human_review(monkeypatch):
     reason. Migrated from `test_coverage_escalation_fences_scouts_
     background_task` (see docs/PHASE_STATUS.md DELETED_TESTS): that test's
     Scout-background-task-fencing assertions are gone because Scout no
-    longer runs during `execute_decisions` at all (Phase 17-B: opt-in
+    longer runs during the execute tail at all (Phase 17-B: opt-in
     post-run report), so there is no "Scout leak" left to prove fenced --
     but the coverage-advice-escalation behavior itself is still real and
     still needs a test, hence this trimmed replacement."""

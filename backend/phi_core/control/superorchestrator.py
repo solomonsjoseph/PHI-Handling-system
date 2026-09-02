@@ -592,9 +592,25 @@ class SuperOrchestrator:
 
     # ---- recover ------------------------------------------------------
 
-    async def recover(self, *, run_id: str, cause: str) -> WorkflowRun:
+    async def recover(
+        self, *, run_id: str, cause: str, expected_node: str | None = None
+    ) -> WorkflowRun:
         """Resume a run from its last committed checkpoint (D9's fail-closed
-        resume default). A terminal run is returned unchanged."""
+        resume default). A terminal run is returned unchanged.
+
+        ``expected_node`` (rewrite plan step 6): closes a disclosed gap.
+        ``request_human_review`` opens a durable ``HumanReviewRequest`` and
+        the session pauses at ``awaiting_human_review``, but not every path
+        that reaches that status calls ``advance()`` to keep
+        ``workflow_runs.node`` in lockstep with it. A caller re-entering
+        ``run_pipeline`` at a specific node -- because the session
+        document's own persisted status says that is where review is
+        pending -- needs the checkpoint to agree, not silently diverge and
+        break the next ``advance()`` call's transition lookup. When
+        supplied and it disagrees with the checkpoint-resolved node, the
+        run is resynchronized to ``expected_node`` instead, with the
+        divergence recorded on the checkpoint for audit.
+        """
         run = await self._load_run(run_id)
         if is_terminal(run.node):
             return run
@@ -604,14 +620,21 @@ class SuperOrchestrator:
             payload_refs=tuple(run.checkpoint.get("payload_refs") or ()),
         )
         resume_to = resume_node(checkpoint)
+        resynced_from = None
+        if expected_node is not None and expected_node != resume_to:
+            resynced_from = resume_to
+            resume_to = expected_node
         now = _now()
+        checkpoint_update = {**run.checkpoint, "recovery_cause": cause}
+        if resynced_from is not None:
+            checkpoint_update["resynced_from"] = resynced_from
         updated = run.model_copy(
             update={
                 "node": resume_to,
                 "state": "running" if run.state == "awaiting_human_review" and resume_to != run.node else run.state,
                 "resumed_at": now,
                 "updated_at": now,
-                "checkpoint": {**run.checkpoint, "recovery_cause": cause},
+                "checkpoint": checkpoint_update,
             }
         )
         matched = await self._store.compare_and_set(

@@ -107,6 +107,68 @@ async def start_test_run(
     return await orch.start_run(session_id=session_id, principal=principal, run_id=run_id or session_id)
 
 
+async def make_execute_state(
+    *,
+    db: Any,
+    sid: str,
+    session: dict[str, Any],
+    session_filter: dict[str, Any],
+    files: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+    make_ctx: Any,
+    complete_and_accept: Any,
+    manager: Any,
+    on_phase: Any,
+    close_last_phase: Any,
+    phase_timings: dict[str, Any] | None = None,
+    run_started: float | None = None,
+    omit_by_file: dict[str, set[str]] | None = None,
+    sentinel_report: dict[str, Any] | None = None,
+    run_id: str = "",
+    store: ControlStore | None = None,
+) -> Any:
+    """Build an ``agents.orchestrator._PipelineDriverState`` populated
+    exactly like ``run_pipeline``'s own driver loop would by the time it
+    reaches the ``"execute"`` node, for a test calling
+    ``_dispatch_execute``/``_dispatch_verify_output``/``_dispatch_package``
+    (or the ``_dispatch_execute_tail`` combinator) directly (step 6: the
+    retired ``execute_decisions`` monolith's former parameter list, now a
+    state-construction helper rather than a plain function call, matching
+    every other ``_dispatch_*`` handler's own test pattern). Lazy-imports
+    ``agents.orchestrator`` to avoid a module-load-order dependency
+    (this module is imported by orchestrator's own docstrings, never the
+    reverse, but the import stays function-local to keep that direction
+    explicit).
+    """
+    import time as _time
+
+    from phi_core.agents.orchestrator import ResultAcceptanceError, _PipelineDriverState
+
+    state = _PipelineDriverState(
+        session=session, db=db, llm_cfg=_TestLlmConfig(), emit=complete_fake_task,
+        on_phase=on_phase, run_id=run_id or None, control_store=store, root_task_id=None,
+        sid=sid, effective_run_id=run_id,
+    )
+    state.session_filter = session_filter
+    state.files = files
+    state.approved_decisions = decisions
+    state.make_ctx = make_ctx
+    state.complete_and_accept = complete_and_accept
+
+    async def require_accepted(ctx: Any, result: dict[str, Any], agent: str) -> None:
+        if not await complete_and_accept(ctx, result):
+            raise ResultAcceptanceError(f"{agent} result was not accepted")
+
+    state.require_accepted = require_accepted
+    state.manager = manager
+    state.close_last_phase = close_last_phase
+    state.phase_timings = phase_timings if phase_timings is not None else {}
+    state.run_started = run_started if run_started is not None else _time.perf_counter()
+    state.omit_by_file = omit_by_file or {}
+    state.sentinel_report = sentinel_report or {}
+    return state
+
+
 def make_ctx(agent: str, **overrides: Any) -> AgentContext:
     """Build a task-scoped context for an agent unit test.
 
