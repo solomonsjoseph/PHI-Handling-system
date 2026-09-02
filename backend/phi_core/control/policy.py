@@ -40,6 +40,15 @@ OUTPUT_SCHEMAS: Mapping[str, Mapping[str, object]] = MappingProxyType(
         "audit_report": MappingProxyType({"type": "object"}),
         "report": MappingProxyType({"type": "object"}),
         "no_provider_output": MappingProxyType({"type": "object"}),
+        # Step 10/11: the strict artifact a code-writing agent's
+        # generated-and-executed module reports back through -- Schema's
+        # per-column extraction result today, Executor's transformation
+        # confirmation once step 11 lands. Never validated against this
+        # placeholder shape itself; each caller applies its own strict
+        # Pydantic model (e.g. ``agents.extract_model.ExtractedSchema``)
+        # before trusting the payload -- this key only satisfies
+        # ``_manifest()``'s existence check.
+        "generated_code": MappingProxyType({"type": "object"}),
         # Reserved for Phase 5's ``StudyKnowledgePackage`` record
         # (docs/MASTER_ARCHITECTURE_V2.md section 28). Wave 5/6-rename
         # pre-registers the schema key only, so Phase 5 does not need to
@@ -119,7 +128,7 @@ def _manifest(
 MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
     {
         "Lexicon": _manifest("Lexicon", purpose="Classify dataset headers.", input_class="restricted_metadata", output_schema="header_analysis"),
-        "Schema": _manifest("Schema", purpose="Inspect file structure.", input_class="restricted_metadata", output_schema="no_provider_output", providers=frozenset()),
+        "Schema": _manifest("Schema", purpose="Generate header-extraction code.", input_class="restricted_metadata", output_schema="generated_code"),
         "Instrument": _manifest("Instrument", purpose="Classify instruments and form metadata.", input_class="restricted_metadata", output_schema="header_analysis"),
         "RegulationsExpert": _manifest("RegulationsExpert", purpose="Research jurisdictional rules.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
         "PHIMethodsExpert": _manifest("PHIMethodsExpert", purpose="Research de-identification practice.", input_class="internal", output_schema="research_evidence", tools=_RESEARCH_TOOLS),
@@ -128,7 +137,18 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
             "Executor",
             purpose="Apply deterministic decisions.",
             input_class="internal",
-            output_schema="no_provider_output",
+            # Step 11 (not yet landed) makes Executor a code-writing agent
+            # and needs providers=None here to match; PROMPT is still ""
+            # today (Executor never calls an LLM), so providers stays
+            # locked to frozenset() -- widening it now would let a grant
+            # issue with a real provider for an agent that structurally
+            # cannot use one yet, and several unrelated bound-enforcement
+            # tests in test_control_bounds.py rely on Executor's manifest
+            # being the "no provider restriction needed" default worker
+            # (CapabilityPolicy(None)) for budget/concurrency assertions
+            # that have nothing to do with Schema or Executor's own
+            # behavior.
+            output_schema="generated_code",
             providers=frozenset(),
             artifact_roots=frozenset({"staging"}),
         ),

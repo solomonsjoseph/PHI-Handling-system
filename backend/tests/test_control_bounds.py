@@ -258,7 +258,7 @@ def test_manifest_cannot_widen_a_grant_past_the_global_ceiling(monkeypatch) -> N
         }
     )
     monkeypatch.setattr(policy_module, "MANIFESTS", patched)
-    policy = CapabilityPolicy(None)
+    policy = CapabilityPolicy(_llm_cfg())
 
     grant = policy.issue_grant(run_id="r" * 32, task_id="t" * 32, agent="Executor", task_type="executor")
 

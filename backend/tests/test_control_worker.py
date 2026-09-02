@@ -24,10 +24,15 @@ RUN_ID = "run-" + "a" * 28
 
 def _service() -> tuple[TaskService, MemoryControlStore]:
     store = MemoryControlStore()
-    # "Executor" carries an empty ``allowed_providers`` manifest, so issuing
-    # a grant needs no real ``LlmConfig`` -- keeps these tests focused on the
-    # worker loop, not provider policy.
-    return TaskService(store, CapabilityPolicy(None)), store
+    # A real (dummy) LlmConfig, not None: several agents' manifests now
+    # carry a real, non-empty allowed_providers set (Schema, step 10),
+    # so an empty-string configured provider would fail issue_grant's
+    # provider check for those agents. "anthropic" is in every such
+    # manifest's provider set; this keeps every test in this file
+    # focused on the worker loop, not provider policy, regardless of
+    # which agent name it happens to enqueue as.
+    llm_cfg = SimpleNamespace(provider="anthropic", model="test-model", base_url="")
+    return TaskService(store, CapabilityPolicy(llm_cfg)), store
 
 
 async def _enqueue(service: TaskService, **overrides):
