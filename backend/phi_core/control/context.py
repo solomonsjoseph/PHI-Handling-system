@@ -11,7 +11,7 @@ from .tasks import TaskService
 
 if TYPE_CHECKING:
     from phi_core.agents.base import AgentMessage
-    from phi_core.agents.manager import Manager
+    from phi_core.control.manager import ManagerSupervision
 
     from .handoff import HandoffGateway
 
@@ -48,7 +48,7 @@ class OpaqueWriter(Protocol):
     """Async, store-backed counterpart to ``opaque.OpaqueMap`` (Phase R-c):
     an agent never touches the run's opaque map dict directly, only mints
     and resolves tokens through this facade, which persists every mint
-    through ``SuperOrchestrator.record_opaque_map`` (the sole
+    through ``Manager.record_opaque_map`` (the sole
     ``workflow_runs.opaque_map`` writer) before the caller's output can
     reach an LLM-facing structure."""
 
@@ -81,7 +81,7 @@ class AgentContext:
     artifacts: ArtifactWriter | None = None
     evidence: EvidenceWriter | None = None
     emit: Callable[["AgentMessage"], Awaitable[None]] | None = None
-    manager: "Manager | None" = None
+    manager: "ManagerSupervision | None" = None
     # Every `Agent` subclass's `run()` is completed against this on return
     # (see `Agent.__init_subclass__`) -- `None` for a context with no
     # backing `WorkItem` to complete (most unit tests build one via
@@ -254,7 +254,7 @@ class StoreOpaqueWriter:
     """The task-facing ``OpaqueWriter``: mints a run-scoped opaque token
     via the pure, deterministic :class:`~.opaque.OpaqueMap` (HMAC digest,
     collision check unchanged) and durably persists the enlarged map
-    through ``SuperOrchestrator.record_opaque_map`` -- encrypted at rest
+    through ``Manager.record_opaque_map`` -- encrypted at rest
     by ``OpaqueMap`` itself (D5) -- before returning the token, so a
     sensitive value projected by any agent this run is recorded before
     that agent's output can reach an LLM-facing structure.
@@ -272,9 +272,9 @@ class StoreOpaqueWriter:
     """
 
     def __init__(self, store: ControlStore, tasks: TaskService, *, run_id: str) -> None:
-        from .superorchestrator import SuperOrchestrator
+        from .manager import Manager
 
-        self._orchestrator = SuperOrchestrator(store, tasks)
+        self._orchestrator = Manager(store, tasks)
         self._run_id = run_id
 
     async def to_opaque(self, kind: str, canonical: str) -> str:

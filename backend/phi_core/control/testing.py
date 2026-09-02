@@ -91,7 +91,7 @@ async def complete_fake_task(ctx: Any, result: dict[str, Any]) -> dict[str, Any]
 async def start_test_run(
     store: ControlStore, session_id: str, *, run_id: str | None = None, principal: str = "test-operator",
 ) -> WorkflowRun:
-    """Open a real ``WorkflowRun`` through ``SuperOrchestrator.start_run``
+    """Open a real ``WorkflowRun`` through ``Manager.start_run``
     for orchestrator-level unit tests that call ``run_pipeline`` directly
     with a bare ``MemoryControlStore()``. Every production entry path opens
     a run this way before running the pipeline (see ``server.py``); a test
@@ -101,9 +101,9 @@ async def start_test_run(
     so it matches ``run_pipeline``'s own default ``effective_run_id`` when
     the caller passes no explicit ``run_id``.
     """
-    from .superorchestrator import SuperOrchestrator
+    from .manager import Manager
 
-    orch = SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None)))
+    orch = Manager(store, TaskService(store, CapabilityPolicy(None)))
     return await orch.start_run(session_id=session_id, principal=principal, run_id=run_id or session_id)
 
 

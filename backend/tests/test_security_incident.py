@@ -248,7 +248,7 @@ async def test_open_incident_survives_a_simulated_backend_restart():
     Mongo instance, "restart" the backend (get_db.cache_clear() forces a
     brand-new AsyncIOMotorClient and therefore a brand-new MongoControlStore
     on the next call -- the exact technique
-    test_control_superorchestrator_lifecycle.py's _fresh_orchestrator and
+    test_resilience_restart_resume.py's _mongo_orch and
     test_control_phase12_cleanup_wiring.py's restart test both use), and
     confirm a MongoControlStore built from scratch after the "restart"
     still finds the incident open and still resolves the destruction

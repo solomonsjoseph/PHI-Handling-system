@@ -1,6 +1,6 @@
 """Tests for RewindRouter (Phase 10, docs #56): the root-cause classifier
 and rewind-routing layer on top of the existing
-``SuperOrchestrator.rewind`` (built, untested-from-a-live-caller, in Wave
+``Manager.rewind`` (built, untested-from-a-live-caller, in Wave
 R-b). Each of the five root-cause categories is tested individually:
 the classifier must pick the right category AND the router must call
 ``rewind()`` targeting the correct earliest-affected node -- not merely
@@ -9,10 +9,10 @@ that something fails.
 from __future__ import annotations
 
 import pytest
+from phi_core.control.manager import Manager
 from phi_core.control.policy import CapabilityPolicy
 from phi_core.control.rewind import RewindDecision, RewindRouter, UnroutableFailure, record_rewind_decision
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.superorchestrator import SuperOrchestrator
 from phi_core.control.tasks import TaskService
 from phi_core.control.workflow import WorkflowError
 
@@ -27,12 +27,12 @@ SESSION_ID = "a" * 32
 _ADVANCE_TO_REPORT_LEDGER = ("ok", "ok", "ok", "ok", "proceed", "ok", "ok", "ok", "clean", "ok")
 
 
-def _rig() -> tuple[SuperOrchestrator, MemoryControlStore]:
+def _rig() -> tuple[Manager, MemoryControlStore]:
     store = MemoryControlStore()
-    return SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None))), store
+    return Manager(store, TaskService(store, CapabilityPolicy(None))), store
 
 
-async def _run_at_report_ledger(orch: SuperOrchestrator):
+async def _run_at_report_ledger(orch: Manager):
     run = await orch.start_run(session_id=SESSION_ID, principal="operator-1")
     for outcome in _ADVANCE_TO_REPORT_LEDGER:
         run = await orch.advance(run_id=run.run_id, outcome=outcome)
@@ -195,7 +195,7 @@ async def test_route_unresolved_uncertainty_rewinds_to_human_review_decisions_pr
 async def test_route_propagates_workflow_error_when_target_is_not_earlier_than_current_node():
     """`route` never builds a second rewind mechanism: when the resolved
     target is not strictly earlier than the run's current node,
-    `SuperOrchestrator.rewind`'s own refusal propagates unchanged."""
+    `Manager.rewind`'s own refusal propagates unchanged."""
     orch, _store = _rig()
     run = await orch.start_run(session_id=SESSION_ID, principal="operator-1")
     for outcome in ("ok", "ok", "ok"):  # lands at "decide"

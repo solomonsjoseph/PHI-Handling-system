@@ -44,6 +44,7 @@ from phi_core.control.handoff import (
     RevisedArtifactHandoff,
     SchemaQuestion,
 )
+from phi_core.control.manager import Manager
 from phi_core.control.manifest import (
     ManifestFreezeRefused,
     ensure_frozen_manifest,
@@ -60,7 +61,6 @@ from phi_core.control.records import (
 )
 from phi_core.control.rewind import RewindRouter
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.superorchestrator import SuperOrchestrator
 from phi_core.control.tasks import TaskService
 from phi_core.control.testing import make_ctx, start_test_run
 from phi_core.control.verification import build_verification_result, record_verification_result
@@ -121,8 +121,8 @@ def _assert_chained(events: list[dict]) -> None:
         assert e["hash"]
 
 
-def _orch(store: MemoryControlStore) -> SuperOrchestrator:
-    return SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None)))
+def _orch(store: MemoryControlStore) -> Manager:
+    return Manager(store, TaskService(store, CapabilityPolicy(None)))
 
 
 def _uploaded_csv(header: list[str], rows: list[list[str]]) -> str:

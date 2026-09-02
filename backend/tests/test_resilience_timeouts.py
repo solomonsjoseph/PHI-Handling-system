@@ -26,9 +26,9 @@ import time
 
 import pytest
 from phi_core.agents.llm import LlmConfig
-from phi_core.agents.manager import Manager
 from phi_core.agents.reasoning import Judge
 from phi_core.control.gateway import GatewayResult, ProviderGateway
+from phi_core.control.manager import ManagerSupervision as Manager
 from phi_core.control.store import MemoryControlStore
 from phi_core.control.testing import complete_fake_task, make_ctx, start_test_run
 
@@ -93,7 +93,7 @@ def test_manager_exhausts_attempts_and_reports_timeout_on_genuine_gateway_timeou
     judge.ctx = ctx.__class__(**{**ctx.__dict__, "manager": manager})
 
     async def fake_decide(*, task, legal, default_action, payload):
-        from phi_core.agents.manager import ManagerDecision
+        from phi_core.control.manager import ManagerDecision
         return ManagerDecision(action="retry", note=None)
     manager._decide = fake_decide
 

@@ -4,7 +4,7 @@ This is a pure data structure: no agent imports, no gateway calls, and no
 import of ``orchestrator.py``. Importing ``orchestrator.py`` from here would
 recreate exactly the import cycle ``control/gates.py`` already had to route
 around with a function-local import inside ``orchestrator.py`` --
-``orchestrator.py`` (and, from Phase 5 on, ``control/superorchestrator.py``)
+``orchestrator.py`` (and, from Phase 5 on, ``control/manager.py``)
 is expected to import *this* module, never the reverse.
 
 ``NODES`` are the exact D9 literals: ``"charter"``, ``"research"``,
@@ -44,7 +44,7 @@ concurrency and retry loops into the fixed checkpoint sequence D9 asks for:
 - ``execute``'s ``"crashed"`` outcome models the Executor-crash
   escalation (``orchestrator.py::_escalate_to_human_review``, reason
   ``executor_crashed``, routed through
-  ``SuperOrchestrator.request_human_review`` per D10); this table
+  ``Manager.request_human_review`` per D10); this table
   records it as returning to ``human_review_decisions`` so a resumed run
   re-enters ``execute`` exactly as D9 requires.
 - ``publish_guard``'s ``"blocked"`` outcome is a terminal, matching

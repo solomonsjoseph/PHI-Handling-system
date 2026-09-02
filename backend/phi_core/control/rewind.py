@@ -2,7 +2,7 @@
 (docs #56, Phase 10, section 56 "final failure rewind").
 
 Section 56 explicitly scopes the actual re-execution machinery to
-``SuperOrchestrator.rewind`` (``control/superorchestrator.py:871``, built
+``Manager.rewind`` (``control/manager.py:871``, built
 in Wave R-b, never called from anywhere live before this module): "do not
 implement" the re-execution loop itself in an earlier phase. This module
 is the missing decision layer on top of that primitive -- given a failure
@@ -26,8 +26,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from .manager import Manager
 from .store import ControlStore
-from .superorchestrator import SuperOrchestrator
 
 FailureCategory = Literal[
     "EXECUTION_ERROR", "METHOD_ERROR", "REGULATION_ERROR", "SEMANTIC_ERROR", "UNRESOLVED_UNCERTAINTY",
@@ -146,7 +146,7 @@ def _extract_failure_class(signal: "str | dict[str, Any]") -> str:
 class RewindRouter:
     """docs #56: classify a failure signal into one of five root-cause
     categories, resolve the earliest affected workflow node, and route
-    the run back there via the existing ``SuperOrchestrator.rewind``.
+    the run back there via the existing ``Manager.rewind``.
     Stateless: every method is deterministic given its arguments, so a
     caller never needs to construct or share an instance."""
 
@@ -181,11 +181,11 @@ class RewindRouter:
 
     @staticmethod
     async def route(
-        *, super_orchestrator: SuperOrchestrator, run_id: str,
+        *, super_orchestrator: Manager, run_id: str,
         signal: "str | dict[str, Any]", stage: str = "post_execution",
     ) -> tuple[RewindDecision, Any]:
         """Classify ``signal`` then call the EXISTING
-        ``SuperOrchestrator.rewind`` with the resolved target node --
+        ``Manager.rewind`` with the resolved target node --
         never a second rewind mechanism. ``rewind()`` itself remains the
         sole authority enforcing "never a terminal target" and "target
         strictly earlier than the run's current node"; a

@@ -166,8 +166,8 @@ def test_opaque_map_collision_check_still_works_once_values_are_encrypted() -> N
 
 
 @pytest.mark.asyncio
-async def test_super_orchestrator_can_erase_a_runs_opaque_map() -> None:
-    """D5 right-to-erasure/retention capability: ``SuperOrchestrator
+async def test_manager_can_erase_a_runs_opaque_map() -> None:
+    """D5 right-to-erasure/retention capability: ``Manager
     .erase_opaque_map`` clears a run's ``opaque_map`` to empty through the
     same CAS boundary ``record_opaque_map`` already uses, so the
     sensitive-header vault can be wiped independently of the rest of the
@@ -179,8 +179,8 @@ async def test_super_orchestrator_can_erase_a_runs_opaque_map() -> None:
 
     os.environ["PHI_ENV"] = "dev"
     from phi_core.control.context import StoreOpaqueWriter
+    from phi_core.control.manager import Manager
     from phi_core.control.policy import CapabilityPolicy
-    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
     from phi_core.control.testing import _TestLlmConfig, start_test_run
 
@@ -194,7 +194,7 @@ async def test_super_orchestrator_can_erase_a_runs_opaque_map() -> None:
     doc = await store.get_one("workflow_runs", {"run_id": run.run_id})
     assert doc["opaque_map"]
 
-    orchestrator = SuperOrchestrator(store, tasks)
+    orchestrator = Manager(store, tasks)
     updated = await orchestrator.erase_opaque_map(run_id=run.run_id)
     assert updated.opaque_map == {}
 
@@ -254,7 +254,7 @@ async def test_schema_uncertain_header_is_projected_not_blocked_and_raises_revie
     ``sensitive`` one (opaque token, run continues) and additionally
     raises a non-blocking review item -- a recorded trace event, never a
     ``HumanReviewRequest`` (which pauses the run; confirmed by reading
-    ``SuperOrchestrator.request_human_review``, the wrong tool for a
+    ``Manager.request_human_review``, the wrong tool for a
     non-blocking flag)."""
     from phi_core.agents.specialists import Schema
 
@@ -437,7 +437,7 @@ async def test_praxis_falls_back_when_recommended_method_is_only_researched_not_
 
 @pytest.mark.asyncio
 async def test_manager_broker_edges_route_through_handoff_gateway_in_order() -> None:
-    """``Manager``'s guardian query broker (``ask_schema``/
+    """``ManagerSupervision``'s guardian query broker (``ask_schema``/
     ``ask_instrument``/``ask_lexicon``) additionally records each query
     as a Judge -> specialist handoff attempt through ``ctx.handoff`` once
     a context carries the facade: exactly three ``phase == "handoff"``
@@ -446,7 +446,7 @@ async def test_manager_broker_edges_route_through_handoff_gateway_in_order() -> 
     were made."""
     import dataclasses
 
-    from phi_core.agents.manager import Manager
+    from phi_core.control.manager import ManagerSupervision
 
     class _FakeSchema:
         def verify(self, column, file_id=None):
@@ -463,7 +463,7 @@ async def test_manager_broker_edges_route_through_handoff_gateway_in_order() -> 
     store = MemoryControlStore()
     ctx = make_ctx("Manager")
     ctx = dataclasses.replace(ctx, handoff=HandoffGateway(store, session_id=ctx.session_id))
-    manager = Manager(ctx)
+    manager = ManagerSupervision(ctx)
     manager.attach_schema(_FakeSchema())
     manager.attach_instrument(_FakeInstrument())
     manager.attach_lexicon(_FakeLexicon())
@@ -686,7 +686,7 @@ def test_handoff_call_sites_confined_to_manager_broker() -> None:
     allowlist is widened by one file, not disabled. No other module hands
     off directly."""
     sites = _call_sites(PHI_CORE_ROOT, {"handoff"})
-    allowed = {PHI_CORE_ROOT / "agents" / "manager.py", PHI_CORE_ROOT / "agents" / "orchestrator.py"}
+    allowed = {PHI_CORE_ROOT / "control" / "manager.py", PHI_CORE_ROOT / "agents" / "orchestrator.py"}
     offenders = [(p, ln) for p, ln in sites if p not in allowed]
     assert offenders == [], f".handoff( called outside manager.py/orchestrator.py: {offenders}"
     assert sites, "the scan itself found nothing"

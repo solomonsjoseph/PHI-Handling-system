@@ -15,8 +15,8 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
+from phi_core.control.manager import Manager
 from phi_core.control.policy import CapabilityPolicy
-from phi_core.control.superorchestrator import SuperOrchestrator
 from phi_core.control.tasks import TaskService
 from phi_core.db import get_db
 
@@ -42,7 +42,7 @@ def _sid() -> str:
 async def _completed_workflow_run(db, run_id: str, session_id: str) -> None:
     from phi_core.control.store import MongoControlStore
     control_store = MongoControlStore(db)
-    orch = SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(None)))
+    orch = Manager(control_store, TaskService(control_store, CapabilityPolicy(None)))
     await orch.start_run(session_id=session_id, principal="operator-1", run_id=run_id)
     for outcome in _COMPLETE_OUTCOMES:
         await orch.advance(run_id=run_id, outcome=outcome)
@@ -128,8 +128,8 @@ async def test_export_and_bundle_lifecycle_survives_a_backend_restart():
     "restarts" (get_db.cache_clear() forces a brand-new AsyncIOMotorClient
     and therefore brand-new MongoControlStore/ArtifactService instances
     inside session_export/session_bundle on the next call -- the same
-    simulated-restart technique test_control_superorchestrator_lifecycle.py's
-    _fresh_orchestrator uses, applied here to the download routes), and
+    simulated-restart technique test_resilience_restart_resume.py's
+    _mongo_orch uses, applied here to the download routes), and
     both the export and bundle endpoints still serve correctly against
     the persisted Mongo state -- no in-process cache or object identity
     the first call happened to construct is required for the second.

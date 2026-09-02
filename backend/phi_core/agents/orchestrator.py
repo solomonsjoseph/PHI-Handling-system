@@ -48,17 +48,17 @@ from phi_core.control.records import (
 from phi_core.control.store import ControlStore
 
 if TYPE_CHECKING:
+    from phi_core.control.manager import Manager
     from phi_core.control.records import VerifiedClassificationManifest
-    from phi_core.control.superorchestrator import SuperOrchestrator
 
 from phi_core.control.deterministic_verifier import DeterministicVerifier
 
+from ..control.manager import ManagerSupervision
 from ..paths import cleanup_session_unpacked
 from ..security import scrub_decision, scrub_persisted_text
 from .base import ITERATION_CAP, AgentMessage
 from .experts import PHIMethodsExpert, RegulationsExpert
 from .llm import LlmConfig
-from .manager import ExecutionHealthSupervisor
 from .reasoning import (
     BLOCKING_ISSUE_FLOOR,
     Executor,
@@ -89,7 +89,7 @@ class PipelineCancelled(Exception):
     """Raised by the orchestrator when the operator requested cancel."""
 
 class ResultAcceptanceError(Exception):
-    """Raised when SuperOrchestrator.accept_result refuses a completed
+    """Raised when Manager.accept_result refuses a completed
     child's result (D9/D5: 'child success is not acceptance'). A caller
     must never treat an unaccepted result as authoritative."""
 
@@ -127,7 +127,7 @@ async def _escalate_to_human_review(
     reasons_plain: list[str], close_last_phase: Callable[[], Awaitable[None]],
     phase_timings: dict[str, Any], run_elapsed_s: float,
     approved_decisions: list[dict[str, Any]], sentinel_report: dict[str, Any] | None,
-    manager: ExecutionHealthSupervisor, store: "ControlStore | None", run_id: str, node: str,
+    manager: ManagerSupervision, store: "ControlStore | None", run_id: str, node: str,
     audit_version: str = "",
 ) -> dict[str, Any]:
     """The single path by which a run becomes 'awaiting_human_review' (D10).
@@ -135,7 +135,7 @@ async def _escalate_to_human_review(
     Manager keeps ``close_run`` (the deterministic report) but no longer
     owns the workflow-authority write: this function persists the session
     document itself, exactly matching every other decision-mutation call
-    site's own pattern, then asks ``SuperOrchestrator.request_human_review``
+    site's own pattern, then asks ``Manager.request_human_review``
     to open the durable, typed ``HumanReviewRequest`` and pause the run at
     ``node``. Every current caller of the deleted
     ``Manager.escalate_to_human_review`` calls this instead.
@@ -144,7 +144,7 @@ async def _escalate_to_human_review(
     ``WorkflowRun`` exists yet for it): the session-document write above is
     the tested, load-bearing contract every caller of this function
     depends on; the durable request is additive until every entry path
-    reliably opens a run through ``SuperOrchestrator.start_run`` first.
+    reliably opens a run through ``Manager.start_run`` first.
 
     ``audit_version`` (D13 step 4/7): historically non-empty only for the
     now-retired Auditor-verdict escalation (``node="human_review_audit"``
@@ -171,8 +171,8 @@ async def _escalate_to_human_review(
         "manager_report": report,
     }})
     if store is not None and run_id:
+        from phi_core.control.manager import Manager
         from phi_core.control.policy import CapabilityPolicy
-        from phi_core.control.superorchestrator import SuperOrchestrator
         from phi_core.control.tasks import TaskService
         from phi_core.control.workflow import WorkflowError
 
@@ -184,7 +184,7 @@ async def _escalate_to_human_review(
         run_doc = await store.get_one("workflow_runs", {"run_id": run_id})
         current_decision_version = int(run_doc.get("decision_version", 0)) if run_doc else 0
         try:
-            await SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None))).request_human_review(
+            await Manager(store, TaskService(store, CapabilityPolicy(None))).request_human_review(
                 run_id=run_id, node=node, reason_codes=reasons, decision_version=current_decision_version,
                 audit_version=audit_version,
             )
@@ -212,6 +212,7 @@ async def _dispatch_execute(state: _PipelineDriverState) -> "str | dict[str, Any
     await state.on_phase("executor", {"decision_count": len(decisions)})
     manifest = None
     if state.control_store is not None and state.effective_run_id:
+        from phi_core.control.manager import Manager
         from phi_core.control.manifest import (
             ManifestFreezeRefused,
             ManifestInvalidated,
@@ -219,7 +220,6 @@ async def _dispatch_execute(state: _PipelineDriverState) -> "str | dict[str, Any
             manifest_artifact_id,
         )
         from phi_core.control.policy import CapabilityPolicy
-        from phi_core.control.superorchestrator import SuperOrchestrator
         from phi_core.control.tasks import TaskService
 
         unresolved_items = sum(1 for d in decisions if d.get("action") == "human_review")
@@ -229,7 +229,7 @@ async def _dispatch_execute(state: _PipelineDriverState) -> "str | dict[str, Any
         try:
             manifest = await ensure_frozen_manifest(
                 store=state.control_store,
-                orchestrator=SuperOrchestrator(state.control_store, TaskService(state.control_store, CapabilityPolicy(None))),
+                orchestrator=Manager(state.control_store, TaskService(state.control_store, CapabilityPolicy(None))),
                 run_id=state.effective_run_id, artifact_id=manifest_artifact_id(state.effective_run_id),
                 source_artifact_versions={f["file_id"]: 0 for f in state.files if f.get("file_id")},
                 decision_refs=[f"{d.get('file_id', '')}:{d.get('column', '')}" for d in decisions],
@@ -489,7 +489,7 @@ async def _dispatch_verify_output(state: _PipelineDriverState) -> "str | dict[st
         # Root-cause classification + rewind routing (docs #56, Phase
         # 10): never implement "FINAL FAIL -> STOP FOREVER" -- classify
         # the failure, try to route the run back to the earliest
-        # affected node via the EXISTING `SuperOrchestrator.rewind` (no
+        # affected node via the EXISTING `Manager.rewind` (no
         # second rewind mechanism built here), then fall back to the
         # same human-review escalation mechanism every other "this run
         # cannot silently succeed" branch in this function already uses.
@@ -514,13 +514,13 @@ async def _dispatch_verify_output(state: _PipelineDriverState) -> "str | dict[st
         # the actual re-execution loop that would let a later phase
         # resume a run from an arbitrary rewound checkpoint is explicitly
         # out of this phase's scope (section 56: "do not implement").
+        from phi_core.control.manager import Manager as _ManagerForRewind
         from phi_core.control.policy import CapabilityPolicy
         from phi_core.control.rewind import RewindRouter, record_rewind_decision
-        from phi_core.control.superorchestrator import SuperOrchestrator as _SuperOrchestratorForRewind
         from phi_core.control.tasks import TaskService
         from phi_core.control.workflow import WorkflowError as _WorkflowError
 
-        rewind_orchestrator = _SuperOrchestratorForRewind(state.control_store, TaskService(state.control_store, CapabilityPolicy(None)))
+        rewind_orchestrator = _ManagerForRewind(state.control_store, TaskService(state.control_store, CapabilityPolicy(None)))
         escalation_node = "human_review_audit"
         rewind_reasons = ["reviewer_final_fail"]
         try:
@@ -693,7 +693,7 @@ class _PipelineDriverState:
     no side effects -- ``_prepare_pipeline_state`` (skipped entirely
     when a caller injects its own ``dispatch_registry``, the mechanism-
     only test seam) does the actual ``ActivationFactory``/
-    ``ExecutionHealthSupervisor`` setup work.
+    ``ManagerSupervision`` setup work.
     """
 
     def __init__(
@@ -722,7 +722,7 @@ class _PipelineDriverState:
         self.close_last_phase: Callable[[], Awaitable[None]] = _noop_close_last_phase
         self.iteration_cap: int = ITERATION_CAP
         self.factory: "ActivationFactory | None" = None
-        self.manager: "ExecutionHealthSupervisor | None" = None
+        self.manager: "ManagerSupervision | None" = None
         self.make_ctx: Callable[[str], Awaitable[AgentContext]] | None = None
         self.make_child_ctx: Callable[[str, str], Awaitable[AgentContext]] | None = None
         self.complete_and_accept: Callable[[AgentContext, dict[str, Any]], Awaitable[bool]] | None = None
@@ -790,7 +790,7 @@ DispatchFn = Callable[[_PipelineDriverState], Awaitable["str | dict[str, Any]"]]
 async def _prepare_pipeline_state(state: _PipelineDriverState) -> None:
     """Populate every shared field the production ``_dispatch_*`` handlers
     need: dataset file partitioning, phase-timing instrumentation, the
-    durable ``ActivationFactory``, and the ``ExecutionHealthSupervisor``
+    durable ``ActivationFactory``, and the ``ManagerSupervision``
     (opened with its charter) -- exactly the setup the pre-Wave-4b
     ``run_pipeline`` did inline before its first phase. Skipped entirely
     when a caller supplies its own ``dispatch_registry``."""
@@ -871,7 +871,7 @@ async def _prepare_pipeline_state(state: _PipelineDriverState) -> None:
     state.complete_and_accept = complete_and_accept
     state.require_accepted = require_accepted
 
-    manager = ExecutionHealthSupervisor(await make_ctx("Manager"), db=state.db)
+    manager = ManagerSupervision(await make_ctx("Manager"), db=state.db)
     state.manager = manager
     manager_result = await manager.run(
         roster=["Lexicon", "Schema", "Instrument", "RegulationsExpert", "PHIMethodsExpert", "Judge",
@@ -1210,7 +1210,7 @@ async def _dispatch_specialists(state: _PipelineDriverState) -> "str | dict[str,
         if agent:
             await state.require_accepted(ctx, result, name)
     lexicon, schema, instrument = outputs["Lexicon"], outputs["Schema"], outputs["Instrument"]
-    # Deterministic guardian query broker: the ExecutionHealthSupervisor
+    # Deterministic guardian query broker: the ManagerSupervision
     # holds the only reference to each specialist for targeted
     # ask_schema/ask_instrument/ask_lexicon lookups, attached only when
     # that specialist actually ran (and did not crash -- a crashed
@@ -1541,7 +1541,7 @@ async def _dispatch_gate_decisions(state: _PipelineDriverState) -> str:
                 s[k] = scrub_persisted_text(s[k])
     # Human review is required when a decision routes to human_review, an
     # agent exhausted supervised retries, Sentinel still has unresolved
-    # BLOCKING issues after the iteration cap, or the ExecutionHealthSupervisor
+    # BLOCKING issues after the iteration cap, or the ManagerSupervision
     # advises early escalation because the Judge/Sentinel loop is not
     # converging.
     reasons: list[str] = []
@@ -1729,23 +1729,23 @@ async def run_pipeline(
     root_task_id: str | None = None,
     *,
     dispatch_registry: "Mapping[str, DispatchFn] | None" = None,
-    super_orchestrator: "SuperOrchestrator | None" = None,
+    super_orchestrator: "Manager | None" = None,
     resume_from_node: str | None = None,
 ) -> dict[str, Any]:
     """Thin driver (Wave 4b, docs #87): asks
-    ``SuperOrchestrator.advance()`` for sequencing on every iteration and
+    ``Manager.advance()`` for sequencing on every iteration and
     dispatches exclusively through a registry -- never decides what runs
     next on its own, and never constructs an agent class directly (see
     ``tests/test_control_run_pipeline_driver.py``'s AST invariant).
 
     ``dispatch_registry``/``super_orchestrator`` are an injectable test
     seam: supplying either skips the production ``ActivationFactory``/
-    ``ExecutionHealthSupervisor`` setup entirely (see
+    ``ManagerSupervision`` setup entirely (see
     ``_prepare_pipeline_state``), so a test can drive the mechanism
     itself against stub node names/handlers with no production
     infrastructure required. Every existing positional/keyword caller is
     unaffected -- both new parameters are keyword-only and default to
-    the real registry and a freshly constructed ``SuperOrchestrator``.
+    the real registry and a freshly constructed ``Manager``.
 
     ``resume_from_node`` (step 6): set by a caller re-entering a parked
     run (e.g. a human just answered a ``human_review_decisions``
@@ -1761,8 +1761,8 @@ async def run_pipeline(
     directly, feeding its real returned outcome into the same loop
     every other node already uses.
     """
+    from phi_core.control.manager import Manager as _Manager
     from phi_core.control.policy import CapabilityPolicy
-    from phi_core.control.superorchestrator import SuperOrchestrator as _SuperOrchestrator
     from phi_core.control.tasks import TaskService
     from phi_core.control.workflow import TERMINAL_NODES
 
@@ -1770,7 +1770,7 @@ async def run_pipeline(
     effective_run_id = run_id or session.get("_pipeline_run_id") or sid
     orchestrator = (
         super_orchestrator if super_orchestrator is not None
-        else _SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(llm_cfg)))
+        else _Manager(control_store, TaskService(control_store, CapabilityPolicy(llm_cfg)))
     )
     registry: "Mapping[str, DispatchFn]" = (
         dispatch_registry if dispatch_registry is not None else _DEFAULT_DISPATCH_REGISTRY

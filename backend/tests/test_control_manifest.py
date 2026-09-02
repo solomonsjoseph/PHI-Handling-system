@@ -9,6 +9,7 @@ been invalidated.
 from __future__ import annotations
 
 import pytest
+from phi_core.control.manager import Manager
 from phi_core.control.manifest import (
     ManifestFreezeRefused,
     ManifestInvalidated,
@@ -19,13 +20,12 @@ from phi_core.control.manifest import (
 )
 from phi_core.control.policy import CapabilityPolicy
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.superorchestrator import SuperOrchestrator
 from phi_core.control.tasks import TaskService
 from phi_core.control.testing import start_test_run
 
 
-def _orch(store: MemoryControlStore) -> SuperOrchestrator:
-    return SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None)))
+def _orch(store: MemoryControlStore) -> Manager:
+    return Manager(store, TaskService(store, CapabilityPolicy(None)))
 
 
 # ---- evaluate_freeze_conditions --------------------------------------------

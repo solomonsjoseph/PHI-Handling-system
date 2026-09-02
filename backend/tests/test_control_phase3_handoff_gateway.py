@@ -507,7 +507,7 @@ async def test_missing_required_payload_field_blocked_by_output_schema():
 # reason_code, detail) denial: it raises policy.BudgetExceeded, the same
 # D5 ceiling-check pattern every other budget/ceiling refusal in this
 # codebase already uses (gateway.py, artifacts.py, runs.py,
-# superorchestrator.py) -- always paired with a TraceEvent(outcome=
+# manager.py) -- always paired with a TraceEvent(outcome=
 # "budget_exceeded") recorded before re-raising. HandoffReasonCode's
 # Literal correctly has no budget-shaped value: no budget refusal
 # anywhere in this codebase is ever expressed through that channel.

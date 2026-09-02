@@ -6,7 +6,7 @@ These tests exercise the full lazy-certify-then-serve path end to end
 against a real `ArtifactService` + `MemoryControlStore` (no Mongo needed),
 since nothing else in the codebase yet calls `certify_publication` on the
 pipeline's behalf (that lands with Phase 5's
-`SuperOrchestrator.authorize_publication`).
+`Manager.authorize_publication`).
 """
 from __future__ import annotations
 

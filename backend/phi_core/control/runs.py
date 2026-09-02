@@ -4,7 +4,7 @@ every gateway call in one ``WorkflowRun`` -- total tokens, total cost,
 total tool calls, total artifact bytes, and total wall-clock time since
 the run started. Per-task/per-child bounds (depth, fanout, parallelism,
 attempts, and the ``CapabilityGrant``-scoped token/cost/tool/wall
-ceilings) are enforced by ``TaskService``/``SuperOrchestrator.create_child_work``
+ceilings) are enforced by ``TaskService``/``Manager.create_child_work``
 and ``ProviderGateway`` directly; this module is the run-wide accumulator
 both call into.
 """
@@ -34,7 +34,7 @@ async def check_run_budget(
     anything when adding the prospective amount to recorded ``usage`` would
     exceed the budget, or when the run's wall-clock age already exceeds
     ``budget.wall_seconds``. A ceiling of ``0`` (unset) is never enforced --
-    only ``SuperOrchestrator.start_run`` mints a real one.
+    only ``Manager.start_run`` mints a real one.
 
     On success, ``run_id``'s ``usage`` is incremented by the prospective
     amount *before* this returns, so two concurrent callers can never both

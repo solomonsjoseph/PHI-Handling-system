@@ -14,7 +14,8 @@ from collections import deque
 
 from phi_core.agents.base import _json_validator
 from phi_core.agents.llm import LlmConfig
-from phi_core.agents.manager import Manager, ManagerAdvice, ManagerDecision
+from phi_core.control.manager import ManagerAdvice, ManagerDecision
+from phi_core.control.manager import ManagerSupervision as Manager
 from phi_core.control.store import MemoryControlStore
 from phi_core.control.testing import FakeGateway, complete_fake_task, make_ctx, start_test_run
 
@@ -490,7 +491,7 @@ def test_run_pipeline_escalates_via_the_shared_human_review_path(monkeypatch):
             return await complete_fake_task(self.ctx, {"issues": [{"column": "c", "severity": "blocking",
                                 "detail": "unresolved leak"}]})
 
-    monkeypatch.setattr(orchestrator, "ExecutionHealthSupervisor", FakeManager)
+    monkeypatch.setattr(orchestrator, "ManagerSupervision", FakeManager)
     monkeypatch.setattr(orchestrator, "RegulationsExpert", FakeRegulationsExpert)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)
@@ -632,7 +633,7 @@ def test_coverage_escalation_reaches_awaiting_human_review(monkeypatch):
         async def run(self, decisions, operator_result, exports, omit_by_file=None):
             return await complete_fake_task(self.ctx, {"exports": exports, "findings": []})
 
-    monkeypatch.setattr(orchestrator, "ExecutionHealthSupervisor", FakeManager)
+    monkeypatch.setattr(orchestrator, "ManagerSupervision", FakeManager)
     monkeypatch.setattr(orchestrator, "RegulationsExpert", FakeRegulationsExpert)
     monkeypatch.setattr(orchestrator, "Schema", FakeSchema)
     monkeypatch.setattr(orchestrator, "PHIMethodsExpert", FakePHIMethodsExpert)

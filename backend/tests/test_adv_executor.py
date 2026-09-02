@@ -23,11 +23,11 @@ from phi_core.agents.reasoning import Executor
 from phi_core.control import execution_validators as ev_module
 from phi_core.control.artifacts import MANIFEST_COLLECTION
 from phi_core.control.execution_validators import ExecutionValidationRejected
+from phi_core.control.manager import Manager
 from phi_core.control.manifest import ManifestInvalidated, ensure_frozen_manifest, manifest_artifact_id
 from phi_core.control.policy import CapabilityPolicy
 from phi_core.control.records import SandboxRecord, VerifiedClassificationManifest
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.superorchestrator import SuperOrchestrator
 from phi_core.control.tasks import TaskService
 from phi_core.control.testing import make_ctx
 from phi_core.paths import DATA_DIR
@@ -78,7 +78,7 @@ def _sandbox(**overrides) -> SandboxRecord:
 @pytest.mark.asyncio
 async def test_stale_invalidated_manifest_refuses_before_executor_ever_runs(monkeypatch):
     store = MemoryControlStore()
-    orch = SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None)))
+    orch = Manager(store, TaskService(store, CapabilityPolicy(None)))
     run_id = uuid4().hex
     artifact_id = manifest_artifact_id(run_id)
     stale = _manifest(run_id, status="invalidated")

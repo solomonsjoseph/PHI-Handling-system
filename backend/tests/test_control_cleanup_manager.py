@@ -3,9 +3,9 @@
 Proves every CleanupManifest field gets genuinely populated (not left at
 its default the way destroy_sandbox alone leaves everything but
 sandbox_destroyed), and that a failed destruction step produces a manifest
-SuperOrchestrator.confirm_cleanup then refuses -- composing this module
+Manager.confirm_cleanup then refuses -- composing this module
 with the pre-existing, already-tested confirm_cleanup invariant
-(test_control_superorchestrator_lifecycle.py::
+(test_control_manager_lifecycle.py::
 test_confirm_cleanup_refuses_an_unverified_manifest) end to end rather than
 re-testing that invariant in isolation.
 """
@@ -23,10 +23,10 @@ from phi_core.control.cleanup_manager import (
     CleanupInputs,
     CleanupManager,
 )
+from phi_core.control.manager import Manager
 from phi_core.control.policy import CapabilityPolicy
 from phi_core.control.records import SandboxRecord
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.superorchestrator import SuperOrchestrator
 from phi_core.control.tasks import TaskService
 from phi_core.control.workflow import WorkflowError
 
@@ -37,14 +37,14 @@ _COMPLETE_OUTCOMES = (
 )
 
 
-def _rig() -> tuple[CleanupManager, SuperOrchestrator, MemoryControlStore]:
+def _rig() -> tuple[CleanupManager, Manager, MemoryControlStore]:
     store = MemoryControlStore()
     tasks = TaskService(store, CapabilityPolicy(None))
-    orch = SuperOrchestrator(store, tasks)
+    orch = Manager(store, tasks)
     return CleanupManager(store, orch), orch, store
 
 
-async def _completed_run(orch: SuperOrchestrator, run_id: str):
+async def _completed_run(orch: Manager, run_id: str):
     run = None
     for outcome in _COMPLETE_OUTCOMES:
         run = await orch.advance(run_id=run_id, outcome=outcome)
@@ -105,7 +105,7 @@ async def test_cleanup_populates_every_manifest_field_on_full_success(tmp_path):
     assert stored is not None
     assert stored["verification_status"] == "verified"
 
-    orch2 = SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None)))
+    orch2 = Manager(store, TaskService(store, CapabilityPolicy(None)))
     updated = await orch2.confirm_cleanup(run_id=run.run_id, manifest=manifest)
     assert updated.state == "session_destroyed"
 
@@ -147,7 +147,7 @@ async def test_a_failed_destruction_step_is_never_verified_and_blocks_session_de
     assert manifest.keys_destroyed is False
     assert "opaque_map_vault" in manifest.failure_details
 
-    orch2 = SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None)))
+    orch2 = Manager(store, TaskService(store, CapabilityPolicy(None)))
     with pytest.raises(WorkflowError):
         await orch2.confirm_cleanup(run_id=run.run_id, manifest=manifest)
     stored = await store.get_one("workflow_runs", {"run_id": run.run_id})

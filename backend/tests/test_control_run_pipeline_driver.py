@@ -1,12 +1,12 @@
 """Wave 4b: ``run_pipeline`` thin-driver invariants.
 
-The plan's own note: "SuperOrchestrator is the only writer of
+The plan's own note: "Manager is the only writer of
 workflow_runs.node" already passes today and cannot detect this phase's
 failure (nothing ever asserted *how* ``run_pipeline`` decided what ran
 next). These three tests replace it with invariants that genuinely fail
 before Wave 4b and pass after:
 
-1. dispatch order is dictated by ``SuperOrchestrator.advance``, not chosen
+1. dispatch order is dictated by ``Manager.advance``, not chosen
    by ``run_pipeline`` itself;
 2. a terminal/blocked ``advance`` result on the very first call dispatches
    zero agents;
@@ -23,8 +23,8 @@ from pathlib import Path
 
 import pytest
 from phi_core.agents import orchestrator
+from phi_core.control.manager import Manager
 from phi_core.control.records import WorkflowRun
-from phi_core.control.superorchestrator import SuperOrchestrator
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 ORCHESTRATOR_PATH = BACKEND_ROOT / "phi_core" / "agents" / "orchestrator.py"
@@ -67,7 +67,7 @@ async def test_dispatch_order_follows_advance_not_choice(monkeypatch) -> None:
         node = next(calls)
         return WorkflowRun(run_id=run_id, session_id="sid", state="running", node=node)
 
-    monkeypatch.setattr(SuperOrchestrator, "advance", fake_advance)
+    monkeypatch.setattr(Manager, "advance", fake_advance)
 
     dispatched: list[str] = []
 
@@ -108,7 +108,7 @@ async def test_nothing_dispatched_when_advance_returns_terminal_first(monkeypatc
         return WorkflowRun(run_id=run_id, session_id="sid", state="blocked",
                           node="blocked", terminal_outcome="blocked")
 
-    monkeypatch.setattr(SuperOrchestrator, "advance", fake_advance)
+    monkeypatch.setattr(Manager, "advance", fake_advance)
 
     dispatched: list[str] = []
 

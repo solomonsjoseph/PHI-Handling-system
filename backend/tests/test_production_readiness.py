@@ -178,11 +178,11 @@ def test_cleanup_session_unpacked_removes_only_unpacked_subdir(tmp_path, monkeyp
 @pytest.mark.asyncio
 async def test_session_delete_removes_document_files_and_agent_log(tmp_path, monkeypatch):
     import server as srv
-    from phi_core.control import superorchestrator as super_module
+    from phi_core.control import manager as super_module
 
     cancel_calls: list[dict] = []
 
-    class FakeSuperOrchestrator:
+    class FakeManager:
         def __init__(self, *_args):
             pass
 
@@ -244,7 +244,7 @@ async def test_session_delete_removes_document_files_and_agent_log(tmp_path, mon
             return _EmptyControlCollection()
 
     db = _StubDB()
-    monkeypatch.setattr(super_module, "SuperOrchestrator", FakeSuperOrchestrator)
+    monkeypatch.setattr(super_module, "Manager", FakeManager)
     monkeypatch.setattr(srv, "get_db", lambda: db)
 
     resp = await srv.session_delete(sid, principal="alice")
@@ -268,9 +268,9 @@ async def test_session_delete_records_erasure_pending_on_a_filesystem_failure(tm
     disk or the failure being swallowed."""
     import server as srv
     from phi_core.control import artifacts as artifacts_module
-    from phi_core.control import superorchestrator as super_module
+    from phi_core.control import manager as super_module
 
-    class FakeSuperOrchestrator:
+    class FakeManager:
         def __init__(self, *_args):
             pass
 
@@ -332,7 +332,7 @@ async def test_session_delete_records_erasure_pending_on_a_filesystem_failure(tm
         return {"staging": "simulated permission denied"}
 
     db = _StubDB()
-    monkeypatch.setattr(super_module, "SuperOrchestrator", FakeSuperOrchestrator)
+    monkeypatch.setattr(super_module, "Manager", FakeManager)
     monkeypatch.setattr(srv, "get_db", lambda: db)
     monkeypatch.setattr(artifacts_module, "erase_session_artifacts", _failing_erase)
 

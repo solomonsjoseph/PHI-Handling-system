@@ -1,4 +1,4 @@
-"""D9 contracts for control/superorchestrator.py: the exclusive writer of
+"""D9 contracts for control/manager.py: the exclusive writer of
 ``workflow_runs.state``/``.node``, the exclusive caller of
 ``TaskService.enqueue`` (through ``create_child_work``), and the exclusive
 issuer/consumer/acceptor of a human-review request, event, and material
@@ -9,25 +9,25 @@ from __future__ import annotations
 from types import MappingProxyType
 
 import pytest
+from phi_core.control import manager as so_module
 from phi_core.control import policy as policy_module
-from phi_core.control import superorchestrator as so_module
+from phi_core.control.manager import Manager
 from phi_core.control.policy import MANIFESTS, CapabilityDenied, CapabilityPolicy
 from phi_core.control.records import HumanReviewEvent, ResourceBudget
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.superorchestrator import SuperOrchestrator
 from phi_core.control.tasks import TaskService
 from phi_core.control.workflow import WorkflowError
 
 SESSION_ID = "a" * 32
 
 
-def _rig() -> tuple[SuperOrchestrator, TaskService, MemoryControlStore]:
+def _rig() -> tuple[Manager, TaskService, MemoryControlStore]:
     store = MemoryControlStore()
     tasks = TaskService(store, CapabilityPolicy(None))
-    return SuperOrchestrator(store, tasks), tasks, store
+    return Manager(store, tasks), tasks, store
 
 
-async def _started_run(orch: SuperOrchestrator):
+async def _started_run(orch: Manager):
     return await orch.start_run(session_id=SESSION_ID, principal="operator-1")
 
 
@@ -264,7 +264,7 @@ async def test_create_child_work_enqueues_a_granted_child_within_depth_and_budge
     # Grant "Pipeline" a test-only child task type, mirroring what step 5
     # will do for real for Ledger/Herald once it lands. Patched on both
     # modules: policy.py's own CapabilityPolicy.check_child reads the
-    # module-level MANIFESTS name directly, and superorchestrator.py
+    # module-level MANIFESTS name directly, and manager.py
     # bound its own reference at import time. "executor" (not "ledger")
     # because "Ledger"'s manifest restricts allowed_providers, which
     # CapabilityPolicy(None)'s empty provider/model would fail regardless
@@ -560,45 +560,3 @@ async def test_recover_on_a_terminal_run_is_a_no_op() -> None:
     assert recovered.node == run.node
     assert recovered.resumed_at == run.resumed_at
 
-
-# ---- authorize_publication --------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_authorize_publication_with_no_artifact_ids_is_query_only() -> None:
-    orch, _tasks, _store = _rig()
-    run = await _started_run(orch)
-
-    generation = await orch.authorize_publication(run_id=run.run_id)
-    assert generation == 0
-
-
-@pytest.mark.asyncio
-async def test_authorize_publication_refuses_while_a_review_request_is_open() -> None:
-    orch, _tasks, _store = _rig()
-    run = await _started_run(orch)
-    await orch.request_human_review(
-        run_id=run.run_id, node="human_review_decisions", reason_codes=[], decision_version=1,
-    )
-
-    with pytest.raises(WorkflowError):
-        await orch.authorize_publication(run_id=run.run_id, artifact_ids=["a1"])
-
-
-@pytest.mark.asyncio
-async def test_authorize_publication_certifies_a_new_generation() -> None:
-    from phi_core.control.artifacts import ArtifactService
-
-    orch, _tasks, store = _rig()
-    run = await _started_run(orch)
-    service = ArtifactService(store, session_id=SESSION_ID, run_id=run.run_id)
-    artifact_id, tmp_path = await service.stage("export", "study.csv", "internal", "standard")
-    tmp_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path.write_bytes(b"clean export")
-    await service.finalize(artifact_id)
-
-    generation = await orch.authorize_publication(run_id=run.run_id, artifact_ids=[artifact_id])
-
-    assert generation == 1
-    path = await service.open_for_download(SESSION_ID, artifact_id)
-    assert path.is_file()

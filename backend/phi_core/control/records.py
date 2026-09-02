@@ -19,7 +19,7 @@ mutable working records) rather than introducing a second schema.
 Phase 3 addendum (target-architecture reconciliation, local reference doc
 docs/MASTER_ARCHITECTURE_V2.md, never committed): the Phase 1 note above
 said no HandoffEnvelope/HandoffResult record existed because Manager/
-SuperOrchestrator sequences every agent today (ADR 0006). That is still
+Manager sequences every agent today (ADR 0006). That is still
 true of the running pipeline, but ``control.handoff.HandoffGateway`` now
 builds the standalone validation module a later phase will wire agents
 through, so ``HandoffEnvelope``/``HandoffResult`` below are the typed
@@ -64,7 +64,7 @@ RunState = Literal[
     # Transition-in-flight values the live pipeline still emits
     # (server.py/events.py), kept alongside the section-78 vocabulary.
     "pending", "running", "paused", "cancelling", "awaiting_human_review",
-    # D9 terminal node names, which ``SuperOrchestrator.advance`` stamps
+    # D9 terminal node names, which ``Manager.advance`` stamps
     # onto ``WorkflowRun.state`` directly (a terminal node's name is always
     # a valid RunState).
     "complete", "partially_complete", "failed",

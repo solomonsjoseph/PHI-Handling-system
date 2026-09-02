@@ -290,10 +290,10 @@ async def test_per_parent_and_run_wide_ceilings_compose_under_load_at_production
     parent's own ceiling (``MAX_PARALLEL_TASKS_PER_PARENT``) would be,
     proving the two bounds compose correctly (whichever is tighter wins)
     under genuine concurrent load, not just individually."""
+    from phi_core.control import manager as manager_module
     from phi_core.control import policy as policy_module
-    from phi_core.control import superorchestrator as so_module
+    from phi_core.control.manager import Manager
     from phi_core.control.policy import CapabilityPolicy
-    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
 
     # Executor's own manifest (unlike Ledger/Herald, which need a real
@@ -310,7 +310,7 @@ async def test_per_parent_and_run_wide_ceilings_compose_under_load_at_production
     patched = {**MANIFESTS, "Executor": MANIFESTS["Executor"].model_copy(
         update={"allowed_child_task_types": frozenset({"executor"}), "max_children": 100},
     )}
-    monkeypatch.setattr(so_module, "MANIFESTS", patched)
+    monkeypatch.setattr(manager_module, "MANIFESTS", patched)
     monkeypatch.setattr(policy_module, "MANIFESTS", patched)
 
     assert limits.MAX_PARALLEL_TASKS_PER_PARENT < limits.MAX_PARALLEL_TASKS_PER_RUN, (
@@ -320,7 +320,7 @@ async def test_per_parent_and_run_wide_ceilings_compose_under_load_at_production
 
     store = MemoryControlStore()
     tasks = TaskService(store, CapabilityPolicy(None))
-    orch = SuperOrchestrator(store, tasks)
+    orch = Manager(store, tasks)
     run = await orch.start_run(session_id=SESSION_ID, principal="operator-1")
     root_docs = await store.find_many("work_items", {"run_id": run.run_id})
     root_task_id = root_docs[0]["task_id"]

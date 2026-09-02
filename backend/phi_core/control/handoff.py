@@ -3,7 +3,7 @@ reference doc docs/MASTER_ARCHITECTURE_V2.md, never committed).
 
 ``records.py``'s Phase 1 addendum flagged HandoffEnvelope/HandoffResult as
 genuinely missing but not yet buildable: this codebase's Manager/
-SuperOrchestrator sequences every agent today (ADR 0006), so there was no
+Manager sequences every agent today (ADR 0006), so there was no
 direct agent-to-agent handoff to gate. This module builds that gate on its
 own, ahead of any caller: a deny-by-default validator that will later let
 Judge, Reviewer, Regulations Expert (``RegulationsExpert``), PHI Methods Expert
@@ -55,7 +55,7 @@ Check 11 (correction/retry budget, spec section 48) is the one
 deliberate exception to "never an exception": it raises
 ``policy.BudgetExceeded`` instead of returning a denial tuple, matching
 every other D5 ceiling refusal already in this codebase (``gateway.py``,
-``artifacts.py``, ``runs.py``, ``superorchestrator.py``), each of which
+``artifacts.py``, ``runs.py``, ``manager.py``), each of which
 is always paired with a ``TraceEvent(outcome="budget_exceeded")``
 recorded before re-raising, never expressed as a ``HandoffReasonCode``
 string. ``handoff()`` reflects this: a budget refusal produces that
@@ -344,7 +344,7 @@ class HandoffGateway:
         # a budget refusal is not a (bool, reason_code, detail) denial --
         # it raises ``BudgetExceeded``, the same D5 ceiling-check pattern
         # every other budget refusal in this codebase already uses
-        # (gateway.py, artifacts.py, runs.py, superorchestrator.py), so
+        # (gateway.py, artifacts.py, runs.py, manager.py), so
         # ``handoff()`` can record it the same way: a TraceEvent with
         # outcome="budget_exceeded", then re-raise. attempt_number and
         # correction_number both count toward the ceiling -- a correction

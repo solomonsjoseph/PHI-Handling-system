@@ -18,8 +18,8 @@ open, and a *different* item's resolution never retroactively clears it.
 
 This module is the assembly/gate layer only: it does not itself persist
 anything or decide run-lifecycle eligibility. Both of those stay
-``SuperOrchestrator``'s exclusive authority (D9, ``control/
-superorchestrator.py``) -- ``authorize_manifest_freeze`` already
+``Manager``'s exclusive authority (D9, ``control/
+manager.py``) -- ``authorize_manifest_freeze`` already
 implements the run-eligibility check (refuses a terminal/paused run) and
 the ``MANIFEST_COLLECTION`` upsert; this module's ``ensure_frozen_manifest``
 is the one caller a real execution path (``agents/orchestrator.py``'s
@@ -32,9 +32,9 @@ the same decision set" rule docs #49's own docstring on
 from __future__ import annotations
 
 from .artifacts import MANIFEST_COLLECTION
+from .manager import Manager
 from .records import VerifiedClassificationManifest
 from .store import ControlStore
-from .superorchestrator import SuperOrchestrator
 
 
 class ManifestFreezeRefused(RuntimeError):
@@ -66,7 +66,7 @@ def manifest_artifact_id(run_id: str) -> str:
     """The synthetic, stable key ``VerifiedClassificationManifest``
     documents in :data:`~.artifacts.MANIFEST_COLLECTION` are keyed by for
     a run's decision set. Every existing manifest reader
-    (``ArtifactService.open_for_download``, ``SuperOrchestrator
+    (``ArtifactService.open_for_download``, ``Manager
     .require_artifacts_current``) already queries that collection by
     ``artifact_id``; the pipeline's decision batch has no corresponding
     real, independently-versioned :class:`~.records.ArtifactRecord` of
@@ -121,7 +121,7 @@ async def get_current_manifest(
 async def ensure_frozen_manifest(
     *,
     store: ControlStore,
-    orchestrator: SuperOrchestrator,
+    orchestrator: Manager,
     run_id: str,
     artifact_id: str,
     source_artifact_versions: dict[str, int],

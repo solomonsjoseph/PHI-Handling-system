@@ -20,10 +20,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from phi_core.control.manager import Manager
 from phi_core.control.policy import CapabilityPolicy
 from phi_core.control.rewind import RewindRouter
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.superorchestrator import SuperOrchestrator
 from phi_core.control.tasks import TaskService
 
 _PHI_CORE_ROOT = Path(__file__).resolve().parent.parent / "phi_core"
@@ -95,7 +95,7 @@ async def test_all_five_rewind_categories_route_to_their_expected_nodes():
     diagram), never all 5 the same.
     """
     store = MemoryControlStore()
-    orch = SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None)))
+    orch = Manager(store, TaskService(store, CapabilityPolicy(None)))
 
     async def _routed_node(signal) -> str:
         run = await orch.start_run(session_id="b" * 32, principal="operator-1")

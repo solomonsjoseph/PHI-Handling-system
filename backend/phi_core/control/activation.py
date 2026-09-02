@@ -3,7 +3,7 @@
 Every entry path that starts an agent (the primary pipeline, the human-review
 resume tail, corpus research, and settings warmup) opens a real ``WorkItem``
 and ``CapabilityGrant`` here rather than constructing an agent from a bare
-database handle. Phase 5's ``SuperOrchestrator`` becomes the sole caller of
+database handle. Phase 5's ``Manager`` becomes the sole caller of
 ``TaskService.enqueue``; until then this factory is the one place that does,
 kept intentionally narrow so migrating call sites onto it later is a
 one-line change per site.
@@ -99,7 +99,7 @@ class ActivationFactory:
         needs_sandbox: bool = False,
     ) -> AgentContext:
         """Like ``activate``, but the task is created as
-        ``SuperOrchestrator``-owned durable child work under
+        ``Manager``-owned durable child work under
         ``parent_task_id`` (D5: depth, fanout, and budget enforced against
         the parent's own grant), not a bare root enqueue. Reserved for a
         genuine sub-agent delegation chain -- Ledger's Compare/Aggregate
@@ -107,11 +107,11 @@ class ActivationFactory:
         -- where a real parent-child relationship exists; every other
         ``activate()`` call is itself a direct child of the root Pipeline
         task and stays on the simpler path."""
+        from .manager import Manager
         from .policy import MANIFESTS, _bounded_budget
-        from .superorchestrator import SuperOrchestrator
 
         task_type = agent.lower().replace(".", "_")
-        task = await SuperOrchestrator(self.store, self.task_service).create_child_work(
+        task = await Manager(self.store, self.task_service).create_child_work(
             run_id=run_id, parent_task_id=parent_task_id, task_type=task_type,
             input_ref={}, budget=_bounded_budget(MANIFESTS[agent].budget),
         )
@@ -176,7 +176,7 @@ class ActivationFactory:
         )
 
     async def complete_and_accept(self, ctx: AgentContext, result: dict[str, Any]) -> bool:
-        """Have ``SuperOrchestrator.accept_result`` formally accept
+        """Have ``Manager.accept_result`` formally accept
         ``ctx``'s already-completed task -- the acceptance authority D5
         step 5 requires for durable child work (a child's ``succeeded``
         state, which ``Agent.__init_subclass__`` already applied when
@@ -184,8 +184,8 @@ class ActivationFactory:
         acceptance). Best-effort: returns ``False`` rather than raising
         on a refused acceptance, so a caller never lets this bookkeeping
         step fail the pipeline around an already-delivered result."""
-        from .superorchestrator import SuperOrchestrator
+        from .manager import Manager
 
-        return await SuperOrchestrator(self.store, self.task_service).accept_result(
+        return await Manager(self.store, self.task_service).accept_result(
             run_id=ctx.run_id, task_id=ctx.task_id, result=result or {},
         )

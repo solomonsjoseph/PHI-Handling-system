@@ -66,7 +66,7 @@ class TaskService:
     @property
     def policy(self) -> CapabilityPolicy:
         """Read-only access to the issuing policy, so a collaborator that
-        needs to re-validate a grant (``SuperOrchestrator.create_child_work``
+        needs to re-validate a grant (``Manager.create_child_work``
         checking ``check_child`` against the parent's grant) does not need
         its own separately constructed ``CapabilityPolicy`` instance."""
         return self._policy

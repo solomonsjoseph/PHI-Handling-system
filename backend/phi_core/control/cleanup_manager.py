@@ -1,10 +1,10 @@
 """CleanupManager (docs #76-77, Phase 12 item 6): populates every
 :class:`~.records.CleanupManifest` field for a run's terminal-path
 destruction, then hands the finished manifest to the caller so it can be
-passed into :meth:`SuperOrchestrator.confirm_cleanup` -- the pre-existing,
+passed into :meth:`Manager.confirm_cleanup` -- the pre-existing,
 already-tested sole path to ``session_destroyed``
-(``superorchestrator.py``'s ``begin_cleanup``/``confirm_cleanup``, and
-``tests/test_control_superorchestrator_lifecycle.py``'s
+(``manager.py``'s ``begin_cleanup``/``confirm_cleanup``, and
+``tests/test_control_manager_lifecycle.py``'s
 ``test_confirm_cleanup_refuses_an_unverified_manifest``). This module does
 not reimplement that invariant; it is the missing producer of a genuinely
 verified manifest to feed it, closing the gap ``destroy_sandbox`` alone
@@ -37,10 +37,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
+from .manager import Manager
 from .records import CleanupManifest, SandboxRecord
 from .sandbox import destroy_sandbox
 from .store import ControlStore
-from .superorchestrator import SuperOrchestrator
 
 CLEANUP_MANIFEST_COLLECTION = "cleanup_manifests"
 
@@ -114,14 +114,14 @@ class CleanupManager:
     of an earlier attempt.
     """
 
-    def __init__(self, store: ControlStore, orchestrator: SuperOrchestrator) -> None:
+    def __init__(self, store: ControlStore, orchestrator: Manager) -> None:
         self._store = store
         self._orchestrator = orchestrator
 
     async def cleanup(self, inputs: CleanupInputs) -> CleanupManifest:
         """Run every destruction step, verify, and persist the manifest.
 
-        Deliberately does **not** call ``SuperOrchestrator.confirm_cleanup``
+        Deliberately does **not** call ``Manager.confirm_cleanup``
         itself: that stays the caller's own, explicit act (docs #77's "never
         transitions ... until this reports verified" is already enforced
         there), so a caller can inspect ``verification_status`` and choose

@@ -2,7 +2,7 @@
 
 Each resource ceiling gets its own test as the corresponding enforcement
 lands. Per-task/enqueue-time bounds are proven against
-`SuperOrchestrator.create_child_work`; per-task gateway-time bounds
+`Manager.create_child_work`; per-task gateway-time bounds
 (wall/tokens/cost/tool-calls/input-output bytes) and run-level aggregates
 (tokens/cost/tool-calls/artifact-bytes/wall across the whole run) are
 proven against `ProviderGateway.complete` and `ArtifactService.finalize`.
@@ -14,14 +14,14 @@ from types import MappingProxyType, SimpleNamespace
 
 import pytest
 from phi_core.control import limits
+from phi_core.control import manager as so_module
 from phi_core.control import policy as policy_module
-from phi_core.control import superorchestrator as so_module
 from phi_core.control.artifacts import ArtifactError
 from phi_core.control.gateway import GatewayRequest, ProviderGateway
+from phi_core.control.manager import Manager
 from phi_core.control.policy import MANIFESTS, POLICY_VERSION, TEAMS, CapabilityDenied, CapabilityPolicy
 from phi_core.control.records import ResourceBudget, ResourceUsage, WorkflowRun
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.superorchestrator import SuperOrchestrator
 from phi_core.control.tasks import TaskService
 
 SESSION_ID = "b" * 32
@@ -39,13 +39,13 @@ def test_teams_are_the_exact_five_non_authoritative_budget_groups() -> None:
     }
 
 
-def _rig() -> tuple[SuperOrchestrator, TaskService, MemoryControlStore]:
+def _rig() -> tuple[Manager, TaskService, MemoryControlStore]:
     store = MemoryControlStore()
     tasks = TaskService(store, CapabilityPolicy(None))
-    return SuperOrchestrator(store, tasks), tasks, store
+    return Manager(store, tasks), tasks, store
 
 
-async def _started_run(orch: SuperOrchestrator):
+async def _started_run(orch: Manager):
     return await orch.start_run(session_id=SESSION_ID, principal="operator-1")
 
 

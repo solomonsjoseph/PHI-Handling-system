@@ -16,7 +16,7 @@ from phi_core.control.gateway import GatewayRequest, GatewayResult
 from .llm import parse_json
 
 if TYPE_CHECKING:
-    from .manager import Manager
+    from phi_core.control.manager import ManagerSupervision
 
 
 PLAIN_TIMEOUT_S = 90.0
@@ -120,7 +120,7 @@ class Agent:
         self._last_gateway_result: GatewayResult | None = None
 
     @property
-    def manager(self) -> "Manager | None":
+    def manager(self) -> "ManagerSupervision | None":
         return self.ctx.manager
 
     @staticmethod

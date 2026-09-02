@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
-from phi_core.agents.manager import ExecutionHealthSupervisor, Manager
+from phi_core.control.manager import ManagerSupervision as Manager
 from phi_core.control.records import HandoffResult
 from phi_core.control.testing import make_ctx
 
@@ -101,14 +101,6 @@ def test_ask_lexicon_budget_exhausted():
 
 # ---- Wave 4b: handoff-observation action responder -------------------------
 
-
-def test_manager_is_the_execution_health_supervisor_compat_name():
-    """`Manager` is a compatibility re-export of the real, renamed class --
-    proves the alias resolves to the genuine demoted supervisor, not a
-    stale duplicate definition."""
-    assert Manager is ExecutionHealthSupervisor
-
-
 def _result(*, allowed: bool, reason_code: str = "", sender: str = "Judge",
             recipient: str = "Schema") -> HandoffResult:
     return HandoffResult(handoff_id="h1", run_id="r1", sender=sender,
@@ -143,7 +135,7 @@ def test_respond_to_handoff_escalates_after_repeated_denial_on_same_edge():
     m = _manager()
     denial = _result(allowed=False, reason_code="topology_blocked", sender="Judge", recipient="Schema")
     actions = [asyncio.run(m.respond_to_handoff(result=denial))
-              for _ in range(ExecutionHealthSupervisor.HANDOFF_DENIAL_ESCALATION_THRESHOLD)]
+              for _ in range(Manager.HANDOFF_DENIAL_ESCALATION_THRESHOLD)]
     assert actions[:-1] == ["BLOCK"] * (len(actions) - 1)
     assert actions[-1] == "ESCALATE"
 
@@ -152,7 +144,7 @@ def test_respond_to_handoff_denial_count_is_scoped_per_edge():
     m = _manager()
     same_edge = _result(allowed=False, reason_code="topology_blocked", sender="Judge", recipient="Schema")
     other_edge = _result(allowed=False, reason_code="topology_blocked", sender="Judge", recipient="Lexicon")
-    for _ in range(ExecutionHealthSupervisor.HANDOFF_DENIAL_ESCALATION_THRESHOLD - 1):
+    for _ in range(Manager.HANDOFF_DENIAL_ESCALATION_THRESHOLD - 1):
         assert asyncio.run(m.respond_to_handoff(result=same_edge)) == "BLOCK"
     # A denial on a *different* edge never contributes to the first edge's count.
     assert asyncio.run(m.respond_to_handoff(result=other_edge)) == "BLOCK"

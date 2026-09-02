@@ -513,7 +513,7 @@ async def test_human_review_tail_claims_awaiting_session_before_scheduling(monke
 async def test_a_successful_submission_persists_its_event_and_resolves_the_durable_request(monkeypatch):
     """D13 steps 5/9: a durable open HumanReviewRequest for this run gets a
     HumanReviewEvent recording the final result, and is marked resolved via
-    SuperOrchestrator.consume_review_event once the submission actually
+    Manager.consume_review_event once the submission actually
     resolves the pipeline (not merely defers)."""
     import server as srv
     from phi_core.control.records import HumanReviewRequest, WorkflowRun
@@ -710,7 +710,7 @@ async def test_build_review_event_is_the_same_typed_record_on_both_review_surfac
     function (`_build_review_event`), is used by both the still-awaiting
     surface (`session_human_review`'s early-return branch) and the
     resuming surface (the branch that calls
-    `SuperOrchestrator.consume_review_event`). This proves parity: given
+    `Manager.consume_review_event`). This proves parity: given
     the same submission, the two call sites render fields identically
     except the ones that legitimately differ by surface (`run_id`,
     `result`, and `seq`, which counts prior events for the same
@@ -847,7 +847,7 @@ async def test_comment_resolution_never_auto_applies_regardless_of_confidence(mo
 @pytest.mark.asyncio
 async def test_cancel_submits_the_existing_run_to_super_orchestrator(monkeypatch):
     import server as srv
-    from phi_core.control import superorchestrator as super_module
+    from phi_core.control import manager as super_module
 
     db = _ConditionalStubDB({
         "id": "sid",
@@ -857,7 +857,7 @@ async def test_cancel_submits_the_existing_run_to_super_orchestrator(monkeypatch
     })
     calls: list[dict] = []
 
-    class FakeSuperOrchestrator:
+    class FakeManager:
         def __init__(self, *_args):
             pass
 
@@ -865,7 +865,7 @@ async def test_cancel_submits_the_existing_run_to_super_orchestrator(monkeypatch
             calls.append(kwargs)
 
     monkeypatch.setattr(srv, "get_db", lambda: db)
-    monkeypatch.setattr(super_module, "SuperOrchestrator", FakeSuperOrchestrator)
+    monkeypatch.setattr(super_module, "Manager", FakeManager)
 
     response = await srv.session_cancel("sid", principal="reviewer")
 

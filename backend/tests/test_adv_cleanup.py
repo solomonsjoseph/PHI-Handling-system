@@ -15,10 +15,10 @@ from uuid import uuid4
 
 import pytest
 from phi_core.control.cleanup_manager import CATEGORY_CREDENTIALS, CleanupInputs, CleanupManager
+from phi_core.control.manager import Manager
 from phi_core.control.policy import CapabilityPolicy
 from phi_core.control.sandbox import create_sandbox, destroy_sandbox
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.superorchestrator import SuperOrchestrator
 from phi_core.control.tasks import TaskService
 
 _COMPLETE_OUTCOMES = (
@@ -33,13 +33,13 @@ def _allow_unenforced_sandbox_memory(request, monkeypatch):
         monkeypatch.setenv("PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY", "1")
 
 
-def _rig() -> tuple[CleanupManager, SuperOrchestrator, MemoryControlStore]:
+def _rig() -> tuple[CleanupManager, Manager, MemoryControlStore]:
     store = MemoryControlStore()
-    orch = SuperOrchestrator(store, TaskService(store, CapabilityPolicy(None)))
+    orch = Manager(store, TaskService(store, CapabilityPolicy(None)))
     return CleanupManager(store, orch), orch, store
 
 
-async def _completed_run(orch: SuperOrchestrator, run_id: str):
+async def _completed_run(orch: Manager, run_id: str):
     run = await orch.start_run(session_id=run_id, principal="dev", run_id=run_id)
     for outcome in _COMPLETE_OUTCOMES:
         run = await orch.advance(run_id=run_id, outcome=outcome)

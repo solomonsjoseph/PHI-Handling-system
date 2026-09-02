@@ -187,7 +187,7 @@ class Ledger:
         self._compare_ctx = compare_ctx
         self._aggregate_ctx = aggregate_ctx
         # D5 plan step 5: when the caller created these as durable child
-        # work under this run's SuperOrchestrator, their material result
+        # work under this run's Manager, their material result
         # is only accepted -- not merely trusted because the call
         # returned -- through this hook. None when no durable run exists
         # yet (e.g. a pre-migration session), matching every other

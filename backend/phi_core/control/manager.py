@@ -1,8 +1,47 @@
-"""The Super Orchestrator (D9): exactly the API below, and nothing more.
+"""D9 sequencing (:class:`Manager`) and agent-facing execution supervision
+(:class:`ManagerSupervision`), co-located per rewrite plan step 7.
 
-Exclusive authority, mutually exclusive with every other collaborator:
+These are two fully independent classes, each a faithful, behavior-preserving
+rename of a pre-existing, separately-tested class -- neither wraps or
+delegates to the other:
 
-- ``SuperOrchestrator`` is the only writer of ``workflow_runs.state`` and
+- :class:`Manager` is renamed from ``SuperOrchestrator``
+  (``control/superorchestrator.py``, deleted): "SuperOrchestrator becomes
+  Manager, one entity with one name that sequences the run" (decision 1).
+  Constructed ``Manager(store, tasks)`` at every call site (server.py's 11
+  lifecycle routes, orchestrator.py's own driver code) -- exactly
+  ``SuperOrchestrator``'s original two-argument constructor, unchanged.
+  Holds every D9 sequencing method below (``start_run``, ``advance``,
+  ``create_child_work``, ``request_human_review``, ``recover``, ...) --
+  exactly what ``SuperOrchestrator`` always was, minus the ten methods with
+  zero production caller the rewrite plan names for deletion (``resume``,
+  ``dependencies_satisfied``, ``observe_handoff``,
+  ``require_artifacts_current``, ``evaluate_handoff_budget``,
+  ``route_budget_exceeded``, ``authorize_execution``, ``begin_export``,
+  ``confirm_export``, ``authorize_publication``).
+- :class:`ManagerSupervision` is renamed from ``ExecutionHealthSupervisor``
+  (``agents/manager.py``, deleted): the agent-facing execution-health
+  supervisor plus the deterministic guardian query broker
+  (``attach_schema``/``ask_schema``, ``attach_instrument``/
+  ``ask_instrument``, ``attach_lexicon``/``ask_lexicon``). Constructed
+  ``ManagerSupervision(ctx, *, db=None)`` -- exactly
+  ``ExecutionHealthSupervisor``'s original constructor -- and is the ONLY
+  thing ``AgentContext.manager`` now types to: agents reaching it via
+  ``ctx.manager`` structurally cannot reach ``advance()``,
+  ``create_child_work()``, or any other D9 state write, since
+  ``ManagerSupervision`` holds no ``store`` and no ``TaskService``.
+  orchestrator.py's existing call sites (``state.manager.consult(...)``,
+  ``.close_run(...)``, ``.run(...)``, ``.attach_schema(...)``) are
+  unchanged: ``state.manager`` was always this class, under its old name.
+
+Moving both into one file satisfies "put ManagerSupervision in
+control/manager.py" (rewrite plan step 7, Ruling 14) without inventing any
+new coupling between the two classes' behavior.
+
+``Manager``'s exclusive authority, mutually exclusive with every other
+collaborator:
+
+- ``Manager`` is the only writer of ``workflow_runs.state`` and
   ``workflow_runs.node``, the only caller of ``TaskService.enqueue``
   (through ``create_child_work``), the only issuer of a human-review
   request, the only consumer of a human-review event, and the only
@@ -16,38 +55,43 @@ Exclusive authority, mutually exclusive with every other collaborator:
 - ``run_decision_gates`` (D11, ``control/gates.py``) separately owns
   ``workflow_runs.decision_version``.
 - ``ArtifactService`` (D14, ``control/artifacts.py``) separately owns
-  every ``artifacts``/``publication_pointers`` transition;
-  ``authorize_publication`` calls into it but writes neither collection
-  itself.
+  every ``artifacts``/``publication_pointers`` transition.
 
 Caller-supplies-the-typed-result convention: D9's published method
 signatures list bare identifiers (``run_id``, ``task_id``, ...) for every
-method, but three of them -- ``advance``, ``request_human_review``, and
-``authorize_publication`` -- need a value this class cannot safely
-re-derive from persisted state alone (which outcome a node reached; the
-human-review request's originating task; the artifact/gate-result set a
-publish authorizes) without inventing a bespoke, unverifiable rule per
-call site. Each of those three accepts one additional keyword argument
-here, defaulted so every other call keeps D9's exact arity. This mirrors
-every other typed-result boundary already in this codebase
-(``TaskService.complete``/``.fail``, ``ArtifactService.certify_publication``):
-the caller reports its own typed result; the callee validates, records,
-and never re-guesses it.
+method, but two of them -- ``advance`` and ``request_human_review`` --
+need a value this class cannot safely re-derive from persisted state
+alone (which outcome a node reached; the human-review request's
+originating task) without inventing a bespoke, unverifiable rule per
+call site. Each accepts one additional keyword argument here, defaulted
+so every other call keeps D9's exact arity. This mirrors every other
+typed-result boundary already in this codebase (``TaskService.complete``/
+``.fail``, ``ArtifactService.certify_publication``): the caller reports
+its own typed result; the callee validates, records, and never
+re-guesses it.
 """
 from __future__ import annotations
 
+import asyncio
+import json
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable, Optional
 from uuid import uuid4
 
+from ..agents.base import Agent
+from ..security import scrub_persisted_text
 from . import limits
-from .artifacts import MANIFEST_COLLECTION, ArtifactService
+from .artifacts import MANIFEST_COLLECTION
 from .context import StoreTraceWriter
+from .handoff import INSTRUMENT, JUDGE, LEXICON, SCHEMA, InstrumentQuestion, LexiconQuestion, SchemaQuestion
 from .policy import MANIFESTS, POLICY_VERSION, CapabilityDenied, _bounded_budget
 from .records import (
     CapabilityGrant,
     CleanupManifest,
-    ExecutionTask,
+    ControlRecord,
+    HandoffEnvelope,
     HandoffResult,
     HumanReviewEvent,
     HumanReviewRequest,
@@ -85,6 +129,46 @@ WORKFLOW_VERSION = "wf/1"
 # run-wide task count only counts non-terminal work.
 _TERMINAL_TASK_STATES = frozenset({"succeeded", "failed", "cancelled", "rejected", "superseded"})
 
+# ---- ManagerSupervision's own constants (module-level so the class body
+# stays literal-free; assigned as class attributes below so
+# `self.ROLES`/`self.BUDGET_S` access matches every ported method body
+# unchanged). ----
+
+# Who reports to the Manager and what each owes. Logged as the run charter
+# and shown to the Manager when it supervises, so "the right agent is doing
+# the right task" is an explicit expectation rather than an assumption.
+_ROLES = {
+    "Lexicon": "reads the data dictionary; returns one entry per documented column",
+    "Schema": "reads dataset column HEADERS ONLY; returns one classification per header",
+    "Instrument": "reads study form text; returns the PHI fields it collects",
+    "RegulationsExpert": "returns the rulebook for the run's jurisdiction",
+    "PHIMethodsExpert": "returns the current best-practice technique for one HIPAA category",
+    "Judge": "returns exactly one handling decision per dataset column",
+    "Executor": "deterministic; applies approved decisions, makes no LLM call",
+    "Operator": "deterministic; self-verifies what Executor wrote against decisions",
+    "Reviewer": "PREVIEW: challenges Judge's decisions before execution, zero leak/100% "
+                "accuracy; FINAL: confirms Operator covered every decision",
+}
+
+# Phase 17-B: Auditor (LLM re-derivation role) is retired; Reviewer's
+# FINAL mode is the sole post-execution safety net now. Scout, Ledger,
+# and Herald moved out of the core PHI path into an opt-in post-run
+# report (``outward.run_post_run_report``) and are no longer part of
+# this manager's per-run charter/budget bookkeeping.
+
+# Soft per-call expectations, seeded from measured warm-cache baselines
+# and rounded up so they do not cry wolf.
+# Advisory only: a slow call that SUCCEEDS is never retried -- retrying it
+# would burn the very wall-clock the budget exists to protect. An overrun is
+# recorded, and is shown to the Manager when that call also fails.
+_BUDGET_S = {
+    "Judge": 40.0, "Reviewer": 40.0, "Lexicon": 40.0, "Schema": 25.0,
+    "Instrument": 40.0,
+    "RegulationsExpert": 60.0, "PHIMethodsExpert": 60.0,
+}
+_DEFAULT_BUDGET_S = 45.0
+_MAX_ATTEMPTS = 3                    # 1 initial + 2 supervised retries
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -118,7 +202,522 @@ def _budget_widens(requested: ResourceBudget, ceiling: ResourceBudget) -> bool:
     return any(getattr(requested, field) > getattr(ceiling, field) for field in fields)
 
 
-class SuperOrchestrator:
+@dataclass(frozen=True)
+class ManagerDecision:
+    action: str            # "retry" | "extend_timeout" | "grant_web_search" | "escalate"
+    note: Optional[str]
+
+
+@dataclass(frozen=True)
+class ManagerAdvice:
+    action: str            # "continue" | "escalate_human_review"
+    note: Optional[str]
+
+
+class ManagerSupervision(Agent):
+    """The narrow, agent-facing supervision surface -- ``AgentContext.
+    manager``'s type. Owns the health of the run, never its content.
+    Holds no ``store``, no ``TaskService``: an agent reaching this via
+    ``ctx.manager`` cannot reach ``advance()``, ``create_child_work()``,
+    or any other durable state write.
+
+      1. run()                     open the run; assign roles and deliverables.
+      2. note_phase()              track phase transitions (deterministic).
+      3. run_supervised()          when an agent fails, times out, returns
+                                    garbage, or under-delivers, decide whether to
+                                    retry, grant more time, grant the web-search
+                                    tool, or give up -- with a coaching note.
+      4. consult()                 answer an agent that is unsure whether to keep
+                                    working or hand off to a human.
+      5. close_run()                persistable report of every intervention.
+
+    Per D10, this class owns no path to 'awaiting_human_review': that
+    write is the shared ``orchestrator._escalate_to_human_review()``
+    helper's and ``Manager.request_human_review()``'s, the durable
+    authority.
+
+    It is never given a prompt, a reply, a decision, or a file. Its LLM
+    payload is always counts, enums, and timings.
+
+    Exception: the deterministic guardian query broker below
+    (``attach_schema``/``ask_schema``, ``attach_instrument``/``ask_instrument``,
+    ``attach_lexicon``/``ask_lexicon``) does pass a column or field name
+    through, so Judge/Sentinel can ask a specialist a targeted question
+    instead of relying only on the broadcast summary. That name and the
+    specialist's lookup result never reach this class's own LLM calls --
+    ``ask_schema``/``ask_instrument`` never call an LLM at all, and
+    ``ask_lexicon`` forwards straight to ``Lexicon.answer`` without this
+    class itself reading the reply content.
+    """
+
+    NAME = "Manager"
+    ROLES = _ROLES
+    BUDGET_S = _BUDGET_S
+    DEFAULT_BUDGET_S = _DEFAULT_BUDGET_S
+    MAX_ATTEMPTS = _MAX_ATTEMPTS
+
+    PROMPT = (
+        "You are Manager, the supervisor of a 12-agent clinical-data handling "
+        "pipeline. Each agent is a specialist with one job. Your job is that each "
+        "of them finishes their own job, on time, and that the run either moves "
+        "forward or reaches a human cleanly.\n\n"
+        "How you manage:\n"
+        "- Know the role. Every request tells you which agent it is, what that "
+        "agent owed, and what it actually delivered. Judge the work against what "
+        "was owed, not against what you would have preferred.\n"
+        "- Intervene proportionally, least intrusive first. A retry with clearer "
+        "instruction is cheaper than more time; more time is cheaper than handing "
+        "over a tool; a tool is cheaper than taking a human's attention. Escalate "
+        "when the agent is genuinely blocked, not at the first stumble.\n"
+        "- Support, do not take over. You give an agent clearer instruction, more "
+        "time, or the tool it lacks. You never do its work and never supply its "
+        "answer.\n"
+        "- Adapt. You are told what has already happened in this run, including "
+        "guidance that already fixed the same kind of failure. Reuse what worked; "
+        "stop repeating what did not.\n"
+        "- Know when to stop. Repeated failure of the same kind means the agent "
+        "is blocked, and a blocked run belongs to a human, promptly.\n\n"
+        "Hard constraint: you supervise EXECUTION HEALTH ONLY -- attempt counts, "
+        "error kinds, elapsed seconds, iteration counts, issue counts, and how "
+        "many items were owed versus delivered. You are never given prompt text, "
+        "model replies, decisions, column names, file contents, or any patient or "
+        "study data. Never ask for them, never guess at them, never refer to them. "
+        "Judging the data is your team's job; keeping your team working is yours.\n\n"
+        "Each request names the task and the actions legal right now. Choose "
+        "exactly one action from legal_actions -- never invent one. The optional "
+        "note is short operational coaching for the struggling agent about output "
+        "format, strictness, completeness, or pacing (for example: 'return strict "
+        "JSON only, one entry per item you were given'); it must never mention "
+        "data content.\n\n"
+        'Respond with strict JSON only: {"action": "<one of legal_actions>", '
+        '"note": "<optional, <=200 chars>"}'
+    )
+
+    BACKOFF_S = {2: 2.0, 3: 5.0}        # sleep before attempt N
+    DECISION_TIMEOUT_S = 12.0           # the Manager's own calls stay short
+    NOTE_MAX_CHARS = 200
+    # Wave 4b: repeated denials on the same (sender, recipient) edge within
+    # one run's observation window escalate rather than being reported as
+    # an ordinary BLOCK forever -- mirrors run_supervised's own "repeated
+    # failure of the same kind means the agent is blocked" philosophy
+    # (see PROMPT above), applied to handoff denials instead of call
+    # failures.
+    HANDOFF_DENIAL_ESCALATION_THRESHOLD = 3
+    LEXICON_QUERY_BUDGET = 8             # Lexicon.answer calls an LLM; cap queries/run
+
+    def __init__(self, ctx, *, db=None):
+        super().__init__(ctx)
+        self._db = db
+        self._t0 = time.perf_counter()
+        self._phases: list[dict[str, Any]] = []
+        self._interventions: list[dict[str, Any]] = []
+        self._consults: list[dict[str, Any]] = []
+        self._late_calls: list[dict[str, Any]] = []
+        self._notes_that_worked: dict[str, str] = {}   # error_kind -> coaching note
+        self._escalation: dict[str, Any] | None = None
+        self._handoff_denials: dict[tuple[str, str], int] = {}
+        self._handoff_budget_denials: dict[str, int] = {}
+        self._schema = None
+        self._instrument = None
+        self._lexicon = None
+        self._lexicon_queries = 0
+
+    # ---- open -----------------------------------------------------------
+    async def run(self, *, roster: list[str], phase_plan: list[str]) -> dict[str, Any]:
+        """Open the run: put every agent's role and time expectation on record.
+        Deterministic -- there is nothing to decide yet, so no LLM call."""
+        charter = {
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+            "max_attempts": self.MAX_ATTEMPTS,
+            "phase_plan": phase_plan,
+            "assignments": [
+                {"agent": a,
+                 "role": self.ROLES.get(a, "unlisted"),
+                 "budget_s": self.BUDGET_S.get(a, self.DEFAULT_BUDGET_S)}
+                for a in roster
+            ],
+        }
+        await self._log("manager.charter", "info", charter)
+        return charter
+
+    # ---- watch ------------------------------------------------------
+    async def note_phase(self, phase: str, elapsed_s: float) -> None:
+        """Record a phase transition. In-memory: the orchestrator already emits a
+        progress event per phase, so a second agent_log row would only double log
+        volume for no new information."""
+        self._phases.append({"phase": phase, "elapsed_s": round(elapsed_s, 3)})
+
+    # ---- step in ----------------------------------------------------
+    async def run_supervised(
+        self, *, agent_name: str, phase: str, base_system_prompt: str,
+        primary_attempt: Callable[[str, bool], Awaitable[str]],
+        escalated_attempt: Optional[Callable[[str, bool], Awaitable[str]]] = None,
+        validate: Optional[Callable[[str], dict[str, Any] | None]] = None,
+    ) -> tuple[str, bool, Optional[str]]:
+        """Drive up to MAX_ATTEMPTS attempts on one agent's LLM call.
+
+        `primary_attempt` / `escalated_attempt` are closures owned by the calling
+        Agent method; each takes (system_prompt, extended) and returns reply text,
+        raising asyncio.TimeoutError or any Exception on failure. They alone hold
+        the prompt and the timeout arithmetic. `validate` returns None when the
+        reply is acceptable, else {"kind": ..., plus integer counts}.
+
+        Returns (reply, ok, final_error_kind).
+        """
+        budget = self.BUDGET_S.get(agent_name, self.DEFAULT_BUDGET_S)
+        attempt_fn = primary_attempt
+        extended = False
+        tool_granted = False
+        guidance = ""
+        note_in_play: Optional[str] = None
+        last_error_kind: Optional[str] = None
+        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            system_prompt = base_system_prompt
+            if guidance:
+                system_prompt += f"\n\n[Manager operational note] {guidance}"
+            failure: dict[str, Any] | None = None
+            reply = ""
+            t0 = time.perf_counter()
+            try:
+                reply = await attempt_fn(system_prompt, extended)
+            except asyncio.TimeoutError:
+                failure = {"kind": "timeout"}
+            except Exception as exc:
+                failure = {"kind": f"exception:{type(exc).__name__}"}
+            else:
+                if not reply.strip():
+                    failure = {"kind": "empty_reply"}
+                elif validate is not None:
+                    failure = validate(reply)
+            attempt_s = round(time.perf_counter() - t0, 3)
+
+            if failure is None:
+                if attempt_s > budget:
+                    late = {"agent": agent_name, "phase": phase,
+                            "attempt_s": attempt_s, "budget_s": budget}
+                    self._late_calls.append(late)
+                    await self._log(f"manager.late.{agent_name}", "info", late)
+                if attempt > 1:
+                    self._interventions.append(
+                        {"agent": agent_name, "phase": phase, "attempt": attempt,
+                         "action": "recovered"})
+                    await self._log(f"manager.recovered.{agent_name}", "info",
+                                    {"phase": phase, "attempt": attempt})
+                    if note_in_play and last_error_kind:
+                        # Remember coaching that actually worked, so a later
+                        # agent hitting the same failure is helped immediately.
+                        self._notes_that_worked[last_error_kind] = note_in_play
+                return reply, True, None
+
+            error_kind = failure["kind"]
+            last_error_kind = error_kind
+            counts = {k: v for k, v in failure.items() if k != "kind"}
+            record = {"agent": agent_name, "phase": phase, "attempt": attempt,
+                      "error_kind": error_kind, "attempt_s": attempt_s,
+                      "over_budget": attempt_s > budget, **counts}
+
+            if attempt >= self.MAX_ATTEMPTS:
+                record["action"] = "escalate"
+                record["reason"] = "attempts_exhausted"
+                self._interventions.append(record)
+                await self._log(f"manager.supervise.{agent_name}", "info", record)
+                return "", False, error_kind
+
+            legal = {"retry", "escalate"}
+            if not extended:
+                legal.add("extend_timeout")
+            if escalated_attempt is not None and not tool_granted:
+                legal.add("grant_web_search")
+
+            remembered = self._notes_that_worked.get(error_kind)
+            decision = await self._decide(
+                task="supervise", legal=legal, default_action="escalate",
+                payload={
+                    "agent": agent_name,
+                    "agent_role": self.ROLES.get(agent_name, "unlisted"),
+                    "phase": phase, "attempt": attempt,
+                    "max_attempts": self.MAX_ATTEMPTS,
+                    "error_kind": error_kind,
+                    "attempt_seconds": attempt_s,
+                    "budget_seconds": budget,
+                    "over_budget": attempt_s > budget,
+                    "tool_already_granted": tool_granted,
+                    "timeout_already_extended": extended,
+                    "run_history": self._history_digest(),
+                    "note_that_worked_earlier": remembered,
+                    **counts,
+                })
+
+            record["action"] = decision.action
+            record["note"] = decision.note
+            self._interventions.append(record)
+            await self._log(f"manager.supervise.{agent_name}", "info", record)
+
+            if decision.action == "escalate":
+                return "", False, error_kind
+            if decision.action == "extend_timeout":
+                extended = True
+            elif decision.action == "grant_web_search" and escalated_attempt is not None:
+                tool_granted = True
+                attempt_fn = escalated_attempt
+            # Adaptation: the Manager's own note wins; otherwise fall back to
+            # coaching that already resolved this same error kind in this run.
+            note_in_play = decision.note or remembered
+            if note_in_play:
+                guidance = note_in_play
+            await asyncio.sleep(self.BACKOFF_S.get(attempt + 1, 5.0))
+
+        return "", False, "attempts_exhausted"   # loop always returns above
+
+    # ---- advise -----------------------------------------------------
+    async def consult(self, *, agent_name: str, phase: str,
+                      signal: dict[str, int | float | str]) -> ManagerAdvice:
+        """Answer an agent unsure whether to keep working or hand off.
+
+        `signal` carries counts / scores / enums only -- never prompt, reply, or
+        decision content.
+
+        Fails OPEN to 'continue': a consult is a wall-clock optimisation, never a
+        safety gate, so an unreachable Manager must not change pipeline behaviour.
+        The deterministic post-loop checks remain the real guarantee.
+        """
+        legal = {"continue", "escalate_human_review"}
+        decision = await self._decide(
+            task="consult", legal=legal, default_action="continue",
+            payload={"agent": agent_name,
+                     "agent_role": self.ROLES.get(agent_name, "unlisted"),
+                     "phase": phase, "run_history": self._history_digest(), **signal})
+        record = {"agent": agent_name, "phase": phase, **signal,
+                  "action": decision.action, "note": decision.note}
+        self._consults.append(record)
+        await self._log(f"manager.consult.{agent_name}", "info", record)
+        return ManagerAdvice(action=decision.action, note=decision.note)
+
+    # ---- observe handoffs ---------------------------------------------
+    # Wave 4b (docs #9/#10/#87): the handoff-observation action responder.
+    # ``Manager.observe_handoff`` (retired step 7: zero production
+    # caller) would have already recorded the durable, per-run denial
+    # count; this is the *response* half -- this class watches the same
+    # ``HandoffResult`` a caller reports and picks one of section 10's
+    # nine actions (ALLOW, BLOCK, PAUSE, CANCEL, LIMIT, REDIRECT, RETRY,
+    # ESCALATE, INVALIDATE).
+    #
+    # Only four of the nine have a clear, testable trigger derivable from
+    # a single observed ``HandoffResult`` plus this class's own run-scoped
+    # denial counters -- implemented in full below. The remaining five
+    # would require context this method does not have (PAUSE: whether a
+    # human should be looped in; REDIRECT: which alternate recipient the
+    # original request actually intended; RETRY: every one of
+    # ``HandoffGateway``'s checks 1-10 is deterministic given the same
+    # envelope, so retrying it unchanged can never succeed; INVALIDATE:
+    # which artifact_id a denial reason maps to, a different domain
+    # entirely (``ArtifactService.invalidate_descendants``)) -- inventing
+    # a trigger for any of them would be exactly the "a fixed escalation
+    # policy tied to a rule that has never fired against real data"
+    # Wave 4a's own (now-retired) ``observe_handoff`` docstring already
+    # declined to do. Forward-compatible hooks: the action vocabulary
+    # this method's return type carries already includes them, so a
+    # later phase can wire a real trigger without changing this method's
+    # contract.
+
+    async def respond_to_handoff(self, *, result: HandoffResult) -> str:
+        """One of ALLOW / BLOCK / CANCEL / ESCALATE, chosen from ``result``
+        and this run's own denial history on ``(result.sender,
+        result.recipient)``.
+
+        - ALLOW: the gateway already let it through -- no supervisory
+          reaction needed.
+        - CANCEL: ``residual_phi_detected``/``secret_detected`` is a
+          genuine leak signal, not a shape/policy mismatch a retry or a
+          plain block addresses -- severe enough to stop the attempting
+          task rather than merely record the denial.
+        - ESCALATE: this exact edge has now been denied
+          ``HANDOFF_DENIAL_ESCALATION_THRESHOLD`` times in this run --
+          "repeated failure of the same kind means the agent is
+          blocked" (the same philosophy ``run_supervised`` already
+          applies to call failures), so a human should see it rather
+          than the run silently re-attempting forever.
+        - BLOCK: every other denial -- the deterministic gateway's own
+          verdict stands; this class never tries to force a denied
+          handoff through (section 10: "Manager intelligence does not
+          replace deterministic policy").
+        """
+        if result.allowed:
+            return "ALLOW"
+        if result.reason_code in ("residual_phi_detected", "secret_detected"):
+            return "CANCEL"
+        edge = (result.sender, result.recipient)
+        self._handoff_denials[edge] = self._handoff_denials.get(edge, 0) + 1
+        if self._handoff_denials[edge] >= self.HANDOFF_DENIAL_ESCALATION_THRESHOLD:
+            return "ESCALATE"
+        return "BLOCK"
+
+    async def respond_to_handoff_budget(self, *, category: str) -> str:
+        """LIMIT: the response to a ``HandoffGateway`` retry/correction
+        budget refusal (check 11, ``BudgetExceeded`` -- a distinct
+        observation channel from ``respond_to_handoff`` above, since a
+        budget refusal never produces a ``HandoffResult`` at all; the
+        gateway raises instead of returning). Unlike a plain denial,
+        exhausting a budget has exactly one clear supervisory meaning:
+        this edge has hit its ceiling for this run."""
+        self._handoff_budget_denials[category] = self._handoff_budget_denials.get(category, 0) + 1
+        return "LIMIT"
+
+    # ---- guardian query broker -----------------------------------------
+    # Deterministic lookups a specialist already indexed during its own
+    # run. The Manager holds the only reference for querying purposes so
+    # Judge/Sentinel ask through one place, and every query is logged the
+    # same way regardless of which specialist answered.
+    #
+    # Wave R-c Step 6: each successful query is additionally recorded as
+    # a Judge -> specialist handoff attempt through ``ctx.handoff``, the
+    # only broker topology ``HandoffGateway.ALLOWED_EDGES`` registers
+    # for these three edges (``requesting_agent`` above stays a free-
+    # text logging field only -- it is never what the handoff envelope
+    # names as sender). See ``_record_handoff`` below for why a denied
+    # handoff never blocks the broker's own already-working answer.
+
+    def attach_schema(self, schema) -> None:
+        self._schema = schema
+
+    def attach_instrument(self, instrument) -> None:
+        self._instrument = instrument
+
+    def attach_lexicon(self, lexicon) -> None:
+        self._lexicon = lexicon
+
+    async def _record_handoff(self, recipient: str, payload: ControlRecord) -> None:
+        """Fire-and-record one Judge -> specialist handoff attempt through
+        ``ctx.handoff`` (Wave R-c Step 6), when this context carries the
+        facade. ``HandoffGateway.handoff`` is a validating audit rail
+        alongside this broker's already-authorized in-process relay --
+        its ``allowed``/``denied`` verdict is written to the trace store
+        but never gates ``ask_schema``/``ask_instrument``/``ask_lexicon``'s
+        own return value, so a future policy tightening on the handoff
+        edge cannot silently break the guardian query broker this wave
+        did not otherwise change. ``ctx.handoff is None`` (every pre-
+        existing unit test built via ``control.testing.make_ctx``) is a
+        no-op, matching every other optional facade guard in this class
+        (``ctx.cache``, ``ctx.artifacts``, ...)."""
+        if self.ctx.handoff is None:
+            return
+        await self.ctx.handoff.handoff(HandoffEnvelope(
+            run_id=self.ctx.run_id, sender=JUDGE, recipient=recipient,
+            data_class="restricted_metadata", payload=payload.model_dump(),
+        ))
+
+    async def ask_schema(self, requesting_agent: str, column: str,
+                          file_id: str | None = None) -> dict[str, Any]:
+        if self._schema is None:
+            return {"available": False, "reason": "schema_not_attached"}
+        result = self._schema.verify(column, file_id)
+        await self._record_handoff(SCHEMA, SchemaQuestion(column=column, file_id=file_id or ""))
+        await self._log("manager.ask_schema", "info",
+                        {"requesting_agent": requesting_agent,
+                         "present": result.get("present")})
+        return {"available": True, **result}
+
+    async def ask_instrument(self, requesting_agent: str, field_or_variable: str,
+                              file_id: str | None = None) -> dict[str, Any]:
+        if self._instrument is None:
+            return {"available": False, "reason": "instrument_not_attached"}
+        result = self._instrument.verify(field_or_variable, file_id)
+        await self._record_handoff(
+            INSTRUMENT, InstrumentQuestion(field_or_variable=field_or_variable, file_id=file_id or ""),
+        )
+        await self._log("manager.ask_instrument", "info",
+                        {"requesting_agent": requesting_agent,
+                         "present": result.get("present")})
+        return {"available": True, **result}
+
+    async def ask_lexicon(self, requesting_agent: str, column: str,
+                           assumption: str, reasoning: str) -> dict[str, Any]:
+        if self._lexicon is None:
+            return {"available": False, "reason": "lexicon_not_attached"}
+        if self._lexicon_queries >= self.LEXICON_QUERY_BUDGET:
+            return {"available": False, "reason": "budget_exhausted"}
+        self._lexicon_queries += 1
+        result = await self._lexicon.answer(column, assumption, reasoning)
+        await self._record_handoff(
+            LEXICON, LexiconQuestion(column=column, assumption=assumption, reasoning=reasoning),
+        )
+        await self._log("manager.ask_lexicon", "info",
+                        {"requesting_agent": requesting_agent,
+                         "verdict": result.get("verdict"),
+                         "queries_used": self._lexicon_queries})
+        return {"available": True, **result}
+
+    # ---- close ------------------------------------------------------
+    async def close_run(self, outcome: str) -> dict[str, Any]:
+        """Deterministic run report. Called once per settled exit."""
+        real = [i for i in self._interventions if i.get("action") != "recovered"]
+        per_agent: dict[str, int] = {}
+        for i in real:
+            per_agent[i["agent"]] = per_agent.get(i["agent"], 0) + 1
+        report = {
+            "outcome": outcome,
+            "run_elapsed_s": round(time.perf_counter() - self._t0, 3),
+            "phases_seen": len(self._phases),
+            "intervention_count": len(real),
+            "recovered_count": len(self._interventions) - len(real),
+            "off_task_count": len([i for i in real if i.get("error_kind") == "off_task"]),
+            "late_call_count": len(self._late_calls),
+            "interventions_by_agent": per_agent,
+            "interventions": self._interventions[:50],
+            "late_calls": self._late_calls[:20],
+            "consults": self._consults[:20],
+            "coaching_reused": self._notes_that_worked,
+            "escalation": self._escalation,
+        }
+        await self._log("manager.closeout", "info", report)
+        return report
+
+    # ---- internals -----------------------------------------------------
+    def _history_digest(self) -> dict[str, Any]:
+        """Compact, content-free summary of this run so far, so each decision is
+        informed by the ones before it."""
+        real = [i for i in self._interventions if i.get("action") != "recovered"]
+        by_kind: dict[str, int] = {}
+        for i in real:
+            k = str(i.get("error_kind", "unknown"))
+            by_kind[k] = by_kind.get(k, 0) + 1
+        return {"interventions_so_far": len(real),
+                "recovered_so_far": len(self._interventions) - len(real),
+                "failures_by_kind": by_kind,
+                "late_calls_so_far": len(self._late_calls)}
+
+    async def _decide(self, *, task: str, legal: set[str], default_action: str,
+                      payload: dict[str, Any]) -> ManagerDecision:
+        """One short, strictly bounded LLM call. Any failure, any unparseable
+        reply, or any action outside `legal` collapses to `default_action`."""
+        body = json.dumps({"task": task, "legal_actions": sorted(legal), **payload},
+                          default=str)
+        try:
+            parsed = await self.call_json(body, phase=f"manager.{task}", default={},
+                                          timeout_s=self.DECISION_TIMEOUT_S,
+                                          status_text=f"Manager checking in on {task}")
+        except Exception:
+            parsed = {}
+        action = parsed.get("action") if isinstance(parsed, dict) else None
+        note = parsed.get("note") if isinstance(parsed, dict) else None
+        if action not in legal:
+            action = default_action
+        if isinstance(note, str) and note.strip():
+            note = scrub_persisted_text(note.strip())[: self.NOTE_MAX_CHARS]
+        else:
+            note = None
+        return ManagerDecision(action=action, note=note)
+
+
+class Manager:
+    """D9 sequencing authority -- exactly ``SuperOrchestrator``'s original
+    scope, renamed (see module docstring). Constructed
+    ``Manager(store, tasks)`` at every call site; this class has no
+    inheritance from ``Agent`` and no supervision surface -- that is
+    ``ManagerSupervision``'s exclusive domain, a fully separate class in
+    this same module.
+    """
+
     def __init__(self, store: ControlStore, tasks: TaskService) -> None:
         self._store = store
         self._tasks = tasks
@@ -365,7 +964,6 @@ class SuperOrchestrator:
             correlation_id=parent.correlation_id,
         )
 
-
     # ---- request_human_review ---------------------------------------------
 
     async def request_human_review(
@@ -383,10 +981,9 @@ class SuperOrchestrator:
         """Open a ``HumanReviewRequest`` and pause the run at ``node``.
 
         The only path to ``awaiting_human_review``: D10 repoints every
-        current ``Manager.escalate_to_human_review`` caller here.
-        ``task_id``/``required_role`` are not part of D9's published
-        signature (see module docstring); both default to ``""`` so every
-        existing call keeps D9's exact arity.
+        current escalation caller here. ``task_id``/``required_role`` are
+        not part of D9's published signature (see module docstring); both
+        default to ``""`` so every existing call keeps D9's exact arity.
         """
         run = await self._load_run(run_id)
         validate_node(node)
@@ -644,186 +1241,6 @@ class SuperOrchestrator:
             raise WorkflowError(f"lost the race recovering run_id={run_id!r}")
         return updated
 
-    # ---- resume ---------------------------------------------------------
-
-    async def resume(self, *, run_id: str) -> dict[str, Any]:
-        """The sole authority for what a process restart should do next
-        for ``run_id`` (D9/docs #87 "Manager can safely resume supported
-        states after process restart").
-
-        ``recover`` alone only re-enters the run's checkpoint node -- it
-        never touches ``work_items``. A restarted process's former
-        workers are gone, and a sandboxed ``run_isolated`` dispatch keeps
-        no independent durable record of its own (``control/sandbox.py``'s
-        ``SandboxRecord`` lives only in the caller's in-memory
-        ``ActivationFactory._sandboxes``, never in ``ControlStore``): the
-        only durable trace that a worker -- sandboxed or not -- was
-        mid-task is the ``WorkItem`` lease it held. ``TaskService
-        .reconcile_leases`` is this codebase's existing, sole authority
-        for what an expired lease means next: return it to ``ready`` for
-        retry while attempts remain, or fail it once ``max_attempts`` is
-        reached. There is no channel to recover a dead sandboxed child's
-        actual result once its result queue is gone with it, so "mark for
-        retry" (never "guess it completed") is the only fail-closed
-        choice available, and it is that lease-based mechanism, not an
-        invented sandbox-specific one, that resume() calls into.
-
-        Never re-dispatches a task itself -- claiming and running work is
-        ``control/worker.py``'s job, out of this class's scope. Returns a
-        read/plan summary a caller acts on.
-        """
-        run = await self.recover(run_id=run_id, cause="process_restart")
-        reconciled = await self._tasks.reconcile_leases(run_id=run_id)
-        tasks = await self._store.find_many("work_items", {"run_id": run_id})
-        live_task_ids = sorted(
-            t["task_id"] for t in tasks if t.get("state") not in _TERMINAL_TASK_STATES
-        )
-        return {
-            "run_id": run.run_id,
-            "node": run.node,
-            "state": run.state,
-            "is_terminal": is_terminal(run.node),
-            "reconciled_task_ids": sorted(item.task_id for item in reconciled),
-            "retried_task_ids": sorted(item.task_id for item in reconciled if item.state == "ready"),
-            "retry_failed_task_ids": sorted(item.task_id for item in reconciled if item.state == "failed"),
-            "live_task_ids": live_task_ids,
-        }
-
-    # ---- dependencies_satisfied -------------------------------------------
-
-    async def dependencies_satisfied(self, *, run_id: str, task_id: str) -> bool:
-        """The dependency-state responsibility (D9/docs #87): whether
-        every direct child ``task_id`` dispatched via ``create_child_work``
-        has reached a terminal ``TaskState``. A parent task's own next
-        step is blocked exactly while this is ``False`` -- callers that
-        need to know whether a task can proceed past its fan-out consult
-        this rather than re-deriving live-sibling logic themselves."""
-        children = await self._store.find_many(
-            "work_items", {"run_id": run_id, "parent_task_id": task_id}
-        )
-        return all(child.get("state") in _TERMINAL_TASK_STATES for child in children)
-
-    # ---- observe_handoff ----------------------------------------------------
-
-    async def observe_handoff(self, *, run_id: str, result: HandoffResult) -> None:
-        """The handoff-supervision responsibility (D9/docs #87): the point
-        a caller reports one ``HandoffGateway.handoff`` verdict back to
-        the run's supervising authority.
-
-        ``HandoffGateway`` already records its own ``TraceEvent`` for
-        every attempt, allowed or denied -- this is not a second copy of
-        that record. An allowed handoff needs no supervisory reaction and
-        is a no-op here. A denied handoff increments a durable per-run
-        denial counter on the run's checkpoint (the same dict every other
-        method in this class already extends for run-scoped bookkeeping,
-        e.g. ``recover``'s ``recovery_cause``): no live caller invokes
-        ``HandoffGateway`` yet (its own module docstring: "not called from
-        phi_core/agents/ yet"), so a fixed escalation policy tied to a
-        rule that has never fired against real data would be invented,
-        not derived; recording the observable count here is the
-        authoritative, forward-compatible hook a later phase's escalation
-        policy attaches to without changing this method's signature.
-        """
-        if result.run_id != run_id:
-            raise WorkflowError(
-                f"result.run_id {result.run_id!r} does not match run_id {run_id!r}"
-            )
-        if result.allowed:
-            return
-        for _ in range(10):
-            run = await self._load_run(run_id)
-            denials = int(run.checkpoint.get("handoff_denials", 0)) + 1
-            updated = run.model_copy(
-                update={
-                    "checkpoint": {**run.checkpoint, "handoff_denials": denials},
-                    "updated_at": _now(),
-                }
-            )
-            if await self._store.compare_and_set(
-                "workflow_runs", {"run_id": run_id}, {"updated_at": run.updated_at}, updated
-            ):
-                return
-        raise WorkflowError(f"could not record handoff denial for run_id={run_id!r} after retries")
-
-    # ---- require_artifacts_current ------------------------------------------
-
-    async def require_artifacts_current(self, *, run_id: str, artifact_ids: list[str]) -> None:
-        """The artifact-validity responsibility (D9/docs #87): refuse
-        (``WorkflowError``) when any ``artifact_id`` in ``run_id`` names
-        an artifact ``ArtifactService.invalidate_descendants`` (docs #30)
-        has already flipped to ``superseded``, or that is linked (via
-        :data:`MANIFEST_COLLECTION`) to a
-        :class:`~.records.VerifiedClassificationManifest` already flipped
-        to ``invalidated``. Also refuses on an artifact_id this run has
-        no record of at all, matching ``ArtifactService.open_for_download``'s
-        own ``artifact_missing``/``artifact_superseded``/
-        ``artifact_invalidated`` ordering (missing first would hide a
-        stale-lineage refusal behind a not-found one on a genuinely
-        existing but wrong-run artifact_id; here the artifact is looked
-        up scoped to ``run_id`` directly, so the two cases stay distinct).
-
-        A caller (a later phase's execution/export gate) consults this
-        before it lets a run advance past a step that depends on one of
-        these artifacts still being the current version -- it does not
-        itself walk or re-derive the lineage, which stays
-        ``ArtifactService``'s exclusive authority.
-        """
-        for artifact_id in artifact_ids:
-            doc = await self._store.get_one("artifacts", {"artifact_id": artifact_id, "run_id": run_id})
-            if doc is None:
-                raise WorkflowError(f"unknown artifact_id {artifact_id!r} for run_id={run_id!r}")
-            if doc.get("state") == "superseded":
-                raise WorkflowError(f"artifact_id {artifact_id!r} has been superseded and is no longer current")
-            manifest_doc = await self._store.get_one(MANIFEST_COLLECTION, {"artifact_id": artifact_id})
-            if manifest_doc is not None and manifest_doc.get("status") == "invalidated":
-                raise WorkflowError(
-                    f"artifact_id {artifact_id!r} is linked to an invalidated VerifiedClassificationManifest"
-                )
-
-    # ---- evaluate_handoff_budget / route_budget_exceeded ---------------------
-
-    def evaluate_handoff_budget(
-        self, *, category: str, attempt_number: int, correction_number: int
-    ) -> bool:
-        """The retry/correction-budget responsibility (D9/docs #87,
-        section 48): whether ``attempt_number + correction_number`` still
-        fits ``limits.HANDOFF_ATTEMPT_BUDGET[category]``.
-
-        Read-only and synchronous: the actual enforcement (raising
-        ``policy.BudgetExceeded`` and recording the refusal) is
-        ``HandoffGateway``'s check 11, run at the moment of one handoff
-        attempt. This is the lifecycle-decision mirror this class needs to
-        decide, once that ceiling is already known to be exceeded (see
-        ``route_budget_exceeded``), how the *run* should respond -- a
-        question ``HandoffGateway`` itself never answers, since it has no
-        notion of a workflow run's node or state. A ``category`` with no
-        configured budget is unbounded by this check (matches
-        ``HandoffGateway._evaluate``'s own "no entry means no ceiling"
-        convention for an edge outside :data:`limits.HANDOFF_ATTEMPT_BUDGET`).
-        """
-        budget = limits.HANDOFF_ATTEMPT_BUDGET.get(category)
-        if budget is None:
-            return True
-        return (attempt_number + correction_number) <= budget
-
-    async def route_budget_exceeded(self, *, run_id: str, reason: str) -> HumanReviewRequest:
-        """The routing decision once a retry or correction budget is
-        exhausted (D9/docs #87 "retry budgets"/"correction budgets"):
-        pause the run for human review the same way every other
-        automatic-retry exhaustion in this codebase resolves, since a
-        budget-exhausted loop is, by definition, something no further
-        automatic retry can fix. Delegates to ``request_human_review``,
-        the sole existing path to ``awaiting_human_review``, rather than
-        writing a second one -- ``reason`` is recorded alongside the
-        fixed ``"budget_exceeded"`` code so a reviewer sees both the
-        category this refusal fired on and why."""
-        return await self.request_human_review(
-            run_id=run_id,
-            node="human_review_decisions",
-            reason_codes=["budget_exceeded", reason],
-            decision_version=0,
-        )
-
     # ---- authorize_manifest_freeze -------------------------------------------
 
     async def authorize_manifest_freeze(
@@ -864,30 +1281,6 @@ class SuperOrchestrator:
         else:
             await self._store.replace_one(MANIFEST_COLLECTION, {"artifact_id": artifact_id}, document)
         return manifest
-
-    # ---- authorize_execution ---------------------------------------------
-
-    async def authorize_execution(self, *, run_id: str, task: ExecutionTask) -> bool:
-        """The execution-authorization responsibility (D9/docs #50, #87):
-        the gate a caller consults before an :class:`~.records.ExecutionTask`
-        may actually run.
-
-        Forward-compatible hook: no live caller submits an
-        ``ExecutionTask`` through a governed path yet (Executor's real
-        wiring through this gate is a later phase's job -- see this
-        wave's report), so this method's contract stays deliberately
-        narrow to what is exercisable today with what already exists:
-        the task's own ``run_id`` must match ``run_id``, and the run must
-        be in an executable lifecycle state (not terminal, not paused for
-        human review). Returns ``False`` rather than raising, matching
-        ``accept_result``'s "a caller checks the boolean" contract, since
-        an authorization query is not itself an error condition."""
-        if task.run_id != run_id:
-            return False
-        run = await self._load_run(run_id)
-        if is_terminal(run.node) or run.state == "awaiting_human_review":
-            return False
-        return True
 
     # ---- rewind ---------------------------------------------------------
 
@@ -944,13 +1337,9 @@ class SuperOrchestrator:
         """The final-release-authorization responsibility (D9/docs #87):
         the gate before a run's outputs may be released/exported.
 
-        Distinct from ``authorize_publication``'s job (certifying a new
-        publication generation on the artifact-lineage side): this checks
-        the *run* has actually reached a releasable terminal state
+        Checks the *run* has actually reached a releasable terminal state
         (``complete`` or ``partially_complete``) with no
-        ``HumanReviewRequest`` still ``open`` -- the read-only precondition
-        ``begin_export`` (below) enforces before it lets export lifecycle
-        state advance past this gate."""
+        ``HumanReviewRequest`` still ``open``."""
         run = await self._load_run(run_id)
         if run.state not in ("complete", "partially_complete"):
             return False
@@ -958,52 +1347,6 @@ class SuperOrchestrator:
             "human_review_requests", {"run_id": run_id, "state": "open"}
         )
         return not open_requests
-
-    # ---- begin_export / confirm_export ---------------------------------------
-
-    async def begin_export(self, *, run_id: str) -> WorkflowRun:
-        """The export-lifecycle responsibility (D9/docs #75, #87): advance
-        ``workflow_runs.state`` to ``ready_for_export`` -- the first of
-        the two lifecycle states :data:`~.workflow.RUN_LIFECYCLE_STATES`
-        (docs section 78) reserves for export, distinct from the D9
-        workflow-node table's own terminal set. Refuses unless
-        ``authorize_final_release`` already clears the run. Idempotent
-        and CAS-guarded like every other run-metadata write in this
-        class."""
-        current = await self._load_run(run_id)
-        if current.state != "ready_for_export" and not await self.authorize_final_release(run_id=run_id):
-            raise WorkflowError(f"run_id={run_id!r} is not authorized for export")
-        for _ in range(10):
-            run = await self._load_run(run_id)
-            if run.state == "ready_for_export":
-                return run
-            updated = run.model_copy(update={"state": "ready_for_export", "updated_at": _now()})
-            if await self._store.compare_and_set(
-                "workflow_runs", {"run_id": run_id}, {"updated_at": run.updated_at}, updated
-            ):
-                return updated
-        raise WorkflowError(f"could not begin export for run_id={run_id!r} after retries")
-
-    async def confirm_export(self, *, run_id: str) -> WorkflowRun:
-        """Advance to ``export_confirmed`` once ``begin_export``'s gate has
-        already been cleared. Refuses (``WorkflowError``) if the run never
-        actually reached ``ready_for_export`` -- there is no path to
-        confirming an export that was never begun."""
-        for _ in range(10):
-            run = await self._load_run(run_id)
-            if run.state == "export_confirmed":
-                return run
-            if run.state != "ready_for_export":
-                raise WorkflowError(
-                    f"run_id={run_id!r} must be ready_for_export before it can be "
-                    f"export_confirmed, is {run.state!r}"
-                )
-            updated = run.model_copy(update={"state": "export_confirmed", "updated_at": _now()})
-            if await self._store.compare_and_set(
-                "workflow_runs", {"run_id": run_id}, {"updated_at": run.updated_at}, updated
-            ):
-                return updated
-        raise WorkflowError(f"could not confirm export for run_id={run_id!r} after retries")
 
     # ---- begin_cleanup / confirm_cleanup --------------------------------------
 
@@ -1076,7 +1419,12 @@ class SuperOrchestrator:
         ``TaskService``/``control/worker.py`` to still be supervising).
         Does not itself destroy or export anything -- the cleanup and
         export lifecycle methods above are the actuators; this is the
-        formal confirmation step section 9 calls "closure"."""
+        formal confirmation step section 9 calls "closure".
+
+        No collision with ``ManagerSupervision.close_run`` (a run-report
+        method with a different signature, on a fully separate class in
+        this same module): the two never coexist on one object.
+        """
         run = await self._load_run(run_id)
         open_requests = await self._store.find_many(
             "human_review_requests", {"run_id": run_id, "state": "open"}
@@ -1094,50 +1442,6 @@ class SuperOrchestrator:
             "open_human_review_request_ids": sorted(r["request_id"] for r in open_requests),
             "live_task_ids": live_task_ids,
         }
-
-    # ---- authorize_publication ---------------------------------------------
-
-    async def authorize_publication(
-        self,
-        *,
-        run_id: str,
-        artifact_ids: list[str] | None = None,
-        gate_result_ids: list[str] | None = None,
-        certified_by_task_id: str = "",
-    ) -> int:
-        """Check the publish gates and certify a new publication generation.
-
-        ``artifact_ids``/``gate_result_ids`` are not part of D9's
-        published signature (see module docstring): the winning set is
-        computed outside ``ControlStore``'s abstraction today (Publish
-        Guard's clean-file set lives on the plain ``db.sessions`` document,
-        not a control-plane record), so the caller that already holds it
-        passes it through rather than this class re-deriving it from a
-        collection it has no access to. A ``None``/empty ``artifact_ids``
-        authorizes nothing new and returns the current generation
-        (``0`` if none has ever been certified) -- a query-only mode.
-        Refuses (``WorkflowError``) while a ``HumanReviewRequest`` for
-        this run is still ``open``: publication cannot be authorized
-        while a human decision is outstanding.
-        """
-        run = await self._load_run(run_id)
-        open_requests = await self._store.find_many(
-            "human_review_requests", {"run_id": run_id, "state": "open"}
-        )
-        if open_requests:
-            raise WorkflowError(f"run_id={run_id!r} has an open human review request; publication refused")
-        service = ArtifactService(self._store, session_id=run.session_id, run_id=run_id)
-        current = await service._current_pointer(run.session_id)
-        if not artifact_ids:
-            return current.generation if current is not None else 0
-        pointer = await service.certify_publication(
-            run_id=run_id,
-            artifact_ids=list(artifact_ids),
-            gate_result_ids=list(gate_result_ids or []),
-            fence=(current.fence + 1) if current is not None else 1,
-            certified_by_task_id=certified_by_task_id,
-        )
-        return pointer.generation
 
     # ---- terminal_outcome ---------------------------------------------
 

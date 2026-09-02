@@ -67,7 +67,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from phi_core import chatgpt_auth
 from phi_core.agents import AgentMessage, LlmConfig
-from phi_core.agents import run_pipeline as run_agent_pipeline
+from phi_core.agents.orchestrator import run_pipeline as run_agent_pipeline
 from phi_core.control import limits
 from phi_core.control.events import EventBroker
 from phi_core.crypto import (
@@ -950,7 +950,7 @@ async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
     Coordinates with active work: the session is tombstoned before
     anything is deleted, so ``ArtifactService.stage`` refuses for this
     session from this point forward. When the session has a durable
-    ``WorkflowRun``, ``SuperOrchestrator.cancel_run`` then fences its root
+    ``WorkflowRun``, ``Manager.cancel_run`` then fences its root
     task and every durable descendant through ``TaskService.cancel_subtree``
     before artifact erasure. A pre-Phase-5 session can have only the legacy
     ``_pipeline_run_id`` token, no durable run record; tombstoning remains
@@ -966,9 +966,9 @@ async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
     resurrect or accept new work while erasure is pending.
     """
     from phi_core.control.artifacts import ArtifactService, tombstone_session
+    from phi_core.control.manager import Manager
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.store import MongoControlStore
-    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
     from phi_core.control.workflow import WorkflowError
 
@@ -981,7 +981,7 @@ async def session_delete(sid: str, principal: str = Depends(resolve_principal)):
     await tombstone_session(control_store, sid)
     if run_id := doc.get("_pipeline_run_id"):
         try:
-            await SuperOrchestrator(
+            await Manager(
                 control_store, TaskService(control_store, CapabilityPolicy(None))
             ).cancel_run(
                 session_id=sid,
@@ -1379,15 +1379,15 @@ async def admin_set_hold(body: AdminHoldBody, principal: str = Depends(resolve_p
     run_id = doc.get("_pipeline_run_id")
     if not run_id:
         raise HTTPException(409, "session has no durable run to hold")
+    from phi_core.control.manager import Manager
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.store import MongoControlStore
-    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
     from phi_core.control.workflow import WorkflowError
 
     control_store = MongoControlStore(db)
     try:
-        await SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(None))).set_hold(
+        await Manager(control_store, TaskService(control_store, CapabilityPolicy(None))).set_hold(
             run_id=run_id, reason=body.reason,
         )
     except WorkflowError as exc:
@@ -1412,15 +1412,15 @@ async def admin_clear_hold(session_id: str, reason: str = "", principal: str = D
     run_id = doc.get("_pipeline_run_id")
     if not run_id:
         raise HTTPException(409, "session has no durable run to clear a hold from")
+    from phi_core.control.manager import Manager
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.store import MongoControlStore
-    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
     from phi_core.control.workflow import WorkflowError
 
     control_store = MongoControlStore(db)
     try:
-        await SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(None))).clear_hold(
+        await Manager(control_store, TaskService(control_store, CapabilityPolicy(None))).clear_hold(
             run_id=run_id,
         )
     except WorkflowError as exc:
@@ -1493,7 +1493,7 @@ async def _open_published_artifact(service, sid: str, run_id: str, artifact_id: 
 
     Nothing yet calls ``ArtifactService.certify_publication`` on the
     pipeline's behalf (that becomes Phase 5's
-    ``SuperOrchestrator.authorize_publication``); until it lands, the
+    ``Manager.authorize_publication``); until it lands, the
     first download request against a fresh Publish-Guard-clean result
     lazily certifies the *entire* current clean set together as one
     publication generation, so every clean file in this run shares one
@@ -1766,9 +1766,9 @@ async def session_cleanup_status(sid: str, principal: str = Depends(resolve_prin
     triggers a cleanup pass itself.
     """
     from phi_core.control.cleanup_manager import CleanupManager
+    from phi_core.control.manager import Manager
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.store import MongoControlStore
-    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
     db = get_db()
     session = await _owned_session(
@@ -1778,7 +1778,7 @@ async def session_cleanup_status(sid: str, principal: str = Depends(resolve_prin
     run_id = session.get("_pipeline_run_id") or sid
     control_store = MongoControlStore(db)
     manager = CleanupManager(
-        control_store, SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(None))),
+        control_store, Manager(control_store, TaskService(control_store, CapabilityPolicy(None))),
     )
     manifest = await manager.latest_manifest(run_id)
     return {
@@ -1974,9 +1974,9 @@ async def corpus_study_research(body: CorpusStudyResearchBody):
     Mongo collection so it survives restart and shows up in the catalog.
     """
     from phi_core.control.activation import ActivationFactory
+    from phi_core.control.manager import Manager
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.store import MongoControlStore
-    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
     from phi_corpus.researcher import CorpusResearcher
     db = get_db()
@@ -1987,7 +1987,7 @@ async def corpus_study_research(body: CorpusStudyResearchBody):
     # the ActivationFactory-issued grant CorpusResearcher already had --
     # this is what makes D5's run-level bounds (MAX_TOKENS_PER_RUN and
     # friends) apply to a research call at all.
-    await SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(cfg))).start_run(
+    await Manager(control_store, TaskService(control_store, CapabilityPolicy(cfg))).start_run(
         session_id="corpus-researcher", principal="api-token", run_type="maintenance", run_id=run_id,
     )
     factory = ActivationFactory(db, cfg, store=control_store)
@@ -2384,9 +2384,9 @@ async def _run_warmup(db, cfg) -> dict:
     """Run RegulationsExpert + all 17 PHIMethodsExpert warmups. Shared by manual and scheduled paths."""
     from phi_core.agents.experts import PHIMethodsExpert, RegulationsExpert
     from phi_core.control.activation import ActivationFactory
+    from phi_core.control.manager import Manager
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.store import MongoControlStore
-    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
 
     warmup_sid = f"warmup:{uuid.uuid4().hex[:8]}"
@@ -2399,7 +2399,7 @@ async def _run_warmup(db, cfg) -> dict:
     # Phase 5 step 2: a real WorkflowRun (run_type="warmup") so D5's
     # run-level bounds apply across these 18 provider calls, not only the
     # per-task ceiling each ActivationFactory-issued grant already had.
-    await SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(cfg))).start_run(
+    await Manager(control_store, TaskService(control_store, CapabilityPolicy(cfg))).start_run(
         session_id=warmup_sid, principal="api-token", run_type="warmup", run_id=warmup_run_id,
     )
     factory = ActivationFactory(db, cfg, store=control_store)
@@ -2643,23 +2643,23 @@ async def _run_cleanup_manager_best_effort(
     real filesystem/db erasure, and -- only when the manifest genuinely
     verifies -- advance the run to ``session_destroyed`` through the
     pre-existing, already-tested ``begin_cleanup``/``confirm_cleanup``
-    invariant (``superorchestrator.py``; refuses outright on anything
+    invariant (``manager.py``; refuses outright on anything
     but ``verification_status == "verified"``).
 
     Best-effort and broadly caught by design, matching this module's own
     ``_erase_opaque_map_best_effort`` convention: a pre-Phase-5 session
     with no durable ``WorkflowRun`` (``begin_cleanup``/``confirm_cleanup``
-    both call ``SuperOrchestrator._load_run``, which raises
+    both call ``Manager._load_run``, which raises
     ``WorkflowError`` for an unknown ``run_id``), or a test harness
-    stubbing ``SuperOrchestrator`` without these newer cleanup-lifecycle
+    stubbing ``Manager`` without these newer cleanup-lifecycle
     methods, must never turn an otherwise-successful erasure into a
     failed request. The filesystem/db erasure the caller already
     performed is the real right-to-erasure guarantee; this is additive
     audit trail on top of it, not a precondition for it.
     """
     from phi_core.control.cleanup_manager import CleanupInputs, CleanupManager
+    from phi_core.control.manager import Manager
     from phi_core.control.policy import CapabilityPolicy
-    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
 
     async def _confirm_true() -> bool:
@@ -2669,7 +2669,7 @@ async def _run_cleanup_manager_best_effort(
         return True, []
 
     try:
-        orchestrator = SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(None)))
+        orchestrator = Manager(control_store, TaskService(control_store, CapabilityPolicy(None)))
         manager = CleanupManager(control_store, orchestrator)
         manifest = await manager.cleanup(CleanupInputs(
             run_id=run_id, session_id=session_id,
@@ -2697,22 +2697,22 @@ async def _run_hold(db, run_id: str | None) -> str:
 
 async def _erase_opaque_map_best_effort(db, run_id: str | None) -> None:
     """D5 right-to-erasure/retention: clear ``run_id``'s encrypted opaque
-    map (see ``SuperOrchestrator.erase_opaque_map``). Best-effort by
+    map (see ``Manager.erase_opaque_map``). Best-effort by
     design, mirroring every other step in this purge path: a session
     whose only identifier is the legacy ``_pipeline_run_id`` token (no
     durable ``WorkflowRun``) has nothing to erase here, and that is not
     an error condition for the caller."""
     if not run_id:
         return
+    from phi_core.control.manager import Manager
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.store import MongoControlStore
-    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
     from phi_core.control.workflow import WorkflowError
 
     control_store = MongoControlStore(db)
     try:
-        await SuperOrchestrator(
+        await Manager(
             control_store, TaskService(control_store, CapabilityPolicy(None))
         ).erase_opaque_map(run_id=run_id)
     except WorkflowError as exc:
@@ -3053,14 +3053,14 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
     session["_pipeline_run_id"] = run_id
     if cap is not None:
         session["iteration_cap"] = cap
+    from phi_core.control.manager import Manager
     from phi_core.control.opaque import OpaqueMap
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.store import MongoControlStore
-    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
 
     control_store = MongoControlStore(db)
-    orchestrator_service = SuperOrchestrator(
+    orchestrator_service = Manager(
         control_store, TaskService(control_store, CapabilityPolicy(cfg))
     )
     workflow_run = await orchestrator_service.start_run(
@@ -3078,7 +3078,7 @@ async def session_handle(sid: str, iteration_cap: int | None = None,
     await orchestrator_service.record_opaque_map(run_id=run_id, opaque_map=workflow_run.opaque_map)
 
     # Phase 5 step 2/9: the route owns its legacy session admission claim
-    # and then submits the command. SuperOrchestrator owns the WorkflowRun
+    # and then submits the command. Manager owns the WorkflowRun
     # and creates the durable root Pipeline work item; this route never
     # calls TaskService.enqueue directly.
     return {"status": "started", "llm": {"provider": cfg.provider, "model": cfg.model}}
@@ -3125,15 +3125,15 @@ async def session_cancel(sid: str, principal: str = Depends(resolve_principal)):
     )
     run_id = doc.get("_pipeline_run_id")
     if run_id:
+        from phi_core.control.manager import Manager
         from phi_core.control.policy import CapabilityPolicy
         from phi_core.control.store import MongoControlStore
-        from phi_core.control.superorchestrator import SuperOrchestrator
         from phi_core.control.tasks import TaskService
         from phi_core.control.workflow import WorkflowError
 
         control_store = MongoControlStore(db)
         try:
-            await SuperOrchestrator(
+            await Manager(
                 control_store, TaskService(control_store, CapabilityPolicy(None))
             ).cancel_run(
                 session_id=sid,
@@ -3350,7 +3350,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     control_store = MongoControlStore(db)
     # D13 step 8: the run's current decision_version, when a durable
     # `WorkflowRun` already exists for it (Phase 5 migrated this session's
-    # start/resume through `SuperOrchestrator`). A pre-migration session,
+    # start/resume through `Manager`). A pre-migration session,
     # or one whose run never opened a `WorkflowRun`, has none -- 0, same
     # as `_next_decision_version`'s own no-store fallback below.
     workflow_run_doc = (await control_store.get_one("workflow_runs", {"run_id": prior_run_id})
@@ -3398,7 +3398,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     # through unchanged -- `request_id` stays None and no idempotency
     # protection applies, same as this route's behavior before this check
     # existed. `open_requests` holds at most one entry:
-    # `SuperOrchestrator.request_human_review` supersedes any prior open
+    # `Manager.request_human_review` supersedes any prior open
     # request for a run_id before opening a new one (D13's "only supersede
     # closes" invariant), so a rerun escalation never leaves two competing
     # open requests for this query to pick between.
@@ -3555,7 +3555,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
     # check and a `capability_grants`/`work_items` write for no reason this
     # call site needs. `store` is `control_store` when a durable
     # `WorkflowRun` already exists for this run (Phase 5's
-    # `SuperOrchestrator.start_run` migration) so `decision_version` is the
+    # `Manager.start_run` migration) so `decision_version` is the
     # real, CAS-incremented one `dataset_file_downloads` scoping above
     # compares against; `None` (decision_version stays 0) for a
     # pre-migration session with no such record, same tolerant fallback
@@ -3694,12 +3694,12 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         )
 
     # Phase 5 step 2/9: submit and return. The atomic `review_filter`
-    # claim preserves the existing session fence. SuperOrchestrator either
+    # claim preserves the existing session fence. Manager either
     # reuses its matching WorkflowRun or opens one for a pre-migration
     # session, then creates the durable `pipeline_resume` root task; this
     # route never calls TaskService.enqueue directly.
+    from phi_core.control.manager import Manager
     from phi_core.control.policy import CapabilityPolicy
-    from phi_core.control.superorchestrator import SuperOrchestrator
     from phi_core.control.tasks import TaskService
     from phi_core.control.workflow import WorkflowError
 
@@ -3711,7 +3711,7 @@ async def session_human_review(sid: str, body: HumanReviewSubmit, principal: str
         principal=principal, body=body, body_hash=body_hash,
         decision_version=gate_outcome.decision_version, result=result,
     )
-    orchestrator_service = SuperOrchestrator(control_store, TaskService(control_store, CapabilityPolicy(cfg)))
+    orchestrator_service = Manager(control_store, TaskService(control_store, CapabilityPolicy(cfg)))
     if review_event is not None:
         # D13's actual resolution authority: consume_review_event both
         # persists this event and resolves the durable request (do not
@@ -3894,9 +3894,9 @@ async def session_post_run_report(sid: str, principal: str = Depends(resolve_pri
     short-circuit, since a study team may reasonably want a fresh
     competitive-landscape/ledger/manuscript draft on demand.
     """
-    from phi_core.agents.manager import ExecutionHealthSupervisor
     from phi_core.agents.outward import run_post_run_report
     from phi_core.control.activation import ActivationFactory
+    from phi_core.control.manager import ManagerSupervision
     from phi_core.control.store import MongoControlStore
 
     db = get_db()
@@ -3915,7 +3915,7 @@ async def session_post_run_report(sid: str, principal: str = Depends(resolve_pri
     cfg = await _current_llm_cfg()
     store = MongoControlStore(db)
     factory = ActivationFactory(db, cfg, store=store)
-    manager_box: dict[str, "ExecutionHealthSupervisor | None"] = {"value": None}
+    manager_box: dict[str, "ManagerSupervision | None"] = {"value": None}
 
     async def _actx(agent: str):
         return await factory.activate(session_id=sid, run_id=run_id, agent=agent, manager=manager_box["value"])
@@ -3929,7 +3929,7 @@ async def session_post_run_report(sid: str, principal: str = Depends(resolve_pri
     async def _complete_and_accept(ctx, result: dict) -> bool:
         return await factory.complete_and_accept(ctx, result)
 
-    manager = ExecutionHealthSupervisor(await _actx("Manager"), db=db)
+    manager = ManagerSupervision(await _actx("Manager"), db=db)
     manager_box["value"] = manager
     await manager.run(
         roster=["Scout", "Ledger", "Ledger.Compare", "Ledger.Aggregate",

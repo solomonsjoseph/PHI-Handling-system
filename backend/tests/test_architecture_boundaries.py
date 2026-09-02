@@ -2,7 +2,7 @@
 
 All five tests the plan names for this file are covered here.
 `test_every_entry_path_submits_a_command` and
-`test_no_module_outside_the_super_orchestrator_calls_task_service_enqueue`
+`test_no_module_outside_the_manager_calls_task_service_enqueue`
 each carry one documented, narrow exception rather than a fictional
 clean pass: `session_intake` and `corpus_study_generate` do no
 provider/workflow work at all (pure file/DB I/O), so the plan's own
@@ -11,7 +11,7 @@ them; `corpus_study_run` delegates to `session_handle`, already
 migrated. `control/activation.py::ActivationFactory.activate` remains a
 documented, intentional interim `TaskService.enqueue` caller for the
 "every agent activation becomes a durable child task" migration
-(`ActivationFactory`'s own module docstring: "Phase 5's SuperOrchestrator
+(`ActivationFactory`'s own module docstring: "Phase 5's Manager
 becomes the sole caller of TaskService.enqueue; until then this factory
 is the one place that does"). Tracked as a known, accepted interim
 state in docs/adr/0006-super-orchestrator.md.
@@ -24,10 +24,10 @@ import re
 from pathlib import Path
 
 import pytest
+from phi_core.control.manager import Manager
 from phi_core.control.policy import CapabilityDenied, CapabilityPolicy
 from phi_core.control.records import ResourceBudget
 from phi_core.control.store import MemoryControlStore
-from phi_core.control.superorchestrator import SuperOrchestrator
 from phi_core.control.tasks import TaskService
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
@@ -40,27 +40,26 @@ _ESCALATE_LIKE = re.compile(r"(escalate|publish|promote|transition|enqueue|accep
 
 
 def test_manager_holds_no_workflow_authority() -> None:
-    """D10: Manager keeps run_supervised/consult/the guardian broker/
-    close_run, and nothing that writes workflow, task, artifact, or
+    """D10: ManagerSupervision keeps run_supervised/consult/the guardian
+    broker/close_run, and nothing that writes workflow, task, artifact, or
     publication-pointer state."""
-    from phi_core.agents.manager import Manager
+    import inspect
 
-    offending = [name for name in dir(Manager) if not name.startswith("__") and _ESCALATE_LIKE.search(name)]
+    from phi_core.control.manager import ManagerSupervision
+
+    offending = [
+        name for name in dir(ManagerSupervision) if not name.startswith("__") and _ESCALATE_LIKE.search(name)
+    ]
     assert offending == []
 
-    source = (BACKEND_ROOT / "phi_core" / "agents" / "manager.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    forbidden_modules = {"control.tasks", "control.artifacts", "control.review"}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            assert not any(node.module.endswith(m) or m in node.module for m in forbidden_modules), (
-                f"manager.py imports from forbidden module: {node.module}"
-            )
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                assert not any(alias.name.endswith(m) for m in forbidden_modules), (
-                    f"manager.py imports forbidden module: {alias.name}"
-                )
+    # D10: ManagerSupervision must never receive a ControlStore or
+    # TaskService at construction -- the structural guarantee that
+    # replaces the old (agents/manager.py-only) module import scan now
+    # that ManagerSupervision shares control/manager.py with the D9
+    # Manager class, which legitimately imports both.
+    params = set(inspect.signature(ManagerSupervision.__init__).parameters)
+    forbidden = params & {"store", "tasks"}
+    assert not forbidden, f"ManagerSupervision.__init__ accepts a workflow collaborator: {forbidden}"
 
 
 # ---- test_only_the_artifact_service_writes_the_publication_pointer -------
@@ -140,10 +139,10 @@ def test_only_trace_event_store_writes_trace_events() -> None:
 # ---- test_concurrent_child_creation_cannot_exceed_parent_ancestor_or_run_budgets
 
 
-def _rig() -> tuple[SuperOrchestrator, MemoryControlStore]:
+def _rig() -> tuple[Manager, MemoryControlStore]:
     store = MemoryControlStore()
     tasks = TaskService(store, CapabilityPolicy(None))
-    return SuperOrchestrator(store, tasks), store
+    return Manager(store, tasks), store
 
 
 @pytest.mark.asyncio
@@ -154,8 +153,8 @@ async def test_concurrent_child_creation_cannot_exceed_parent_ancestor_or_run_bu
     from types import MappingProxyType
 
     from phi_core.control import limits
+    from phi_core.control import manager as manager_module
     from phi_core.control import policy as policy_module
-    from phi_core.control import superorchestrator as so_module
     from phi_core.control.policy import MANIFESTS
 
     patched = MappingProxyType(
@@ -166,7 +165,7 @@ async def test_concurrent_child_creation_cannot_exceed_parent_ancestor_or_run_bu
             ),
         }
     )
-    monkeypatch.setattr(so_module, "MANIFESTS", patched)
+    monkeypatch.setattr(manager_module, "MANIFESTS", patched)
     monkeypatch.setattr(policy_module, "MANIFESTS", patched)
     monkeypatch.setattr(limits, "MAX_PARALLEL_TASKS_PER_PARENT", 3)
     monkeypatch.setattr(limits, "MAX_TASKS_PER_RUN", 100)
@@ -209,7 +208,7 @@ def _function_source(source: str, tree: ast.AST, name: str) -> str:
 
 def test_every_entry_path_submits_a_command() -> None:
     """Every route that starts provider or workflow work calls
-    `SuperOrchestrator` to do it -- `session_handle`, `session_human_review`,
+    `Manager` to do it -- `session_handle`, `session_human_review`,
     `session_cancel`, `session_delete`, `corpus_study_research`, and
     `_run_warmup` (shared by `settings_warmup` and `_warmup_scheduler_loop`)
     each construct one and call a command method on it, rather than
@@ -221,7 +220,7 @@ def test_every_entry_path_submits_a_command() -> None:
         "corpus_study_research", "_run_warmup",
     ):
         segment = _function_source(source, tree, name)
-        assert "SuperOrchestrator(" in segment, f"{name} never constructs a SuperOrchestrator"
+        assert re.search(r"(?<![A-Za-z])Manager\(", segment), f"{name} never constructs a Manager"
 
 
 # ---- test_no_module_outside_the_super_orchestrator_calls_task_service_enqueue
@@ -246,10 +245,10 @@ def _task_service_enqueue_call_sites() -> list[tuple[Path, int]]:
     return sites
 
 
-def test_no_module_outside_the_super_orchestrator_calls_task_service_enqueue() -> None:
+def test_no_module_outside_the_manager_calls_task_service_enqueue() -> None:
     sites = _task_service_enqueue_call_sites()
     allowed = {
-        BACKEND_ROOT / "phi_core" / "control" / "superorchestrator.py",
+        BACKEND_ROOT / "phi_core" / "control" / "manager.py",
         # Documented interim exception -- see this file's module docstring.
         BACKEND_ROOT / "phi_core" / "control" / "activation.py",
     }
