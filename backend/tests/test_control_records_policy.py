@@ -82,6 +82,39 @@ def test_output_schemas_reserves_study_knowledge_package_for_phase_5() -> None:
     assert "study_knowledge_package" in OUTPUT_SCHEMAS
     assert OUTPUT_SCHEMAS["study_knowledge_package"] == {"type": "object"}
 
+def test_no_manifest_pairs_a_real_prompt_with_zero_allowed_providers() -> None:
+    """Step 10's own requirement: an agent whose ``PROMPT`` is non-empty
+    (it genuinely calls an LLM somewhere in its own methods) must never
+    be paired with an empty ``allowed_providers`` -- that combination
+    means every such call raises ``CapabilityDenied`` unconditionally,
+    which is either a silent, permanent failure (if the caller swallows
+    the exception, as ``ManagerSupervision._decide`` did until this
+    test caught it) or an unconditionally-broken agent. Every ``Agent``
+    subclass is discovered by reflection (``Agent.__subclasses__()``,
+    after importing every module that defines one) rather than a
+    hand-maintained list, so this stays a real regression guard rather
+    than a snapshot of today's roster. A subclass whose ``NAME`` has no
+    corresponding ``MANIFESTS`` entry is skipped -- this test checks
+    only the pairing, not manifest/class completeness (a different,
+    already-existing test owns that)."""
+    import phi_core.agents.experts
+    import phi_core.agents.outward
+    import phi_core.agents.reasoning
+    import phi_core.agents.reviewer
+    import phi_core.agents.specialists
+    import phi_core.control.manager  # noqa: F401
+    from phi_core.agents.base import Agent
+
+    violations: list[str] = []
+    for cls in Agent.__subclasses__():
+        name = getattr(cls, "NAME", None)
+        prompt = getattr(cls, "PROMPT", "")
+        manifest = MANIFESTS.get(name) if name else None
+        if manifest is None or not prompt:
+            continue
+        if not manifest.allowed_providers:
+            violations.append(name)
+    assert violations == [], f"non-empty PROMPT paired with zero allowed_providers: {violations!r}"
 
 def test_policy_issues_an_immutable_manifest_bounded_grant() -> None:
     policy = CapabilityPolicy(LlmConfig(provider="anthropic", model="test"))

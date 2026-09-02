@@ -169,7 +169,16 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
                              allowed_child_task_types=frozenset({"herald_abstract", "herald_sections"})),
         "Herald.Abstract": _manifest("Herald.Abstract", purpose="Prepare a report abstract.", input_class="internal", output_schema="report"),
         "Herald.Sections": _manifest("Herald.Sections", purpose="Prepare report sections.", input_class="internal", output_schema="report"),
-        "Manager": _manifest("Manager", purpose="Supervise bounded calls.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),
+        # ManagerSupervision.PROMPT is non-empty and _decide() genuinely
+        # calls self.call_json -- providers=frozenset() here was a
+        # pre-existing latent bug (found by the manifest/PROMPT
+        # invariant test in test_control_records_policy.py): every
+        # such call raised CapabilityDenied, silently swallowed by
+        # _decide's own `except Exception: parsed = {}`, so Manager's
+        # LLM-informed supervision decisions could never actually take
+        # effect. Fixed by dropping the override (resolves to the
+        # global provider set, matching every other real-PROMPT agent).
+        "Manager": _manifest("Manager", purpose="Supervise bounded calls.", input_class="internal", output_schema="no_provider_output"),
         "Operator": _manifest("Operator", purpose="Verify deterministic transformations.", input_class="internal", output_schema="no_provider_output", providers=frozenset()),
         "Reviewer": _manifest("Reviewer", purpose="Preview Judge's decisions before execution "
                               "(PREVIEW mode); review export coverage after execution (FINAL "
