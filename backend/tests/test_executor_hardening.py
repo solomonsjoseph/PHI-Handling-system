@@ -1,7 +1,7 @@
 import csv
 
 import pytest
-from phi_core.agents.reasoning import (
+from phi_core.control.transform_primitives import (
     PseudonymRegistry,
     _apply_action,
     _scrub_text_cell,
@@ -44,7 +44,7 @@ def test_dataset_write_failure_leaves_no_partial_file(tmp_path, monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("simulated mid-write failure")
 
-    monkeypatch.setattr("phi_core.agents.reasoning._apply_action", _boom)
+    monkeypatch.setattr("phi_core.control.transform_primitives._apply_action", _boom)
     with pytest.raises(RuntimeError):
         apply_column_actions_to_dataset(src, dst, "csv", decisions, PseudonymRegistry(salt="s"))
     assert not dst.exists()

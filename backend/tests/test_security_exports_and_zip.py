@@ -2,10 +2,8 @@
 import zipfile
 from pathlib import Path
 
-from phi_core.agents.reasoning import (
-    _redact_metadata_file,
-    apply_column_actions_to_dataset,
-)
+from phi_core.agents.reasoning import _redact_metadata_file
+from phi_core.control.transform_primitives import apply_column_actions_to_dataset
 from phi_core.intake import unpack_zip
 
 # ---------- SEC-004 -------------------------------------------------------

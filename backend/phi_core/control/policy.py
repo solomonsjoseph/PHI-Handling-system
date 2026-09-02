@@ -135,21 +135,16 @@ MANIFESTS: Mapping[str, AgentManifest] = MappingProxyType(
         "Judge": _manifest("Judge", purpose="Propose column decisions.", input_class="restricted_metadata", output_schema="column_decision"),
         "Executor": _manifest(
             "Executor",
-            purpose="Apply deterministic decisions.",
+            purpose="Write and run per-column transformation code.",
             input_class="internal",
-            # Step 11 (not yet landed) makes Executor a code-writing agent
-            # and needs providers=None here to match; PROMPT is still ""
-            # today (Executor never calls an LLM), so providers stays
-            # locked to frozenset() -- widening it now would let a grant
-            # issue with a real provider for an agent that structurally
-            # cannot use one yet, and several unrelated bound-enforcement
-            # tests in test_control_bounds.py rely on Executor's manifest
-            # being the "no provider restriction needed" default worker
-            # (CapabilityPolicy(None)) for budget/concurrency assertions
-            # that have nothing to do with Schema or Executor's own
-            # behavior.
+            # Task 11 landed: Executor is a code-writing agent now (real
+            # PROMPT, generate_with_retry per dataset file), so it needs
+            # a real provider set exactly like Schema's own manifest
+            # (Task 10). See test_control_bounds.py / test_control_
+            # worker.py for the bound-enforcement tests updated in the
+            # same change to stop relying on Executor's manifest as the
+            # "no provider restriction needed" default worker.
             output_schema="generated_code",
-            providers=frozenset(),
             artifact_roots=frozenset({"staging"}),
         ),
         # Phase 17-B: Auditor (LLM re-derivation role) retired; Reviewer's

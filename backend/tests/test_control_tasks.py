@@ -22,7 +22,7 @@ def _service() -> tuple[TaskService, MemoryControlStore]:
 
 
 async def _enqueue(service: TaskService, **overrides):
-    kwargs = dict(run_id=RUN_ID, session_id="session-1", worker="Executor", task_type="executor")
+    kwargs = dict(run_id=RUN_ID, session_id="session-1", worker="Operator", task_type="operator")
     kwargs.update(overrides)
     return await service.enqueue(**kwargs)
 

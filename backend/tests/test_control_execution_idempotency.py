@@ -37,7 +37,7 @@ def _uploaded_csv(content: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_first_attempt_persists_task_and_successful_result() -> None:
+async def test_first_attempt_persists_task_and_successful_result(stub_executor_dataset_codegen) -> None:
     store = MemoryControlStore()
     run_id = uuid4().hex
     ctx = make_ctx("Executor", run_id=run_id, store=store)
@@ -60,7 +60,7 @@ async def test_first_attempt_persists_task_and_successful_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_with_same_manifest_never_re_runs_the_transform(monkeypatch) -> None:
+async def test_retry_with_same_manifest_never_re_runs_the_transform(monkeypatch, stub_executor_dataset_codegen) -> None:
     store = MemoryControlStore()
     run_id = uuid4().hex
     ctx = make_ctx("Executor", run_id=run_id, store=store)

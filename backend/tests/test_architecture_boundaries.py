@@ -161,7 +161,7 @@ async def test_concurrent_child_creation_cannot_exceed_parent_ancestor_or_run_bu
         {
             **MANIFESTS,
             "Pipeline": MANIFESTS["Pipeline"].model_copy(
-                update={"allowed_child_task_types": frozenset({"executor"}), "max_children": 100}
+                update={"allowed_child_task_types": frozenset({"operator"}), "max_children": 100}
             ),
         }
     )
@@ -179,7 +179,7 @@ async def test_concurrent_child_creation_cannot_exceed_parent_ancestor_or_run_bu
     async def _attempt() -> bool:
         try:
             await orch.create_child_work(
-                run_id=run.run_id, parent_task_id=root_task_id, task_type="executor",
+                run_id=run.run_id, parent_task_id=root_task_id, task_type="operator",
                 input_ref={}, budget=ResourceBudget(),
             )
             return True

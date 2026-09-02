@@ -29,7 +29,7 @@ from phi_core.control.tasks import TaskService
 _PHI_CORE_ROOT = Path(__file__).resolve().parent.parent / "phi_core"
 _RAW_READER_TARGETS = {
     "_read_dataset_headers", "read_narrative",
-    "_redact_metadata_file", "apply_column_actions_to_dataset",
+    "_redact_metadata_file",
     "verify_keep_decisions",
 }
 

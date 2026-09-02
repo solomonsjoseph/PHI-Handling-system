@@ -350,34 +350,60 @@ async def test_instrument_routes_form_text_through_source_projection(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_executor_dataset_read_happens_only_inside_sandbox_never_in_parent(tmp_path, monkeypatch) -> None:
-    """``Executor.run``'s four raw-data call sites (exercised here via
-    ``apply_column_actions_to_dataset``) route through
-    ``control.sandbox.run_isolated`` once a run has opted into a sandbox
-    (``ActivationFactory.activate(..., needs_sandbox=True)``): the raw
-    dataset file is opened only inside that separate process, never
-    directly in the parent. A ``builtins.open``/``io.open`` spy in this
-    (parent) test process can only ever observe parent-process opens -- a
-    ``multiprocessing.spawn`` child re-imports everything fresh, so any
-    open the child performs is invisible here by construction. Proving
-    the source path never appears in the spy's log, while the export
-    still lands with the expected transformed content, demonstrates the
-    read genuinely happened in the isolated child."""
+    """Rewrite plan Task 11 updated this invariant's mechanism, not its
+    substance: Executor's dataset transformation no longer routes
+    through ``control.sandbox.run_isolated`` at all (that boundary now
+    only guards ``generate_with_retry``'s own two data-touching checks,
+    ``assert_no_dataset_literals``/``assert_no_formula_injection_in_
+    outputs``); the raw dataset file itself is opened only inside
+    ``control/runner.py``'s Docker container, a strictly stronger
+    isolation boundary than the retired multiprocessing one. This test
+    fakes ``generate_with_retry`` (never a real LLM or container call)
+    so it can assert the property that still matters at the Python
+    level: ``Executor._dataset_via_codegen`` never calls
+    ``open()``/``io.open()`` on the raw dataset path itself -- it only
+    ever hands the path to the (here, faked) codegen chain as a plain
+    string, exactly as it would hand it to a real container's bind
+    mount. A ``builtins.open``/``io.open`` spy in this (parent) test
+    process proves that; the container's own real handling of that
+    string is exercised separately, by ``test_container_runner.py`` and
+    the acceptance harness (Docker required)."""
     import builtins
-    import dataclasses
     import io
+    import json
     import os
+    import shutil
+    import tempfile
 
+    import phi_core.agents.reasoning as reasoning_module
     from phi_core.agents.reasoning import Executor
-    from phi_core.control.sandbox import create_sandbox, destroy_sandbox
 
     os.environ["PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY"] = "1"
 
     src = tmp_path / "data.csv"
     src.write_text("name\nJane Doe\n", encoding="utf-8")
 
+    class _FakeResult:
+        def __init__(self, workspace_path: Path) -> None:
+            self.workspace_path = workspace_path
+
+        def cleanup(self) -> None:
+            shutil.rmtree(self.workspace_path, ignore_errors=True)
+
+    async def _fake_generate_with_retry(agent, build_prompt, *, declared_outputs, **_kw):
+        workspace = Path(tempfile.mkdtemp(prefix="fake_codegen_"))
+        if "selftest.json" in declared_outputs:
+            (workspace / "selftest.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
+        else:
+            export_name = next(n for n in declared_outputs if n.startswith("export."))
+            (workspace / export_name).write_text("name\n\n", encoding="utf-8")
+            (workspace / "pseudonym_state_out.json").write_text("{}", encoding="utf-8")
+            (workspace / "effect_ledger.json").write_text("[]", encoding="utf-8")
+        return "fake generated source", _FakeResult(workspace)
+
+    monkeypatch.setattr(reasoning_module, "generate_with_retry", _fake_generate_with_retry)
+
     ctx = make_ctx("Executor")
-    sandbox = create_sandbox(ctx.run_id)
-    ctx = dataclasses.replace(ctx, sandbox=sandbox)
     executor = Executor(ctx)
 
     opened_paths: list[str] = []
@@ -392,13 +418,11 @@ async def test_executor_dataset_read_happens_only_inside_sandbox_never_in_parent
 
     files = [{"file_id": "f1", "kind": "dataset", "stored_path": str(src), "subtype": "csv", "columns": ["name"]}]
     decisions = [{"file_id": "f1", "column": "name", "action": "drop"}]
-    try:
-        result = await executor.run(files, decisions)
-    finally:
-        destroy_sandbox(sandbox)
+    result = await executor.run(files, decisions)
 
     assert str(src) not in opened_paths, (
-        "raw dataset file must never be opened directly in the parent process when the run has a sandbox"
+        "raw dataset file must never be opened directly in the parent process -- only the "
+        "codegen chain's own container boundary may open it"
     )
     out = Path(result["exports"]["f1"]).read_text(encoding="utf-8")
     assert "Jane Doe" not in out
@@ -658,22 +682,29 @@ async def test_judge_prompt_never_carries_a_raw_sensitive_header_only_the_opaque
 
 
 def test_sandboxed_raw_reader_call_sites_confined_to_reasoning_py() -> None:
-    """Exclusivity: the four relocated raw-data readers
+    """Exclusivity: the three relocated raw-data readers
     (``_read_dataset_headers``, ``read_narrative``, ``_redact_metadata_
-    file``, ``apply_column_actions_to_dataset``) are only ever called
-    from ``reasoning.py`` (their own definitions, the Step 4 sandboxed
-    dispatch wrappers, ``Executor``'s sandboxed/direct-call dispatch
-    methods, and -- since Phase 10 -- the relocated ``_read_columns``
-    raw-column reader, moved here verbatim from the retired
-    ``agents/operator.py``). Tightened from the pre-Phase-10 version of
-    this test, which additionally allowlisted
+    file``) are only ever called from ``reasoning.py`` (their own
+    definitions, the Step 4 sandboxed dispatch wrappers, ``Executor``'s
+    sandboxed/direct-call dispatch methods, and -- since Phase 10 -- the
+    relocated ``_read_columns`` raw-column reader, moved here verbatim
+    from the retired ``agents/operator.py``). Tightened from the
+    pre-Phase-10 version of this test, which additionally allowlisted
     ``operator.py::_read_columns``: that module is gone, so this scan no
-    longer carries a second allowed site at all. ``phi_corpus/replay.py``'s
-    direct calls are out of scope by construction: this scan is rooted
-    at ``phi_core/``, a sibling package."""
+    longer carries a second allowed site at all.
+
+    ``apply_column_actions_to_dataset`` dropped out of this scan's
+    target set at rewrite plan Task 11: it moved to
+    ``control/transform_primitives.py`` as the DeterministicVerifier /
+    corpus-replay reference implementation once Executor stopped
+    driving a fixed action table and became a code-writing agent
+    instead -- it is no longer reachable from ``reasoning.py`` at all,
+    live or otherwise. ``phi_corpus/replay.py``'s direct calls into that
+    new module are out of scope by construction: this scan is rooted at
+    ``phi_core/``, a sibling package."""
     targets = {
         "_read_dataset_headers", "read_narrative",
-        "_redact_metadata_file", "apply_column_actions_to_dataset",
+        "_redact_metadata_file",
         "verify_keep_decisions",
     }
     sites = _call_sites(PHI_CORE_ROOT, targets)

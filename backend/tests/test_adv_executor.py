@@ -226,7 +226,7 @@ async def test_credential_shaped_grant_tool_is_rejected_end_to_end_through_execu
 
 
 @pytest.mark.asyncio
-async def test_static_code_validator_and_capability_broker_re_audit_the_real_worker_module_on_every_run(monkeypatch):
+async def test_static_code_validator_and_capability_broker_re_audit_the_real_worker_module_on_every_run(monkeypatch, stub_executor_dataset_codegen):
     seen_static: list[list[Path]] = []
     seen_broker: list[list[Path]] = []
     real_static_validate = ev_module.StaticCodeValidator.validate

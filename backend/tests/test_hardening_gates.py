@@ -59,7 +59,7 @@ async def test_owner_mismatch_returns_404_across_every_owner_scoped_read_route(m
 # ---------------------------------------------------------------------------
 
 def test_hash_action_digests_differ_across_sessions_and_are_not_bundle_reproducible():
-    from phi_core.agents.reasoning import PseudonymRegistry, _apply_action
+    from phi_core.control.transform_primitives import PseudonymRegistry, _apply_action
 
     reg_session_a = PseudonymRegistry(salt="session-a-secret")
     reg_session_b = PseudonymRegistry(salt="session-b-secret")

@@ -72,7 +72,7 @@ def test_read_pdf_ocr_fallback_extracts_text(tmp_path: Path):
 def test_ocr_output_flows_through_scrubber(tmp_path: Path):
     """The critical Phase C invariant: OCR text becomes safe after
     ``_scrub_text_cell`` — same detector as digital-text PDFs."""
-    from phi_core.agents.reasoning import _scrub_text_cell
+    from phi_core.control.transform_primitives import _scrub_text_cell
 
     text = "Patient contact 415-555-1234 for James Smith"
     pdf = _make_image_only_pdf(tmp_path, text)

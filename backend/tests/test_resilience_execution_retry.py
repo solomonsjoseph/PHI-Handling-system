@@ -60,7 +60,7 @@ def _many_files_and_decisions(n: int) -> tuple[list[dict], list[dict]]:
 
 
 @pytest.mark.asyncio
-async def test_multi_file_execution_persists_one_task_and_result_covering_every_file() -> None:
+async def test_multi_file_execution_persists_one_task_and_result_covering_every_file(stub_executor_dataset_codegen) -> None:
     """Widens ``test_control_execution_idempotency.py``'s single-file
     ``test_first_attempt_persists_task_and_successful_result`` to
     ``_N_FILES`` files in one manifest: still exactly one
@@ -85,7 +85,7 @@ async def test_multi_file_execution_persists_one_task_and_result_covering_every_
 
 
 @pytest.mark.asyncio
-async def test_retry_with_the_same_manifest_after_a_successful_multi_file_run_never_re_transforms_any_file(monkeypatch) -> None:
+async def test_retry_with_the_same_manifest_after_a_successful_multi_file_run_never_re_transforms_any_file(monkeypatch, stub_executor_dataset_codegen) -> None:
     """Widens ``test_control_execution_idempotency.py``'s single-file
     ``test_retry_with_same_manifest_never_re_runs_the_transform`` to
     ``_N_FILES`` files: a retry against a manifest that already
@@ -118,7 +118,7 @@ async def test_retry_with_the_same_manifest_after_a_successful_multi_file_run_ne
 
 
 @pytest.mark.asyncio
-async def test_retry_after_a_crash_partway_through_a_multi_file_batch_recovers_without_duplicating_exports(monkeypatch) -> None:
+async def test_retry_after_a_crash_partway_through_a_multi_file_batch_recovers_without_duplicating_exports(monkeypatch, stub_executor_dataset_codegen) -> None:
     """A batch of dataset files plus one metadata file: the metadata
     file's redaction call is made to raise on the *first* attempt only
     (simulating a genuine mid-batch Executor crash after some dataset

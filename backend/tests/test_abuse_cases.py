@@ -20,11 +20,11 @@ def test_unknown_action_from_model_routes_to_human_review_not_export(tmp_path):
     """A Judge reply naming an action outside the executable vocabulary must
     never reach the Executor, and the raw identifier must never appear in
     an export produced from that decision list."""
-    from phi_core.agents.reasoning import (
+    from phi_core.agents.reasoning import validate_decisions
+    from phi_core.control.transform_primitives import (
         PseudonymRegistry,
         _apply_action,
         apply_column_actions_to_dataset,
-        validate_decisions,
     )
 
     decisions = [{

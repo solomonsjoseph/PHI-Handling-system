@@ -98,7 +98,7 @@ def _source_value_mismatch_problem(action: str, column: str, cells: list[str],
     """Row-aligned comparison of every non-empty source cell's expected
     transform against Executor's written cell. Returns ``None`` when
     consistent, else a problem string that never contains a raw value."""
-    from ..agents.reasoning import _apply_action
+    from .transform_primitives import _apply_action
 
     relevant = [(s, w) for s, w in zip(source_cells, cells, strict=True) if s != ""]
     if action == "pseudonymize":
@@ -116,7 +116,7 @@ def _verify_record(record: dict[str, Any], view: dict[str, Any] | None) -> dict[
     written (and, for scrub_text, source) column view. Never opens a
     file: ``view`` was built once per file before any record was
     checked. Moved verbatim from the retired ``agents/operator.py``."""
-    from ..agents.reasoning import _scrub_text_cell
+    from .transform_primitives import _scrub_text_cell
 
     verdict = dict(record)
     column = record["column"]

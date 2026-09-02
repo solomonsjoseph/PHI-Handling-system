@@ -428,8 +428,10 @@ async def test_reconcile_retries_a_previously_failed_deletion() -> None:
 
 @pytest.mark.asyncio
 async def test_stage_denies_a_root_outside_the_producer_grants() -> None:
+    from types import SimpleNamespace
+
     service, store = _service()
-    grant = CapabilityPolicy(None).issue_grant(
+    grant = CapabilityPolicy(SimpleNamespace(provider="anthropic", model="claude", base_url="")).issue_grant(
         run_id=service.run_id,
         task_id="c" * 32,
         agent="Executor",

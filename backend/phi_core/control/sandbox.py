@@ -7,14 +7,25 @@ raw dataset rows as a plain in-process ``async`` coroutine, in the same
 process, event loop, and class hierarchy as every LLM-calling agent, with no
 network-deny, no resource ceiling, and no dedicated workspace of its own.
 This module is wired into ``agents/`` as of Wave R-c step 4:
-``Executor`` (``agents/reasoning.py``) routes its four raw-row-work call
-sites (``apply_column_actions_to_dataset``, ``_redact_metadata_file``,
-``_read_dataset_headers``, ``read_narrative``) through ``run_isolated``
-when ``ctx.sandbox`` is attached (``ActivationFactory.activate(...,
+``Executor`` (``agents/reasoning.py``) routes its three remaining
+raw-row-work call sites (``_redact_metadata_file``, ``_read_dataset_
+headers``, ``read_narrative``) through ``run_isolated`` when
+``ctx.sandbox`` is attached (``ActivationFactory.activate(...,
 needs_sandbox=True)``). Contexts built via ``control.testing.make_ctx``
 (every pre-existing unit test) leave ``ctx.sandbox`` unset and keep
-calling the four functions in-process, a documented permanent
-compatibility path, not a retiring debt.
+calling those three functions in-process, a documented permanent
+compatibility path, not a retiring debt. Dataset row TRANSFORMATION
+(rewrite plan Task 11) no longer routes through this multiprocessing
+sandbox at all: Executor's ``generate_with_retry``/``run_generated``
+(``agents/codegen.py``) run generated code inside the far more isolated
+``control/runner.py`` Docker container instead, and this same
+``SandboxRecord`` still gates that path's own two data-touching checks
+(``assert_no_dataset_literals``, ``assert_no_formula_injection_in_
+outputs``). ``apply_column_actions_to_dataset``, the fixed per-cell
+action table Executor used to drive here, moved to
+``control/transform_primitives.py`` as a reference-only implementation
+(``DeterministicVerifier``'s recompute oracle, the corpus-replay
+harness) with no live Executor call site left at all.
 
 ``create_sandbox`` allocates a per-run directory under
 ``phi_core.paths.SANDBOX_DIR`` (mode 0700) and a :class:`SandboxRecord`.

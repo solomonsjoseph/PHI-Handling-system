@@ -9,12 +9,10 @@ from __future__ import annotations
 import asyncio
 
 from phi_core.agents.llm import LlmConfig
-from phi_core.agents.reasoning import (
-    PseudonymRegistry,
-    plain_human_review_reasons,
-)
+from phi_core.agents.reasoning import plain_human_review_reasons
 from phi_core.control.store import MemoryControlStore
 from phi_core.control.testing import complete_fake_task, start_test_run
+from phi_core.control.transform_primitives import PseudonymRegistry
 from phi_core.crypto import decrypt_reversal_map, encrypt_reversal_map
 
 

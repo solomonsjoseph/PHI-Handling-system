@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import csv
 
-from phi_core.agents.reasoning import PseudonymRegistry, apply_column_actions_to_dataset
+from phi_core.control.transform_primitives import PseudonymRegistry, apply_column_actions_to_dataset
 from phi_corpus.verify import score_cells
 
 
@@ -51,7 +51,7 @@ def test_formula_shaped_keep_value_escaped_on_write_and_still_scored_preserved(t
 
 
 def test_neutralise_formula_only_escapes_formula_lead_chars():
-    from phi_core.agents.reasoning import _neutralise_formula
+    from phi_core.control.transform_primitives import _neutralise_formula
     assert _neutralise_formula("=SUM(A1)") == "'=SUM(A1)"
     assert _neutralise_formula("+1") == "'+1"
     assert _neutralise_formula("-1") == "'-1"

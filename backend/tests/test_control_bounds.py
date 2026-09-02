@@ -57,13 +57,15 @@ async def _root_task(store: MemoryControlStore, run_id: str):
 
 def _patched_manifests(**overrides) -> MappingProxyType:
     """Return MANIFESTS with "Pipeline" replaced, carrying `overrides` plus
-    a grant to "executor" child work (executor's own manifest has no
-    provider restriction, so CapabilityPolicy(None) can issue its grant)."""
+    a grant to "executor"/"operator" child work (operator's own manifest
+    has no provider restriction, so `CapabilityPolicy(None)` can issue
+    its grant; executor now has a real provider set like every other
+    code-writing agent, Task 11)."""
     return MappingProxyType(
         {
             **MANIFESTS,
             "Pipeline": MANIFESTS["Pipeline"].model_copy(
-                update={"allowed_child_task_types": frozenset({"executor"}), **overrides}
+                update={"allowed_child_task_types": frozenset({"executor", "operator"}), **overrides}
             ),
         }
     )
@@ -113,14 +115,14 @@ async def test_max_children_per_task_enforced(monkeypatch) -> None:
     monkeypatch.setattr(limits, "MAX_PARALLEL_TASKS_PER_PARENT", 100)  # isolate this bound
 
     first = await orch.create_child_work(
-        run_id=run.run_id, parent_task_id=root["task_id"], task_type="executor",
+        run_id=run.run_id, parent_task_id=root["task_id"], task_type="operator",
         input_ref={}, budget=ResourceBudget(),
     )
     assert first.state == "ready"
 
     with pytest.raises(CapabilityDenied):
         await orch.create_child_work(
-            run_id=run.run_id, parent_task_id=root["task_id"], task_type="executor",
+            run_id=run.run_id, parent_task_id=root["task_id"], task_type="operator",
             input_ref={}, budget=ResourceBudget(),
         )
     events = await store.find_many("trace_events", {"run_id": run.run_id, "outcome": "budget_exceeded"})
@@ -140,13 +142,13 @@ async def test_max_parallel_tasks_per_parent_enforced(monkeypatch) -> None:
     monkeypatch.setattr(limits, "MAX_PARALLEL_TASKS_PER_PARENT", 1)
 
     await orch.create_child_work(
-        run_id=run.run_id, parent_task_id=root["task_id"], task_type="executor",
+        run_id=run.run_id, parent_task_id=root["task_id"], task_type="operator",
         input_ref={}, budget=ResourceBudget(),
     )
 
     with pytest.raises(CapabilityDenied):
         await orch.create_child_work(
-            run_id=run.run_id, parent_task_id=root["task_id"], task_type="executor",
+            run_id=run.run_id, parent_task_id=root["task_id"], task_type="operator",
             input_ref={}, budget=ResourceBudget(),
         )
     events = await store.find_many("trace_events", {"run_id": run.run_id, "outcome": "budget_exceeded"})
@@ -209,7 +211,7 @@ async def test_max_attempts_per_task_enforced() -> None:
 
     store = MemoryControlStore()
     tasks = TaskService(store, CapabilityPolicy(None))
-    task = await tasks.enqueue(run_id="r" * 32, session_id=SESSION_ID, worker="Executor", task_type="executor")
+    task = await tasks.enqueue(run_id="r" * 32, session_id=SESSION_ID, worker="Operator", task_type="operator")
     await tasks.claim(task_id=task.task_id, lease_owner="worker-a")
     doc = await store.get_one("work_items", {"task_id": task.task_id})
     doc["max_attempts"] = 1

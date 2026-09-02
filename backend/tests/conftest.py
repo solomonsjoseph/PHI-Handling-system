@@ -160,3 +160,36 @@ _SANDBOX_FAIL_CLOSED_TEST_NAME = (
 def _suite_default_allow_unenforced_sandbox_memory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     if request.node.name != _SANDBOX_FAIL_CLOSED_TEST_NAME:
         monkeypatch.setenv("PHI_SANDBOX_ALLOW_UNENFORCED_MEMORY", "1")
+
+
+@pytest.fixture
+def stub_executor_dataset_codegen(monkeypatch: pytest.MonkeyPatch):
+    """Stub Executor's dataset codegen seam (rewrite plan Task 11,
+    ``Executor._dataset_via_codegen``) with the deterministic reference
+    transform from ``control.transform_primitives``, so pre-existing
+    ``Executor.run()`` orchestration tests keep exercising the same
+    transformed values they always did, without a real LLM or Docker.
+    Tests that specifically exercise the real codegen chain (e.g.
+    ``test_generated_code_guard.py``, ``test_executor_codegen.py``) do
+    not request this fixture."""
+    import os as _os
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+
+    from phi_core.agents.reasoning import Executor
+    from phi_core.control.transform_primitives import PseudonymRegistry, apply_column_actions_to_dataset
+
+    async def _stub(self, f, file_decisions, omit_columns, real_columns, sandbox, local_opaque, salt, pseudonym_state):
+        ext = (f.get("subtype") or _Path(f["stored_path"]).suffix.lstrip(".")).lower()
+        registry = PseudonymRegistry(salt=salt)
+        registry._map.update(pseudonym_state)
+        fd, name = _tempfile.mkstemp(suffix=f".{ext}")
+        _os.close(fd)
+        dst = _Path(name)
+        apply_column_actions_to_dataset(
+            _Path(f["stored_path"]), dst, ext, file_decisions, registry, omit_columns=omit_columns,
+        )
+        return dst, dict(registry._map), []
+
+    monkeypatch.setattr(Executor, "_dataset_via_codegen", _stub)
+    return _stub

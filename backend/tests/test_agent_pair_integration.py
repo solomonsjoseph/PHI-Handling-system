@@ -416,7 +416,7 @@ async def test_reviewer_to_judge_correction_edge_chains_across_multiple_rounds_t
 
 
 @pytest.mark.asyncio
-async def test_judge_manifest_freeze_unlocks_executor_and_refusal_blocks_it():
+async def test_judge_manifest_freeze_unlocks_executor_and_refusal_blocks_it(stub_executor_dataset_codegen):
     store = await _seeded_store()
     run_id = uuid4().hex
     manifest = await _frozen_manifest(store, run_id)
@@ -458,7 +458,7 @@ async def test_judge_manifest_freeze_unlocks_executor_and_refusal_blocks_it():
 
 
 @pytest.mark.asyncio
-async def test_executor_output_feeds_deterministic_verifier_and_persists_a_real_verification_result():
+async def test_executor_output_feeds_deterministic_verifier_and_persists_a_real_verification_result(stub_executor_dataset_codegen):
     store = await _seeded_store()
     run_id = uuid4().hex
     manifest = await _frozen_manifest(store, run_id)
@@ -502,7 +502,7 @@ async def test_executor_output_feeds_deterministic_verifier_and_persists_a_real_
 
 
 @pytest.mark.asyncio
-async def test_deterministic_verification_result_drives_reviewer_final_pass_and_fail():
+async def test_deterministic_verification_result_drives_reviewer_final_pass_and_fail(stub_executor_dataset_codegen):
     store = await _seeded_store()
     run_id = uuid4().hex
     manifest = await _frozen_manifest(store, run_id)
@@ -551,7 +551,7 @@ async def test_deterministic_verification_result_drives_reviewer_final_pass_and_
 
 
 @pytest.mark.asyncio
-async def test_reviewer_final_fail_signal_routes_a_real_rewind_to_decide():
+async def test_reviewer_final_fail_signal_routes_a_real_rewind_to_decide(stub_executor_dataset_codegen):
     store = await _seeded_store()
     run_id = uuid4().hex
     manifest = await _frozen_manifest(store, run_id)

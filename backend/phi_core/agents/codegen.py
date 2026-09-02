@@ -151,7 +151,61 @@ def _attribute_root_name(node: ast.Attribute) -> str | None:
     return current.id if isinstance(current, ast.Name) else None
 
 
-def check_generated_code(source: str) -> list[str]:
+# ---- Executor's first-party container shim (rewrite plan step 11) ----
+
+# Rewrite plan step 11: "generated code refers to columns by position
+# and opaque token. A first-party non-agent shim inside the container
+# resolves token to real header at execution time using the run's
+# opaque map. The real header never enters a prompt, a report or the
+# generated source." This module is never model-written and never
+# regenerated -- it is a fixed constant string materialized into the
+# container's ``/input`` alongside the generated sources, exactly like
+# ``run_generated``'s other ``source_files`` entries, so generated code
+# may ``import phi_container_shim`` to resolve a column token to the
+# real header name at execution time. It reads two fixed mounted
+# inputs, never a prompt-carried literal: ``/data/column_map.json``
+# (opaque token -> real header, this file's slice of the run's opaque
+# map) and ``/data/pseudonym_salt.txt`` (the server-held per-session
+# salt, D6: never leaves this process otherwise). Deliberately narrow
+# stdlib-only surface (``json``, ``pathlib``) so it never itself trips
+# :func:`check_generated_code`.
+CONTAINER_SHIM_FILENAME = "phi_container_shim.py"
+CONTAINER_SHIM_MODULE_NAME = "phi_container_shim"
+CONTAINER_SHIM_SOURCE = '''"""First-party container shim -- never model-written. See
+agents/codegen.py's CONTAINER_SHIM_SOURCE docstring for the contract."""
+import json
+from pathlib import Path
+
+_COLUMN_MAP: dict | None = None
+
+
+def resolve_header(token: str) -> str:
+    """Opaque column token -> this file's real header name."""
+    global _COLUMN_MAP
+    if _COLUMN_MAP is None:
+        _COLUMN_MAP = json.loads(Path("/data/column_map.json").read_text(encoding="utf-8"))
+    if token not in _COLUMN_MAP:
+        raise KeyError(f"unknown column token: {token!r}")
+    return _COLUMN_MAP[token]
+
+
+def load_salt() -> str:
+    """The server-held per-session pseudonym salt, mounted read-only --
+    never a prompt-carried or source-embedded literal."""
+    return Path("/data/pseudonym_salt.txt").read_text(encoding="utf-8").strip()
+
+
+def load_pseudonym_state() -> dict:
+    """This run's accumulated real-value -> pseudonym map so far
+    (empty on the first dataset file processed this run)."""
+    path = Path("/data/pseudonym_state_in.json")
+    if path.is_file():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return {}
+'''
+
+
+def check_generated_code(source: str, *, extra_allowed_modules: frozenset[str] = frozenset()) -> list[str]:
     """Static, pre-execution violations found in ``source``. An empty
     list means the source passed every check here -- not that it is
     safe to run unchecked; :func:`check_entrypoint_shape`,
@@ -171,11 +225,11 @@ def check_generated_code(source: str) -> list[str]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 top = _top_level_module(alias.name)
-                if top not in STATIC_CHECK_ALLOWED_IMPORTS:
+                if top not in STATIC_CHECK_ALLOWED_IMPORTS and top not in extra_allowed_modules:
                     violations.append(f"import_denied: {alias.name!r} not in the allowed import list")
         elif isinstance(node, ast.ImportFrom):
             top = _top_level_module(node.module or "")
-            if top not in STATIC_CHECK_ALLOWED_IMPORTS:
+            if top not in STATIC_CHECK_ALLOWED_IMPORTS and top not in extra_allowed_modules:
                 violations.append(f"import_denied: {node.module!r} not in the allowed import list")
                 continue
             # The module itself is allowed, but a *name* imported out of
@@ -491,6 +545,8 @@ async def generate_with_retry(
     attempts: int = 2,
     call_timeout_s: float | None = None,
     known_safe_values: frozenset[str] = frozenset(),
+    extra_sources: dict[str, str] | None = None,
+    extra_allowed_modules: frozenset[str] = frozenset(),
 ) -> tuple[str, ContainerRunResult]:
     """Drive up to ``attempts`` full generate-check-execute-verify
     rounds. ``build_prompt(previous_source, previous_diagnostics)`` is
@@ -499,9 +555,25 @@ async def generate_with_retry(
     the prompt; this function only ever passes the structured diagnostic
     list, never a raw exception's free text.
 
-    Returns ``(source, result)`` on success; raises
-    :class:`CodeGenerationExhausted` (carrying every attempt's
-    diagnostics) once ``attempts`` rounds have all failed.
+    ``extra_sources`` (rewrite plan step 11): already-validated companion
+    modules -- a shared ``transformations.py`` and/or a first-party,
+    non-generated shim -- materialized alongside ``entrypoint`` in the
+    same container run so the newly generated source may import them.
+    Never re-generated here; every attempt reuses the same
+    ``extra_sources`` verbatim. Still re-checked by
+    :func:`check_generated_code` and scanned for dataset literals on
+    every attempt, against *this* attempt's dataset, since a companion
+    module validated once against one dataset file is not thereby proven
+    safe against every other file in the same run. ``extra_allowed_modules``
+    names the extra sources' own module names (their filename stems) so
+    ``import transformations`` in the generated entrypoint is not itself
+    flagged as an unlisted import.
+
+    Returns ``(source, result)`` on success -- ``source`` is only the
+    newly generated ``entrypoint`` source, never ``extra_sources``, which
+    the caller already has. Raises :class:`CodeGenerationExhausted`
+    (carrying every attempt's diagnostics) once ``attempts`` rounds have
+    all failed.
     """
     previous_source: str | None = None
     previous_diagnostics: list[str] | None = None
@@ -513,6 +585,7 @@ async def generate_with_retry(
         outcome = await _try_one_generation(
             source=source, dataset_path=dataset_path, inputs=inputs, entrypoint=entrypoint,
             declared_outputs=declared_outputs, sandbox=sandbox, known_safe_values=known_safe_values,
+            extra_sources=extra_sources, extra_allowed_modules=extra_allowed_modules,
         )
         if isinstance(outcome, ContainerRunResult):
             return source, outcome
@@ -530,6 +603,8 @@ async def _try_one_generation(
     *, source: str, dataset_path: str, inputs: dict[str, str], entrypoint: str,
     declared_outputs: frozenset[str], sandbox: SandboxRecord,
     known_safe_values: frozenset[str] = frozenset(),
+    extra_sources: dict[str, str] | None = None,
+    extra_allowed_modules: frozenset[str] = frozenset(),
 ) -> "ContainerRunResult | _AttemptFailure":
     """One full check_generated_code / check_entrypoint_shape /
     assert_no_dataset_literals / run_generated / workspace_diff_check /
@@ -551,13 +626,20 @@ async def _try_one_generation(
     if not source.strip():
         return _AttemptFailure(diagnostics=["empty_reply: the model returned no source"])
 
-    violations = check_generated_code(source) + check_entrypoint_shape(source)
+    extra_sources = extra_sources or {}
+    violations = check_generated_code(source, extra_allowed_modules=extra_allowed_modules) + check_entrypoint_shape(source)
+    for name, extra_source in extra_sources.items():
+        violations += [
+            f"{name}: {v}" for v in check_generated_code(extra_source, extra_allowed_modules=extra_allowed_modules)
+        ]
     if violations:
         return _AttemptFailure(diagnostics=violations)
 
     try:
         has_literal, literal_count = await asyncio.to_thread(
-            assert_no_dataset_literals, sandbox, source, dataset_path, known_safe_values=known_safe_values,
+            assert_no_dataset_literals, sandbox,
+            "\n".join([source, *extra_sources.values()]), dataset_path,
+            known_safe_values=known_safe_values,
         )
     except SandboxTimeout:
         return _AttemptFailure(diagnostics=["dataset_literal_check_timeout"])
@@ -568,7 +650,7 @@ async def _try_one_generation(
 
     before = frozenset()
     try:
-        result = await asyncio.to_thread(run_generated, {entrypoint: source}, entrypoint, inputs)
+        result = await asyncio.to_thread(run_generated, {**extra_sources, entrypoint: source}, entrypoint, inputs)
     except ContainerTimeout:
         return _AttemptFailure(diagnostics=["execution_timeout"])
     except (ContainerRunnerError, ContainerWorkerFailure) as exc:

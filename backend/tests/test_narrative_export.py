@@ -38,7 +38,7 @@ def test_narrative_redaction_extracts_and_redacts_real_text(tmp_path, monkeypatc
     assert "MRN-12345678" not in text
 
 
-def test_executor_dataset_output_survives_publish_guard(tmp_path, monkeypatch):
+def test_executor_dataset_output_survives_publish_guard(tmp_path, monkeypatch, stub_executor_dataset_codegen):
     """Executor's dataset export, run through the widened step-5 pattern
     set, must still come out 'clean' for a properly-decided study export."""
     src = tmp_path / "enrollment.csv"

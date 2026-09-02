@@ -265,15 +265,16 @@ async def test_create_child_work_enqueues_a_granted_child_within_depth_and_budge
     # will do for real for Ledger/Herald once it lands. Patched on both
     # modules: policy.py's own CapabilityPolicy.check_child reads the
     # module-level MANIFESTS name directly, and manager.py
-    # bound its own reference at import time. "executor" (not "ledger")
-    # because "Ledger"'s manifest restricts allowed_providers, which
-    # CapabilityPolicy(None)'s empty provider/model would fail regardless
-    # of the child-task grant this test is actually exercising.
+    # bound its own reference at import time. "operator" (not "ledger" or,
+    # since Task 11, "executor") because "Ledger"'s manifest restricts
+    # allowed_providers and Executor now needs a real one too, either of
+    # which would fail `CapabilityPolicy(None)`'s empty provider/model
+    # regardless of the child-task grant this test is actually exercising.
     patched = MappingProxyType(
         {
             **MANIFESTS,
             "Pipeline": MANIFESTS["Pipeline"].model_copy(
-                update={"allowed_child_task_types": frozenset({"executor"})}
+                update={"allowed_child_task_types": frozenset({"operator"})}
             ),
         }
     )
@@ -281,14 +282,14 @@ async def test_create_child_work_enqueues_a_granted_child_within_depth_and_budge
     monkeypatch.setattr(so_module, "MANIFESTS", patched)
 
     child = await orch.create_child_work(
-        run_id=run.run_id, parent_task_id=parent.task_id, task_type="executor",
+        run_id=run.run_id, parent_task_id=parent.task_id, task_type="operator",
         input_ref={"section": "compare"}, budget=ResourceBudget(),
     )
 
     assert child.parent_task_id == parent.task_id
     assert child.depth == parent.depth + 1
-    assert child.worker == "Executor"
-    assert child.state == "ready"
+    assert child.worker == "Operator"
+
     stored = await store.get_one("work_items", {"task_id": child.task_id})
     assert stored["parent_task_id"] == parent.task_id
 

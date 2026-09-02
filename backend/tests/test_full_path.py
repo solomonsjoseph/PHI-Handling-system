@@ -63,7 +63,7 @@ def _run_deterministic_gates(
     return annotate_pending_review(decisions)
 
 
-def test_planted_corpus_full_path_uses_real_safety_components(tmp_path, monkeypatch):
+def test_planted_corpus_full_path_uses_real_safety_components(tmp_path, monkeypatch, stub_executor_dataset_codegen):
     """Intake through bundle stays local while exercising the deterministic spine."""
     monkeypatch.setenv("APP_ENCRYPTION_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 

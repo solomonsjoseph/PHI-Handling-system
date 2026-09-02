@@ -27,7 +27,7 @@ REASONING_PY = Path(__file__).resolve().parent.parent / "phi_core" / "agents" / 
 
 def _grant(**tools: int):
     policy = CapabilityPolicy(None)
-    grant = policy.issue_grant(run_id="r1", task_id="t1", agent="Executor", task_type="executor")
+    grant = policy.issue_grant(run_id="r1", task_id="t1", agent="Operator", task_type="operator")
     return grant.model_copy(update={"tools": dict(tools)})
 
 

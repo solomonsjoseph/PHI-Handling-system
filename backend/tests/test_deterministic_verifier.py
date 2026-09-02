@@ -22,8 +22,8 @@ import csv
 from pathlib import Path
 
 import pytest
-from phi_core.agents.reasoning import PseudonymRegistry, _scrub_text_cell, apply_column_actions_to_dataset
 from phi_core.control.deterministic_verifier import DeterministicVerifier
+from phi_core.control.transform_primitives import PseudonymRegistry, _scrub_text_cell, apply_column_actions_to_dataset
 
 
 def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:

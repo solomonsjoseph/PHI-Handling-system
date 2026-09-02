@@ -47,10 +47,10 @@ async def test_two_work_items_with_default_effect_key_do_not_collide() -> None:
     run_id = "run-" + "e" * 28
     try:
         first = await service.enqueue(
-            run_id=run_id, session_id="session-1", worker="Executor", task_type="executor",
+            run_id=run_id, session_id="session-1", worker="Operator", task_type="operator",
         )
         second = await service.enqueue(
-            run_id=run_id, session_id="session-1", worker="Executor", task_type="executor",
+            run_id=run_id, session_id="session-1", worker="Operator", task_type="operator",
         )
         assert first.task_id != second.task_id
         assert first.effect_key == ""

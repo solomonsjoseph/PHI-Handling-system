@@ -296,19 +296,19 @@ async def test_per_parent_and_run_wide_ceilings_compose_under_load_at_production
     from phi_core.control.policy import CapabilityPolicy
     from phi_core.control.tasks import TaskService
 
-    # Executor's own manifest (unlike Ledger/Herald, which need a real
-    # provider) carries `providers=frozenset()`, so `CapabilityPolicy(None)`
+    # Operator's own manifest (unlike Ledger/Herald, or Executor since
+    # Task 11) carries `providers=frozenset()`, so `CapabilityPolicy(None)`
     # can issue its grants with no LlmConfig -- exactly the property
-    # `test_control_tasks.py` documents for using "executor" task types in
+    # `test_control_tasks.py` documents for using "operator" task types in
     # a provider-free rig. It has no `allowed_child_task_types` of its own
     # (a real leaf agent), so this test grants it one self-referential
-    # entry ("executor" children of an "executor" parent) purely to build
+    # entry ("operator" children of an "operator" parent) purely to build
     # a genuine two-level parent/grandchild tree for the compose proof
     # below -- the same monkeypatched-``MANIFESTS`` technique
     # `test_control_bounds.py`/`test_architecture_boundaries.py` already
     # use, never a change to the real manifest file.
-    patched = {**MANIFESTS, "Executor": MANIFESTS["Executor"].model_copy(
-        update={"allowed_child_task_types": frozenset({"executor"}), "max_children": 100},
+    patched = {**MANIFESTS, "Operator": MANIFESTS["Operator"].model_copy(
+        update={"allowed_child_task_types": frozenset({"operator"}), "max_children": 100},
     )}
     monkeypatch.setattr(manager_module, "MANIFESTS", patched)
     monkeypatch.setattr(policy_module, "MANIFESTS", patched)
@@ -332,7 +332,7 @@ async def test_per_parent_and_run_wide_ceilings_compose_under_load_at_production
     parent_ids = []
     for _ in range(n_parents):
         child = await orch.create_child_work(
-            run_id=run.run_id, parent_task_id=root_task_id, task_type="executor",
+            run_id=run.run_id, parent_task_id=root_task_id, task_type="operator",
             input_ref={}, budget=ResourceBudget(),
         )
         parent_ids.append(child.task_id)
@@ -340,7 +340,7 @@ async def test_per_parent_and_run_wide_ceilings_compose_under_load_at_production
     async def _attempt(parent_id: str) -> bool:
         try:
             await orch.create_child_work(
-                run_id=run.run_id, parent_task_id=parent_id, task_type="executor",
+                run_id=run.run_id, parent_task_id=parent_id, task_type="operator",
                 input_ref={}, budget=ResourceBudget(),
             )
             return True
