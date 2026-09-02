@@ -33,6 +33,18 @@ KEEP_NAMES = {".env", ".credentials", "credentials.json", "aws-credentials.ini"}
 KEEP_SUFFIXES = (".env", ".pem", ".key")
 KEEP_DIRS = {".vscode"}
 
+# Ignored but NOT regenerable: hand-authored documents that happen to be
+# gitignored (size, scope, or personal-content reasons), never a build or
+# test artifact a command can recreate. Exact repo-relative path, so a
+# same-named file elsewhere is never accidentally protected too. Matched
+# the same way as EXPENSIVE_PATHS below. Never collected, at any scope --
+# `docs/MASTER_ARCHITECTURE_V2.md` (the durable rewrite master prompt,
+# cited by section number across dozens of docstrings) was deleted by an
+# earlier `--apply` run before this protection existed; it was only
+# recoverable because an agent session transcript had captured the
+# original paste verbatim.
+KEEP_PATHS = {"docs/MASTER_ARCHITECTURE_V2.md"}
+
 # Ignored and regenerable, but expensive to rebuild: needs npm install or a
 # fresh virtualenv. Collected only with --all.
 EXPENSIVE_DIRS = {"node_modules", ".venv", "venv", "env", "ENV"}
@@ -70,6 +82,8 @@ def _protected(path: str, *, include_expensive: bool) -> bool:
     if leaf in KEEP_NAMES or leaf.endswith(KEEP_SUFFIXES):
         return True
     if any(s in KEEP_DIRS for s in segments):
+        return True
+    if path.strip("/") in KEEP_PATHS:
         return True
     if not include_expensive:
         if any(s in EXPENSIVE_DIRS for s in segments):

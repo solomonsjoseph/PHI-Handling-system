@@ -12,6 +12,7 @@ import hashlib as _hashlib
 import hmac as _hmac
 import json as _json
 import os as _os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -1755,7 +1756,17 @@ class Executor(Agent):
                                         {"file_id": f["file_id"], "error": type(e).__name__})
                         continue
                     effect_ledger.extend(ledger)
-                    transformed_path.replace(tmp_path)
+                    # `transformed_path` (`_dataset_via_codegen`'s
+                    # `tempfile.mkstemp()` output) and `tmp_path` (this
+                    # run's `STAGING_DIR`, i.e. `DATA_DIR`-rooted) are not
+                    # guaranteed to share a filesystem -- unlike the
+                    # metadata-export case above, whose `written` is
+                    # always a same-directory sibling of `tmp_path`.
+                    # `Path.replace()` (a bare `os.rename()`) raises EXDEV
+                    # across devices; `shutil.move()` falls back to
+                    # copy-then-unlink in that case while still removing
+                    # the source, so this never leaves two live copies.
+                    shutil.move(str(transformed_path), str(tmp_path))
                 else:
                     export_suffix = ".redacted.txt"
                     artifact_id, tmp_path = await self.ctx.artifacts.stage(
