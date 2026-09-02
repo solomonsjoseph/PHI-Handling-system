@@ -1095,6 +1095,30 @@ _CODEGEN_SELFTEST_VECTORS: dict[str, list[tuple[tuple[Any, ...], str]]] = {
     ],
 }
 
+# Every literal string appearing anywhere in the vectors above (both
+# the invented inputs and their expected outputs) is, by construction,
+# baked verbatim into the model's generated self-test code for
+# whichever action it covers -- so each one is a permanent, unavoidable
+# literal inside `transformations.py`'s own source. Some of these are
+# deliberately PHI-shaped (`"123-45-6789"`, `"P001"`) because the
+# self-test needs realistic shapes to exercise `cap_age_90`/
+# `year_only`/`zip3_truncate`/`hash`/`pseudonymize` meaningfully -- and
+# this repository's own fixtures reuse exactly those canonical example
+# values elsewhere. Without this set in `known_safe_values`,
+# `assert_no_dataset_literals` would flag transformations.py's own
+# fixed self-test literal as a "leaked real value" the moment a real
+# dataset happens to contain the same string, which is a false alarm
+# about this module's own known-synthetic constant, not a real leak.
+_CODEGEN_SELFTEST_LITERALS: frozenset[str] = frozenset(
+    {_CODEGEN_SELFTEST_SALT}
+    | {
+        str(v)
+        for vectors in _CODEGEN_SELFTEST_VECTORS.values()
+        for args, expected in vectors
+        for v in (*args, expected)
+    }
+)
+
 
 class Executor(Agent):
     NAME = "Executor"
@@ -1360,7 +1384,7 @@ class Executor(Agent):
             self, build_prompt, phase="executor.transformations",
             dataset_path=dataset_path, inputs={},
             entrypoint="transformations.py", declared_outputs=frozenset({"selftest.json"}),
-            sandbox=sandbox, known_safe_values=frozenset(ACTION_TYPES),
+            sandbox=sandbox, known_safe_values=frozenset(ACTION_TYPES) | _CODEGEN_SELFTEST_LITERALS,
         )
         try:
             report = _json.loads((result.workspace_path / "selftest.json").read_text(encoding="utf-8"))
@@ -1397,26 +1421,33 @@ class Executor(Agent):
             "entirely.\n"
             "3. For every other listed column, call the transformations function named "
             "'op_' followed by that column's \"action\" value, on every cell in that "
-            "column, and use the returned value as the new cell value. Never apply a "
-            "different operation than the one listed.\n"
-            f"4. For a column whose \"action\" is \"hash\": call "
+            "column, to get the new cell value. Never apply a different operation than "
+            "the one listed.\n"
+            "4. Before writing ANY cell's new value (from step 3, every column, every "
+            f"action including \"keep\") to the output, call "
+            f"{CONTAINER_SHIM_MODULE_NAME}.neutralise_formula(new_value) and write its "
+            "return value instead of the raw new_value. Do this for every single cell "
+            "you write, with no exception -- never skip it because a value looks like "
+            "plain text, since the check happens after your module runs and inspects "
+            "the file you wrote, not your reasoning about which cells needed it.\n"
+            f"5. For a column whose \"action\" is \"hash\": call "
             f"{CONTAINER_SHIM_MODULE_NAME}.resolve_header(token) to get its real header name "
             f"and {CONTAINER_SHIM_MODULE_NAME}.load_salt() to get the salt, then call "
             "op_hash(value, real_header_name, salt). For a column whose \"action\" is "
             f"\"pseudonymize\": call {CONTAINER_SHIM_MODULE_NAME}.load_salt() to get the "
             "salt, then call op_pseudonymize(value, salt).\n"
-            "5. For every \"pseudonymize\" column, start from "
+            "6. For every \"pseudonymize\" column, start from "
             f"{CONTAINER_SHIM_MODULE_NAME}.load_pseudonym_state() (a dict of real value -> "
             "previously returned token), add every new (real value -> returned token) pair "
             "your run produces, and write the complete resulting dict as "
             "/workspace/pseudonym_state_out.json. If there is no \"pseudonymize\" column, "
             "write /workspace/pseudonym_state_out.json containing {} unchanged.\n"
-            f"6. Writes the transformed dataset, in the same {ext} format, with the "
+            f"7. Writes the transformed dataset, in the same {ext} format, with the "
             f"original header row and row order both preserved, to /workspace/{export_name}.\n"
-            "7. Writes /workspace/effect_ledger.json: a JSON list with one object per "
+            "8. Writes /workspace/effect_ledger.json: a JSON list with one object per "
             "listed column, each exactly {\"token\": <its token>, \"position\": <its "
             "position>, \"action\": <its action>}, and nothing else -- never a real value.\n"
-            f"8. Returns the exact string \"{export_name}\".\n\n"
+            f"9. Returns the exact string \"{export_name}\".\n\n"
             "<<<BEGIN UNTRUSTED COLUMN PROJECTION DATA>>>\n"
             f"{prompt_columns}\n"
             "<<<END UNTRUSTED COLUMN PROJECTION DATA>>>\n"
@@ -1478,7 +1509,7 @@ class Executor(Agent):
                 },
                 entrypoint=entrypoint,
                 declared_outputs=frozenset({export_name, "pseudonym_state_out.json", "effect_ledger.json"}),
-                sandbox=sandbox, known_safe_values=frozenset(ACTION_TYPES),
+                sandbox=sandbox, known_safe_values=frozenset(ACTION_TYPES) | _CODEGEN_SELFTEST_LITERALS,
                 extra_sources={
                     "transformations.py": self._transformations_source,
                     CONTAINER_SHIM_FILENAME: CONTAINER_SHIM_SOURCE,

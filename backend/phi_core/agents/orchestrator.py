@@ -57,6 +57,7 @@ from ..control.manager import ManagerSupervision
 from ..paths import cleanup_session_unpacked
 from ..security import scrub_decision, scrub_persisted_text
 from .base import ITERATION_CAP, AgentMessage
+from .codegen import CodeGenerationExhausted
 from .experts import PHIMethodsExpert, RegulationsExpert
 from .llm import LlmConfig
 from .reasoning import (
@@ -264,6 +265,27 @@ async def _dispatch_execute(state: _PipelineDriverState) -> "str | dict[str, Any
             files=state.files, decisions=decisions, omit_by_file=state.omit_by_file,
             manifest=manifest, store=state.control_store)
         await state.require_accepted(executor_ctx, exec_out, "Executor")
+    except CodeGenerationExhausted as exc:
+        # Rewrite plan Task 11: two full generate-check-execute-verify
+        # rounds (agents/codegen.py's own bounded retry) failed to
+        # produce working transformation code for some dataset file.
+        # Distinct from the generic `executor_crashed` path below: this
+        # is a specific, structured diagnosis (which checks failed and
+        # why) a human reviewing generated code needs, not a bare
+        # exception. Routes to its own node (DISCUSSIONS.md round 6's
+        # `human_review_code`) rather than `human_review_decisions`,
+        # since the resolution here is about code, not a classification
+        # decision.
+        await state.manager._log("executor.codegen_exhausted", "info",
+                           {"diagnostics": exc.diagnostics[:5]})
+        return await _escalate_to_human_review(
+            db=state.db, session_filter=state.session_filter, reasons=["code_generation_exhausted"],
+            reasons_plain=plain_human_review_reasons(["code_generation_exhausted"]),
+            close_last_phase=state.close_last_phase, phase_timings=state.phase_timings,
+            run_elapsed_s=time.perf_counter() - state.run_started,
+            approved_decisions=decisions, sentinel_report=state.sentinel_report,
+            manager=state.manager, store=state.control_store, run_id=state.effective_run_id,
+            node="human_review_code")
     except Exception as exc:
         # Executor is deterministic and irreversible (writes exports to disk);
         # a crash here must never be papered over by an LLM's advice.

@@ -751,3 +751,159 @@ async def test_generate_with_retry_succeeds_end_to_end_against_a_real_container(
         assert json.loads(written.read_text()) == {"ok": True}
     finally:
         result.cleanup()
+
+
+@needs_docker
+@needs_image
+@pytest.mark.asyncio
+async def test_executor_full_codegen_path_against_a_real_container_and_dataset(tmp_path):
+    """Advisory-caught gap: every other Executor/codegen test stubs
+    ``_dataset_via_codegen`` or ``generate_with_retry`` -- none of them
+    ever drives Executor's real ``transformations.py`` + per-file
+    ``apply_<id>.py`` two-module codegen chain against a real Docker
+    container, the real ``phi_container_shim``, and a real dataset. This
+    is that round: a stubbed LLM reply (hand-written, not model
+    generated) stands in for the provider call, but every other layer
+    -- container mount, shim resolution, salt/pseudonym-state file
+    round-trip, the literal scan, the formula scan, the workspace diff
+    -- is genuine.
+
+    The dataset deliberately reuses "P001" (this module's own
+    ``pseudonymize`` self-test literal) as a real ``patient_id`` value,
+    and puts a formula-injection-shaped value in the "keep" column.
+    Both are exactly the two gaps a review round identified in this
+    session: without the ``known_safe_values`` fix, "P001" colliding
+    with the self-test vector would fail ``assert_no_dataset_literals``
+    on both attempts; without the ``neutralise_formula`` shim call, the
+    formula-shaped "keep" cell would fail
+    ``assert_no_formula_injection_in_outputs`` on both attempts. This
+    test would have failed loudly before either fix landed."""
+    import csv
+    from collections import deque
+
+    from phi_core.agents.reasoning import Executor
+    from phi_core.control.opaque import OpaqueMap
+    from phi_core.control.testing import FakeGateway, make_ctx
+
+    dataset_path = tmp_path / "dataset.csv"
+    dataset_path.write_text(
+        "patient_id,note,age\n"
+        "P001,=cmd|'/C calc'!A1,95\n"
+        "P002,normal text,45\n",
+        encoding="utf-8",
+    )
+
+    transformations_source = (
+        "import hashlib\n"
+        "import json\n"
+        "from pathlib import Path\n"
+        "\n\n"
+        "def op_pseudonymize(value, salt):\n"
+        "    digest = hashlib.sha256((salt + ':' + value).encode('utf-8')).hexdigest()\n"
+        "    return 'P' + digest[:8]\n"
+        "\n\n"
+        "def op_keep(value):\n"
+        "    return value\n"
+        "\n\n"
+        "def op_cap_age_90(value):\n"
+        "    digits = ''.join(c for c in value if c.isdigit() or c == '-')\n"
+        "    try:\n"
+        "        n = int(digits)\n"
+        "    except ValueError:\n"
+        "        return ''\n"
+        "    if n > 89:\n"
+        "        return '90+'\n"
+        "    return str(n)\n"
+        "\n\n"
+        "def run():\n"
+        "    failed = []\n"
+        "    expected = 'P' + hashlib.sha256('selftest-salt:P001'.encode('utf-8')).hexdigest()[:8]\n"
+        "    if op_pseudonymize('P001', 'selftest-salt') != expected:\n"
+        "        failed.append('pseudonymize')\n"
+        "    if op_keep('hello') != 'hello':\n"
+        "        failed.append('keep')\n"
+        "    if op_cap_age_90('95') != '90+':\n"
+        "        failed.append('cap_age_90')\n"
+        "    ok = not failed\n"
+        "    Path('/workspace/selftest.json').write_text(json.dumps({'ok': ok, 'failed': failed}))\n"
+        "    return 'selftest.json'\n"
+    )
+
+    apply_source = (
+        "import csv\n"
+        "import json\n"
+        "from pathlib import Path\n"
+        "\n"
+        "import phi_container_shim\n"
+        "import transformations\n"
+        "\n\n"
+        "def run():\n"
+        "    with open('/data/dataset.csv', newline='', encoding='utf-8') as fh:\n"
+        "        rows = list(csv.reader(fh))\n"
+        "    header = rows[0]\n"
+        "    data_rows = rows[1:]\n"
+        "    plan = [(0, 'pseudonymize'), (1, 'keep'), (2, 'cap_age_90')]\n"
+        "    salt = phi_container_shim.load_salt()\n"
+        "    state = phi_container_shim.load_pseudonym_state()\n"
+        "    out_rows = []\n"
+        "    for row in data_rows:\n"
+        "        new_row = list(row)\n"
+        "        for position, action in plan:\n"
+        "            raw = row[position]\n"
+        "            if action == 'pseudonymize':\n"
+        "                if raw in state:\n"
+        "                    new_value = state[raw]\n"
+        "                else:\n"
+        "                    new_value = transformations.op_pseudonymize(raw, salt)\n"
+        "                    state[raw] = new_value\n"
+        "            elif action == 'keep':\n"
+        "                new_value = transformations.op_keep(raw)\n"
+        "            else:\n"
+        "                new_value = transformations.op_cap_age_90(raw)\n"
+        "            new_row[position] = phi_container_shim.neutralise_formula(new_value)\n"
+        "        out_rows.append(new_row)\n"
+        "    with open('/workspace/export.csv', 'w', newline='', encoding='utf-8') as fh:\n"
+        "        writer = csv.writer(fh)\n"
+        "        writer.writerow(header)\n"
+        "        writer.writerows(out_rows)\n"
+        "    Path('/workspace/pseudonym_state_out.json').write_text(json.dumps(state))\n"
+        "    ledger = [\n"
+        "        {'token': 'TOK_0', 'position': 0, 'action': 'pseudonymize'},\n"
+        "        {'token': 'TOK_1', 'position': 1, 'action': 'keep'},\n"
+        "        {'token': 'TOK_2', 'position': 2, 'action': 'cap_age_90'},\n"
+        "    ]\n"
+        "    Path('/workspace/effect_ledger.json').write_text(json.dumps(ledger))\n"
+        "    return 'export.csv'\n"
+    )
+
+    gateway = FakeGateway(deque([transformations_source, apply_source]))
+    executor = Executor(make_ctx("Executor", gateway=gateway))
+    local_opaque = OpaqueMap(executor.ctx.run_id, {})
+    real_columns = ["patient_id", "note", "age"]
+    file_decisions = [
+        {"file_id": "f1", "column": "patient_id", "action": "pseudonymize"},
+        {"file_id": "f1", "column": "note", "action": "keep"},
+        {"file_id": "f1", "column": "age", "action": "cap_age_90"},
+    ]
+    f = {"file_id": "f1", "stored_path": str(dataset_path), "subtype": "csv"}
+    sandbox = create_sandbox(run_id=executor.ctx.run_id)
+    try:
+        output_path, updated_state, ledger = await executor._dataset_via_codegen(
+            f, file_decisions, set(), real_columns, sandbox, local_opaque, "test-salt-value", {},
+        )
+        try:
+            written = output_path.read_text(encoding="utf-8")
+            rows = list(csv.reader(written.splitlines()))
+            assert rows[0] == ["patient_id", "note", "age"]
+            assert rows[1][1].startswith("'="), f"formula-shaped cell not neutralised: {rows[1][1]!r}"
+            assert rows[2][1] == "normal text"
+            assert rows[1][0] != "P001" and rows[1][0].startswith("P")
+            assert rows[2][0] != "P002"
+            assert rows[1][2] == "90+"
+            assert rows[2][2] == "45"
+            assert updated_state, "pseudonym_state_out.json round-trip produced nothing"
+            assert len(ledger) == 3
+        finally:
+            output_path.unlink(missing_ok=True)
+    finally:
+        destroy_sandbox(sandbox)

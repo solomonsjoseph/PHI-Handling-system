@@ -202,6 +202,24 @@ def load_pseudonym_state() -> dict:
     if path.is_file():
         return json.loads(path.read_text(encoding="utf-8"))
     return {}
+
+
+_FORMULA_LEAD_CHARS = ("=", "+", "-", "@", chr(9), chr(13))
+
+
+def neutralise_formula(value: str) -> str:
+    """Deterministic parity with control/transform_primitives.py's own
+    _neutralise_formula (the DeterministicVerifier recompute oracle):
+    prefix a spreadsheet-formula-shaped value with a leading apostrophe
+    so a cell beginning with =, +, -, @, tab, or carriage return lands
+    as inert text, never an executable formula, when the recipient
+    opens the export in a spreadsheet application. Exposed here, never
+    left to model-authored code, so every generated apply module gets
+    this security-relevant behaviour for free rather than risking a
+    model that forgets to neutralise a pass-through cell."""
+    if value and value[0] in _FORMULA_LEAD_CHARS:
+        return "'" + value
+    return value
 '''
 
 
