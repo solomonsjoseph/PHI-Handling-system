@@ -118,6 +118,7 @@ _DOCKER_CLI_OVERHEAD_GRACE_SECONDS = 20
 _CONTAINER_UID = 10001
 _CONTAINER_GID = 10001
 _RESULT_FILENAME = ".container_result.json"
+RESULT_FILENAME = _RESULT_FILENAME  # public alias: codegen.py's workspace-diff check must exclude this bookkeeping file
 
 
 class ContainerRunnerError(RuntimeError):
