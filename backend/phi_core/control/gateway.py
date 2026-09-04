@@ -369,7 +369,15 @@ class ProviderGateway:
                 self._latency(started), "provider_error", "provider_error", digest,
             )
 
-        actual_provider = str(getattr(response, "provider", "") or getattr(response, "provider_name", "") or req.provider)
+        served_by = str(getattr(response, "provider", "") or getattr(response, "provider_name", "") or req.provider)
+        # OpenRouter is a broker, so the provider field on its response names
+        # the upstream compute vendor that served the call (GMICloud, Together,
+        # Fireworks, ...), not the provider the grant authorized. Comparing
+        # those two refuses every OpenRouter reply after paying for it, the
+        # same failure mode `_model_matches` documents for dated snapshots.
+        # The authorized axis for a broker is the model, which is still
+        # checked below.
+        actual_provider = req.provider if req.provider == "openrouter" else served_by
         actual_model = str(getattr(response, "model", "") or req.model)
         if actual_provider != req.provider or not _model_matches(req.model, actual_model):
             mismatch_payload = canonical_payload(

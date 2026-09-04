@@ -99,6 +99,50 @@ async def test_gateway_denies_a_secret_bearing_prompt_before_dispatch(monkeypatc
     assert result.denial_reason == "secret_detected"
 
 
+@pytest.mark.asyncio
+async def test_gateway_accepts_an_openrouter_upstream_vendor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenRouter brokers the call, so its response names the upstream compute
+    vendor that served it. That is not a substitution of the authorized
+    provider and must not be refused after the tokens are paid for."""
+    monkeypatch.setenv("PHI_ENV", "dev")
+    import phi_core.detectors as detectors
+
+    monkeypatch.setattr(detectors, "presidio_detect", lambda text: [])
+    store = MemoryControlStore()
+    policy = CapabilityPolicy(LlmConfig(provider="openrouter", model="minimax/minimax-m3:free"))
+    grant = policy.issue_grant(run_id="run", task_id="task", agent="RegulationsExpert", task_type="regulationsexpert")
+    await store.insert("capability_grants", grant.model_dump())
+    gateway = ProviderGateway(store)
+
+    class _Message:
+        content = '{"ok": true}'
+        tool_calls = None
+
+    class _Choice:
+        message = _Message()
+        finish_reason = "stop"
+
+    class _Response:
+        id = "resp-1"
+        provider = "GMICloud"
+        model = "minimax/minimax-m3:free"
+        choices = (_Choice(),)
+        usage = None
+
+    monkeypatch.setattr(ProviderGateway, "_completion", staticmethod(lambda *a, **k: _Response()))
+
+    result = await gateway.complete(
+        _request(
+            grant_id=grant.grant_id, provider="openrouter", model="minimax/minimax-m3:free",
+            response_schema="", user_prompt="classify these headers",
+        )
+    )
+
+    assert result.denial_reason != "provider_mismatch"
+    assert result.status == "ok"
+    assert result.provider == "openrouter"
+
+
 # --- authorization / contract registry --------------------------------------
 
 
