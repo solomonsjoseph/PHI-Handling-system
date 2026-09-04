@@ -10,6 +10,7 @@ from typing import Any, Mapping, Protocol
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pydantic import BaseModel
+from pymongo import ReturnDocument
 
 Document = dict[str, Any]
 Query = Mapping[str, Any]
@@ -33,6 +34,8 @@ class ControlStore(Protocol):
         expected: Query,
         replacement: BaseModel | Mapping[str, Any],
     ) -> bool: ...
+
+    async def increment_field(self, collection: str, query: Query, field: str) -> int | None: ...
 
     async def delete_one(self, collection: str, query: Query) -> bool: ...
 
@@ -141,6 +144,13 @@ class MemoryControlStore:
                 return True
         return False
 
+    async def increment_field(self, collection: str, query: Query, field: str) -> int | None:
+        for document in self._collections.get(collection, []):
+            if _matches(document, query):
+                document[field] = int(document.get(field, 0)) + 1
+                return int(document[field])
+        return None
+
     async def delete_one(self, collection: str, query: Query) -> bool:
         documents = self._collections.get(collection, [])
         for index, document in enumerate(documents):
@@ -189,6 +199,23 @@ class MongoControlStore:
         match.update(expected)
         result = await self._db[collection].replace_one(match, _document(replacement))
         return result.matched_count == 1
+
+    async def increment_field(self, collection: str, query: Query, field: str) -> int | None:
+        """Atomically ``$inc`` one field and return its new value.
+
+        A read-then-replace CAS cannot allocate a counter safely here: any
+        concurrent full-document write to the same record (a lifecycle
+        node change, say) restores a stale value for this field, and the
+        next allocation then hands out a number that has already been
+        used. ``$inc`` touches the single field under the server's own
+        document lock instead.
+        """
+        document = await self._db[collection].find_one_and_update(
+            dict(query), {"$inc": {field: 1}}, return_document=ReturnDocument.AFTER,
+        )
+        if document is None:
+            return None
+        return int(document.get(field, 0))
 
     async def delete_one(self, collection: str, query: Query) -> bool:
         result = await self._db[collection].delete_one(dict(query))

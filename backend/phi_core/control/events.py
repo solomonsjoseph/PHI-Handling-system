@@ -4,19 +4,21 @@ SSE fan-out broker.
 ``TraceEventStore.append`` is the only place in the codebase that inserts
 into ``trace_events`` -- proven by
 ``test_architecture_boundaries.py::test_only_trace_event_store_writes_trace_events``.
-It owns ``seq`` allocation (the same CAS-on-``workflow_runs.event_seq``
-pattern every other run-scoped counter in this control plane uses), the
+It owns ``seq`` allocation (an atomic ``$inc`` on
+``workflow_runs.event_seq``), the
 ``prev_hash``/``hash`` chain, and the fence check that keeps a superseded
 worker from publishing a terminal event for a run it no longer owns.
 
-A duplicate-key race on the underlying ``(run_id, seq)`` unique index is
-structurally unreachable through this store: ``seq`` itself is the value a
-winning CAS on ``workflow_runs.event_seq`` produced, so two concurrent
-``append`` calls for the same run can never compute the same ``seq`` to
-insert under in the first place. D15 describes retrying a duplicate-key
-insert because a naive design could allocate ``seq`` and insert
-separately; CAS-then-insert-under-the-won-value removes the race instead
-of catching it after the fact.
+``seq`` comes from an atomic single-field ``$inc`` on
+``workflow_runs.event_seq``, so two concurrent ``append`` calls for the
+same run can never compute the same ``seq`` and collide on the underlying
+``(run_id, seq)`` unique index. This previously used a read-then-CAS loop
+and the claim of structural safety did not hold: ``compare_and_set``
+replaces the whole document, so any other lifecycle writer working from an
+older snapshot rewound ``event_seq`` and the next allocation reused a
+number already inserted. Three specialists starting together reproduced it
+on every run. D15 describes retrying a duplicate-key insert; incrementing
+the counter atomically removes the race instead of catching it afterwards.
 
 ``EventBroker`` replaces the single shared ``asyncio.Queue`` per session
 (``server.py``'s former ``_progress_queues``) that silently split each
@@ -38,8 +40,6 @@ from uuid import uuid4
 from .records import TraceEvent
 from .store import ControlStore
 from .trace_sanitizer import sanitize_payload, sanitize_status_text
-
-MAX_SEQ_ALLOCATION_RETRIES = 8
 
 # TraceEvent.outcome values that mean "this run just reached a state from
 # which no further trace event for it will ever be appended." Mirrors the
@@ -81,23 +81,28 @@ class TraceEventStore:
         self._session_id = session_id
 
     async def _allocate_seq(self) -> int:
-        """CAS-increment ``workflow_runs.event_seq``. A run with no durable
-        ``WorkflowRun`` document (a unit-test fixture, or a pre-D9 legacy
-        session) allocates ``seq=0`` every time -- best-effort, matching
-        the writer this replaces, rather than refusing to trace at all."""
-        current = None
-        for _ in range(MAX_SEQ_ALLOCATION_RETRIES):
-            current = await self._store.get_one("workflow_runs", {"run_id": self._run_id})
-            if current is None:
-                return 0
-            seq = int(current.get("event_seq", 0)) + 1
-            updated = dict(current)
-            updated["event_seq"] = seq
-            if await self._store.compare_and_set(
-                "workflow_runs", {"run_id": self._run_id}, {"event_seq": current.get("event_seq", 0)}, updated,
-            ):
-                return seq
-        raise EventAppendError("seq_allocation_failed", self._run_id)
+        """Atomically ``$inc`` ``workflow_runs.event_seq``. A run with no
+        durable ``WorkflowRun`` document (a unit-test fixture, or a pre-D9
+        legacy session) allocates ``seq=0`` every time -- best-effort,
+        matching the writer this replaces, rather than refusing to trace
+        at all.
+
+        A read-then-compare-and-set loop is not safe for this counter, and
+        that is not theoretical: ``compare_and_set`` replaces the whole
+        ``workflow_runs`` document, so an unrelated lifecycle write built
+        from a snapshot taken before the last allocation puts ``event_seq``
+        back, and the next allocation reissues a sequence number that
+        ``trace_events``' unique ``(run_id, seq)`` index already holds. The
+        three specialists running in parallel at t=0 hit exactly that and
+        every one of them died with a DuplicateKeyError. A single-field
+        ``$inc`` never hands out the same number twice.
+        """
+        seq = await self._store.increment_field(
+            "workflow_runs", {"run_id": self._run_id}, "event_seq"
+        )
+        if seq is None:
+            return 0
+        return seq
 
     async def _checked_fence(self, event: TraceEvent, fence: int | None) -> int:
         if event.outcome not in TERMINAL_RUN_OUTCOMES:

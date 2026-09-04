@@ -62,11 +62,15 @@ def test_missing_stats_left_alone():
 
 
 def test_non_keep_action_never_forced():
+    """The rule only ever forces a 'keep' down. A column already carrying a
+    de-identifying action keeps that action; the rule records that it agrees
+    (see test_rule_confirms_a_de_identifying_action_... below) and never
+    rewrites the decision."""
     stats = {("dataset.csv", "treatment_facility_name"): {"distinct": 4, "rows": 40}}
     out, overrides = apply_site_cardinality_rule(
         [_decide(action="pseudonymize")], stats)
     assert out[0]["action"] == "pseudonymize"
-    assert overrides == []
+    assert [o["rule"] for o in overrides] == ["site_cardinality_agreement"]
 
 
 def test_non_matching_column_name_left_alone():
@@ -284,3 +288,32 @@ def test_pipeline_fires_before_sentinel_and_after_age_dob(tmp_path, monkeypatch)
     assert decision["action"] == "drop"
     assert decision["phi_category"] == "R"
     assert decision["suggested_action"] == "keep"
+
+
+def test_rule_confirms_a_de_identifying_action_instead_of_paying_for_a_review():
+    """Judge scores facility names at 0.74 to 0.76 across runs, just under the
+    0.80 floor, because Safe Harbor does not enumerate facility names. When it
+    has already chosen the de-identifying action this rule would have forced,
+    the rule says it agrees rather than letting the floor buy a human review.
+    The action never changes."""
+    stats = {("dataset.csv", "treatment_facility_name"): {"distinct": 6, "rows": 10}}
+
+    for action in ("pseudonymize", "hash", "drop"):
+        decision = {"file_id": "dataset.csv", "column": "treatment_facility_name",
+                    "action": action, "confidence": 0.76}
+        out, overrides = apply_site_cardinality_rule([decision], stats)
+
+        assert out[0]["action"] == action
+        assert out[0]["confidence"] == 0.95
+        assert overrides[0]["rule"] in {"site_cardinality", "site_cardinality_agreement"}
+
+
+def test_agreement_never_fires_on_a_high_cardinality_site_column():
+    stats = {("dataset.csv", "treatment_facility_name"): {"distinct": 900, "rows": 1000}}
+    decision = {"file_id": "dataset.csv", "column": "treatment_facility_name",
+                "action": "pseudonymize", "confidence": 0.76}
+
+    out, overrides = apply_site_cardinality_rule([decision], stats)
+
+    assert out[0]["confidence"] == 0.76
+    assert overrides == []

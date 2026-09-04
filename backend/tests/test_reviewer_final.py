@@ -242,3 +242,46 @@ def test_findings_never_carry_a_raw_value():
     for finding in result["findings"]:
         assert "phi_category" not in finding["detail"]
         assert "citation" not in finding["detail"]
+
+
+def test_clinical_keeper_columns_do_not_fail_the_privacy_check():
+    """The hard-rule table's last row is the explicit non-PHI keeper list,
+    whose own default action is 'keep'. Treating a match against any row as a
+    leak failed privacy_intent_preserved on every study that has clinical
+    columns, which is every study, and rewound each finished run as a
+    REGULATION_ERROR."""
+    reviewer = Reviewer(make_ctx("Reviewer"))
+    decisions = [
+        {"file_id": "f1", "column": "sex", "action": "keep", "phi_category": "NONE", "citation": ""},
+        {"file_id": "f1", "column": "race", "action": "keep", "phi_category": "NONE", "citation": ""},
+        {"file_id": "f1", "column": "state", "action": "keep", "phi_category": "NONE", "citation": ""},
+        {"file_id": "f1", "column": "diagnosis_code", "action": "keep", "phi_category": "NONE", "citation": ""},
+    ]
+    result = _finalize(
+        reviewer,
+        decisions=decisions,
+        manifest=_manifest(decision_refs=[f"f1:{d['column']}" for d in decisions]),
+        safe_output_metadata={"column_counts": {"f1": {"decisions": 4, "verdicts": 4}},
+                              "schema_valid": {"f1": True}},
+    )
+
+    privacy = next(c for c in result["checks"] if c["name"] == "privacy_intent_preserved")
+    assert privacy["pass"], privacy["detail"]
+
+
+def test_a_real_identifier_kept_still_fails_the_privacy_check():
+    reviewer = Reviewer(make_ctx("Reviewer"))
+    decisions = [
+        {"file_id": "f1", "column": "ssn", "action": "keep", "phi_category": "G", "citation": ""},
+    ]
+    result = _finalize(
+        reviewer,
+        decisions=decisions,
+        manifest=_manifest(decision_refs=["f1:ssn"]),
+        safe_output_metadata={"column_counts": {"f1": {"decisions": 1, "verdicts": 1}},
+                              "schema_valid": {"f1": True}},
+    )
+
+    privacy = next(c for c in result["checks"] if c["name"] == "privacy_intent_preserved")
+    assert not privacy["pass"]
+    assert result["signal"]["failure_class"] == "REGULATION_ERROR"

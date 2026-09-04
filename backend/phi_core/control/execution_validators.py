@@ -42,7 +42,7 @@ from .records import CapabilityGrant, MethodRecord, SandboxRecord
 # worker module later, not re-enumerating every internal sibling.
 _APPROVED_WORKER_IMPORTS = frozenset({
     "__future__", "asyncio", "csv", "hashlib", "hmac", "json", "os", "re",
-    "pathlib", "shutil", "tempfile", "typing", "uuid", "openpyxl", "pydantic",
+    "pathlib", "tempfile", "typing", "uuid", "openpyxl", "pydantic",
 })
 
 # StaticCodeValidator: import names that are always forbidden regardless

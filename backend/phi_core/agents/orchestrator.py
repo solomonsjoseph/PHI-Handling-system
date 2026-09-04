@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 
 from phi_core.control.deterministic_verifier import DeterministicVerifier
 
+from ..anonymizer import scrub_for_prompt
 from ..control.manager import ManagerSupervision
 from ..paths import cleanup_session_unpacked
 from ..security import scrub_decision, scrub_persisted_text
@@ -291,8 +292,17 @@ async def _dispatch_execute(state: _PipelineDriverState) -> "str | dict[str, Any
         # a crash here must never be papered over by an LLM's advice.
         # consult() fails open by design and is never a safety gate, so the
         # escalation itself is unconditional, fixed code -- see manager.py.
+        # The class name alone has repeatedly proved undiagnosable: every
+        # Executor crash looks like `exception:RuntimeError` and the cause
+        # has to be reproduced by hand. Carry the last line of the message
+        # too, through `scrub_for_prompt` first, because Executor is the
+        # one agent that reads raw rows and a traceback from it can quote a
+        # cell value.
+        detail, _ = scrub_for_prompt(str(exc), detectors=("presidio", "rule"))
+        detail = detail.splitlines()[-1][:400] if detail.strip() else ""
         await state.manager._log("executor.crashed", "info",
-                           {"error_kind": f"exception:{type(exc).__name__}"})
+                           {"error_kind": f"exception:{type(exc).__name__}",
+                            "detail": detail})
         return await _escalate_to_human_review(
             db=state.db, session_filter=state.session_filter, reasons=["executor_crashed"],
             reasons_plain=plain_human_review_reasons(["executor_crashed"]),
@@ -403,6 +413,7 @@ async def _dispatch_verify_output(state: _PipelineDriverState) -> "str | dict[st
             operator_result={"failed_file_ids": op_failed_ids, "verdicts": op_out["verdicts"]},
             exports=exports,
             omit_by_file=omit_by_file,
+            metadata_file_ids={f.get("file_id", "") for f in state.dict_files},
         )
         await state.require_accepted(reviewer_ctx, rv_out, "Reviewer")
     except Exception as exc:
@@ -1293,9 +1304,16 @@ async def _dispatch_decide(state: _PipelineDriverState) -> str:
     # 'blocking' on a column BLOCKING_ISSUE_FLOOR times.
     blocking_attempts: dict[tuple[str, str], int] = {}
     max_iterations = max(state.iteration_cap, BLOCKING_ISSUE_FLOOR)
+    # Mutable so a granted re-ask can buy the one iteration it needs. A
+    # rejection observed on the last permitted pass is the common case, and
+    # without this the retry is granted and then never runs.
+    iteration_budget = max_iterations
+    iteration = 0
     research_dispatched = False
+    reask_used = False
     s: dict[str, Any] = {}
-    for iteration in range(1, max_iterations + 1):
+    while iteration < iteration_budget:
+        iteration += 1
         await _check_cancel(state.db, state.sid, state.on_phase)
         await state.on_phase(f"judge_iter_{iteration}", {"iteration": iteration})
         judge_ctx = await state.make_ctx("Judge")
@@ -1392,6 +1410,18 @@ async def _dispatch_decide(state: _PipelineDriverState) -> str:
         sentinel = Reviewer(sentinel_ctx)
         s = await sentinel.preview(decisions=decisions, statute=state.statute, instrument=state.instrument,
                                    files=state.dataset_files, parent_id=last_judge_message_id)
+        # `Agent.__init_subclass__` (agents/base.py) wraps only each
+        # subclass's own `run`, so it completes the WorkItem for
+        # `Reviewer(...).run(...)` (the finalize path further down) but NOT
+        # for `preview`, which is a separate public method invoked directly
+        # here. Without this explicit completion the task stays `leased`
+        # with an empty `output_ref`, and `Manager.accept_result`'s
+        # `result != task.output_ref` check then refuses acceptance --
+        # surfacing as `ResultAcceptanceError: Reviewer result was not
+        # accepted` and failing the whole run after Judge already
+        # succeeded. Mirrors exactly what `_completing_run` does.
+        if sentinel_ctx.tasks is not None:
+            await sentinel_ctx.tasks.complete(s if isinstance(s, dict) else {})
         await state.require_accepted(sentinel_ctx, s, "Reviewer")
         sentinel_call_failures += sentinel.call_failures
         # Sentinel-originated escalation: genuine ambiguity Sentinel can't
@@ -1465,7 +1495,39 @@ async def _dispatch_decide(state: _PipelineDriverState) -> str:
             await state.on_phase(f"reviewer_correction_budget_exhausted_iter_{iteration}",
                                  {"iteration": iteration})
             break
-        if not blocking:
+        # A rejected decision is a reason to iterate in its own right.
+        # `validate_decisions` fails closed on unusable model output by
+        # routing the column to human_review at confidence 0.0, which
+        # discards whatever Judge actually reasoned. When the only fault is
+        # the action string -- Judge answering "human_review" although the
+        # prompt tells it that is not one of its options -- a human ends up
+        # resolving a column the model had an opinion about, over a
+        # formatting slip. Sentinel does not raise a blocking issue for
+        # this (the coerced decision is safe, just uninformative), so
+        # without this the loop short-circuits and the column is never
+        # re-asked. Re-asking is bounded by the operator's own rigor
+        # selector, and the retry is ordinary Judge output that every
+        # downstream gate still inspects.
+        # Only an 'action' rejection is worth another Judge call. The other
+        # fields (`phi_category`, `subject`) are coerced to a safe default
+        # without disturbing the action Judge chose, so re-asking would
+        # spend a model call to tidy a label.
+        retry_rejections = [
+            r for r in rejections if r.get("column") and r.get("field") == "action"
+        ]
+        # One extra Judge call per run, wherever in the loop the bad answer
+        # turns up. Tying this to `iteration_cap` instead would mean a
+        # rejection on the final permitted iteration -- which is exactly
+        # when it was observed -- gets no retry at all, while a rejection
+        # that keeps recurring could still consume the whole budget.
+        reask = bool(retry_rejections) and not reask_used
+        if reask:
+            reask_used = True
+            iteration_budget = max(iteration_budget, iteration + 1)
+            await state.on_phase(f"judge_rejection_reask_iter_{iteration}",
+                                 {"iteration": iteration,
+                                  "columns": sorted({str(r.get("column")) for r in retry_rejections})})
+        if not blocking and not reask:
             # Iterate only when required. No blocking issues means Sentinel
             # has nothing PHI-critical to complain about.
             await state.on_phase(f"sentinel_short_circuit_iter_{iteration}",
@@ -1473,12 +1535,15 @@ async def _dispatch_decide(state: _PipelineDriverState) -> str:
                                   "advisory_issues": len(advisory_issues)})
             s["verdict"] = "approved"
             break
-        if blocking_by_column and iteration >= state.iteration_cap and all(
+        if not reask and blocking_by_column and iteration >= state.iteration_cap and all(
             blocking_attempts.get(key, 0) >= BLOCKING_ISSUE_FLOOR for key in blocking_by_column
         ):
             break
-        prior_feedback = _summarise_issues(blocking)
-        if iteration < max_iterations:
+        prior_feedback = "\n".join(
+            part for part in (_summarise_issues(blocking), _summarise_rejections(retry_rejections))
+            if part
+        )
+        if iteration < iteration_budget:
             advice = await state.manager.consult(
                 agent_name="Judge", phase=f"judge_sentinel_iter_{iteration}",
                 signal={"iteration": iteration, "iteration_cap": state.iteration_cap,
@@ -1858,6 +1923,27 @@ def _summarise_issues(issues: list[dict[str, Any]]) -> str:
     parts = []
     for i in issues[:10]:
         parts.append(f"- {i.get('column')} ({i.get('file_id', '?')[:6]}): {i.get('problem')} -> {i.get('suggested_action')}")
+    return "\n".join(parts)
+
+
+def _summarise_rejections(rejections: list[dict[str, Any]]) -> str:
+    """Tell Judge which of its own fields came back unusable, and why.
+
+    Only the column name, the field name, and the value Judge itself
+    proposed are echoed, all three of which originated in Judge's own
+    output or in the schema headers it was given, so nothing from a
+    dataset row can reach the prompt through here. The proposed value is
+    truncated because a malformed model reply can be arbitrarily long.
+    """
+    if not rejections:
+        return ""
+    parts = ["Your previous answer was rejected for these columns. Re-decide each one, "
+             "choosing an action from the list above and giving your honest confidence. "
+             "'human_review' is not one of your options: commit to the action you believe "
+             "is correct and let a low confidence say how sure you are."]
+    for r in rejections[:10]:
+        proposed = str(r.get("proposed"))[:60]
+        parts.append(f"- {r.get('column')}: field '{r.get('field')}' was {proposed!r}, which is not valid.")
     return "\n".join(parts)
 
 

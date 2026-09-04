@@ -11,7 +11,9 @@ from typing import Any, Literal, Mapping
 import litellm
 from fastapi import HTTPException
 
-from phi_core.anonymizer import scrub_for_prompt
+from phi_core.anonymizer import apply_to_text
+from phi_core.detectors import detect_text
+from .transform_primitives import FIRST_PARTY_CONSTANTS
 from phi_core.security import scrub_persisted_text, validate_llm_base_url, validate_llm_provider
 
 from . import authorization, canary, limits, security_incident
@@ -160,16 +162,60 @@ def _usage(response: Any) -> Mapping[str, int]:
     return {str(key): int(value) for key, value in raw.items() if isinstance(value, (int, float))}
 
 
+_IDENTIFIER_TOKEN_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _is_column_identifier(value: str) -> bool:
+    """Whether a detected span is a dataset column name rather than a value.
+
+    Presidio's NER cannot tell the header ``date_of_birth`` from a person's
+    name, and headers are exactly what the pipeline is designed to send:
+    Schema, Judge, and Reviewer all reason over them. Redacting them is not
+    a safe default, it is silent data loss. A live run lost two columns to
+    ``[REDACTED:A:NAME]`` and the coverage gate then reported them as
+    missing, duplicated, and invented at once.
+
+    The exemption is deliberately shape-based and narrow: one token, no
+    whitespace, either snake_case or entirely lowercase. ``Smith``,
+    ``John Smith``, and any multi-word value still redact normally, and the
+    rule detectors (SSN, phone, email, date, ZIP shapes) are untouched, so
+    a real identifier value typed into a prompt is still caught. A study
+    whose headers are prose-shaped, ``First Name`` or ``Patient ID``, is
+    not covered by this and would still be redacted.
+    """
+    token = value.strip().strip("\"'`,:;.()[]{}")
+    if not token or not _IDENTIFIER_TOKEN_RE.match(token):
+        return False
+    return "_" in token or token.islower()
+
+
+def _scrub_text(text: str) -> tuple[str, int]:
+    """``scrub_for_prompt`` with column identifiers exempted.
+
+    Shared by ``_scrub`` and ``_contains_restricted_content`` on purpose:
+    if the two disagreed, the second would re-detect what the first
+    deliberately left in place and deny the whole request.
+    """
+    spans = [
+        span for span in detect_text(text, detectors=("presidio", "rule"))
+        if not _is_column_identifier(span.value)
+        and span.value.strip().strip("\"'`,:;.()[]{}") not in FIRST_PARTY_CONSTANTS
+    ]
+    for span in spans:
+        span.review_status = "accepted"
+    return apply_to_text(text, spans), len(spans)
+
+
 def _scrub(value: Any) -> tuple[Any, int]:
     if isinstance(value, str):
-        return scrub_for_prompt(value, detectors=("presidio", "rule"))
+        return _scrub_text(value)
     if isinstance(value, Mapping):
         result: dict[str, Any] = {}
         findings = 0
         for key, child in value.items():
             clean_key = str(key)
             if clean_key not in _STRUCTURAL_KEYS:
-                clean_key, count = scrub_for_prompt(clean_key, detectors=("presidio", "rule"))
+                clean_key, count = _scrub_text(clean_key)
                 findings += count
             clean_child, count = _scrub(child)
             result[clean_key] = clean_child
@@ -188,7 +234,7 @@ def _scrub(value: Any) -> tuple[Any, int]:
 
 def _contains_restricted_content(value: Any) -> bool:
     if isinstance(value, str):
-        return scrub_for_prompt(value, detectors=("presidio", "rule"))[1] > 0
+        return _scrub_text(value)[1] > 0
     if isinstance(value, Mapping):
         return any(
             (key not in _STRUCTURAL_KEYS and _contains_restricted_content(str(key))) or _contains_restricted_content(child)
@@ -197,6 +243,60 @@ def _contains_restricted_content(value: Any) -> bool:
     if isinstance(value, (list, tuple)):
         return any(_contains_restricted_content(child) for child in value)
     return False
+
+
+def _model_matches(requested: str, actual: str) -> bool:
+    """Whether the model the provider served is the one that was asked for.
+
+    The guard this supports exists to catch a provider quietly answering
+    with a different model than the grant authorized. It must not fire on
+    a provider naming the same model more precisely than the request did:
+    OpenAI answers a request for ``gpt-5.2`` with the dated snapshot
+    ``gpt-5.2-2025-12-11``, and treating that as a substitution discarded
+    every reply in a live run while still paying for the tokens. A dated
+    or versioned suffix on either side is the same model; anything else
+    is a genuine mismatch and is still refused.
+    """
+    left = requested.split("/")[-1].strip().lower()
+    right = actual.split("/")[-1].strip().lower()
+    if not right or left == right:
+        return True
+    return right.startswith(f"{left}-") or left.startswith(f"{right}-")
+
+
+def _provider_qualified(provider: str, model: str) -> str:
+    """The id LiteLLM's metadata tables are keyed by."""
+    if provider == "openrouter" and not model.startswith("openrouter/"):
+        return f"openrouter/{model}"
+    return model
+
+
+def model_output_token_default(provider: str, model: str) -> int:
+    """The model's own documented maximum output tokens, or 0 when unknown.
+
+    Read from LiteLLM's model metadata rather than hard-coded in this
+    repository: a curated number goes stale the day a provider ships a new
+    model, and a stale number silently truncates an agent's answer.
+    """
+    return _model_metadata_int(provider, model, "max_output_tokens")
+
+
+def model_input_token_default(provider: str, model: str) -> int:
+    """The model's own documented context window, or 0 when unknown."""
+    return _model_metadata_int(provider, model, "max_input_tokens")
+
+
+def _model_metadata_int(provider: str, model: str, field: str) -> int:
+    try:
+        info = litellm.get_model_info(_provider_qualified(provider, model))
+    except Exception:
+        # Unknown or unreleased model id, or metadata unavailable. The
+        # caller falls back to its own configured ceiling.
+        return 0
+    try:
+        return max(0, int((info or {}).get(field) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 class ProviderGateway:
@@ -271,7 +371,7 @@ class ProviderGateway:
 
         actual_provider = str(getattr(response, "provider", "") or getattr(response, "provider_name", "") or req.provider)
         actual_model = str(getattr(response, "model", "") or req.model)
-        if actual_provider != req.provider or actual_model != req.model:
+        if actual_provider != req.provider or not _model_matches(req.model, actual_model):
             mismatch_payload = canonical_payload(
                 request=req,
                 decision={"status": "denied", "denial_reason": "provider_mismatch"},

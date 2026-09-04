@@ -201,3 +201,14 @@ def test_run_pre_execution_validators_passes_clean_input() -> None:
         decisions=decisions, files=files, allowed_operations={"keep", "drop"},
         worker_module_paths=[REASONING_PY], sandbox=_sandbox(),
     )
+
+
+def test_data_dir_is_resolved_so_the_traversal_check_never_fires_on_our_own_config():
+    """An operator can legitimately write DATA_DIR=/srv/app/../data. Every
+    stored path is built from DATA_DIR, and PathPolicyValidator refuses a
+    stored path containing a '..' component, so an unresolved DATA_DIR made
+    every run fail pre-execution validation on the service's own config."""
+    from phi_core.paths import DATA_DIR
+
+    assert DATA_DIR.is_absolute()
+    assert ".." not in DATA_DIR.parts

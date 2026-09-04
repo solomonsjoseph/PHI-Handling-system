@@ -172,9 +172,27 @@ class Lexicon(Agent):
                     blank_row_indices.append(row_index)
                     continue
                 name = row[name_idx].strip()
+                # A ragged row (more or fewer cells than the header) must
+                # degrade THAT ROW, never the whole specialist. `strict=True`
+                # raised ValueError out of `run()`, past the parse-time
+                # try/except above, so a single unquoted comma in a single
+                # dictionary description crashed Lexicon outright and the
+                # orchestrator's structured-only gather then discarded the
+                # entire dictionary index -- precisely the outcome the
+                # docstring above promises cannot happen. Pair by position
+                # over the shared prefix; label any overflow cell
+                # positionally so its content is still scrubbed and indexed.
+                paired = list(zip(header, row))
+                if len(row) > len(header):
+                    paired += [(f"col{i}", row[i]) for i in range(len(header), len(row))]
                 raw_row = ", ".join(
-                    f"{h.strip()}: {v}" for h, v in zip(header, row, strict=True) if (h or "").strip()
+                    f"{h.strip()}: {v}" for h, v in paired if (h or "").strip()
                 )
+                if len(row) != len(header):
+                    await self._log("lexicon.ragged_row", "info",
+                                    {"file_id": f["file_id"], "row_index": row_index,
+                                     "header_cells": len(header), "row_cells": len(row),
+                                     "reason": "ragged_row_paired_by_position"})
                 # Dictionary rows are short label-like phrases with little
                 # surrounding narrative context -- the same case
                 # scrub_for_prompt's docstring documents for form text.

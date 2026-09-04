@@ -61,6 +61,16 @@ class _FakeCollection:
                 return SimpleNamespace(matched_count=1)
         return SimpleNamespace(matched_count=0)
 
+
+    async def find_one_and_update(self, query, update, return_document=None):
+        for d in self.docs:
+            if _matches(d, query):
+                for key, delta in update.get("$inc", {}).items():
+                    d[key] = int(d.get(key, 0)) + int(delta)
+                d.update(update.get("$set", {}))
+                return dict(d)
+        return None
+
     async def delete_one(self, query):
         for i, d in enumerate(self.docs):
             if _matches(d, query):

@@ -40,8 +40,32 @@ import openpyxl
 
 from ..detectors import detect_text
 
+# Literals this pipeline itself produces and must be able to talk about.
+# 45 CFR 164.514(b)(2)(i)(C) mandates the exact string "90+" for an
+# aggregated age, and (B) mandates "000" for a restricted ZIP3, so both
+# appear verbatim in generated code, in self-test vectors, and in the
+# diagnostics fed back to a model. Presidio reads "90+" as a date and the
+# ZIP3 codes as postal codes, which is correct in isolation and wrong
+# here: redacting them turns a self-test report into
+# "[REDACTED] != [REDACTED]" and the model can no longer see its own
+# mistake. Exempted only where the span is exactly one of these, never as
+# a substring.
 _RESTRICTED_ZIP3 = {"036", "059", "063", "102", "203", "556", "692", "790",
                      "821", "823", "830", "831", "878", "879", "884", "890", "893"}
+
+FIRST_PARTY_CONSTANTS: set[str] = {"90+", "000"} | set(_RESTRICTED_ZIP3)
+
+
+def register_first_party_constants(values: "frozenset[str] | set[str]") -> None:
+    """Add literals another first-party module is known to emit.
+
+    `agents/reasoning.py` registers its code-generation self-test vectors
+    here at import time. They cannot be declared in this module (they are
+    the codegen layer's own fixtures) and this module cannot import that
+    one (the gateway would then depend on the agents package, which the
+    architecture test forbids), so the codegen layer pushes them down.
+    """
+    FIRST_PARTY_CONSTANTS.update(values)
 
 
 class PseudonymRegistry:

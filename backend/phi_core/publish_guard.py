@@ -163,7 +163,7 @@ def _sha256_of_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def scan_names(text: str, jurisdiction: str = "us") -> list[Finding]:
+def scan_names_with_keys(text: str, jurisdiction: str = "us") -> list[tuple[Finding, str]]:
     """Detect person names in ``text`` with Presidio's PERSON recognizer
     and report each as a HIPAA identifier-category-A finding (Safe
     Harbor 18(a): names of individuals or relatives).
@@ -183,6 +183,8 @@ def scan_names(text: str, jurisdiction: str = "us") -> list[Finding]:
     )
     findings: list[Finding] = []
     seen: set[tuple[int, str]] = set()
+    lines_by_match: dict[str, set[int]] = {}
+    keys_by_finding: list[tuple[Finding, str]] = []
     for lineno, line in enumerate(text.splitlines() or [text], start=1):
         if not line.strip():
             continue
@@ -193,15 +195,21 @@ def scan_names(text: str, jurisdiction: str = "us") -> list[Finding]:
             )
         except Exception:
             _LOGGER.exception("Presidio name detector failed at line %s", lineno)
-            findings.append(Finding(
+            unresolved = Finding(
                 file="",
                 pattern_id="PRESIDIO_PERSON_NAME_UNRESOLVED",
                 hipaa_category=category,
                 sample="",
                 line=lineno,
-            ))
+            )
+            # Keyed per line so the shared-vocabulary filter can never
+            # collapse two of these into one and drop them: a detector
+            # that failed is a fail-closed block, not a match to reason
+            # about.
+            keys_by_finding.append((unresolved, f"__unresolved__{lineno}"))
+            findings.append(unresolved)
             if len(findings) >= MAX_FINDINGS_PER_FILE:
-                return findings
+                return keys_by_finding
             continue
         for r in results:
             matched = line[r.start:r.end]
@@ -209,13 +217,55 @@ def scan_names(text: str, jurisdiction: str = "us") -> list[Finding]:
             if key in seen:
                 continue
             seen.add(key)
-            findings.append(Finding(
+            match_key = matched.strip().casefold()
+            lines_by_match.setdefault(match_key, set()).add(lineno)
+            finding = Finding(
                 file="", pattern_id="PRESIDIO_PERSON_NAME", hipaa_category=category,
                 sample=_sanitise_sample(matched), line=lineno,
-            ))
+            )
+            keys_by_finding.append((finding, match_key))
+            findings.append(finding)
             if len(findings) >= MAX_FINDINGS_PER_FILE:
-                return findings
-    return findings
+                return keys_by_finding
+    return keys_by_finding
+
+
+def scan_names(text: str, jurisdiction: str = "us") -> list[Finding]:
+    """:func:`scan_names_with_keys` with the shared-vocabulary filter
+    applied over this one text. Callers that scan a whole file cell by
+    cell must use the keyed form instead and filter across the file: a
+    single cell can never show that a term recurs."""
+    keyed = scan_names_with_keys(text, jurisdiction)
+    lines_by_match: dict[str, set[int]] = {}
+    for finding, key in keyed:
+        lines_by_match.setdefault(key, set()).add(finding.line)
+    return _drop_shared_vocabulary(keyed, lines_by_match)
+
+
+def _drop_shared_vocabulary(
+    keys_by_finding: list[tuple[Finding, str]], lines_by_match: dict[str, set[int]],
+) -> list[Finding]:
+    """Remove PERSON hits on text that recurs across records.
+
+    45 CFR 164.514(b)(2) lists identifiers "of the individual". Presidio
+    reads clinical vocabulary as proper nouns, so a de-identified
+    tuberculosis export was blocked at the download boundary on
+    "Pulmonary", "Cavitary" and "Ethambutol". A string appearing in two or
+    more records cannot single out any one subject, so it is not one of
+    those identifiers, whatever the NER called it. A string confined to a
+    single record still blocks, which is the shape a real leaked name has
+    in a de-identified export.
+
+    The residual risk, stated rather than hidden: a genuine name repeated
+    across records (a subject with several visits) would pass this filter.
+    It would have to have survived Judge, the hard-rule table, the
+    row-value keep scan and Reviewer Final first, so this is the last of
+    five gates, not the only one.
+    """
+    return [
+        finding for finding, key in keys_by_finding
+        if len(lines_by_match.get(key, ())) < 2
+    ]
 
 
 def scan_export_file(
@@ -360,7 +410,8 @@ def _scan_csv_names(text: str, jurisdiction: str) -> list[Finding]:
     two unrelated cells joined by a comma) and misfire on structured
     data that is not free text. Skips the header row, matching
     ``_scan_csv_text``'s own convention."""
-    findings: list[Finding] = []
+    keyed: list[tuple[Finding, str]] = []
+    lines_by_match: dict[str, set[int]] = {}
     reader = csv.reader(text.splitlines())
     for lineno, row in enumerate(reader, start=1):
         if lineno == 1:
@@ -368,12 +419,13 @@ def _scan_csv_names(text: str, jurisdiction: str) -> list[Finding]:
         for cell in row:
             if not cell or not cell.strip() or _is_opaque_generated_token(cell):
                 continue
-            for f in scan_names(cell, jurisdiction):
+            for f, key in scan_names_with_keys(cell, jurisdiction):
                 f.line = lineno
-                findings.append(f)
-                if len(findings) >= MAX_FINDINGS_PER_FILE:
-                    return findings
-    return findings
+                keyed.append((f, key))
+                lines_by_match.setdefault(key, set()).add(lineno)
+                if len(keyed) >= MAX_FINDINGS_PER_FILE:
+                    return _drop_shared_vocabulary(keyed, lines_by_match)
+    return _drop_shared_vocabulary(keyed, lines_by_match)
 
 
 def _scan_xlsx(
@@ -383,6 +435,11 @@ def _scan_xlsx(
     patterns: tuple[GuardPattern, ...],
     jurisdiction: str = "us",
 ) -> list[Finding]:
+    # Name findings are collected keyed and filtered once at the end of
+    # the workbook: a term shared across records is not an identifier of
+    # any individual, and a single cell can never show that.
+    name_keyed: list[tuple[Finding, str]] = []
+    name_lines: dict[str, set[int]] = {}
     unavailable = [Finding(
         file=path.name, pattern_id="GUARD_UNAVAILABLE", hipaa_category="",
         sample="", line=0,
@@ -433,10 +490,11 @@ def _scan_xlsx(
                     # avoid bleeding a name detector's context across an
                     # entire tab-joined row.
                     if cell.strip() and not _is_opaque_generated_token(cell):
-                        for f in scan_names(cell, jurisdiction):
+                        for f, key in scan_names_with_keys(cell, jurisdiction):
                             f.line = lineno
-                            findings.append(f)
-                            if len(findings) >= MAX_FINDINGS_PER_FILE:
+                            name_keyed.append((f, key))
+                            name_lines.setdefault(key, set()).add(lineno)
+                            if len(findings) + len(name_keyed) >= MAX_FINDINGS_PER_FILE:
                                 break
                     if len(findings) >= MAX_FINDINGS_PER_FILE:
                         break
@@ -454,7 +512,7 @@ def _scan_xlsx(
         wb.close()
     except Exception:
         return unavailable
-    return findings
+    return findings + _drop_shared_vocabulary(name_keyed, name_lines)
 
 
 def scan_all_exports(

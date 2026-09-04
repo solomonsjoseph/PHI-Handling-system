@@ -67,27 +67,23 @@ def test_executor_dataset_output_survives_publish_guard(tmp_path, monkeypatch, s
 
 
 def test_executor_dataset_export_survives_a_simulated_cross_device_move(tmp_path, monkeypatch):
-    """`_dataset_via_codegen`'s output (`tempfile.mkstemp()`, system temp)
-    and the real staging path (`STAGING_DIR`, `DATA_DIR`-rooted) are not
-    guaranteed to share a filesystem in a real deployment -- Docker's
-    `/tmp` and a bind-mounted `/app/data` commonly do not.
+    """The transformed dataset output is written straight into the staged
+    artifact path (``destination`` under ``STAGING_DIR``, ``DATA_DIR``-
+    rooted) with no temp-file hop into shared system ``/tmp`` first, so no
+    cross-filesystem rename ever happens -- Docker's ``/tmp`` and a bind-
+    mounted ``/app/data`` commonly sit on different mounts, and the retired
+    ``mkstemp`` + ``Path.replace`` shape raised EXDEV there.
 
-    The patch below is deliberately path-aware, refusing only a
-    rename/replace whose source lives under the system temp directory
-    (where `_dataset_via_codegen`'s `tempfile.mkstemp()` output lives) --
-    never a blanket patch. `ArtifactService.finalize` has its own,
-    unrelated `os.replace(tmp_path, final_path)` promoting an
-    already-staged file within `STAGING_DIR` itself (same filesystem,
-    never the bug this test targets); a blanket patch breaks that call
-    too and produces a false failure attributed to the wrong line, not
-    a valid negative control. Also deliberately does NOT use the
-    `stub_executor_dataset_codegen` fixture, since its reference
-    implementation (`apply_column_actions_to_dataset`) ends with its
-    own `os.replace(tmp, dst)` inside `tmp_path`'s own directory --
-    also outside system temp, so unaffected by the patch, but replaced
-    here with an even simpler stub to keep the only source-in-system-
-    temp rename/replace call in this test's path to the one line under
-    test in `Executor.run`'s dataset branch."""
+    The patch below is a guard, not the thing under test: it refuses any
+    rename/replace whose source lives under the system temp directory, so
+    if anyone reintroduces a temp-dir source file into the export path the
+    run fails loudly. ``ArtifactService.finalize`` promotes the already-
+    staged file with its own ``os.replace(tmp_path, final_path)`` inside
+    ``STAGING_DIR`` itself (same filesystem), so a blanket patch would
+    break the legitimate call and misattribute the failure; the stub below
+    also writes into ``destination`` directly rather than using the
+    ``stub_executor_dataset_codegen`` fixture, whose reference implementation
+    performs its own same-directory ``os.replace`` a blanket patch would hit."""
     import errno
     import os as os_module
     import tempfile as _tempfile
@@ -108,12 +104,9 @@ def test_executor_dataset_export_survives_a_simulated_cross_device_move(tmp_path
     monkeypatch.setattr(os_module, "rename", _refuse_if_source_in_system_tmp(real_rename))
     monkeypatch.setattr(os_module, "replace", _refuse_if_source_in_system_tmp(real_replace))
 
-    async def _trivial_stub(self, f, file_decisions, omit_columns, real_columns, sandbox, local_opaque, salt, pseudonym_state):
-        fd, name = _tempfile.mkstemp(suffix=".csv")
-        os_module.close(fd)
-        dst = Path(name)
-        dst.write_bytes(Path(f["stored_path"]).read_bytes())
-        return dst, dict(pseudonym_state), []
+    async def _trivial_stub(self, f, file_decisions, omit_columns, real_columns, sandbox, local_opaque, salt, pseudonym_state, destination):
+        destination.write_bytes(Path(f["stored_path"]).read_bytes())
+        return destination, dict(pseudonym_state), []
 
     monkeypatch.setattr(ExecutorClass, "_dataset_via_codegen", _trivial_stub)
 

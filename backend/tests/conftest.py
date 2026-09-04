@@ -172,24 +172,19 @@ def stub_executor_dataset_codegen(monkeypatch: pytest.MonkeyPatch):
     Tests that specifically exercise the real codegen chain (e.g.
     ``test_generated_code_guard.py``, ``test_executor_codegen.py``) do
     not request this fixture."""
-    import os as _os
-    import tempfile as _tempfile
     from pathlib import Path as _Path
 
     from phi_core.agents.reasoning import Executor
     from phi_core.control.transform_primitives import PseudonymRegistry, apply_column_actions_to_dataset
 
-    async def _stub(self, f, file_decisions, omit_columns, real_columns, sandbox, local_opaque, salt, pseudonym_state):
+    async def _stub(self, f, file_decisions, omit_columns, real_columns, sandbox, local_opaque, salt, pseudonym_state, destination):
         ext = (f.get("subtype") or _Path(f["stored_path"]).suffix.lstrip(".")).lower()
         registry = PseudonymRegistry(salt=salt)
         registry._map.update(pseudonym_state)
-        fd, name = _tempfile.mkstemp(suffix=f".{ext}")
-        _os.close(fd)
-        dst = _Path(name)
         apply_column_actions_to_dataset(
-            _Path(f["stored_path"]), dst, ext, file_decisions, registry, omit_columns=omit_columns,
+            _Path(f["stored_path"]), destination, ext, file_decisions, registry, omit_columns=omit_columns,
         )
-        return dst, dict(registry._map), []
+        return destination, dict(registry._map), []
 
     monkeypatch.setattr(Executor, "_dataset_via_codegen", _stub)
     return _stub

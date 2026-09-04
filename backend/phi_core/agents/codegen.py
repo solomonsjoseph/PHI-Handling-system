@@ -69,6 +69,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from ..anonymizer import scrub_for_prompt
 from ..control import limits
 from ..control.records import SandboxRecord
 from ..control.runner import (
@@ -236,7 +237,21 @@ def check_generated_code(source: str, *, extra_allowed_modules: frozenset[str] =
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
-        return [f"syntax_error: {exc.msg} (line {exc.lineno})"]
+        # Carry the offending line, not only its number. A model that
+        # cannot see which line it broke rewrites the same mistake: the
+        # observed case was ZIP3 codes retyped as bare integers, where
+        # '036' is not a valid Python integer literal. The source is the
+        # model's own output, but a generated module can embed a literal
+        # copied from the dataset, so it is scrubbed before it goes back
+        # into a prompt.
+        line = ""
+        if exc.lineno:
+            raw = source.splitlines()[exc.lineno - 1: exc.lineno]
+            if raw:
+                scrubbed, _ = scrub_for_prompt(raw[0].strip(), detectors=("presidio", "rule"))
+                line = scrubbed[:200]
+        located = f"syntax_error: {exc.msg} (line {exc.lineno})"
+        return [f"{located}: {line}" if line else located]
 
     violations: list[str] = []
     for node in ast.walk(tree):
@@ -300,6 +315,33 @@ def check_entrypoint_shape(source: str) -> list[str]:
         for node in tree.body
     )
     return [] if has_run else ["missing_entrypoint: no top-level def run(...) found"]
+
+
+def generated_code_rules() -> str:
+    """The static checker's rules, stated for the model that has to pass
+    them. Built from the allowlists above rather than written out by hand,
+    so the prompt can never drift from what ``check_generated_code``
+    actually enforces.
+
+    Without this, a model has to guess: a live run lost an attempt to a
+    script that imported ``os`` purely to join two paths, which the
+    checker rejects outright. Naming the rule up front costs a few dozen
+    tokens and buys back a whole generation round.
+    """
+    imports = ", ".join(sorted(STATIC_CHECK_ALLOWED_IMPORTS))
+    pandas_methods = ", ".join(sorted(PANDAS_ALLOWED_METHODS))
+    return (
+        "\n\nYour code runs inside a network-denied sandbox behind a static checker. "
+        "It rejects the whole script, without running it, on any of these:\n"
+        f"- Importing anything outside this list: {imports}. There is no os, no sys, "
+        "no subprocess, no pathlib alternative for them. Use plain string paths or "
+        "pathlib, both of which are available.\n"
+        f"- Using a pandas call outside this list: {pandas_methods}.\n"
+        "- Using exec, eval, compile, __import__, globals, locals, vars, getattr, "
+        "setattr, delattr, dir, or input.\n"
+        "- Omitting a top-level `def run():`. It must be at module level, not nested.\n"
+        "Write only the module source. No explanation, no commentary outside the code."
+    )
 
 
 _CODE_FENCE_RE = re.compile(r"^```(?:python)?\n(.*?)\n?```\s*$", re.DOTALL)
@@ -565,6 +607,7 @@ async def generate_with_retry(
     known_safe_values: frozenset[str] = frozenset(),
     extra_sources: dict[str, str] | None = None,
     extra_allowed_modules: frozenset[str] = frozenset(),
+    source_suffix: str = "",
 ) -> tuple[str, ContainerRunResult]:
     """Drive up to ``attempts`` full generate-check-execute-verify
     rounds. ``build_prompt(previous_source, previous_diagnostics)`` is
@@ -587,9 +630,21 @@ async def generate_with_retry(
     ``import transformations`` in the generated entrypoint is not itself
     flagged as an unlisted import.
 
+    ``source_suffix`` is first-party code appended to whatever the model
+    returns, before any check runs, for boilerplate the caller can write
+    correctly once and a model transcribes badly (see
+    ``Executor._generate_transformations``' self-test harness). It is
+    part of the module that is checked and executed, but not part of the
+    ``source`` handed back to ``build_prompt`` as ``previous_source``,
+    so a retry prompt never shows the model its own output polluted with
+    ours.
+
     Returns ``(source, result)`` on success -- ``source`` is only the
     newly generated ``entrypoint`` source, never ``extra_sources``, which
-    the caller already has. Raises :class:`CodeGenerationExhausted`
+    the caller already has. It is returned with any markdown code fence
+    already stripped, because a caller that passes it on as another
+    round's ``extra_sources`` gets it re-checked verbatim, and a stray
+    ```python line fails that check with a syntax error on line 1. Raises :class:`CodeGenerationExhausted`
     (carrying every attempt's diagnostics) once ``attempts`` rounds have
     all failed.
     """
@@ -598,12 +653,13 @@ async def generate_with_retry(
     all_diagnostics: list[str] = []
 
     for attempt in range(1, attempts + 1):
-        prompt = build_prompt(previous_source, previous_diagnostics)
-        source = await agent.call(prompt, phase=phase, timeout_s=call_timeout_s)
+        prompt = build_prompt(previous_source, previous_diagnostics) + generated_code_rules()
+        source = _strip_code_fences(await agent.call(prompt, phase=phase, timeout_s=call_timeout_s))
         outcome = await _try_one_generation(
             source=source, dataset_path=dataset_path, inputs=inputs, entrypoint=entrypoint,
             declared_outputs=declared_outputs, sandbox=sandbox, known_safe_values=known_safe_values,
             extra_sources=extra_sources, extra_allowed_modules=extra_allowed_modules,
+            source_suffix=source_suffix,
         )
         if isinstance(outcome, ContainerRunResult):
             return source, outcome
@@ -623,6 +679,7 @@ async def _try_one_generation(
     known_safe_values: frozenset[str] = frozenset(),
     extra_sources: dict[str, str] | None = None,
     extra_allowed_modules: frozenset[str] = frozenset(),
+    source_suffix: str = "",
 ) -> "ContainerRunResult | _AttemptFailure":
     """One full check_generated_code / check_entrypoint_shape /
     assert_no_dataset_literals / run_generated / workspace_diff_check /
@@ -643,6 +700,13 @@ async def _try_one_generation(
     source = _strip_code_fences(source)
     if not source.strip():
         return _AttemptFailure(diagnostics=["empty_reply: the model returned no source"])
+    # First-party code appended to the model's own, before every check.
+    # Boilerplate a caller can write correctly once is not worth asking a
+    # model to transcribe: a self-test harness carrying a long literal came
+    # back mistyped run after run, including as a bare-integer ZIP code that
+    # would not parse. It still passes `check_generated_code`, because the
+    # combined module is what actually runs.
+    source = source + source_suffix
 
     extra_sources = extra_sources or {}
     violations = check_generated_code(source, extra_allowed_modules=extra_allowed_modules) + check_entrypoint_shape(source)
@@ -672,7 +736,16 @@ async def _try_one_generation(
     except ContainerTimeout:
         return _AttemptFailure(diagnostics=["execution_timeout"])
     except (ContainerRunnerError, ContainerWorkerFailure) as exc:
-        return _AttemptFailure(diagnostics=[f"execution_failed: {type(exc).__name__}"])
+        # The class name alone is not actionable: it says the generated
+        # code raised, not what it got wrong, so the retry round repeats
+        # the same mistake and a live run died on exactly that. The
+        # message comes from a traceback raised while reading the real
+        # dataset, so it could carry a cell value; scrub_for_prompt runs
+        # over it before it reaches either the next prompt or the trace.
+        detail, _ = scrub_for_prompt(str(exc), detectors=("presidio", "rule"))
+        detail = detail.splitlines()[-1][:400] if detail.strip() else ""
+        label = f"execution_failed: {type(exc).__name__}"
+        return _AttemptFailure(diagnostics=[f"{label}: {detail}" if detail else label])
 
     # ContainerRunner always leaves its own RESULT_FILENAME bookkeeping
     # file in the workspace -- it is not a declarable output and never

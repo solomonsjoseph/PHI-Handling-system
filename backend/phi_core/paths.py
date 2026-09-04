@@ -72,7 +72,14 @@ def safe_join(base: Path, user_name: str | None, *, fallback: str = "upload.bin"
     return candidate
 
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
+# Resolved, not merely constructed. Every stored file path is built from
+# DATA_DIR, and `control/execution_validators.PathPolicyValidator` refuses
+# any stored path containing a '..' component, so an operator who exports
+# DATA_DIR=/srv/app/../data would see every run reach Executor and fail a
+# traversal check on the service's own configuration. Normalising here
+# keeps that check strict where it matters, on paths the service did not
+# construct itself.
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data")).resolve()
 UPLOAD_DIR = DATA_DIR / "uploads"
 CHATGPT_TOKEN_DIR = DATA_DIR / "chatgpt"
 # D14 artifact-registry roots. ``intake`` reuses ``UPLOAD_DIR`` rather than

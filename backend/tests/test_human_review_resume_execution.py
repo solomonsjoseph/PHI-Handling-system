@@ -74,6 +74,16 @@ class _FakeCollection:
                 return SimpleNamespace(matched_count=1)
         return SimpleNamespace(matched_count=0)
 
+
+    async def find_one_and_update(self, query, update, return_document=None):
+        for d in self.docs:
+            if _matches(d, query):
+                for key, delta in update.get("$inc", {}).items():
+                    d[key] = int(d.get(key, 0)) + int(delta)
+                d.update(update.get("$set", {}))
+                return dict(d)
+        return None
+
     async def delete_one(self, query):
         for i, d in enumerate(self.docs):
             if _matches(d, query):
@@ -190,7 +200,8 @@ async def test_session_human_review_resume_worker_runs_dispatch_execute_tail_to_
                            parent_id=None, deterministic_only=False):
             return {"preview_status": "PASS", "verdict": "approved", "issues": [], "findings": []}
 
-        async def run(self, decisions, operator_result, exports, omit_by_file=None):
+        async def run(self, decisions, operator_result, exports, omit_by_file=None,
+                      metadata_file_ids=None):
             result = {"exports": exports, "findings": []}
             await _complete(self._ctx, result)
             return result
@@ -306,7 +317,8 @@ async def test_session_human_review_resume_worker_leaves_partially_complete_when
                            parent_id=None, deterministic_only=False):
             return {"preview_status": "PASS", "verdict": "approved", "issues": [], "findings": []}
 
-        async def run(self, decisions, operator_result, exports, omit_by_file=None):
+        async def run(self, decisions, operator_result, exports, omit_by_file=None,
+                      metadata_file_ids=None):
             result = {"exports": exports, "findings": []}
             await _complete(self._ctx, result)
             return result

@@ -16,7 +16,7 @@ export default function Settings() {
     provider: 'openai',
     model: 'gpt-5.2',
     temperature: 0.1,
-    max_tokens: 2000,
+    max_tokens: 0,
   });
   const [catalog, setCatalog] = useState({ providers: [], models: [], default_model_id: '' });
   const [busy, setBusy] = useState(false);
@@ -47,7 +47,7 @@ export default function Settings() {
         provider: nextProvider,
         model: nextModel,
         temperature: Number(r.data.temperature ?? 0.1),
-        max_tokens: Number(r.data.max_tokens ?? 2000),
+        max_tokens: Number(r.data.max_tokens ?? 0),
       });
       setApiKeySet(!!r.data.api_key_set);
       setApiKey('');
@@ -189,7 +189,7 @@ export default function Settings() {
               >
                 {modelsForProvider.map(m => (
                   <option key={m.id} value={m.id}>
-                    {m.label} — {m.tier}{m.supports_web_search ? ' · web-search' : ''}
+                    {m.label} · {m.tier}{m.supports_web_search ? ' · web-search' : ''}
                   </option>
                 ))}
                 <option value={CUSTOM_VALUE}>Custom (type model ID)…</option>
@@ -220,11 +220,13 @@ export default function Settings() {
             />
           </Field>
 
-          <Field label="Max tokens">
+          <Field
+            label="Max tokens"
+            hint="0 uses the selected model's own default output limit."
+          >
             <input
               type="number"
-              min={200}
-              max={16000}
+              min={0}
               step={100}
               value={cfg.max_tokens}
               onChange={e => setCfg({ ...cfg, max_tokens: Number(e.target.value) })}

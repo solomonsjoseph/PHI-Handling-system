@@ -381,3 +381,26 @@ def test_reviewer_rejects_the_artifact_behind_an_excluded_export() -> None:
     assert "f1" not in result["exports"]
     assert record["state"] == "rejected"
     assert record["rejection_reason"] == "Reviewer excluded export: missing_operator_verdict."
+
+
+def test_a_registered_metadata_file_is_exempt_from_the_header_count_check(tmp_path):
+    """A data dictionary is redacted whole by Executor, never decided column
+    by column, so it reaches the coverage audit with zero decisions against a
+    two-column header. Without the caller naming it as metadata that reads as
+    a coverage mismatch and rewinds a finished export. An unnamed file keeps
+    the strict rule, which
+    test_zero_decision_file_with_real_export_is_coverage_mismatch_unless_already_failed
+    pins.
+    """
+    src = tmp_path / "dictionary.csv"
+    _write_csv(src, ["column_name", "description"], [["age", "Age in years"]])
+    exports = {"dict": str(src)}
+    operator_result = {"verdicts": [], "failed_file_ids": [], "status": "clean"}
+
+    reviewer = Reviewer(make_ctx("Reviewer"))
+    result = asyncio.run(reviewer.run([], operator_result, exports,
+                                      metadata_file_ids={"dict"}))
+
+    assert result["findings"] == []
+    assert result["status"] == "clean"
+    assert "dict" in result["exports"]

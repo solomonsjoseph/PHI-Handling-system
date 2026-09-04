@@ -842,3 +842,36 @@ async def test_publish_guard_rejection_is_registered_and_reconciled(tmp_path: Pa
     assert counts == {"deleted": 1, "failed": 0, "skipped_hold": 0}
     assert await store.get_one("artifacts", {"artifact_id": artifact_id}) is None
     assert not alias.exists()
+
+
+def test_clinical_vocabulary_repeated_across_records_does_not_block_an_export(tmp_path: Path) -> None:
+    """45 CFR 164.514(b)(2) lists identifiers of the individual. Presidio
+    reads clinical vocabulary as proper nouns, so a correctly de-identified
+    tuberculosis export was blocked at the download boundary on "Pulmonary",
+    "Cavitary" and "Ethambutol". A string present in two or more records
+    cannot single out any subject."""
+    path = _write_csv(tmp_path, "clean.csv", [
+        ["site_of_disease", "treatment_regimen"],
+        ["Pulmonary", "Isoniazid, Rifampin, Ethambutol"],
+        ["Pulmonary", "Isoniazid, Rifampin, Ethambutol"],
+        ["Cavitary infiltrate", "Isoniazid, Rifampin, Ethambutol"],
+        ["Cavitary infiltrate", "Isoniazid, Rifampin, Ethambutol"],
+    ])
+
+    result = scan_export_file("f1", path)
+
+    assert result.status == "clean", result.findings
+
+
+def test_a_name_in_a_single_record_still_blocks_an_export(tmp_path: Path) -> None:
+    path = _write_csv(tmp_path, "leak.csv", [
+        ["site_of_disease", "note"],
+        ["Pulmonary", "seen by Elena Martinez"],
+        ["Pulmonary", "routine"],
+        ["Pulmonary", "routine"],
+    ])
+
+    result = scan_export_file("f1", path)
+
+    assert result.status == "blocked"
+    assert any(f["pattern_id"] == "PRESIDIO_PERSON_NAME" for f in result.findings)

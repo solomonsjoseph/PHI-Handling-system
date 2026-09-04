@@ -253,17 +253,72 @@ def _global_budget() -> ResourceBudget:
     )
 
 
-def _bounded_budget(manifest: ResourceBudget) -> ResourceBudget:
+def model_task_ceilings(llm_config: Any | None) -> tuple[int, int]:
+    """The per-task (output tokens, input bytes) ceilings for this run.
+
+    An environment pin always wins. Otherwise the selected model's own
+    documented limits apply, so switching models moves the ceiling with
+    them instead of truncating every agent at a constant chosen years
+    earlier. An unknown model id falls back to the configured constants.
+    """
+    # Imported lazily: gateway imports this module, and LiteLLM's metadata
+    # tables are the only place a model's real limits are recorded.
+    from .gateway import model_input_token_default, model_output_token_default
+
+    provider = str(getattr(llm_config, "provider", "") or "")
+    model = str(getattr(llm_config, "model", "") or "")
+    configured = max(0, int(getattr(llm_config, "max_tokens", 0) or 0))
+
+    tokens = limits.MAX_TOKENS_PER_TASK
+    if not limits.MAX_TOKENS_PER_TASK_PINNED:
+        if configured:
+            # An operator who typed a number means it, including a number
+            # below the built-in default.
+            tokens = configured
+        else:
+            # Every in-flight task reserves its whole ceiling against the
+            # run budget up front, so an unbounded per-task ceiling would
+            # let a few parallel agents exhaust the run before any of them
+            # finishes. Keep room for two full rounds at maximum width.
+            run_share = limits.MAX_TOKENS_PER_RUN // max(1, limits.MAX_PARALLEL_TASKS_PER_RUN * 2)
+            model_default = model_output_token_default(provider, model)
+            tokens = max(tokens, min(model_default, run_share)) if model_default else tokens
+
+    input_bytes = limits.MAX_INPUT_BYTES
+    if not limits.MAX_INPUT_BYTES_PINNED:
+        # LiteLLM reports a context window in tokens; four bytes per token
+        # is the conventional English-text approximation used for a byte
+        # ceiling that only has to be the right order of magnitude.
+        context_tokens = model_input_token_default(provider, model)
+        input_bytes = context_tokens * 4 if context_tokens else input_bytes
+    return tokens, input_bytes
+
+
+def _bounded_budget(manifest: ResourceBudget, llm_config: Any | None = None) -> ResourceBudget:
     global_budget = _global_budget()
+    model_tokens, model_input_bytes = model_task_ceilings(llm_config)
+    # A manifest that carries the shared placeholder value has not tuned
+    # that ceiling, so the model's own limit applies. A manifest that names
+    # its own number is authority and still bounds the grant.
+    tuned_tokens = manifest.max_tokens != _MANIFEST_MAX_BUDGET.max_tokens
+    tuned_input = manifest.max_input_bytes != _MANIFEST_MAX_BUDGET.max_input_bytes
+    max_tokens = min(manifest.max_tokens, global_budget.max_tokens) if tuned_tokens else model_tokens
+    max_input_bytes = (
+        min(manifest.max_input_bytes, global_budget.max_input_bytes) if tuned_input else model_input_bytes
+    )
     return ResourceBudget(
         wall_seconds=min(manifest.wall_seconds, global_budget.wall_seconds),
         max_attempts=min(manifest.max_attempts, global_budget.max_attempts),
         max_parallel=min(manifest.max_parallel, global_budget.max_parallel),
-        max_tokens=min(manifest.max_tokens, global_budget.max_tokens),
-        max_cost_usd=min(manifest.max_cost_usd, global_budget.max_cost_usd),
+        max_tokens=max_tokens,
+        max_cost_usd=(
+            min(manifest.max_cost_usd, global_budget.max_cost_usd)
+            if (tuned_tokens or manifest.max_cost_usd != _MANIFEST_MAX_BUDGET.max_cost_usd)
+            else max_tokens / 1000 * limits.ASSUMED_USD_PER_1K_TOKENS
+        ),
         max_tool_calls=min(manifest.max_tool_calls, global_budget.max_tool_calls),
         max_children=min(manifest.max_children, global_budget.max_children),
-        max_input_bytes=min(manifest.max_input_bytes, global_budget.max_input_bytes),
+        max_input_bytes=max_input_bytes,
         max_output_bytes=min(manifest.max_output_bytes, global_budget.max_output_bytes),
         max_artifact_bytes=min(manifest.max_artifact_bytes, global_budget.max_artifact_bytes),
     )
@@ -276,7 +331,7 @@ class CapabilityPolicy:
 
     def issue_grant(self, *, run_id: str, task_id: str, agent: str, task_type: str) -> CapabilityGrant:
         manifest = self._manifest_for(agent, task_type)
-        budget = _bounded_budget(manifest.budget)
+        budget = _bounded_budget(manifest.budget, self._llm_config)
         issued_at = datetime.now(timezone.utc)
         provider = str(getattr(self._llm_config, "provider", "") or "")
         model = str(getattr(self._llm_config, "model", "") or "")
@@ -355,7 +410,7 @@ class CapabilityPolicy:
             raise CapabilityDenied("grant does not match an active manifest")
         if grant.policy_version != POLICY_VERSION:
             raise CapabilityDenied("grant has an inactive policy version")
-        expected_budget = _bounded_budget(manifest.budget)
+        expected_budget = _bounded_budget(manifest.budget, self._llm_config)
         if (
             grant.tools != manifest.allowed_tools
             or grant.data_class_ceiling != manifest.data_class_ceiling

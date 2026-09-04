@@ -43,7 +43,9 @@ class LlmConfig:
     api_key: str = ""
     base_url: str = ""
     temperature: float = 0.1
-    max_tokens: int = 2000
+    # 0 means "use the model's own default output limit". A positive value
+    # is an operator-chosen cap, still intersected with the run's ceilings.
+    max_tokens: int = 0
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "LlmConfig":
@@ -57,7 +59,7 @@ class LlmConfig:
             api_key=d.get("api_key", ""),
             base_url=d.get("base_url", ""),
             temperature=float(d.get("temperature", 0.1)),
-            max_tokens=int(d.get("max_tokens", 2000)),
+            max_tokens=max(0, int(d.get("max_tokens", 0) or 0)),
         )
 
 

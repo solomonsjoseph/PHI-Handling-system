@@ -36,7 +36,7 @@ def test_already_human_review_not_double_touched():
     assert overrides == []
 
 
-def _run_confidence_floor_pipeline(tmp_path, monkeypatch, iteration_cap):
+def _run_confidence_floor_pipeline(tmp_path, monkeypatch, iteration_cap, judge_decisions=None):
     """Drive orchestrator.run_pipeline with a Judge that always proposes
     'keep' at a fixed below-floor confidence and a Sentinel that never
     raises an issue, so the only thing that can route the decision to
@@ -95,12 +95,19 @@ def _run_confidence_floor_pipeline(tmp_path, monkeypatch, iteration_cap):
         pass
 
     class FakeJudge:
+        calls = 0
+
         def __init__(self, ctx=None, *_a, **_kwargs):
             self.ctx = ctx
             self.call_failures = 0
             self.last_message_id = None
 
         async def run(self, **_kwargs):
+            if judge_decisions is not None:
+                FakeJudge.calls += 1
+                return await complete_fake_task(
+                    self.ctx, {"decisions": judge_decisions(FakeJudge.calls)},
+                )
             return await complete_fake_task(self.ctx, {"decisions": [{
                 "file_id": "dataset.csv",
                 "column": "col",
@@ -182,3 +189,44 @@ def test_floor_fires_identically_regardless_of_iteration_cap(tmp_path, monkeypat
     assert decision["action"] == "human_review"
     assert decision["suggested_action"] == "keep"
     assert decision["suggested_confidence"] == 0.55
+
+
+def test_invalid_judge_action_is_re_asked_instead_of_sent_to_a_human(tmp_path, monkeypatch):
+    """Judge is told it has no 'human_review' option. When it answers with one
+    anyway, `validate_decisions` fails closed and discards everything it
+    reasoned, which costs a reviewer a column over a formatting slip. The
+    decide loop now spends one more Judge call instead."""
+    def decisions(call):
+        action = "human_review" if call == 1 else "pseudonymize"
+        return [{
+            "file_id": "dataset.csv", "column": "col", "action": action,
+            "confidence": 0.95, "reason": "Judge decision", "phi_category": "R",
+            "citation": "45 CFR 164.514(b)(2)(i)(R)",
+        }]
+
+    result, phase_events = _run_confidence_floor_pipeline(
+        tmp_path, monkeypatch, iteration_cap=2, judge_decisions=decisions,
+    )
+
+    phases = [p for p, _ in phase_events]
+    assert "judge_rejection_reask_iter_1" in phases
+    assert "judge_iter_2" in phases
+    assert result["decisions"][0]["action"] == "pseudonymize"
+
+
+def test_a_judge_that_keeps_answering_invalidly_still_reaches_a_human(tmp_path, monkeypatch):
+    """The re-ask is bounded by the operator's rigor selector, so a model that
+    never complies still fails closed rather than looping."""
+    def decisions(_call):
+        return [{
+            "file_id": "dataset.csv", "column": "col", "action": "human_review",
+            "confidence": 0.95, "reason": "Judge decision", "phi_category": "R",
+        }]
+
+    result, phase_events = _run_confidence_floor_pipeline(
+        tmp_path, monkeypatch, iteration_cap=2, judge_decisions=decisions,
+    )
+
+    judge_iters = [p for p, _ in phase_events if p.startswith("judge_iter_")]
+    assert judge_iters == ["judge_iter_1", "judge_iter_2"]
+    assert result["decisions"][0]["action"] == "human_review"

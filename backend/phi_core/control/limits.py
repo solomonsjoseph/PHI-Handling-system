@@ -8,6 +8,12 @@ from __future__ import annotations
 import os
 
 
+def _env_set(name: str) -> bool:
+    """Whether the operator gave this ceiling an explicit, non-blank value."""
+    raw = os.environ.get(name)
+    return raw is not None and bool(raw.strip())
+
+
 def _int_env(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -49,6 +55,13 @@ MAX_RUN_WALL_S = _float_env("MAX_RUN_WALL_S", 900.0)
 MAX_INPUT_BYTES = _int_env("MAX_INPUT_BYTES", 262144)
 MAX_OUTPUT_BYTES = _int_env("MAX_OUTPUT_BYTES", 262144)
 MAX_TOKENS_PER_TASK = _int_env("MAX_TOKENS_PER_TASK", 8000)
+# Whether the operator pinned these two ceilings explicitly. When they did
+# not, ``CapabilityPolicy`` substitutes the selected model's own documented
+# input and output limits, so a run uses the model's defaults instead of a
+# constant that predates the model. An explicit environment value always
+# wins: a deployment that pins a ceiling means it.
+MAX_INPUT_BYTES_PINNED = _env_set("MAX_INPUT_BYTES")
+MAX_TOKENS_PER_TASK_PINNED = _env_set("MAX_TOKENS_PER_TASK")
 MAX_TOKENS_PER_RUN = _int_env("MAX_TOKENS_PER_RUN", 400000)
 ASSUMED_USD_PER_1K_TOKENS = _float_env("ASSUMED_USD_PER_1K_TOKENS", 0.02)
 MAX_COST_PER_TASK_USD = _float_env(

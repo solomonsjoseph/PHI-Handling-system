@@ -588,7 +588,10 @@ async def test_generate_with_retry_exhausts_after_two_failing_static_checks(sand
     assert len(agent.calls) == 2
     # Second prompt build must have received the first attempt's source
     # and structured diagnostics -- never empty, never the raw exception.
-    assert prompts_seen[1][0] == "import os\n"
+    # `generate_with_retry` strips any markdown fence before it checks the
+    # source, and hands the retry prompt the same stripped text, since that
+    # is what was actually rejected.
+    assert prompts_seen[1][0] == "import os"
     assert any("import_denied" in d for d in prompts_seen[1][1])
     assert any("import_denied" in d for d in excinfo.value.diagnostics)
 
@@ -745,7 +748,10 @@ async def test_generate_with_retry_succeeds_end_to_end_against_a_real_container(
         declared_outputs=frozenset({"out.json"}), sandbox=sandbox_record, attempts=2,
     )
     try:
-        assert result_source == source
+        # Returned stripped: `generate_with_retry` removes any markdown
+        # fence, and trailing whitespace with it, before anything checks or
+        # runs the source.
+        assert result_source == source.rstrip()
         assert isinstance(result, ContainerRunResult)
         written = result.workspace_path / "out.json"
         assert json.loads(written.read_text()) == {"ok": True}
@@ -888,8 +894,9 @@ async def test_executor_full_codegen_path_against_a_real_container_and_dataset(t
     f = {"file_id": "f1", "stored_path": str(dataset_path), "subtype": "csv"}
     sandbox = create_sandbox(run_id=executor.ctx.run_id)
     try:
+        destination = tmp_path / "export.csv"
         output_path, updated_state, ledger = await executor._dataset_via_codegen(
-            f, file_decisions, set(), real_columns, sandbox, local_opaque, "test-salt-value", {},
+            f, file_decisions, set(), real_columns, sandbox, local_opaque, "test-salt-value", {}, destination,
         )
         try:
             written = output_path.read_text(encoding="utf-8")

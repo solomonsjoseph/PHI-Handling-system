@@ -1802,7 +1802,9 @@ class LlmSettings(BaseModel):
     api_key: str = ""
     base_url: str = ""
     temperature: float = 0.1
-    max_tokens: int = 2000
+    # 0 means "use the selected model's own default output limit"
+    # (phi_core.control.policy.model_task_ceilings).
+    max_tokens: int = 0
 
 
 def _first_boot_llm_defaults() -> dict:
@@ -1928,7 +1930,7 @@ async def corpus_study_data_zip(package_id: str):
 # The corpus is a red-team torture-test rig: PHI is planted in realistic
 # study data, run through the pipeline, and every decision compared
 # against the planted ground truth. Ground truth stays in the session
-# document only (Sir's Q1(iii)) — it is never persisted to disk.
+# document only (Sir's Q1(iii)); it is never persisted to disk.
 
 
 @app.get("/api/corpus/study/catalog", dependencies=[Depends(require_api_token)])

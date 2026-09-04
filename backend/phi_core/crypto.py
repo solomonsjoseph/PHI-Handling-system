@@ -37,6 +37,26 @@ class KeyRotated(Exception):
     caller-visible key problem apart from 'nothing stored'."""
 
 
+def _key_from_env_file() -> str:
+    """The last non-empty ``APP_ENCRYPTION_KEY`` assignment in
+    ``backend/.env``, or an empty string. Last wins, matching how
+    python-dotenv resolves a duplicated name, so this reads the same value
+    a normally-started server does."""
+    try:
+        lines = _BACKEND_ENV.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    found = ""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith(f"{_ENV_KEY}="):
+            continue
+        value = stripped.split("=", 1)[1].strip().strip("'\"")
+        if value:
+            found = value
+    return found
+
+
 def _load_or_create_key() -> bytes:
     val = os.environ.get(_ENV_KEY, "").strip()
     if val:
@@ -48,6 +68,20 @@ def _load_or_create_key() -> bytes:
         # restart with a different env) fails loudly instead of silently
         # generating a throwaway key that can never decrypt existing rows.
         raise RuntimeError(f"{_ENV_KEY} must be set (PHI_ENV != 'dev')")
+    # Before generating anything, look for a key this deployment already
+    # wrote. A process that imports phi_core without loading backend/.env
+    # (a one-off script, a REPL) used to skip straight to generation and
+    # append a fresh key, which became the last assignment in the file and
+    # therefore the key the next server start read. Every secret encrypted
+    # under the previous key then failed to decrypt, which is what silently
+    # destroyed the operator's saved provider key in Settings, repeatedly:
+    # backend/.env accumulated 44 APP_ENCRYPTION_KEY lines that way.
+    # Reading the file's own last assignment makes the dev fallback
+    # idempotent instead of rotating the deployment's key by accident.
+    existing = _key_from_env_file()
+    if existing:
+        os.environ[_ENV_KEY] = existing
+        return existing.encode()
     # dev convenience only: generate and persist so the next process finds it.
     generated = Fernet.generate_key()
     try:

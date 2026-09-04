@@ -251,12 +251,18 @@ class Reviewer(Agent):
 
     async def run(self, decisions: list[dict[str, Any]], operator_result: dict[str, Any],
                   exports: dict[str, str],
-                  omit_by_file: dict[str, set[str]] | None = None) -> dict[str, Any]:
+                  omit_by_file: dict[str, set[str]] | None = None,
+                  metadata_file_ids: set[str] | None = None) -> dict[str, Any]:
         """Audit Operator's coverage per file_id: every decision Judge/
         Sentinel produced has a matching Operator verdict, every
         ``omit_by_file`` column is genuinely absent from the written
         export, and a file Operator reported zero failures for still has
         its decision count match its real written column count.
+
+        ``metadata_file_ids`` names files the caller registered as
+        metadata (a data dictionary or mapping) rather than datasets.
+        Those are exempt from the decision-count-versus-header check only;
+        every other check still applies to them.
 
         Returns ``{"findings": [...], "status": "clean" | "issues",
         "coverage": {"decisions": n, "verdicts": n, "missing": n},
@@ -328,7 +334,20 @@ class Reviewer(Agent):
 
                     file_verdicts = by_file_verdicts.get(file_id, [])
                     zero_fail = all(v.get("verdict") != "fail" for v in file_verdicts)
-                    if zero_fail and decisions_checked != len(header):
+                    # The decision count is compared to the written header
+                    # only for a file Judge was supposed to classify. A
+                    # data dictionary or mapping is redacted whole by
+                    # Executor, never decided column by column, so it
+                    # arrives with zero decisions and a header of its own
+                    # width; without the caller naming it, that reads as a
+                    # coverage mismatch and rewinds a finished run. A file
+                    # the caller does NOT name stays under the old rule:
+                    # zero decisions plus a real export is still a gap.
+                    if (
+                        zero_fail
+                        and file_id not in (metadata_file_ids or set())
+                        and decisions_checked != len(header)
+                    ):
                         findings.append(ReviewFinding(
                             verdict="CORRECTION_REQUIRED", file_id=file_id,
                             kind="coverage_mismatch",
@@ -518,11 +537,19 @@ class Reviewer(Agent):
 
         # 6. privacy intent preserved? -- no executed decision matches a
         #    known direct-identifier hard-rule pattern while still 'keep'.
+        # Matching any hard-rule pattern is not the test: the table's last
+        # row is the explicit non-PHI keeper list (sex, race, state,
+        # diagnosis_code, site_of_disease and the rest), whose own default
+        # action is 'keep'. Counting those as leaks failed this check on
+        # every real study, since every study has clinical columns. What
+        # makes a kept column a leak is that its own rule does not allow
+        # 'keep'.
         leaks = sorted({
             (d.get("file_id", ""), d.get("column", "")) for d in decisions
             if d.get("action") == "keep" and any(
-                re.match(pattern, str(d.get("column") or "").strip().lower().replace(" ", "_"))
-                for pattern, *_ in _HARD_RULE_TABLE
+                "keep" not in allow
+                and re.match(pattern, str(d.get("column") or "").strip().lower().replace(" ", "_"))
+                for pattern, allow, *_ in _HARD_RULE_TABLE
             )
         })
         _check("privacy_intent_preserved", not leaks,
